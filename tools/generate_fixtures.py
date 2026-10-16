@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Generate MMX-specific fixtures using an already built C++ reference node.
+
+Uses CMake's actual include and link configuration; never changes the reference
+source tree or its database. Ordinary cargo tests use the checked-in fixtures.
+"""
+import argparse
+import pathlib
+import shlex
+import subprocess
+import tempfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--source", type=pathlib.Path, default=pathlib.Path.home() / "workspace/mmx-node")
+parser.add_argument("--build", type=pathlib.Path)
+args = parser.parse_args()
+root = pathlib.Path(__file__).resolve().parent.parent
+build = (args.build or args.source / "build").resolve()
+target = build / "test/CMakeFiles/vm_engine_tests.dir"
+flags = {}
+for line in (target / "flags.make").read_text().splitlines():
+    if " = " in line:
+        key, value = line.split(" = ", 1)
+        flags[key] = shlex.split(value)
+link = shlex.split((target / "link.txt").read_text())
+with tempfile.TemporaryDirectory(prefix="mmx-reference-") as directory:
+    binary = pathlib.Path(directory) / "fixtures"
+    command = [link[0], "-std=c++17", "-O0", *flags["CXX_DEFINES"], *flags["CXX_INCLUDES"]]
+    command.append(str(root / "tools/reference_fixtures.cpp"))
+    i = 1
+    while i < len(link):
+        arg = link[i]
+        if arg == "-o":
+            i += 2
+            continue
+        if not arg.endswith("engine_tests.cpp.o"):
+            command.append(arg)
+        i += 1
+    command.extend(["-o", str(binary)])
+    subprocess.run(command, cwd=build / "test", check=True)
+    output = root / "crates/mmx-vm/tests/fixtures"
+    output.mkdir(parents=True, exist_ok=True)
+    subprocess.run([str(binary), str(output)], check=True)

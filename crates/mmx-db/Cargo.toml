@@ -1,0 +1,14 @@
+[package]
+name = "mmx-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Versioned storage foundation for the MMX Rust node"
+
+[dependencies]
+thiserror.workspace = true
+crc32fast.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

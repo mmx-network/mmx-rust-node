@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/mmx-db", "crates/mmx-vm"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+mmx-db = { path = "crates/mmx-db" }
+thiserror = "2"
+crc32fast = "1.5"
+primitive-types = { version = "0.12", default-features = false, features = ["std"] }
+sha2 = "0.10"
+tempfile = "3"
+
+[profile.release]
+overflow-checks = true
