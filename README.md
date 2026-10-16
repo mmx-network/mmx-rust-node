@@ -8,7 +8,11 @@ to be ported.
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
 `ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
 reference implementation and its tests, including protocol-specific differences.
-Do not silently replace unsupported behavior with approximations.
+Consensus compatibility is required: identical transaction/block acceptance,
+execution results, state transitions, gas and limits, failure behavior, and
+protocol-version rules. The database's physical disk format is independent and
+does not need to match C++. Do not silently replace unsupported behavior with
+approximations.
 
 ## Build and run
 
@@ -33,19 +37,38 @@ counter. It does not require the C++ repository or a running MMX node.
 | Crate | Implemented |
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
-| `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, scalar interpreter, gas accounting, call frames, read-only execution, and contract storage adapters. |
+| `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
-The interpreter executes 33 of the 48 recognized opcodes: scalar copy/clear,
+The interpreter executes 39 of the 48 recognized opcodes: copy/clear and cloning,
 branches and local calls, unsigned 256-bit arithmetic, comparisons, logical and
 bitwise operations, shifts, type/size queries, string/binary concatenation and
-slicing, SHA-256, and explicit failures. Multiplication preserves both the legacy
-overflow rule and the protocol-version-1 fix.
+slicing, arrays/maps and entry access, SHA-256, and explicit failures.
+Multiplication preserves both the legacy overflow rule and the protocol-version-1
+fix.
 
-Reference, array, and map values can be serialized and stored, but their execution
-and reference ownership are not implemented yet. `CLONE`, collection operations,
-conversions, signature verification, logging/events, transfers/minting, balances,
-remote calls, and contract reads return explicit unsupported errors. A failed
-execution cannot publish state through that engine instance.
+Heap references, arrays, maps, and nested collections execute with allocation,
+reference counting, aliasing, entry mutation, lazy storage loads, and recursive
+cleanup. `COPY`, `CLR`, `SIZE`, and `CONCAT` include their collection paths.
+`CLONE` allocates a copied value and returns a reference; references inside a
+collection keep their aliases rather than being recursively deep-cloned.
+
+The 9 remaining opcodes return explicit unsupported errors:
+
+| Area | Opcodes |
+| --- | --- |
+| Conversion | `CONV` |
+| Signature verification | `VERIFY` |
+| Assets | `SEND`, `MINT`, `BALANCE` |
+| Cross-contract access | `RCALL`, `CREAD` |
+| Logs/events | `LOG`, `EVENT` |
+
+New heap objects are reclaimed when their last reference is released. Objects
+loaded from storage stay pinned, matching C++; copying stored maps and erasing
+stored collection descriptors remain errors in the reference VM. Read-only
+execution protects loaded state but can allocate temporary objects; publishing
+new persistent state still fails. A failed execution or commit cannot publish
+state through that engine instance. Opcode coverage alone does not establish
+full consensus compatibility.
 
 ## Database and execution semantics
 
@@ -55,7 +78,8 @@ writes at version 0 followed by `commit(1)` are visible in historical reads at
 version 0. `revert(v)` discards writes at versions **greater than or equal to**
 `v`, along with staged writes. This matches the C++ `Table` convention.
 
-`Engine::run()` changes only its private memory. `Engine::commit()` checks the
+`Engine::run()` changes only its private memory. `Engine::commit()` first clears
+stack references and reclaims unreachable new heap objects, then checks the
 entire persistence gas cost before applying one atomic batch to its storage
 backend. `storage.database_mut().commit(next_version)` then makes the staged
 changes durable. This split allows a future transaction/block executor to decide
@@ -64,10 +88,11 @@ caller serialize access to the storage backend.
 
 The disk backend uses a **new Rust journal format**, not the C++ database files.
 Use a separate data directory. It retains all history in memory and replays the
-journal on open; the C++ block files, compaction, async flush, and migration tools
-are later work. Uncommitted writes are discarded on reopen. Complete records
-with invalid checksums are reported as corruption; only an incomplete final
-record is removed during recovery.
+journal on open; scalable indexing, compaction, and flush scheduling are later
+work. Reproducing the C++ block/index file format is not a port requirement.
+Uncommitted writes are discarded on reopen. Complete records with invalid
+checksums are reported as corruption; only an incomplete final record is removed
+during recovery.
 
 MMX-specific value and instruction encodings target the little-endian reference
 format. Contract storage preserves the original 20-byte contract prefix and
@@ -91,6 +116,19 @@ execution cases**, including successful-execution gas, plus value encodings in
 all four metadata modes and compressed instruction bytes. Ordinary tests use
 these fixtures without a C++ build dependency.
 
+An additional **21,933 C++ composite trace steps** exercise heap ownership, all
+ten scenarios from `test/vm/storage_tests.cpp`, collection instructions, nested
+state, rollback, limits, and failures. Traces compare returned values, allocated
+addresses, gas, error codes/locations, and every successful persistence write.
+Each relevant operation is replayed with gas just below, at, and above its
+reference cost; compound operations also sweep intermediate gas limits.
+
+These fixtures validate the covered VM behavior, not complete consensus
+compatibility. Extend coverage to host operations and transaction/block execution
+as those layers are ported. Storage implementation changes must preserve the
+same logical reads, state updates, and VM gas independently of physical I/O or
+cache behavior.
+
 Additional tests cover malformed/truncated input, invalid versions, atomic batch
 validation, single-writer locking, checksum failures, every truncation point in a
 final journal record, durable rollback/forks, execution failure, gas exhaustion,
@@ -109,12 +147,12 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Heap allocation, reference counting, arrays/maps, storage cache/overlays, and
-   the remaining engine/storage unit tests and failure cases.
-2. Conversions, crypto verification, host execution hooks, executable contracts,
+1. Conversions, crypto verification, host execution hooks, executable contracts,
    and the JavaScript-subset compiler and contract tests.
-3. Database block/index files, compaction and flush scheduling, benchmarks, and
-   an explicit C++ state import path.
+2. Transaction-scoped storage overlays and cross-contract execution, carrying
+   over the remaining engine tests and extending failure/gas differential tests.
+3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
+   using an independent disk format while preserving logical state semantics.
 4. VNX-backed types/serialization, transactions, chain state, consensus,
    networking, RPC, and node services, carrying over the relevant original tests
    as each component becomes executable.

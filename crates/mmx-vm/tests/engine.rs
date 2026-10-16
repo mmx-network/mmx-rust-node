@@ -168,7 +168,7 @@ fn execution_gas_stops_endless_loop_without_publishing() {
 }
 
 #[test]
-fn read_only_storage_rejects_existing_and_new_persistent_cells() {
+fn read_only_storage_protects_loaded_cells_and_rejects_commit_of_new_cells() {
     let mut storage = StorageDb::memory();
     storage
         .apply(
@@ -185,10 +185,12 @@ fn read_only_storage_rejects_existing_and_new_persistent_cells() {
         let mut engine = Engine::new([0; 32], &mut storage, true, 1, 100_000);
         engine.write(1, 2u64).unwrap();
         engine.init().unwrap();
-        assert!(matches!(
-            engine.run(&[instr(O::Copy, address, 1, 0), ret()], 0),
-            Err(Error::ReadOnly(_))
-        ));
+        let result = engine.run(&[instr(O::Copy, address, 1, 0), ret()], 0);
+        if address == MEM_STATIC {
+            assert!(matches!(result, Err(Error::ReadOnly(_))));
+        } else {
+            result.unwrap();
+        }
         assert!(engine.commit().is_err());
     }
     assert!(!storage.database().has_pending());
@@ -312,10 +314,11 @@ fn invalid_memory_type_and_instruction_fail_closed() {
         Err(Error::InstructionPointer(1))
     ));
     let mut engine = Engine::new([0; 32], &mut storage, false, 1, 100_000);
-    assert!(matches!(
-        engine.write(MEM_STACK, Value::Ref(MEM_STATIC)),
-        Err(Error::UnsupportedValue(3))
-    ));
+    engine.write(MEM_STACK, Value::Ref(MEM_STATIC)).unwrap();
+    assert_eq!(
+        engine.read(MEM_STACK).unwrap(),
+        Some(Value::Ref(MEM_STATIC))
+    );
 }
 
 #[test]
