@@ -20,6 +20,69 @@ fn hash_result(value: mmx_consensus::Result<impl AsRef<[u8]>>) -> String {
 }
 
 #[test]
+fn time_difficulty_walk_shares_headers_and_preserves_genesis_clamping_and_wrapping() {
+    use mmx_consensus::transitions::history::{block_iters, HeaderSource};
+    use std::sync::Arc;
+
+    struct Shared(BTreeMap<[u8; 32], Arc<mmx::BlockHeader>>);
+    impl HeaderSource for Shared {
+        fn get_header(
+            &self,
+            _: &[u8; 32],
+        ) -> mmx_consensus::proof::ProofResult<Option<mmx::BlockHeader>> {
+            panic!("time-difficulty lookup must not copy whole space-proof payloads")
+        }
+        fn get_shared_header(
+            &self,
+            hash: &[u8; 32],
+        ) -> mmx_consensus::proof::ProofResult<Option<Arc<mmx::BlockHeader>>> {
+            Ok(self.0.get(hash).cloned())
+        }
+    }
+    let mut source = Shared(
+        (0..=3u8)
+            .map(|height| {
+                (
+                    [height; 32],
+                    Arc::new(mmx::BlockHeader {
+                        hash: [height; 32].into(),
+                        prev: [height.wrapping_sub(1); 32].into(),
+                        height: u32::from(height),
+                        time_diff: 36 - 6 * u64::from(height),
+                        ..Default::default()
+                    }),
+                )
+            })
+            .collect(),
+    );
+    let tip = source.0[&[3; 32]].clone();
+    let mut params = mmx::ChainParams {
+        commit_delay: 2,
+        time_diff_divider: 3,
+        time_diff_constant: u64::MAX,
+        ..Default::default()
+    };
+    assert_eq!(
+        block_iters(&source, &params, &tip).unwrap(),
+        10u64.wrapping_mul(u64::MAX)
+    );
+    params.commit_delay = 100;
+    assert_eq!(
+        block_iters(&source, &params, &tip).unwrap(),
+        12u64.wrapping_mul(u64::MAX)
+    );
+    source.0.remove(&[2; 32]);
+    assert!(block_iters(&source, &params, &tip).is_err());
+    params.commit_delay = 0;
+    assert_eq!(
+        block_iters(&source, &params, &tip).unwrap(),
+        6u64.wrapping_mul(u64::MAX)
+    );
+    params.time_diff_divider = 0;
+    assert!(block_iters(&source, &params, &tip).is_err());
+}
+
+#[test]
 fn native_header_serialization_hashes_static_validity_farmer_auth_and_context() {
     let mut count = 0;
     let mut snapshots = BTreeMap::<String, Value>::new();

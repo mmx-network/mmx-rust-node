@@ -10,6 +10,7 @@ pub mod genesis;
 pub mod network;
 pub mod sync;
 pub mod voting;
+mod work;
 use crate::{
     block,
     transaction::{bytes, uint},

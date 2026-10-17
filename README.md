@@ -137,6 +137,11 @@ Immutable header caches are shared across validator/challenge walks. Speculative
 replay retains only cached headers below its replacement height and publishes its
 new cache after the database transaction succeeds. Wire descriptor declarations
 are cached independently of record payloads. Neither cache establishes proof work.
+Difficulty walks also share ancestor headers instead of copying space-proof
+payloads at every step. History and VDF eligibility are resolved before CPU header
+checks run on up to eight workers. Outcomes and votes are applied in archive order;
+fork choice and ledger publication remain serial. Proof evidence remains bound to
+the exact header, parameters and ancestry context.
 New ledger/archive writes retain each complete block and derive its full header
 when needed, avoiding another disk copy of all space proofs. Existing separate
 header rows remain readable. Admission/publication warms the immutable cache only

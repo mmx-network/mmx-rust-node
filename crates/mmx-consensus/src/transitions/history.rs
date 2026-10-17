@@ -109,15 +109,19 @@ pub fn block_iters<S: HeaderSource>(
     params: &mmx::ChainParams,
     infused: &mmx::BlockHeader,
 ) -> ProofResult<u64> {
-    let mut block = infused.clone();
+    let mut ancestor: Option<Arc<mmx::BlockHeader>> = None;
     for _ in 0..params.commit_delay {
+        let block = ancestor.as_deref().unwrap_or(infused);
         if block.height == 0 {
             break;
         }
-        block = source
-            .get_header(&block.prev.0)?
-            .ok_or_else(|| invalid("cannot get time difficulty"))?;
+        ancestor = Some(
+            source
+                .get_shared_header(&block.prev.0)?
+                .ok_or_else(|| invalid("cannot get time difficulty"))?,
+        );
     }
+    let block = ancestor.as_deref().unwrap_or(infused);
     if params.time_diff_divider == 0 {
         return Err(invalid("zero time difficulty divider"));
     }

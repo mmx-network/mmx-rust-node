@@ -422,62 +422,80 @@ impl ForkChain {
         let mut candidates = Vec::new();
         let mut points = BTreeMap::new();
         let verification_started = Instant::now();
+        let mut jobs = Vec::new();
+        let mut pending_work = BTreeMap::new();
+        let mut bad_context = BTreeSet::new();
+        // Resolve history and VDF eligibility on the owner thread. The owned
+        // contexts then allow independent CPU space checks, as in native
+        // Node::verify_block_proofs(), without sharing any database connection.
+        for entry in &entries {
+            let h = &entry.header;
+            if h.height <= root_header.height || self.verified.contains_key(&h.hash.0) {
+                continue;
+            }
+            let Some(parent) = history.get_header(&h.prev.0)? else {
+                continue;
+            };
+            let work: Vec<_> = if mode == ValidationMode::HistoricalSync {
+                vec![]
+            } else {
+                entry
+                    .proofs
+                    .iter()
+                    .filter_map(|p| {
+                        self.verified_work
+                            .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
+                            .cloned()
+                            .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
+                    })
+                    .collect()
+            };
+            if mode == ValidationMode::HistoricalSync
+                || self.sync_verified.contains(&h.hash.0)
+                || vdf::link_block(&entry.block, self.chain.params(), &history, &work).is_ok()
+            {
+                if let Ok(context) =
+                    transitions::ProofContext::resolve(&entry.block, self.chain.params(), &history)
+                {
+                    if context.parent != parent {
+                        bad_context.insert(h.hash.0);
+                    } else {
+                        jobs.push(super::work::Header {
+                            hash: h.hash.0,
+                            record: &entry.block,
+                            context,
+                        });
+                        pending_work.insert(h.hash.0, work);
+                    }
+                }
+            }
+        }
+        let mut checked = super::work::verify_headers(&jobs, self.chain.params())?;
         for entry in &entries {
             let h = &entry.header;
             if h.height <= root_header.height {
                 continue;
             }
             let mut verified = false;
-            let mut bad = entry.invalid;
+            let mut bad = entry.invalid || bad_context.contains(&h.hash.0);
             if let Some(work) = self.verified.get(&h.hash.0) {
                 verified = true;
                 points.insert(h.hash.0, work.clone());
-            } else {
-                if let Some(parent) = history.get_header(&h.prev.0)? {
-                    let work: Vec<_> = if mode == ValidationMode::HistoricalSync {
-                        vec![]
-                    } else {
-                        entry
-                            .proofs
-                            .iter()
-                            .filter_map(|p| {
-                                self.verified_work
-                                    .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
-                                    .cloned()
-                                    .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
-                            })
-                            .collect()
-                    };
-                    if mode == ValidationMode::HistoricalSync
-                        || self.sync_verified.contains(&h.hash.0)
-                        || vdf::link_block(&entry.block, self.chain.params(), &history, &work)
-                            .is_ok()
-                    {
-                        if let Ok(context) = transitions::ProofContext::resolve(
-                            &entry.block,
-                            self.chain.params(),
-                            &history,
-                        ) {
-                            if context.parent != parent {
-                                bad = true;
-                            } else {
-                                match transitions::verify_evidence(
-                                    &entry.block,
-                                    self.chain.params(),
-                                    &context,
-                                ) {
-                                    Err(_) => bad = true,
-                                    Ok(evidence) => {
-                                        verified = true;
-                                        self.evidence.insert(h.hash.0, evidence);
-                                        if mode == ValidationMode::HistoricalSync {
-                                            self.sync_verified.insert(h.hash.0);
-                                        }
-                                        points.insert(h.hash.0, work);
-                                    }
-                                }
-                            }
+            } else if let Some(result) = checked.remove(&h.hash.0) {
+                match result {
+                    Err(_) => bad = true,
+                    Ok(evidence) => {
+                        verified = true;
+                        self.evidence.insert(h.hash.0, evidence);
+                        if mode == ValidationMode::HistoricalSync {
+                            self.sync_verified.insert(h.hash.0);
                         }
+                        points.insert(
+                            h.hash.0,
+                            pending_work
+                                .remove(&h.hash.0)
+                                .ok_or_else(|| invalid("missing prepared VDF work"))?,
+                        );
                     }
                 }
             }
