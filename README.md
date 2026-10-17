@@ -113,9 +113,11 @@ owner is joined before the pool closes. Whole frames share a ten-second deadline
 across header and payload reads, also bounded by the client's fifteen-second RPC
 deadline. Trickling bytes cannot extend either deadline; failed frames close the
 connection.
-Download windows retain up to 64
+Download windows retain up to 128
 heights and target 8 MiB, including competing candidates, in an atomic archive
-transaction. Progress logs separate hash queries, bodies, archive publication,
+transaction. A connection still has at most 64 metadata requests outstanding;
+larger height windows span multiple request rounds. Progress logs separate hash
+queries, bodies, archive publication,
 proofs and ledger replay. A final multi-peer tip probe runs after publication;
 a changing valid tip keeps the node in historical mode. Heights containing only
 consensus-rejected candidates do not extend the sync peak. Any queued successor
@@ -198,12 +200,14 @@ suffix must be downloaded. The harness checks the final hash and, for binaries
 with request counters, exactly one body request per missing block plus timeout
 reassignments. Production rollback continues to retain every archived block.
 
-In a local mainnet replay of heights 4000–4500, these cache/staging changes raised
-the download-and-validation rate from 11.7 to 28.6 blocks/s. Including startup,
-the retained future archive and shutdown, elapsed time fell from 66.9 to 38.3 s.
-Both runs reached `B5801963A9C5BC34E7A277425B07880FA7A428945DE9647B034536E77F19E844`.
-RPC p95 latency during those runs was 2.0 and 2.4 s respectively; larger atomic
-windows improve publication throughput while increasing time between snapshots.
+Two local mainnet replays of heights 4000–6000 compared 64-height and 128-height
+windows, reversing binary order for the second run. The 64-height binary reached
+39.5 and 55.2 blocks/s; the 128-height binary reached 56.6 and 58.9 blocks/s.
+Host contention affected the size of the gain. RPC p95 was 1.26/0.88 s with 64
+heights and 1.72/1.62 s with 128: larger atomic publications trade RPC latency
+for sync throughput. All four runs downloaded exactly 2,000 bodies without
+timeout retries and reached
+`0A0C01D81EE4F036D2B2EBF576039E44D8E72879D24F2CC2E995E65EDF137726`.
 
 CPU proof recomputation parallelizes independent F1 inputs while preserving the
 native canonical proof order. `RAYON_NUM_THREADS` can bound the worker pool.

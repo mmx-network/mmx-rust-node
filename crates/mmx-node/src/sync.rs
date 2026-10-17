@@ -21,7 +21,7 @@ use std::{
 
 // Amortize durable archive/ledger publication without retaining a whole chain
 // in RAM. The byte budget and native root/lookahead still bound each window.
-const BATCH_BLOCKS: u32 = 64;
+pub(crate) const BATCH_BLOCKS: u32 = 128;
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 pub trait Source {

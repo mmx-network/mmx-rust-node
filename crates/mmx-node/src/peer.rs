@@ -403,8 +403,8 @@ impl Client {
             .transpose()
     }
     pub fn hash_pairs(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
-        if count > 64 {
-            return Err(error("peer hash window exceeds 64 heights"));
+        if count > crate::sync::BATCH_BLOCKS {
+            return Err(error("peer hash window exceeds sync batch limit"));
         }
         let methods = (0..count)
             .map(|i| {

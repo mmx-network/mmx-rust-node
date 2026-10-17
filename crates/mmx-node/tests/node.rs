@@ -896,6 +896,64 @@ fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_t
 }
 
 #[test]
+fn hash_windows_can_span_two_request_rounds_without_exceeding_sixty_four_in_flight() {
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        for _ in 0..2 {
+            let requests: Vec<_> = (0..64)
+                .map(|_| c.receive(Duration::from_secs(2)).unwrap().unwrap())
+                .collect();
+            assert!(c.receive(Duration::from_millis(10)).unwrap().is_none());
+            for request in requests.into_iter().rev() {
+                let height = mmx_node::node::number(
+                    request.field("method").unwrap().record().unwrap(),
+                    "height",
+                )
+                .unwrap();
+                c.send(&record(
+                    "mmx.Return",
+                    [
+                        ("id".into(), request.field("id").unwrap().clone()),
+                        (
+                            "result".into(),
+                            V::Record(record(
+                                "mmx.Node.get_block_hash_ex.return",
+                                [(
+                                    "_ret_0".into(),
+                                    V::Optional(Some(Box::new(V::Sequence(vec![
+                                        V::Bytes(vec![height as u8; 32]),
+                                        V::Bytes(vec![(height ^ 128) as u8; 32]),
+                                    ])))),
+                                )],
+                            )),
+                        ),
+                    ],
+                ))
+                .unwrap();
+            }
+        }
+    });
+    let mut client = peer::Client::connect(&address.to_string(), n).unwrap();
+    let replies = client.hash_pairs(1000, 128).unwrap();
+    assert_eq!(replies.len(), 128);
+    for (offset, actual) in replies.into_iter().enumerate() {
+        let height = 1000 + offset as u32;
+        assert_eq!(
+            actual,
+            Some(peer::BlockHash {
+                block: [height as u8; 32],
+                content: [(height ^ 128) as u8; 32],
+            })
+        );
+    }
+    server.join().unwrap();
+}
+
+#[test]
 fn peer_identity_and_published_height_replies_do_not_wait_for_the_ledger_and_follow_rewind() {
     let (network, g, steps, _) = fixture();
     let n = node(&network);
