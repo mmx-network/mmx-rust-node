@@ -674,6 +674,12 @@ Snapshot identity/generation checks reject stale or foreign replacements. Failed
 writes poison the handle until reopen; uncommitted publication recovers the old
 state and committed publication recovers the new state. No history is pruned.
 
+The writer attempts a passive WAL checkpoint before opening a new branch reader
+when the WAL is at least 64 MiB, at most once every five seconds. These reader
+gaps let SQLite recycle the WAL during continuous sync. Long-lived snapshots may
+delay recycling; checkpointing preserves their view and all rollback history.
+Commits retain full synchronous durability.
+
 Existing Rust journals import once on indexed open, retaining the source journal.
 Journal callers then reject that directory to prevent divergent writable copies.
 Bounded header caches avoid repeated historical decoding; selected-chain caches

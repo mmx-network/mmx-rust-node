@@ -3,14 +3,17 @@
 use crate::{validate, Database, Error, Key, Pending, Result, Row, Write};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const APPLICATION_ID: i64 = 0x4D4D5852;
+const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 const SCHEMA: &str = "CREATE TABLE meta(id INTEGER PRIMARY KEY CHECK(id=0),version INTEGER NOT NULL,generation INTEGER NOT NULL);
     INSERT INTO meta VALUES(0,0,0);
     CREATE TABLE history(t TEXT NOT NULL,n INTEGER NOT NULL,k BLOB NOT NULL,v INTEGER NOT NULL,value BLOB,PRIMARY KEY(t,n,k,v)) WITHOUT ROWID;
@@ -29,6 +32,7 @@ pub(crate) struct Disk {
     poisoned: bool,
     _temporary: Option<tempfile::TempDir>,
     staging_root: PathBuf,
+    last_checkpoint: Cell<Instant>,
 }
 pub(crate) struct Snapshot {
     base: Arc<Base>,
@@ -149,6 +153,7 @@ impl Disk {
             poisoned: false,
             _temporary: None,
             staging_root: staging,
+            last_checkpoint: Cell::new(Instant::now()),
         })
     }
     pub fn version(&self) -> u32 {
@@ -194,6 +199,7 @@ impl Disk {
             poisoned: false,
             _temporary: Some(directory),
             staging_root: self.staging_root.clone(),
+            last_checkpoint: Cell::new(Instant::now()),
         })
     }
     pub fn get(&self, t: &str, k: &[u8], max: Option<u32>) -> Result<Option<Vec<u8>>> {
@@ -315,6 +321,10 @@ impl Disk {
         if !self.pending.is_empty() || version > self.version {
             return Err(Error::SnapshotMismatch);
         }
+        // Publication's automatic checkpoint runs while this branch's base
+        // reader still pins the previous WAL end. Checkpoint in the reader gap
+        // before the next branch instead, so the next write can recycle it.
+        self.checkpoint_if_due(CHECKPOINT_BYTES, CHECKPOINT_INTERVAL)?;
         let conn = Connection::open_with_flags(
             self.path.join("state.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -335,6 +345,31 @@ impl Disk {
             cutoff: version,
             local,
         })
+    }
+    fn checkpoint_if_due(&self, minimum_bytes: u64, interval: Duration) -> Result<()> {
+        if self.last_checkpoint.get().elapsed() < interval {
+            return Ok(());
+        }
+        self.last_checkpoint.set(Instant::now());
+        let bytes = match fs::metadata(self.path.join("state.sqlite-wal")) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
+        if bytes >= minimum_bytes {
+            // PASSIVE never waits for another reader to finish and may leave
+            // frames pinned by an intentionally long-lived snapshot. Both
+            // checkpoint and commits use the existing FULL-synchronous writer.
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?;
+        }
+        Ok(())
     }
     pub fn replace(&mut self, version: u32, branch: &Snapshot) -> Result<()> {
         self.readable()?;
@@ -623,5 +658,80 @@ mod failure_tests {
         assert_eq!(disk.version, 1);
         assert_eq!(disk.get("t", b"x", None).unwrap(), Some(b"old".to_vec()));
         assert_eq!(disk.get("t", b"pending", None).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoints_in_reader_gaps_recycle_the_wal_preserve_snapshots_and_all_rollback_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut disk = Disk::open(directory.path()).unwrap();
+        disk.conn
+            .execute_batch("PRAGMA wal_autocheckpoint=0")
+            .unwrap();
+        let value = vec![19; 16 * 1024];
+        for height in 0..12 {
+            let mut branch = disk.fork(height).unwrap();
+            branch
+                .local
+                .commit_batch(
+                    height + 1,
+                    [Write::put("t", height.to_be_bytes(), value.as_slice())],
+                )
+                .unwrap();
+            disk.replace(height, &branch).unwrap();
+        }
+        let snapshot = disk.fork(12).unwrap();
+        disk.commit(13, [Write::put("t", b"extra", b"first")])
+            .unwrap();
+        disk.checkpoint_if_due(1, Duration::ZERO).unwrap();
+        let pinned_bytes = fs::metadata(directory.path().join("state.sqlite-wal"))
+            .unwrap()
+            .len();
+        disk.commit(14, [Write::put("t", b"extra", b"second")])
+            .unwrap();
+        assert!(
+            fs::metadata(directory.path().join("state.sqlite-wal"))
+                .unwrap()
+                .len()
+                > pinned_bytes
+        );
+        assert_eq!(snapshot.get("t", b"extra", None).unwrap(), None);
+        assert_eq!(
+            snapshot.get("t", &11u32.to_be_bytes(), None).unwrap(),
+            Some(value.clone())
+        );
+        drop(snapshot);
+        disk.checkpoint_if_due(1, Duration::ZERO).unwrap();
+        let recyclable_bytes = fs::metadata(directory.path().join("state.sqlite-wal"))
+            .unwrap()
+            .len();
+        disk.commit(15, [Write::put("t", b"extra", b"third")])
+            .unwrap();
+        assert!(
+            fs::metadata(directory.path().join("state.sqlite-wal"))
+                .unwrap()
+                .len()
+                <= recyclable_bytes
+        );
+        drop(disk);
+        let mut disk = Disk::open(directory.path()).unwrap();
+        assert_eq!(
+            disk.get("t", b"extra", None).unwrap(),
+            Some(b"third".to_vec())
+        );
+        for height in (0..=12u32).rev() {
+            disk.revert(height).unwrap();
+            assert_eq!(disk.get("t", b"extra", None).unwrap(), None);
+            for key in 0..12u32 {
+                assert_eq!(
+                    disk.get("t", &key.to_be_bytes(), None).unwrap(),
+                    (key < height).then(|| value.clone())
+                );
+            }
+        }
     }
 }
