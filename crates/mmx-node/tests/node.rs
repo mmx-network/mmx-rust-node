@@ -383,6 +383,68 @@ fn farmer_response_waits_for_verified_future_vdf_then_live_block_uses_the_same_e
 }
 
 #[test]
+fn peer_broadcast_io_continues_while_the_ledger_is_locked_then_validates_on_tick() {
+    use std::{net::TcpListener, sync::mpsc, thread};
+    let (network, _, steps, _) = fixture();
+    let n = node(&network);
+    let proof = wire(&steps[0]["vdf"]);
+    let mut invalid = proof.clone();
+    invalid
+        .fields
+        .insert("content_hash".into(), V::Bytes(vec![0; 32]));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let sending = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut connection = peer::Connection::new(socket).unwrap();
+        connection.send(&invalid).unwrap();
+        connection.send(&proof).unwrap();
+    });
+    let mut client = peer::Client::connect(&address.to_string(), n.clone()).unwrap();
+    let locked = n.lock().unwrap();
+    let (done, complete) = mpsc::channel();
+    let receiving = thread::spawn(move || {
+        client.poll().unwrap();
+        client.poll().unwrap();
+        done.send(()).unwrap();
+    });
+    // A synchronous callback would block here waiting for the ledger mutex.
+    complete.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        locked
+            .call(&record("mmx.Node.get_vdf_height", []))
+            .unwrap()
+            .field("_ret_0")
+            .unwrap(),
+        &V::Uint(0)
+    );
+    drop(locked);
+    receiving.join().unwrap();
+    sending.join().unwrap();
+    n.lock().unwrap().tick().unwrap();
+    assert_eq!(
+        n.lock()
+            .unwrap()
+            .call(&record("mmx.Node.get_vdf_height", []))
+            .unwrap()
+            .field("_ret_0")
+            .unwrap(),
+        &V::Uint(1)
+    );
+    assert_eq!(
+        n.lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
+    );
+}
+
+#[test]
 fn downloading_a_competing_branch_keeps_the_native_root_until_an_explicit_rewind() {
     let (network, g, steps, deep) = fixture();
     let mut chain = ForkChain::memory(network.params.clone());

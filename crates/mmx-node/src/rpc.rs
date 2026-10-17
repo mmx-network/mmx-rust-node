@@ -116,10 +116,12 @@ fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
                 .selected()
                 .tip()?
                 .ok_or_else(|| error("missing node tip"))?;
+            let inbox = n.inbox().stats()?;
             Ok(
                 json!({"height":tip.height,"vdf_height":tip.vdf_height,"root_height":n.root,
                 "synced":n.synced,"network":n.chain.selected().params().network,
-                "hash":vnx::util::to_hex_string(&tip.hash.0,false,false)}),
+                "hash":vnx::util::to_hex_string(&tip.hash.0,false,false),
+                "queued_messages":inbox.messages,"queued_bytes":inbox.bytes,"dropped_messages":inbox.dropped}),
             )
         })()
     } else {

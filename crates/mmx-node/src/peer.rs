@@ -1,8 +1,9 @@
 //! Native vnx.addons.MsgServer framing: u32 compressed size, u32 magic, Zstd
-//! VNX record. Each decompressed frame has its own type-code stream. Consensus
+//! VNX record. Type declarations persist across frames on each connection. Consensus
 //! records are decoded losslessly, including byte strings and Variant payloads.
 use crate::{
     error,
+    inbox::Inbox,
     node::{number, record},
     Node, Result,
 };
@@ -38,9 +39,12 @@ pub fn encode_frame(value: &Record) -> Result<Vec<u8>> {
     .concat())
 }
 pub fn decode_frame(frame: &[u8]) -> Result<Record> {
-    decode_frame_with_registry(frame, &mut vnx::Registry::new())
+    Ok(decode_frame_with_registry(frame, &mut vnx::Registry::new())?.0)
 }
-fn decode_frame_with_registry(frame: &[u8], registry: &mut vnx::Registry) -> Result<Record> {
+fn decode_frame_with_registry(
+    frame: &[u8],
+    registry: &mut vnx::Registry,
+) -> Result<(Record, usize)> {
     if frame.len() < 8 {
         return Err(error("truncated peer frame"));
     }
@@ -60,11 +64,12 @@ fn decode_frame_with_registry(frame: &[u8], registry: &mut vnx::Registry) -> Res
     if raw.len() > MAX_FRAME {
         return Err(error("decompressed peer frame exceeds limit"));
     }
-    Ok(Record::decode_with_registry(&raw, registry)?)
+    Ok((Record::decode_with_registry(&raw, registry)?, raw.len()))
 }
 pub struct Connection {
     stream: TcpStream,
     registry: vnx::Registry,
+    last_size: usize,
 }
 impl Connection {
     pub fn connect(address: &str) -> Result<Self> {
@@ -85,6 +90,7 @@ impl Connection {
         Ok(Self {
             stream,
             registry: vnx::Registry::new(),
+            last_size: 0,
         })
     }
     pub fn send(&mut self, value: &Record) -> Result<()> {
@@ -125,7 +131,9 @@ impl Connection {
         let mut frame = Vec::from(header);
         frame.resize(size as usize + 8, 0);
         self.stream.read_exact(&mut frame[8..])?;
-        decode_frame_with_registry(&frame, &mut self.registry).map(Some)
+        let (record, size) = decode_frame_with_registry(&frame, &mut self.registry)?;
+        self.last_size = size;
+        Ok(Some(record))
     }
 }
 pub fn respond(
@@ -158,13 +166,19 @@ pub struct Client {
     connection: Connection,
     node: Arc<Mutex<Node>>,
     next_id: u32,
+    inbox: Inbox,
 }
 impl Client {
     pub fn connect(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
+        let inbox = node
+            .lock()
+            .map_err(|_| error("node lock poisoned"))?
+            .inbox();
         Ok(Self {
             connection: Connection::connect(address)?,
             node,
             next_id: 1,
+            inbox,
         })
     }
     pub fn call(&mut self, method: Record) -> Result<Value> {
@@ -202,7 +216,7 @@ impl Client {
                 }
                 results[index] = Some(result.field("_ret_0")?.clone());
             } else {
-                self.handle(&message)?;
+                self.handle(message)?;
             }
         }
         results
@@ -236,26 +250,18 @@ impl Client {
             })
             .collect()
     }
-    fn handle(&mut self, message: &Record) -> Result<()> {
+    fn handle(&mut self, message: Record) -> Result<()> {
         if message.name == "mmx.Request" {
-            respond(&self.node, &mut self.connection, message)
+            respond(&self.node, &mut self.connection, &message)
         } else {
             // Invalid unsolicited broadcasts do not abort an outstanding sync
             // request; the same validation gates apply as to inbound peers.
-            if let Err(e) = self
-                .node
-                .lock()
-                .map_err(|_| error("node lock poisoned"))?
-                .receive(message)
-            {
-                eprintln!("Rejected {}: {e}", message.name);
-            }
-            Ok(())
+            self.inbox.submit(message, self.connection.last_size)
         }
     }
     pub fn poll(&mut self) -> Result<()> {
         if let Some(message) = self.connection.receive(Duration::from_millis(500))? {
-            self.handle(&message)?;
+            self.handle(message)?;
         }
         Ok(())
     }
@@ -297,6 +303,10 @@ pub struct Server {
 }
 impl Server {
     pub fn bind(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
+        let inbox = node
+            .lock()
+            .map_err(|_| error("node lock poisoned"))?
+            .inbox();
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
@@ -316,6 +326,7 @@ impl Server {
                 match listener.accept() {
                     Ok((stream, _)) if workers.len() < 32 => {
                         let node = node.clone();
+                        let inbox = inbox.clone();
                         let stop = running.clone();
                         workers.push(thread::spawn(move || {
                             let run = || -> Result<()> {
@@ -327,10 +338,7 @@ impl Server {
                                         if msg.name == "mmx.Request" {
                                             respond(&node, &mut connection, &msg)?;
                                         } else {
-                                            let _ = node
-                                                .lock()
-                                                .map_err(|_| error("node lock poisoned"))?
-                                                .receive(&msg);
+                                            inbox.submit(msg, connection.last_size)?;
                                         }
                                     }
                                 }

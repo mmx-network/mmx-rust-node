@@ -86,6 +86,12 @@ tip and downloaded prefix; retained future orphans are not automatically selecte
 after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
 
+Peer broadcasts enter a bounded FIFO without taking the ledger mutex, so proof
+validation does not interrupt socket reads. The node update drains and validates
+the queue; embedded callers must drive `Node::tick()`. The queue retains at most
+32 MiB of decompressed messages and 16,384 entries, dropping oldest entries when
+full. HTTP status exposes queued messages, bytes and the dropped-message count.
+
 Immutable header caches are shared across validator/challenge walks. Speculative
 replay retains only cached headers below its replacement height and publishes its
 new cache after the database transaction succeeds. Wire descriptor declarations

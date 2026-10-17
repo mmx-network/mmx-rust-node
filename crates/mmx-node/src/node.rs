@@ -1,4 +1,4 @@
-use crate::{error, Result};
+use crate::{error, inbox::Inbox, Result};
 use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use mmx_consensus::{Hash, Record, Value};
 use mmx_execution::chain::{
@@ -24,6 +24,7 @@ pub struct Node {
     pending: BTreeMap<Hash, Record>,
     verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
     responses: Vec<(Record, i64)>,
+    inbox: Inbox,
 }
 pub fn record(name: &str, fields: impl IntoIterator<Item = (String, Value)>) -> Record {
     Record {
@@ -97,10 +98,14 @@ impl Node {
             pending: BTreeMap::new(),
             verified_work: BTreeMap::new(),
             responses: vec![],
+            inbox: Inbox::default(),
         })
     }
     pub fn chain(&self) -> &ForkChain {
         &self.chain
+    }
+    pub(crate) fn inbox(&self) -> Inbox {
+        self.inbox.clone()
     }
     pub fn is_synced(&self) -> bool {
         self.synced
@@ -111,7 +116,8 @@ impl Node {
     pub fn begin_resync(&mut self) {
         self.synced = false;
     }
-    /// Native Node coalesces queued proof/vote work in its periodic update.
+    /// Drain peer broadcasts and coalesce work in the native periodic update.
+    /// Embedded callers must drive this tick even while a peer is polling.
     pub fn tick(&mut self) -> Result<()> {
         self.update().map(|_| ())
     }
@@ -127,9 +133,15 @@ impl Node {
         self.pending.clear();
         self.verified_work.clear();
         self.responses.clear();
+        self.inbox.clear()?;
         Ok(())
     }
     pub(crate) fn update(&mut self) -> Result<Update> {
+        for (message, _) in self.inbox.take()? {
+            if let Err(e) = self.admit_message(&message) {
+                eprintln!("Rejected {}: {e}", message.name);
+            }
+        }
         let selected = self.chain.selected();
         let tip = selected
             .tip()?
@@ -327,11 +339,18 @@ impl Node {
         Ok(())
     }
     pub fn receive(&mut self, message: &Record) -> Result<()> {
+        if self.admit_message(message)? {
+            self.update()?;
+        }
+        Ok(())
+    }
+    fn admit_message(&mut self, message: &Record) -> Result<bool> {
+        let mut update = false;
         match message.name.as_str() {
             "mmx.Block" if self.synced => {
                 self.chain.admit(message, &[])?;
                 self.pending.insert(hash(message, "hash")?, message.clone());
-                self.update()?;
+                update = true;
             }
             "mmx.ProofOfTime" => {
                 if !mmx_consensus::vdf::is_valid(message)? {
@@ -344,7 +363,7 @@ impl Node {
                         self.verified_work.remove(&hash(&old, "content_hash")?);
                     }
                 }
-                self.update()?;
+                update = true;
             }
             "mmx.ValidatorVote" => {
                 self.chain
@@ -361,7 +380,7 @@ impl Node {
             // and farmer response relay are separate from the read/sync service.
             _ => (),
         }
-        Ok(())
+        Ok(update)
     }
     /// Native method/result records, shared by peer requests and VNX/HTTP reads.
     /// Unsupported methods return an explicit error instead of placeholder data.
