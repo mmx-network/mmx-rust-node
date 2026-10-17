@@ -8,6 +8,7 @@ use vnx::serde_json::{self, Value as Json};
 enum Event {
     Hash(u8, u32, u32),
     Fetch(u8, Hash, Instant),
+    Batch(usize),
 }
 #[derive(Clone)]
 struct Fake {
@@ -58,6 +59,7 @@ impl PeerSource for Fake {
     }
     fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
         assert!(hashes.len() <= MAX_BODY_REQUESTS);
+        self.events.lock().unwrap().push(Event::Batch(hashes.len()));
         hashes
             .iter()
             .map(|id| {
@@ -318,8 +320,20 @@ fn three_fresh_observers_progress_without_waiting_for_a_late_peer_and_stale_repl
 }
 
 #[test]
-fn common_content_uses_the_fastest_claimant_without_reducing_hash_observers() {
-    let (_, node, blocks) = fixture();
+fn common_content_fills_the_fastest_claimants_pipeline_within_the_aggregate_bound() {
+    let (network, node, mut blocks) = fixture();
+    // Statically valid descendants exercise scheduling without selecting a
+    // chain or substituting fabricated space work for consensus validation.
+    for height in 3..=24 {
+        let mut child = blocks[2].clone();
+        child.fields.insert("height".into(), Value::Uint(height));
+        child.fields.insert(
+            "prev".into(),
+            Value::Bytes(hash(blocks.last().unwrap(), "hash").unwrap().to_vec()),
+        );
+        resign(&mut child, &network.params);
+        blocks.push(child);
+    }
     let events = Arc::new(Mutex::new(vec![]));
     let mut pool = peers(&blocks, &events);
     for peer in &mut pool.peers {
@@ -327,16 +341,21 @@ fn common_content_uses_the_fastest_claimant_without_reducing_hash_observers() {
             peer.source.as_mut().unwrap().hash_delay = Duration::from_millis(50);
         }
     }
-    let window = pool.window(1, 2, &node, &AtomicBool::new(false)).unwrap();
+    let window = pool.window(1, 24, &node, &AtomicBool::new(false)).unwrap();
     assert_eq!(
         window.heights,
-        vec![vec![blocks[1].clone()], vec![blocks[2].clone()]]
+        blocks[1..]
+            .iter()
+            .cloned()
+            .map(|block| vec![block])
+            .collect::<Vec<_>>()
     );
+    assert_eq!((window.body_requests, window.body_retries), (24, 0));
     let events = events.lock().unwrap();
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e, Event::Hash(_, 1, 2)))
+            .filter(|e| matches!(e, Event::Hash(_, 1, 24)))
             .count(),
         3
     );
@@ -347,7 +366,19 @@ fn common_content_uses_the_fastest_claimant_without_reducing_hash_observers() {
             _ => None,
         })
         .collect();
-    assert_eq!(providers, [1, 1]);
+    assert_eq!(providers, vec![1; 24]);
+    let batches: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Batch(size) => Some(*size),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        batches,
+        [12, 12],
+        "three peers bound each group to twelve contents"
+    );
 }
 fn resign(block: &mut Record, params: &mmx::ChainParams) {
     let id = mmx_consensus::header::calc_hash(block, params).unwrap();

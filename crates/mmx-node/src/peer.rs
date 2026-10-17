@@ -23,7 +23,7 @@ use std::{
 const MAGIC: u32 = 0x4B277B06;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// Bound native block lookups pipelined on a single peer connection.
-pub const MAX_BODY_REQUESTS: usize = 8;
+pub const MAX_BODY_REQUESTS: usize = 32;
 const MAX_RPC_REQUESTS: usize = 128;
 
 /// Native get_block_hash_ex: the chain ID and the complete content commitment.

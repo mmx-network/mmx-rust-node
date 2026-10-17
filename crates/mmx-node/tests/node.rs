@@ -696,7 +696,7 @@ fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_th
     let (network, _, steps, _) = fixture();
     let n = node(&network);
     let mut expected: Vec<_> = steps[..2].iter().map(|s| Some(wire(&s["block"]))).collect();
-    expected.resize(8, None);
+    expected.resize(peer::MAX_BODY_REQUESTS, None);
     let replies = expected.clone();
     let ids: Vec<_> = replies
         .iter()
@@ -712,7 +712,7 @@ fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_th
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
-        let requests: Vec<_> = (0..8)
+        let requests: Vec<_> = (0..peer::MAX_BODY_REQUESTS)
             .map(|_| c.receive(Duration::from_secs(2)).unwrap().unwrap())
             .collect();
         let second = &requests[1];
@@ -793,6 +793,9 @@ fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_th
         );
     });
     let mut client = peer::Client::connect(&address.to_string(), n).unwrap();
+    assert!(client
+        .blocks_by_hash(&vec![[0; 32]; peer::MAX_BODY_REQUESTS + 1])
+        .is_err());
     assert_eq!(client.blocks_by_hash(&ids).unwrap(), expected);
     assert_eq!(client.backpressure_retries(), 1);
     assert_eq!(client.height().unwrap(), 2);

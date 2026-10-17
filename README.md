@@ -100,7 +100,7 @@ after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
 
 Each connection correlates reordered native returns while serving peer requests,
-with at most eight body requests outstanding. The aggregate content-group bound
+with at most 32 body requests outstanding. The aggregate content-group bound
 still applies when common content uses one provider's wider pipeline.
 Common content is fetched from its
 fastest successful hash claimant; a slower provider is tried only after the request
