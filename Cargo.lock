@@ -547,9 +547,11 @@ dependencies = [
 name = "mmx-execution"
 version = "0.1.0"
 dependencies = [
+ "mmx-consensus",
  "mmx-types",
  "mmx-vm",
  "tempfile",
+ "thiserror",
  "vnx",
 ]
 

@@ -6,6 +6,7 @@
 //! every native value. The `authorization` module supplies native signature
 //! checks; static validity and authorization remain separate from ledger validation.
 pub mod authorization;
+mod encode;
 mod hash;
 mod validation;
 mod wire;
@@ -110,6 +111,11 @@ impl Record {
     }
     pub fn from_generated<T: vnx::VnxType>(value: &T) -> Result<Self> {
         Self::decode(&value.encode(&mmx_types::vnx_registry()?)?)
+    }
+    /// Encode the checked-in VNX schema while retaining original dynamic bytes
+    /// and byte strings. This is wire encoding, not hash serialization.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        encode::encode(self)
     }
     pub fn field(&self, name: &str) -> Result<&Value> {
         self.fields

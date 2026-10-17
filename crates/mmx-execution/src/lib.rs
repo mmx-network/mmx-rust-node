@@ -1,8 +1,10 @@
-//! Contract execution after transaction authentication and funding validation.
-//! Matches Node::execute and vm_interface; transaction signatures, fees, implicit
-//! deposits, output settlement and block acceptance remain in the node layer.
+//! Contract execution and single-transaction validation with atomic settlement.
+//! The invocation API accepts authenticated, funded calls. The `transaction`
+//! module combines native hashing, authorization, balances, fees and execution;
+//! block validation and chain selection remain outside this crate.
 mod contracts;
 mod overlay;
+pub mod transaction;
 mod wire;
 pub use contracts::{BinaryInfo, Contract, ExecutableInfo, MethodInfo};
 
@@ -315,10 +317,11 @@ struct Session<'a, 's, S> {
 impl<'s, S: Storage> Session<'_, 's, S> {
     fn fetch_total(&mut self, address: &Address) -> Result<Option<Arc<Contract>>> {
         let data = self.storage.get_contract(address)?;
-        let cost = self
-            .context
-            .min_txfee_read
-            .wrapping_add(data.as_ref().map_or(0, |d| d.read_cost));
+        let index = self.storage.get_transaction_index(address)?;
+        let cost = self.context.min_txfee_read.wrapping_add(index.map_or_else(
+            || data.as_ref().map_or(0, |d| d.read_cost),
+            |i| i.contract_read_cost,
+        ));
         let next = self.receipt.total_cost.wrapping_add(cost);
         if next > self.context.gas_limit {
             return Err(failure("not enough gas to read contract"));
@@ -334,10 +337,11 @@ impl<'s, S: Storage> Session<'_, 's, S> {
         vm: &mut Engine<'_, Shared<'s, S>>,
     ) -> Result<Option<Arc<Contract>>> {
         let data = self.storage.get_contract(address)?;
-        let cost = self
-            .context
-            .min_txfee_read
-            .wrapping_add(data.as_ref().map_or(0, |d| d.read_cost));
+        let index = self.storage.get_transaction_index(address)?;
+        let cost = self.context.min_txfee_read.wrapping_add(index.map_or_else(
+            || data.as_ref().map_or(0, |d| d.read_cost),
+            |i| i.contract_read_cost,
+        ));
         let next = vm.gas_used.wrapping_add(cost);
         if next > vm.gas_limit {
             return Err(failure("not enough gas to read contract"));
@@ -353,6 +357,38 @@ impl<'s, S: Storage> Session<'_, 's, S> {
         contract: Arc<Contract>,
         constructor: bool,
     ) -> Result<()> {
+        let storage = self.storage.clone();
+        let context = self.context;
+        self.operation_authenticated(operation, contract, constructor, None, |vm| {
+            if let Some(user) = operation.user {
+                let data = storage.get_contract(&user)?;
+                let index = storage.get_transaction_index(&user)?;
+                let cost = context.min_txfee_read.wrapping_add(index.map_or_else(
+                    || data.as_ref().map_or(0, |d| d.read_cost),
+                    |i| i.contract_read_cost,
+                ));
+                if vm.gas_used.wrapping_add(cost) > vm.gas_limit {
+                    return Err(failure("not enough gas to read contract"));
+                }
+                vm.gas_used = vm.gas_used.wrapping_add(cost);
+                if let Some(data) = data {
+                    Contract::decode(data)?;
+                }
+            }
+            Ok(())
+        })
+    }
+    fn operation_authenticated<F>(
+        &mut self,
+        operation: &Invocation,
+        contract: Arc<Contract>,
+        constructor: bool,
+        gas_limit: Option<u64>,
+        authenticate: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut Engine<'_, Shared<'s, S>>) -> Result<()>,
+    {
         let executable = contract.executable()?;
         let mut storage = self.storage.clone();
         let mut vm = Engine::new(
@@ -360,12 +396,14 @@ impl<'s, S: Storage> Session<'_, 's, S> {
             &mut storage,
             false,
             self.context.protocol_version,
-            self.context
-                .gas_limit
-                .saturating_sub(self.receipt.total_cost),
+            gas_limit.unwrap_or_else(|| {
+                self.context
+                    .gas_limit
+                    .saturating_sub(self.receipt.total_cost)
+            }),
         );
+        authenticate(&mut vm)?;
         if let Some(user) = operation.user {
-            self.fetch(&user, &mut vm)?;
             vm.write(MEM_EXTERN + EXTERN_USER, Value::Binary(user.to_vec()))?;
         } else {
             vm.write(MEM_EXTERN + EXTERN_USER, Value::Nil)?;

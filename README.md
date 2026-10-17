@@ -50,7 +50,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hash serialization, transaction IDs/content hashes, contract/operation/solution/result hashes, static validity, costs, PubKey/MultiSig authentication and transaction signature selection. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
-| `mmx-execution` | VNX contract loading, dependency locks, constructors, cross-contract calls and metadata reads, native boundary copies, and deferred atomic publication across contracts, balances and deployments. |
+| `mmx-execution` | Contract loading/calls, constructors and metadata reads; complete single-transaction validation with authorization, balances, fees, deposits, execution-result matching and deferred atomic settlement. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
 The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
@@ -137,11 +137,44 @@ Non-const commits clear their return slot, matching the reference executor.
 Child gas is added only after successful execution and return copying; outer VM
 costs are clamped on failure as in `Node::execute`.
 
-This layer expects transaction authentication, static contract/dependency validity,
-and deposit funding checks to have succeeded. Combining authentication and consensus
-hashing with full fee/input/output validation, implicit deposits and block
-settlement remains node-layer work; `Receipt::total_cost` includes the supplied initial cost,
-contract reads, and execution, before the node's execution-input/output costs.
+The invocation API expects transaction authentication, static contract/dependency
+validity and deposit funding checks to have succeeded. Its `Receipt::total_cost`
+includes supplied initial cost, contract reads and execution, before execution
+input/output costs. The `mmx_execution::transaction` API combines these steps.
+
+`transaction::prepare(&mut storage, &context, &transaction)` checks native static
+validity, the active transaction version, duplicate IDs, sender authorization,
+fee funding, expiry, explicit inputs/outputs, deployment validity/dependencies and
+per-operation user authorization. It runs constructors and calls at their native
+positions, accounts for deposits and contract spending, creates execution inputs
+and outputs, applies implicit-deposit rules, checks dynamic fees, and validates
+any supplied execution result. Version 0 retains the reference's GCC/libstdc++
+unordered-map iteration order for implicit deposits, including bucket collisions
+and rehashes; version 1 sorts currencies.
+
+`PreparedTransaction::result()` exposes success or a charged execution failure.
+Rejections return an error and publish nothing. On commit, failed transactions
+publish only their fee debit and transaction index; successful transactions
+publish VM state, deployments, settlement balances and the index together.
+Settlement credits all outputs before clamping input debits, matching native
+single-transaction block application. Ledger validation uses the original
+balance snapshot independently of the VM's deposit/spending cache. `LedgerStorage`
+is an explicit backend capability requiring index queries and atomic publication
+of every batch field; `StorageDb` implements it.
+
+Dropping a prepared transaction aborts it. `transaction::execute()` prepares and
+commits immediately, and `transaction::with_result()` attaches a computed result
+while recalculating static cost and the content hash. The caller separately
+advances the database version. Transaction index height and deployment read cost
+survive reopen and rollback, including read costs for failed deployments whose
+contract record is absent. Error codes, addresses and operation indexes are
+enforced when matching results; diagnostic line/message fields retain the native
+consensus exemption.
+
+This is a single-transaction API. Whole-block reservations, transaction ordering,
+shared execution contexts across transactions, rewards/supply and archival indexes,
+block validation and chain selection remain to be ported. Sequentially committing
+transactions through this API does not implement native whole-block validation.
 
 `mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
 conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
@@ -157,7 +190,7 @@ JSON metadata restrictions, contract/method flags and wrapped cost arithmetic.
 Contract validity is exposed separately: native `Transaction::is_valid()` does
 not validate the deployment itself. These checks do not authenticate signatures,
 enforce the active transaction version at a height, check balances or authorize
-execution. The next transaction layer must combine them with those checks.
+execution. `mmx_execution::transaction` combines them with those checks.
 
 `mmx_consensus::authorization` ports `Contract::validate()` and the sender,
 input and operation-user signature selection rules. `authorize_sender()` always
@@ -172,8 +205,9 @@ check, and user authentication follows the target-executable check. The lookup
 callback must use chain contract records and charge the native read cost at the
 appropriate transaction/engine gas meter. Eagerly authenticating all operations
 would change failure order and gas. These functions do not check balances or
-fees, run bytecode, or publish state; `mmx-execution::prepare()` still expects
-authenticated, funded invocations until the full transaction layer connects them.
+fees, run bytecode, or publish state; `mmx_execution::transaction` connects these
+steps to execution and settlement. The lower-level `mmx_execution::prepare()`
+continues to accept authenticated, funded invocations.
 
 Version 0 multisig validation ignores the declared threshold, non-owner entries
 and non-PubKey owner solutions. Version 1 requires the declared threshold to
@@ -192,6 +226,9 @@ their tags, and non-native Variant types retain their original payload.
 `Record::from_generated()` is convenient for generated declarations, but their
 JSON-backed Variant fields cannot represent every native distinction. Use
 original bytes for consensus inputs.
+`Record::encode()` re-emits current-schema VNX records while preserving original
+Variant bytes and raw strings; it is used to persist deployments without a JSON
+round trip. It remains distinct from hash serialization.
 
 The disk backend uses a **new Rust journal format**, not the C++ database files.
 Use a separate data directory. It retains all history in memory and replays the
@@ -299,6 +336,18 @@ integration binaries prove cache sharing in both directions between authorizatio
 and VM `VERIFY`; signed PubKey and multisig transactions also pass static and
 signature checks together.
 
+The transaction layer adds **2,016 native C++ comparisons**. Its generator extracts
+the original `Node::validate` and both `Node::execute` methods into a harness with
+test storage/indexes. Cases compare acceptance/rejection, failure classes, costs,
+fees, execution inputs/outputs, error locations, every VM write, stored contracts,
+deployment index costs and settled balances. They include hardfork boundaries,
+signature parsing/failure order, fee/read budgets, constructor/child rollback,
+deposits, wrapped 128-bit amounts, raw memos/arguments, legacy currency order, and
+supplied-result mutations (including ignored diagnostics/input solution indexes).
+Additional tests cover prepare/abort, durable commit, reopen, duplicate checks and
+rollback of transaction indexes. Consensus fixtures also round-trip losslessly
+through the byte-preserving VNX encoder.
+
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
 transactions/contracts, and call a generated MMX client through the VNX runtime.
@@ -314,6 +363,7 @@ To regenerate fixtures from an existing CMake build of the reference node:
 python3 tools/generate_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_consensus_fixtures.py --source ~/workspace/mmx-node
 # Optional: --suite hashes or --suite authorization
+python3 tools/generate_transaction_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -323,13 +373,12 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. The Rust JavaScript-subset compiler and the remaining original contract suites.
-2. Full transaction validation: authentication, deployment validity and consensus
-   hashing, fee/input/output checks, implicit deposits and settlement, using the
-   prepared execution batch for atomic publication.
+1. Whole-block transaction reservations/execution, ordering, rewards/supply,
+   archival indexes and block validation, building on single-transaction validation.
+2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.
-4. Transactions, chain state, consensus, networking, RPC, and node services using
+4. Chain selection, networking, RPC and node services using
    the generated types and VNX runtime, carrying over the relevant original tests
    as each component becomes executable.
 

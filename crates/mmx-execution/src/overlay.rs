@@ -62,6 +62,7 @@ impl<'a, S: Storage> Overlay<'a, S> {
                 .iter()
                 .map(|(a, c)| (*a, c.clone()))
                 .collect(),
+            transactions: Vec::new(),
         }
     }
 }
@@ -74,6 +75,12 @@ impl<S> Clone for Shared<'_, S> {
     }
 }
 impl<S: Storage> Storage for Shared<'_, S> {
+    fn get_transaction_index(
+        &self,
+        id: &Address,
+    ) -> storage::Result<Option<storage::TransactionIndex>> {
+        self.0.borrow().backend.get_transaction_index(id)
+    }
     fn read(&self, c: &Address, a: u64, k: Option<u64>) -> storage::Result<Option<Var>> {
         let state = self.0.borrow();
         if let Some(var) = state.writes.get(&(*c, a, k)) {

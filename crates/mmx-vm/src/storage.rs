@@ -40,19 +40,35 @@ pub struct BalanceWrite {
     pub amount: u128,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionIndex {
+    pub height: u32,
+    pub contract_read_cost: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TransactionBatch {
     pub writes: Vec<(Address, StorageWrite)>,
     pub balances: Vec<BalanceWrite>,
     pub contracts: Vec<(Address, ContractData)>,
+    pub transactions: Vec<(Address, TransactionIndex)>,
 }
 
 pub trait AtomicStorage: Storage {
-    /// All contracts and balances publish together, or none of them do.
+    /// All state, contracts, balances and transaction indexes publish together,
+    /// or none of them do. Every field of the batch must be applied.
     fn apply_transaction(&mut self, batch: &TransactionBatch) -> Result<()>;
 }
 
+/// Opt-in for full transaction validation. Implementations must supply chain
+/// balances/contracts, override transaction-index queries, and persist indexes
+/// in the same atomic batch. VM-only backends need not implement this trait.
+pub trait LedgerStorage: AtomicStorage {}
+
 pub trait Storage {
+    fn get_transaction_index(&self, _id: &Address) -> Result<Option<TransactionIndex>> {
+        Ok(None)
+    }
     fn read(&self, contract: &Address, address: u64, key: Option<u64>) -> Result<Option<Var>>;
     fn lookup(&self, contract: &Address, value: &Value) -> Result<Option<u64>>;
     fn get_contract(&self, _address: &Address) -> Result<Option<ContractData>> {
@@ -181,6 +197,20 @@ impl StorageDb {
 }
 
 impl Storage for StorageDb {
+    fn get_transaction_index(&self, id: &Address) -> Result<Option<TransactionIndex>> {
+        self.database
+            .get("transactions", id, None)
+            .map(|bytes| {
+                if bytes.len() != 12 {
+                    return Err(Error::Invalid("transaction index length"));
+                }
+                Ok(TransactionIndex {
+                    height: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+                    contract_read_cost: u64::from_le_bytes(bytes[4..].try_into().unwrap()),
+                })
+            })
+            .transpose()
+    }
     fn get_balance(&self, contract: &Address, currency: &Address) -> Result<Option<u128>> {
         self.balance_at(contract, currency, None)
     }
@@ -271,10 +301,16 @@ impl AtomicStorage for StorageDb {
             bytes.extend(&contract.bytes);
             batch.push(Write::put("contracts", address, bytes));
         }
+        for (id, index) in &transaction.transactions {
+            let mut bytes = index.height.to_le_bytes().to_vec();
+            bytes.extend(index.contract_read_cost.to_le_bytes());
+            batch.push(Write::put("transactions", id, bytes));
+        }
         self.database.apply(batch)?;
         Ok(())
     }
 }
+impl LedgerStorage for StorageDb {}
 
 fn balance_key(contract: &Address, currency: &Address) -> Vec<u8> {
     contract.iter().chain(currency).copied().collect()

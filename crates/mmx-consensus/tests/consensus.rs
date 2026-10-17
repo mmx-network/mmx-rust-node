@@ -78,6 +78,12 @@ fn native_consensus_hashes_validity_costs_and_serialization() {
             p.min_txfee_depend = u64::MAX;
         }
         let record = Record::decode(&unhex(f[2])).unwrap_or_else(|e| panic!("{label}: {e}"));
+        let encoded = record
+            .encode()
+            .unwrap_or_else(|e| panic!("{label}: encode {e}"));
+        let roundtrip =
+            Record::decode(&encoded).unwrap_or_else(|e| panic!("{label}: roundtrip {e}"));
+        assert_eq!(roundtrip, record, "{label}: lossless VNX roundtrip");
         let valid = record.is_valid(&p).map(|v| u8::from(v).to_string());
         assert_eq!(result(valid), f[3], "{label}: validity");
         assert_eq!(result(record.calc_cost(&p)), f[4], "{label}: cost");

@@ -9,6 +9,8 @@ description = "MMX contract loading and atomic cross-contract execution"
 [dependencies]
 mmx-vm.workspace = true
 mmx-types.workspace = true
+mmx-consensus.workspace = true
+thiserror.workspace = true
 vnx.workspace = true
 
 [dev-dependencies]

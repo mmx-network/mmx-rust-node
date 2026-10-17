@@ -200,6 +200,13 @@ fn transaction_batch_validates_every_contract_before_publishing_any_table() {
             currency: [3; 32],
             amount: 99,
         }],
+        transactions: vec![(
+            [5; 32],
+            mmx_vm::storage::TransactionIndex {
+                height: 10,
+                contract_read_cost: 48,
+            },
+        )],
         contracts: vec![(
             [4; 32],
             ContractData {
@@ -212,6 +219,7 @@ fn transaction_batch_validates_every_contract_before_publishing_any_table() {
     assert!(db.read(&[1; 32], MEM_STATIC, None).unwrap().is_none());
     assert_eq!(db.get_balance(&[1; 32], &[3; 32]).unwrap(), None);
     assert_eq!(db.get_contract(&[4; 32]).unwrap(), None);
+    assert_eq!(db.get_transaction_index(&[5; 32]).unwrap(), None);
     assert_eq!(
         db.read(&[9; 32], MEM_STATIC, None).unwrap().unwrap().value,
         Value::from(73u64)
