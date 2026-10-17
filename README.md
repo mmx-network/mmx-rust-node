@@ -36,6 +36,9 @@ cargo fmt --all --check
 
 # Run repeatedly to increment a contract counter in a persistent database.
 cargo run -p mmx-vm --example counter -- ./tmp/counter-db
+
+# Initialize/reopen genesis using the original network configuration/assets.
+cargo run -p mmx-execution --example bootstrap -- ../mmx-node mainnet ./tmp/mainnet-db
 ```
 
 The example executes MMX instructions, charges gas, stages contract state, and
@@ -311,8 +314,27 @@ Other networks use the reference testnet project address. The VDF/challenge
 domains, nonce, initial difficulties, timestamp casts, transaction commitments
 and header hashes retain native rules. Bootstrap transactions receive native
 genesis checks rather than normal transaction validation, and constructors and
-operations do not execute. Supply original, trusted network records: manifest
-file/JSON loading and canonical network configuration are separate work.
+operations do not execute.
+
+`chain::network::Network::load(root, configuration)` reads the original
+`config/<configuration>` tree through VNX, including parent inheritance, namespace
+JSON files, leaf overrides and array appends. The configured `chain.params.network`
+selects `data/<network>`; configuration overlays can have different directory
+names. `Network::from_config()` accepts an already layered configuration with
+caller overrides. Both return the generated parameters and lossless bootstrap
+records for `ChainState::initialize()`.
+
+The loader reads all nine binaries in native order and mainnet's rewards JSON
+and separate project relay. Text conversion preserves MMX addresses, native
+integer casts/defaults, enum names and 128-bit decimal/hex amounts, including
+the native permissive digit parser and overflow behavior. The shared VNX parser
+retains native string escapes, including literal `u0041` for `\u0041`. Binary
+files use the strict consensus reader. Loading reports file paths on errors and
+does not publish state; genesis checks remain in `genesis::build`/`initialize`.
+Files are bounded to 64 MiB. Text support covers the shipped distribution and
+its input/output/execution-result records; floating-point integer conversions
+and non-null polymorphic contract/operation/solution JSON payloads fail explicitly.
+General native text/schema migration remains separate work.
 
 `chain::ChainState` owns the storage backend and exposes read-only ledger access.
 `initialize()` applies genesis balances, deployments, read-cost indexes and

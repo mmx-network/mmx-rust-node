@@ -2,6 +2,7 @@
 //! records, height indexes and the tip commit together at the block's height.
 //! This module verifies extensions; fork choice and orphan retention are separate.
 pub mod genesis;
+pub mod network;
 use crate::{
     block,
     transaction::{bytes, uint},
