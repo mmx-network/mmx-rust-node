@@ -118,6 +118,11 @@ impl Record {
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         wire::decode(bytes)
     }
+    /// Decode a value in a continuing native stream. Type codes are cached
+    /// between frames, while every record still uses the checked-in schema.
+    pub fn decode_with_registry(bytes: &[u8], registry: &mut vnx::Registry) -> Result<Self> {
+        wire::decode_with_registry(bytes, registry)
+    }
     pub fn from_generated<T: vnx::VnxType>(value: &T) -> Result<Self> {
         Self::decode(&value.encode(&mmx_types::vnx_registry()?)?)
     }

@@ -83,6 +83,18 @@ impl Encoder {
                 self.count(s.len())?;
                 self.0.extend(s);
             }
+            Code::F32 => {
+                let Value::Float32(bits) = v else {
+                    return Err(input("expected float32 bits"));
+                };
+                self.0.extend(bits.to_le_bytes());
+            }
+            Code::F64 => {
+                let Value::Float64(bits) = v else {
+                    return Err(input("expected float64 bits"));
+                };
+                self.0.extend(bits.to_le_bytes());
+            }
             Code::Dynamic => {
                 let Value::Variant(variant) = v else {
                     return Err(input("expected Variant"));
@@ -119,6 +131,15 @@ impl Encoder {
                 for (a, b) in map {
                     self.value(a, k, owner, depth + 1)?;
                     self.value(b, value, owner, depth + 1)?;
+                }
+            }
+            Code::Tuple(codes) => {
+                let values = v.seq()?;
+                if values.len() != codes.len() {
+                    return Err(input("tuple length"));
+                }
+                for (value, code) in values.iter().zip(codes) {
+                    self.value(value, code, owner, depth + 1)?;
                 }
             }
             Code::Struct(index) => {

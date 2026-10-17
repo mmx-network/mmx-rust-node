@@ -372,16 +372,22 @@ fn json_depth(code: &Code, value: &V) -> Option<usize> {
     })
 }
 pub(crate) fn decode(bytes: &[u8]) -> Result<Record> {
+    decode_with_registry(bytes, &mut Registry::new())
+}
+pub(crate) fn decode_with_registry(bytes: &[u8], registry: &mut Registry) -> Result<Record> {
     let mut parser = Parser {
         input: bytes,
-        registry: Registry::new(),
+        registry: registry.clone(),
     };
     let value = parser.any(0)?;
     if !parser.input.is_empty() {
         return Err(input("trailing bytes"));
     }
     match value {
-        V::Record(r) => Ok(r),
+        V::Record(r) => {
+            *registry = parser.registry;
+            Ok(r)
+        }
         _ => Err(input("expected record")),
     }
 }

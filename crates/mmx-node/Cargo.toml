@@ -1,0 +1,23 @@
+[package]
+name = "mmx-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MMX full ledger node, native peer sync and RPC server"
+
+[dependencies]
+mmx-consensus.workspace = true
+mmx-execution.workspace = true
+mmx-types.workspace = true
+mmx-vm.workspace = true
+mmx-crypto.workspace = true
+vnx.workspace = true
+k256.workspace = true
+thiserror.workspace = true
+zstd = "0.13"
+tiny_http = "0.12"
+ctrlc = "3"
+
+[dev-dependencies]
+tempfile.workspace = true

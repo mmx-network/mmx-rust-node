@@ -1,9 +1,10 @@
 # MMX Rust node
 
 A Rust port of [`mmx-node`](https://github.com/madMAx43v3r/mmx-node), starting
-with the smart contract engine and versioned database. This is an early library
-workspace; validator services, chain sync, networking, wallet services and a
-node executable remain to be ported.
+with the smart contract engine and versioned database. The workspace now includes
+a node executable with native peer sync, durable fork handling, native VNX read
+RPC and HTTP JSON-RPC. Wallet and block-production services remain separate port
+stages.
 
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
 `ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
@@ -41,6 +42,47 @@ cargo run -p mmx-vm --example counter -- ./tmp/counter-db
 cargo run -p mmx-execution --example bootstrap -- ../mmx-node mainnet ./tmp/mainnet-db
 ```
 
+Build and start the node using the original public network assets:
+
+```sh
+cargo build --release -p mmx-node --locked
+./target/release/mmx-node --mmx-root ../mmx-node --network mainnet \
+  --data-dir ./mmx-data
+# Pin peers with repeated --peer HOST[:PORT]; otherwise use native seed config.
+# Serve stored state without network access:
+./target/release/mmx-node --mmx-root ../mmx-node --offline
+# Keep a chosen height before resuming sync (all later orphans remain archived):
+./target/release/mmx-node --mmx-root ../mmx-node --rollback-to 1000
+```
+
+Default listeners are local: native peers on the configured network port
+(mainnet 11337), VNX service `Node` at `127.0.0.1:11331`, and HTTP JSON-RPC at
+`http://127.0.0.1:11380/rpc`. Override with `--p2p-listen`, `--rpc-listen` and
+`--http-listen`. `--sync-once` exits after reaching a peer tip. Ctrl-C stops the
+servers and sync workers; each selected batch is already durable.
+
+```sh
+curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_status"}'
+curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"get_block_hash","params":{"height":100}}'
+```
+
+The read API supports parameters, heights/sync status, genesis/VDF hashes,
+blocks/headers by hash/height, transaction lookup/height/block IDs, contracts and
+balances. HTTP accepts bare names or `mmx.Node.*`; `get_status` adds node status.
+Other HTTP methods use the generated VNX field representations (fixed byte arrays
+and little-endian uint128 bytes), and method parameters are named objects.
+Unsupported methods return explicit errors. These public RPC listeners expose
+reads only. Native compressed peer requests carry lossless block records.
+
+Socket integration tests download the native fixture chain, switch a deep fork,
+query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
+A mainnet smoke test connected to a native peer advertising height 5,513,516 and
+validated the first 80 blocks. This is evidence of native interoperability, not a
+claim that a complete mainnet sync has finished. The current database indexes all
+versions in RAM and the sync implementation still needs throughput/scaling work.
+
 The example executes MMX instructions, charges gas, stages contract state, and
 commits it to disk. Running it again reopens the database and increments the same
 counter. It does not require the C++ repository or a running MMX node.
@@ -50,6 +92,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | Crate | Implemented |
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
+| `mmx-node` | Executable, native Zstd peer protocol, historical download with ancestor discovery and native fork choice, live block/VDF/vote admission, durable rewind/restart, VNX public reads and HTTP JSON-RPC. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hashes/costs and authorization, header/vote authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
@@ -707,13 +750,12 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Chain sync and
-   specialized history indexes, building on durable fork application/selection.
+1. Sync throughput, peer scheduling/relay, farmer response admission and specialized
+   history indexes, building on the executable node and durable fork selection.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.
-4. Networking, RPC and node services using
-   the generated types and VNX runtime, carrying over the relevant original tests
-   as each component becomes executable.
+4. Remaining node RPCs, wallet and block-production services, carrying over the
+   relevant original tests as each component becomes executable.
 
 Licensed under Apache-2.0, following the original MMX project. See [LICENSE](LICENSE).

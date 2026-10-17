@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto"]
+members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node"]
 exclude = ["vendor/vnx-rust"]
 resolver = "2"
 
@@ -14,6 +14,7 @@ mmx-db = { path = "crates/mmx-db" }
 mmx-types = { path = "crates/mmx-types" }
 mmx-consensus = { path = "crates/mmx-consensus" }
 mmx-crypto = { path = "crates/mmx-crypto" }
+mmx-execution = { path = "crates/mmx-execution" }
 mmx-vm = { path = "crates/mmx-vm" }
 vnx = { path = "vendor/vnx-rust/crates/vnx" }
 vnx-codegen = { path = "vendor/vnx-rust/crates/vnx-codegen" }
