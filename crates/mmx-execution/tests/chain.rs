@@ -687,3 +687,138 @@ fn torn_branch_switch_keeps_orphans_and_recovers_old_or_new_ledger_together() {
         verify_step(recovered.selected(), winner);
     }
 }
+
+fn signed_vote(step: &Value, key: u64) -> Record {
+    include_str!("fixtures/votes.jsonl")
+        .lines()
+        .map(|l| vnx::serde_json::from_str::<Value>(l).unwrap())
+        .find(|r| {
+            r["kind"] == "chain_vote" && r["key"] == key && address(&r["block"]) == block_hash(step)
+        })
+        .map(|r| record(&r["wire"]))
+        .unwrap()
+}
+#[test]
+fn authenticated_votes_switch_tied_branches_and_reset_after_restart() {
+    use mmx_execution::chain::{forks::ForkChain, voting::Disposition};
+    let (g, steps) = synthetic();
+    let root = block_hash(&g);
+    let (winner, loser) = if block_hash(&steps[1]) < block_hash(&steps[2]) {
+        (&steps[1], &steps[2])
+    } else {
+        (&steps[2], &steps[1])
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    retain(&mut chain, &steps[0]);
+    retain(&mut chain, winner);
+    retain(&mut chain, loser);
+    chain.update_at(root, None, 100).unwrap();
+    verify_step(chain.selected(), winner);
+    let unauthorized = chain.admit_vote(&signed_vote(loser, 2), 100).unwrap();
+    assert_eq!(unauthorized.processed[0].1, Disposition::NotValidator);
+    let accepted = chain.admit_vote(&signed_vote(loser, 1), 100).unwrap();
+    assert_eq!(accepted.processed[0].1, Disposition::Accepted);
+    assert_eq!(
+        chain
+            .admit_vote(&signed_vote(loser, 1), 101)
+            .unwrap()
+            .processed[0]
+            .1,
+        Disposition::Duplicate
+    );
+    assert_eq!(chain.vote_count(&block_hash(loser)), 1);
+    chain.update_at(root, None, 102).unwrap();
+    verify_step(chain.selected(), loser);
+    let mut invalid = signed_vote(winner, 1);
+    invalid.fields.insert(
+        "content_hash".into(),
+        mmx_consensus::Value::Bytes(vec![0; 32]),
+    );
+    assert!(chain.admit_vote(&invalid, 103).is_err());
+    assert_eq!(chain.vote_count(&block_hash(winner)), 0);
+    drop(chain);
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    verify_step(chain.selected(), loser);
+    assert_eq!(chain.vote_count(&block_hash(loser)), 0);
+    chain.update_at(root, None, 104).unwrap();
+    verify_step(chain.selected(), winner);
+}
+#[test]
+fn votes_wait_for_verified_blocks_and_expire_only_while_pending() {
+    use mmx_execution::chain::{forks::ForkChain, voting::Disposition};
+    let (g, steps) = synthetic();
+    let root = block_hash(&g);
+    let interval = params(&g).block_interval_ms;
+    let mut chain = ForkChain::memory(params(&g));
+    chain.initialize(&assets(&g)).unwrap();
+    assert_eq!(
+        chain
+            .admit_vote(&signed_vote(&steps[1], 1), 100)
+            .unwrap()
+            .pending,
+        1
+    );
+    retain(&mut chain, &steps[0]);
+    chain.admit(&record(&steps[1]["block"]), &[]).unwrap();
+    let update = chain.update_at(root, None, 100 + 3 * interval).unwrap();
+    assert_eq!(update.votes.pending, 1);
+    assert_eq!(chain.vote_count(&block_hash(&steps[1])), 0);
+    retain(&mut chain, &steps[1]);
+    let update = chain.update_at(root, None, 100 + 3 * interval).unwrap();
+    assert_eq!(update.votes.processed[0].1, Disposition::Accepted);
+    assert_eq!(chain.vote_count(&block_hash(&steps[1])), 1);
+    chain.process_votes(100 + 30 * interval);
+    assert_eq!(chain.vote_count(&block_hash(&steps[1])), 1);
+    let deep = rows()
+        .into_iter()
+        .find(|r| r["kind"] == "deep_fork")
+        .unwrap()["steps"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        chain
+            .admit_vote(&signed_vote(&deep[1], 1), 200 + 30 * interval)
+            .unwrap()
+            .pending,
+        1
+    );
+    let expired = chain.process_votes(201 + 33 * interval);
+    assert_eq!(expired.processed[0].1, Disposition::Expired);
+    retain(&mut chain, &deep[0]);
+    retain(&mut chain, &deep[1]);
+    chain.update_at(root, None, 201 + 33 * interval).unwrap();
+    assert_eq!(chain.vote_count(&block_hash(&deep[1])), 0);
+}
+#[test]
+fn rollback_to_every_selected_height_survives_reopen_and_retains_all_orphans() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let root = block_hash(&g);
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    retain(&mut chain, &steps[0]);
+    retain(&mut chain, &steps[1]);
+    chain.update_at(root, None, 0).unwrap();
+    assert!(chain.rollback_to(3).is_err());
+    for height in (0..=2).rev() {
+        chain.rollback_to(height).unwrap();
+        verify_step(
+            chain.selected(),
+            if height == 0 {
+                &g
+            } else {
+                &steps[(height - 1) as usize]
+            },
+        );
+        assert!(chain.block(&block_hash(&steps[1])).unwrap().is_some());
+        drop(chain);
+        chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+        assert_eq!(chain.selected().tip().unwrap().unwrap().height, height);
+    }
+    chain.update_at(root, None, 1).unwrap();
+    verify_step(chain.selected(), &steps[1]);
+}

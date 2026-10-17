@@ -17,6 +17,7 @@ pub mod proof;
 pub mod transitions;
 mod validation;
 pub mod vdf;
+pub mod vote;
 mod wire;
 
 use std::collections::BTreeMap;

@@ -6,6 +6,7 @@ pub mod choice;
 pub mod forks;
 pub mod genesis;
 pub mod network;
+pub mod voting;
 use crate::{
     block,
     transaction::{bytes, uint},
@@ -41,6 +42,8 @@ pub enum ChainError {
     Header(#[from] mmx_consensus::header::HeaderError),
     #[error(transparent)]
     Vdf(#[from] mmx_consensus::vdf::VdfError),
+    #[error(transparent)]
+    Vote(#[from] mmx_consensus::vote::VoteError),
 }
 pub type ChainResult<T> = Result<T, ChainError>;
 fn invalid(message: &'static str) -> ChainError {

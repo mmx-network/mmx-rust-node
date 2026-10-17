@@ -51,7 +51,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
-| `mmx-consensus` | Native hashes/costs and authorization, header authentication, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
+| `mmx-consensus` | Native hashes/costs and authorization, header/vote authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
 | `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native network bootstrap, durable selected-chain state, orphan archives, native fork-choice policy and atomic branch replacement. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
@@ -389,9 +389,28 @@ before switching. The caller tracks the selected root after a deep fork.
 The standalone `chain::choice::select()` ports native proof/invalid propagation,
 wrapping cumulative votes, root/peak weight comparisons, height/hash tie-breaks
 and the backwards-sync guard. It accepts already authenticated vote counts.
-`ForkChain` currently counts zero validator votes: vote authentication/eligibility,
-root advancement/commit scheduling, sync orchestration, archive pruning,
-specialized wallet/trading indexes and node-service caches remain to be ported.
+`ForkChain::admit_vote()` authenticates native vote content/signatures and queues
+votes until the referenced block's proof is verified. `update_at()` supplies an
+explicit clock for deterministic processing; `update()` uses wall time. Validator
+membership is selected once at proof verification, starting with the unclamped
+commit-delay ancestor, then scanning at most `max_history` headers for distinct
+first-proof farmer keys. The default history limit is the native 1,000 headers.
+
+New votes require the best known proof for that challenge and a key in the
+block's validator set. Each key counts once per block. Accepted votes retain
+their count when stronger proofs arrive and do not expire; pending votes time
+out after three block intervals, using the native strict boundary. The proof
+pool accepts additional `proof::VerifiedProof` evidence. Votes, eligibility and
+proof-ranking caches reset on restart, matching the native process; durable
+ledger/orphan state remains intact. Invalid vote content short-circuits signature
+parsing, and signature verification shares the VM/authorization cache.
+
+`ForkChain::rollback_to(height)` keeps that selected block and durably removes
+every later ledger/index version while retaining every archived branch. Any
+selected height, including genesis, is supported; no root/checkpoint introduces
+an irreversible state cutoff. Reopen and subsequent fork selection can replay
+the retained branches. Root advancement/commit scheduling, sync orchestration,
+archive pruning, specialized wallet/trading indexes and node-service caches remain to be ported.
 
 ```rust
 let mut forks = mmx_execution::chain::forks::ForkChain::open(path, params)?;
@@ -636,6 +655,13 @@ out-of-order orphans, deferred work, restart, selected-index rollback, atomic
 replay failures, deep forks, backwards-sync guards and torn branch replacement.
 The fork-choice oracle compares **430 native graphs**, including wrapping votes,
 unverified/invalid ancestors, differing root weights, height/hash ties and sync.
+Voting adds **290 native cases**: 110 signature/hash cases, 101 validator-history
+cases, 69 event sequences and ten signatures for real branch fixtures. Queue
+sequences compare every vote count, publication and pending length across proof
+verification, membership, duplicate votes, stronger proofs and timeout boundaries.
+End-to-end tests switch a tied branch using an authenticated eligible vote,
+preserve state on bad signatures, test transient votes across restart, and rewind
+and replay every height of the fixture chain with all orphans retained.
 
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
@@ -661,6 +687,7 @@ python3 tools/generate_nft_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_chain_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_network_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_fork_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_vote_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -670,7 +697,7 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Validator vote authentication/eligibility, root advancement, chain sync and
+1. Root advancement, chain sync and
    specialized history indexes, building on durable fork application/selection.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,

@@ -1,9 +1,8 @@
-//! Durable orphan archive and vote-free fork updates. The native choice policy
-//! also supports votes through `choice`; authenticated vote ingestion, root
-//! advancement, sync scheduling and archive pruning are separate node services.
+//! Durable orphan archive, authenticated validator voting and native fork
+//! updates. Root advancement, sync scheduling and archive pruning are separate.
 use super::{
     choice::{self, Anchor, Candidate},
-    genesis, invalid, ChainError, ChainResult, ChainState,
+    genesis, invalid, voting, ChainError, ChainResult, ChainState,
 };
 use crate::{
     block,
@@ -28,6 +27,7 @@ pub struct Update {
     pub applied: Vec<Hash>,
     pub invalid: BTreeSet<Hash>,
     pub waiting: BTreeSet<Hash>,
+    pub votes: voting::Report,
 }
 struct Entry {
     block: Record,
@@ -38,18 +38,21 @@ struct Entry {
 pub struct ForkChain {
     chain: ChainState,
     archive: Database,
+    voting: voting::Voting,
 }
 impl ForkChain {
     pub fn memory(params: mmx::ChainParams) -> Self {
         Self {
             chain: ChainState::memory(params),
             archive: Database::memory(),
+            voting: voting::Voting::default(),
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
         let chain = Self {
             chain: ChainState::open(path.as_ref().join("selected"), params)?,
             archive: Database::open(path.as_ref().join("archive"))?,
+            voting: voting::Voting::default(),
         };
         if chain.archive.version() != 0
             && chain.archive.get("fork_meta", b"params", None)
@@ -77,6 +80,42 @@ impl ForkChain {
     }
     pub fn selected(&self) -> &ChainState {
         &self.chain
+    }
+    /// Keep the selected block at `height` and rewind every later ledger/index
+    /// version. Orphans and original genesis stay archived at every height.
+    pub fn rollback_to(&mut self, height: u32) -> ChainResult<()> {
+        let tip = self
+            .chain
+            .tip()?
+            .ok_or_else(|| invalid("chain is not initialized"))?;
+        if height > tip.height {
+            return Err(invalid("rollback height exceeds selected tip"));
+        }
+        if height < tip.height {
+            self.chain.revert(height + 1)?;
+            self.voting.reset();
+        }
+        Ok(())
+    }
+    pub fn vote_count(&self, block: &Hash) -> u32 {
+        self.voting.count(block)
+    }
+    pub fn set_vote_history_limit(&mut self, max_history: u32) {
+        self.voting.set_history_limit(max_history);
+    }
+    pub fn admit_vote(&mut self, vote: &Record, now_ms: i64) -> ChainResult<voting::Report> {
+        Ok(self
+            .voting
+            .admit(vote, now_ms, self.chain.params().block_interval_ms)?)
+    }
+    pub fn process_votes(&mut self, now_ms: i64) -> voting::Report {
+        self.voting
+            .process(now_ms, self.chain.params().block_interval_ms)
+    }
+    /// Additional work-verified farmer proofs can change future vote eligibility;
+    /// already counted votes remain counted. Response admission belongs to Node.
+    pub fn observe_proof(&mut self, proof: &mmx_consensus::proof::VerifiedProof) {
+        self.voting.observe_proof(proof);
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
         self.archive
@@ -204,10 +243,18 @@ impl ForkChain {
             .collect()
     }
     /// Select and apply a branch above an explicitly supplied selected root.
-    /// No validator votes are counted yet. Root advancement and the lowest
-    /// backwards-sync height are supplied by the caller, matching native policy
+    /// Root advancement and the lowest backwards-sync height are supplied by
+    /// the caller, matching native policy
     /// inputs without inventing a finality/sync policy for this library.
     pub fn update(&mut self, root: Hash, sync_pending: Option<u32>) -> ChainResult<Update> {
+        self.update_at(root, sync_pending, vnx::util::get_wall_time_millis())
+    }
+    pub fn update_at(
+        &mut self,
+        root: Hash,
+        sync_pending: Option<u32>,
+        now_ms: i64,
+    ) -> ChainResult<Update> {
         let root_header = self
             .chain
             .header(&root)?
@@ -215,6 +262,7 @@ impl ForkChain {
         if self.chain.hash_at(root_header.height)? != Some(root) {
             return Err(invalid("root is not selected"));
         }
+        self.voting.root(root_header.height, root_header.vdf_height);
         let entries = self.entries()?;
         let headers: BTreeMap<_, _> = entries
             .iter()
@@ -231,7 +279,7 @@ impl ForkChain {
             }
             let mut verified = false;
             let mut bad = entry.invalid;
-            if !bad {
+            {
                 if let Some(parent) = headers.get(&h.prev.0) {
                     let work: Vec<_> = entry
                         .proofs
@@ -255,6 +303,12 @@ impl ForkChain {
                                 bad = true;
                             } else {
                                 verified = true;
+                                self.voting.register(
+                                    &entry.block,
+                                    h,
+                                    self.chain.params(),
+                                    &history,
+                                )?;
                                 points.insert(h.hash.0, work);
                             }
                         }
@@ -271,7 +325,7 @@ impl ForkChain {
                 prev: h.prev.0,
                 height: h.height,
                 total_weight: u128::from_le_bytes(h.total_weight.0),
-                votes: 0,
+                votes: self.voting.count(&h.hash.0),
                 proof_verified: verified,
                 invalid: bad,
                 anchor: headers.get(&h.prev.0).map(|p| Anchor {
@@ -279,6 +333,10 @@ impl ForkChain {
                     total_weight: u128::from_le_bytes(p.total_weight.0),
                 }),
             });
+        }
+        out.votes = self.process_votes(now_ms);
+        for candidate in &mut candidates {
+            candidate.votes = self.voting.count(&candidate.hash);
         }
         self.persist_invalid(&out.invalid)?;
         loop {

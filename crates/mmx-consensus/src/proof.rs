@@ -14,6 +14,43 @@ pub enum ProofError {
     Work(#[from] crate::pos::Error),
 }
 pub type ProofResult<T> = std::result::Result<T, ProofError>;
+/// Work-verified proof identity for consumers such as the validator proof pool.
+#[derive(Clone, Debug)]
+pub struct VerifiedProof {
+    challenge: Hash,
+    hash: Hash,
+    height: u32,
+    record: Record,
+}
+impl VerifiedProof {
+    pub fn challenge(&self) -> &Hash {
+        &self.challenge
+    }
+    pub fn hash(&self) -> &Hash {
+        &self.hash
+    }
+    pub fn vdf_height(&self) -> u32 {
+        self.height
+    }
+    pub fn record(&self) -> &Record {
+        &self.record
+    }
+}
+pub fn verify_evidence(
+    record: &Record,
+    params: &mmx::ChainParams,
+    challenge: &Hash,
+    space_diff: u64,
+    vdf_height: u32,
+) -> ProofResult<VerifiedProof> {
+    verify(record, params, challenge, space_diff, vdf_height)?;
+    Ok(VerifiedProof {
+        challenge: *challenge,
+        hash: calc_proof_hash(record)?,
+        height: vdf_height,
+        record: record.clone(),
+    })
+}
 pub(crate) fn invalid(message: &str) -> ProofError {
     ProofError::Invalid(message.into())
 }
