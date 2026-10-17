@@ -4,7 +4,7 @@ use super::{Progress, BATCH_BLOCKS, BATCH_BYTES};
 use crate::{
     error,
     node::{hash, number},
-    peer::{BlockHash, Client},
+    peer::{BlockHash, Client, MAX_BODY_REQUESTS},
     Node, Result,
 };
 use mmx_consensus::{Hash, Record, Value};
@@ -370,7 +370,8 @@ impl<S: PeerSource> PeerPool<S> {
         let body_started = Instant::now();
         let mut bytes = 0usize;
         // Bound each group by unique content count, including competing
-        // candidates. Each connection has at most four body requests in flight.
+        // candidates. Keep this aggregate bound when increasing per-connection
+        // concurrency, so common content can use a fuller single-peer pipeline.
         let mut first = 0;
         while first < count && bytes < BATCH_BYTES {
             let mut end = start + first + 1;
@@ -409,10 +410,10 @@ impl<S: PeerSource> PeerPool<S> {
                         .filter(|&&(p, _)| self.peers[p].active && !job.tried.contains(&p))
                         .min_by_key(|&&(p, _)| self.peers[p].latency)
                     {
-                        // Keep the fastest claimant's four-request pipeline
+                        // Keep the fastest claimant's bounded request pipeline
                         // full instead of assigning the same common chain to
                         // slow claimants merely because its slots are occupied.
-                        if assigned[peer].len() < 4 {
+                        if assigned[peer].len() < MAX_BODY_REQUESTS {
                             job.tried.insert(peer);
                             self.body_requests += 1;
                             self.body_retries += u64::from(job.tried.len() > 1);

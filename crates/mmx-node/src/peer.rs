@@ -22,6 +22,8 @@ use std::{
 
 const MAGIC: u32 = 0x4B277B06;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// Bound native block lookups pipelined on a single peer connection.
+pub const MAX_BODY_REQUESTS: usize = 8;
 
 /// Native get_block_hash_ex: the chain ID and the complete content commitment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -426,8 +428,8 @@ impl Client {
             .collect()
     }
     pub fn blocks_by_hash(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
-        if hashes.len() > 4 {
-            return Err(error("peer request window exceeds four blocks"));
+        if hashes.len() > MAX_BODY_REQUESTS {
+            return Err(error("peer body request window exceeds limit"));
         }
         self.call_many(
             hashes

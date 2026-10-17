@@ -100,7 +100,9 @@ after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
 
 Each connection correlates reordered native returns while serving peer requests,
-with at most four body requests outstanding. Common content is fetched from its
+with at most eight body requests outstanding. The aggregate content-group bound
+still applies when common content uses one provider's wider pipeline.
+Common content is fetched from its
 fastest successful hash claimant; a slower provider is tried only after the request
 lease expires. Hash requests fan out to available pool members. Each height window
 completes after at least three independent replies, including other replies already

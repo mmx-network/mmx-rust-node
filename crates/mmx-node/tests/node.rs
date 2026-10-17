@@ -695,19 +695,27 @@ fn offline_rewinds_stay_at_the_requested_height_across_ticks_and_restarts() {
 fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_the_connection() {
     let (network, _, steps, _) = fixture();
     let n = node(&network);
-    let expected: Vec<_> = steps[..2].iter().map(|s| Some(wire(&s["block"]))).collect();
+    let mut expected: Vec<_> = steps[..2].iter().map(|s| Some(wire(&s["block"]))).collect();
+    expected.resize(8, None);
     let replies = expected.clone();
     let ids: Vec<_> = replies
         .iter()
-        .map(|b| hash(b.as_ref().unwrap(), "hash").unwrap())
+        .enumerate()
+        .map(|(i, b)| {
+            b.as_ref()
+                .map(|b| hash(b, "hash").unwrap())
+                .unwrap_or([100 + i as u8; 32])
+        })
         .collect();
     let wanted = ids.clone();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
-        let first = c.receive(Duration::from_secs(2)).unwrap().unwrap();
-        let second = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+        let requests: Vec<_> = (0..8)
+            .map(|_| c.receive(Duration::from_secs(2)).unwrap().unwrap())
+            .collect();
+        let second = &requests[1];
         let send = |c: &mut peer::Connection, id: V, result: Record| {
             c.send(&record(
                 "mmx.Return",
@@ -728,14 +736,21 @@ fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_th
             ],
         ))
         .unwrap();
-        send(
-            &mut c,
-            first.field("id").unwrap().clone(),
-            record(
-                "mmx.Node.get_block.return",
-                [("_ret_0".into(), V::Record(replies[0].clone().unwrap()))],
-            ),
-        );
+        for (index, request) in requests.iter().enumerate().rev() {
+            if index != 1 {
+                send(
+                    &mut c,
+                    request.field("id").unwrap().clone(),
+                    record(
+                        "mmx.Node.get_block.return",
+                        [(
+                            "_ret_0".into(),
+                            replies[index].clone().map(V::Record).unwrap_or(V::Null),
+                        )],
+                    ),
+                );
+            }
+        }
         let mut answered = false;
         loop {
             let request = c.receive(Duration::from_secs(2)).unwrap().unwrap();

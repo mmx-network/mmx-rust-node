@@ -57,7 +57,7 @@ impl PeerSource for Fake {
             .collect()
     }
     fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
-        assert!(hashes.len() <= 4);
+        assert!(hashes.len() <= MAX_BODY_REQUESTS);
         hashes
             .iter()
             .map(|id| {
