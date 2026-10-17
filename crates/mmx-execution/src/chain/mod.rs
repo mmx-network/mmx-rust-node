@@ -145,7 +145,7 @@ impl ChainState {
         if let Some(header) = self.headers.get_shared(hash) {
             return Ok(Some(header));
         }
-        let header = self
+        let legacy = self
             .storage
             .database()
             .get("chain_headers", hash, None)?
@@ -157,6 +157,10 @@ impl ChainState {
                 Ok(header)
             })
             .transpose()?;
+        let header = match legacy {
+            Some(header) => Some(header),
+            None => self.block(hash)?.as_ref().map(block_header).transpose()?,
+        };
         Ok(header.map(|h| self.headers.insert(h)))
     }
     pub fn transaction(&self, id: &Address) -> ChainResult<Option<Record>> {
@@ -317,20 +321,9 @@ impl ChainState {
             ));
         }
         let hash = bytes::<32>(block.field("hash")?)?;
-        // Slice without rehashing: native Block and Header have distinct type
-        // identities, and authenticated ancestry retains the original Block ID.
-        let header = Record {
-            name: "mmx.BlockHeader".into(),
-            fields: block
-                .fields
-                .iter()
-                .filter(|(name, _)| name.as_str() != "tx_list")
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect(),
-        };
+        let header = block_header(block)?;
         let mut writes = vec![
             Write::put("chain_blocks", hash, block.encode()?),
-            Write::put("chain_headers", hash, header.encode()?),
             Write::put("chain_height", height.to_be_bytes(), hash),
             Write::put("chain_meta", b"tip", hash),
         ];
@@ -350,6 +343,7 @@ impl ChainState {
             ));
         }
         self.storage.commit_transaction(batch, writes, next)?;
+        self.headers.insert(header);
         Ok(())
     }
     /// Remove blocks and ledger effects at heights >= `height`, matching native
@@ -360,6 +354,21 @@ impl ChainState {
         self.headers.clear();
         Ok(())
     }
+}
+// Slice without rehashing: native Block and Header have distinct type identities.
+// Full immutable blocks retain the exact header fields, including legacy fields
+// outside the hash. Persisting both duplicated the entire space-proof payload.
+fn block_header(block: &Record) -> ChainResult<mmx::BlockHeader> {
+    let header = Record {
+        name: "mmx.BlockHeader".into(),
+        fields: block
+            .fields
+            .iter()
+            .filter(|(name, _)| name.as_str() != "tx_list")
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    };
+    Ok(mmx::BlockHeader::decode(&header.encode()?)?)
 }
 impl HeaderSource for ChainState {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {

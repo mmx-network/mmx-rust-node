@@ -85,6 +85,11 @@ Immutable header caches are shared across validator/challenge walks. Speculative
 replay retains only cached headers below its replacement height and publishes its
 new cache after the database transaction succeeds. Wire descriptor declarations
 are cached independently of record payloads. Neither cache establishes proof work.
+New ledger/archive writes retain each complete block and derive its full header
+when needed, avoiding another disk copy of all space proofs. Existing separate
+header rows remain readable. Admission/publication warms the immutable cache only
+after its transaction succeeds. Cold reads and replacement tests preserve legacy
+unhashed fields even when a replacement block has the same ID.
 
 For repeatable performance comparisons, keep an earlier release binary and use
 an already downloaded range. The benchmark makes SQLite backups, downloads that

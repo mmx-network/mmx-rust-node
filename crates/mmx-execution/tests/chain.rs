@@ -962,3 +962,45 @@ fn verified_header_evidence_binds_unhashed_fields_parameters_and_ancestry_contex
     assert!(!evidence.matches(&invalid, &p, &context));
     assert!(evidence.matches(&block, &p, &context));
 }
+
+#[test]
+fn cold_header_reads_preserve_legacy_unhashed_fields_and_invalidate_replaced_suffixes() {
+    use mmx_consensus::Value as V;
+    let (g, steps) = synthetic();
+    let original = record(&steps[0]["block"]);
+    let hash = block_hash(&steps[0]);
+    let mut changed = original.clone();
+    changed
+        .fields
+        .insert("proof_chain".into(), V::Bytes(vec![42; 32]));
+    assert_eq!(
+        mmx_consensus::header::calc_hash(&changed, &params(&g)).unwrap(),
+        hash
+    );
+    for indexed in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let open = || {
+            if indexed {
+                ChainState::open_indexed(directory.path(), params(&g)).unwrap()
+            } else {
+                ChainState::open(directory.path(), params(&g)).unwrap()
+            }
+        };
+        let mut chain = open();
+        chain.initialize(&assets(&g)).unwrap();
+        chain.append_sync(&changed).unwrap();
+        let expected = chain.header(&hash).unwrap().unwrap();
+        assert_eq!(expected.proof_chain.0, [42; 32]);
+        drop(chain);
+        let mut chain = open();
+        assert_eq!(chain.header(&hash).unwrap().unwrap(), expected);
+        chain.revert(1).unwrap();
+        assert!(chain.header(&hash).unwrap().is_none());
+        chain.append_sync(&original).unwrap();
+        verify_step(&chain, &steps[0]);
+        let replacement = chain.header(&hash).unwrap().unwrap();
+        assert_ne!(replacement.proof_chain, expected.proof_chain);
+        drop(chain);
+        assert_eq!(open().header(&hash).unwrap().unwrap(), replacement);
+    }
+}

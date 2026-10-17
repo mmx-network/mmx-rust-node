@@ -236,6 +236,7 @@ impl ForkChain {
             return Err(invalid("chain is not initialized"));
         }
         let mut writes = Vec::new();
+        let mut headers = Vec::new();
         let mut seen = BTreeSet::new();
         let mut arrival = self.archive.version();
         for block in blocks {
@@ -252,19 +253,18 @@ impl ForkChain {
             arrival = arrival
                 .checked_add(1)
                 .ok_or_else(|| invalid("fork archive version limit"))?;
+            headers.push(header(block)?);
             writes.extend([
                 Write::put("fork_order", key, hash),
                 Write::put("fork_work", hash, pack(&[])?),
                 Write::put("fork_blocks", hash, block.encode()?),
-                Write::put(
-                    "fork_headers",
-                    hash,
-                    header(block)?.encode(&mmx_types::vnx_registry()?)?,
-                ),
             ]);
         }
         if !writes.is_empty() {
             self.archive.commit_batch(arrival, writes)?;
+            for header in headers {
+                self.headers.insert(header);
+            }
         }
         Ok(())
     }
@@ -287,6 +287,7 @@ impl ForkChain {
             return Ok(());
         }
         let mut writes = vec![Write::put("fork_work", hash, pack(&work)?)];
+        let mut retained_header = None;
         if !exists {
             let height = uint(block, "height")? as u32;
             if height == 0 {
@@ -295,13 +296,13 @@ impl ForkChain {
             let key = [height.to_be_bytes(), self.archive.version().to_be_bytes()].concat();
             writes.push(Write::put("fork_order", key, hash));
             writes.push(Write::put("fork_blocks", hash, block.encode()?));
-            writes.push(Write::put(
-                "fork_headers",
-                hash,
-                header(block)?.encode(&mmx_types::vnx_registry()?)?,
-            ));
+            retained_header = Some(header(block)?);
         }
-        self.commit_archive(writes)
+        self.commit_archive(writes)?;
+        if let Some(header) = retained_header {
+            self.headers.insert(header);
+        }
+        Ok(())
     }
     fn commit_archive(&mut self, mut writes: Vec<Write>) -> ChainResult<()> {
         if self.archive.version() == 0 {
@@ -691,16 +692,7 @@ fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::Bl
         .transpose()
 }
 fn header(block: &Record) -> ChainResult<mmx::BlockHeader> {
-    let header = Record {
-        name: "mmx.BlockHeader".into(),
-        fields: block
-            .fields
-            .iter()
-            .filter(|(name, _)| name.as_str() != "tx_list")
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    };
-    Ok(mmx::BlockHeader::decode(&header.encode()?)?)
+    super::block_header(block)
 }
 fn pack(values: &[Vec<u8>]) -> ChainResult<Vec<u8>> {
     let mut out = u32::try_from(values.len())
