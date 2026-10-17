@@ -19,3 +19,14 @@ mod generated {
 pub use generated::*;
 
 pub use ::vnx::VnxType;
+
+/// Parse the checked-in schema once. Each caller receives an independent
+/// registry for native per-stream type-code additions.
+pub fn vnx_registry() -> ::vnx::Result<::vnx::Registry> {
+    static REGISTRY: std::sync::LazyLock<Result<::vnx::Registry, String>> =
+        std::sync::LazyLock::new(|| generated::vnx_registry().map_err(|e| e.to_string()));
+    match &*REGISTRY {
+        Ok(registry) => Ok(registry.clone()),
+        Err(message) => Err(::vnx::Error::Invalid(message.clone())),
+    }
+}

@@ -13,7 +13,7 @@ use mmx_consensus::{
     transitions::{self, history::HeaderSource},
     vdf, Hash, Record,
 };
-use mmx_db::{Database, Write};
+use mmx_db::{Store as Database, Write};
 use mmx_types::{mmx, VnxType};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -44,6 +44,7 @@ pub struct ForkChain {
     sync_verified: BTreeSet<Hash>,
     verified: BTreeMap<Hash, Vec<vdf::VerifiedPoint>>,
     verified_work: BTreeMap<Hash, vdf::VerifiedPoint>,
+    headers: super::cache::Headers,
 }
 impl ForkChain {
     pub fn memory(params: mmx::ChainParams) -> Self {
@@ -54,26 +55,34 @@ impl ForkChain {
             sync_verified: BTreeSet::new(),
             verified: BTreeMap::new(),
             verified_work: BTreeMap::new(),
+            headers: Default::default(),
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
+        Self::with_storage(
+            ChainState::open(path.as_ref().join("selected"), params)?,
+            Database::open(path.as_ref().join("archive"))?,
+        )
+    }
+    pub fn open_indexed(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
+        Self::with_storage(
+            ChainState::open_indexed(path.as_ref().join("selected"), params)?,
+            Database::open_indexed(path.as_ref().join("archive"))?,
+        )
+    }
+    fn with_storage(selected: ChainState, archive: Database) -> ChainResult<Self> {
         let chain = Self {
-            chain: ChainState::open(path.as_ref().join("selected"), params)?,
-            archive: Database::open(path.as_ref().join("archive"))?,
+            chain: selected,
+            archive,
             voting: voting::Voting::default(),
             sync_verified: BTreeSet::new(),
             verified: BTreeMap::new(),
             verified_work: BTreeMap::new(),
+            headers: Default::default(),
         };
         if chain.archive.version() != 0
-            && chain.archive.get("fork_meta", b"params", None)
-                != Some(
-                    chain
-                        .chain
-                        .params
-                        .encode(&mmx_types::vnx_registry()?)?
-                        .as_slice(),
-                )
+            && chain.archive.get("fork_meta", b"params", None)?
+                != Some(chain.chain.params.encode(&mmx_types::vnx_registry()?)?)
         {
             return Err(invalid("fork archive parameter mismatch"));
         }
@@ -81,8 +90,8 @@ impl ForkChain {
             if chain.block(&tip.hash.0)?.is_none() {
                 return Err(invalid("selected tip missing from fork archive"));
             }
-            if chain.archive.get("fork_meta", b"genesis", None)
-                != chain.chain.hash_at(0)?.as_ref().map(|h| h.as_slice())
+            if chain.archive.get("fork_meta", b"genesis", None)?
+                != chain.chain.hash_at(0)?.map(|h| h.to_vec())
             {
                 return Err(invalid("fork archive genesis mismatch"));
             }
@@ -145,9 +154,9 @@ impl ForkChain {
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
         self.archive
-            .get("fork_blocks", hash, None)
+            .get("fork_blocks", hash, None)?
             .map(|b| {
-                let block = Record::decode(b)?;
+                let block = Record::decode(&b)?;
                 if bytes::<32>(block.field("hash")?)? != *hash || block.name != "mmx.Block" {
                     return Err(invalid("fork archive key mismatch"));
                 }
@@ -163,7 +172,7 @@ impl ForkChain {
         let hash = bytes::<32>(block.field("hash")?)?;
         if self
             .archive
-            .get("fork_meta", b"genesis", None)
+            .get("fork_meta", b"genesis", None)?
             .is_some_and(|old| old != hash)
         {
             return Err(invalid("fork archive genesis mismatch"));
@@ -193,7 +202,7 @@ impl ForkChain {
     }
     fn retain(&mut self, block: &Record, proofs: &[Record]) -> ChainResult<()> {
         let hash = bytes::<32>(block.field("hash")?)?;
-        let exists = self.archive.get("fork_blocks", &hash, None).is_some();
+        let exists = self.archive.get("fork_blocks", &hash, None)?.is_some();
         let mut work = self
             .work(&hash)?
             .into_iter()
@@ -243,10 +252,10 @@ impl ForkChain {
         Ok(())
     }
     fn work(&self, hash: &Hash) -> ChainResult<Vec<Record>> {
-        let Some(data) = self.archive.get("fork_work", hash, None) else {
+        let Some(data) = self.archive.get("fork_work", hash, None)? else {
             return Ok(vec![]);
         };
-        unpack(data)
+        unpack(&data)
     }
     fn entries(&self, root_height: u32) -> ChainResult<Vec<Entry>> {
         self.archive
@@ -259,7 +268,7 @@ impl ForkChain {
                 .concat(),
                 None,
                 None,
-            )
+            )?
             .into_iter()
             .map(|row| {
                 let hash: Hash = row
@@ -277,7 +286,7 @@ impl ForkChain {
                     block,
                     header,
                     proofs: self.work(&hash)?,
-                    invalid: self.archive.get("fork_invalid", &hash, None).is_some(),
+                    invalid: self.archive.get("fork_invalid", &hash, None)?.is_some(),
                 })
             })
             .collect()
@@ -330,6 +339,7 @@ impl ForkChain {
         let history = History {
             headers: &headers,
             archive: &self.archive,
+            cache: &self.headers,
         };
         self.verified.retain(|hash, _| headers.contains_key(hash));
         let mut out = Update::default();
@@ -436,6 +446,7 @@ impl ForkChain {
                 let history = History {
                     headers: &headers,
                     archive: &self.archive,
+                    cache: &self.headers,
                 };
                 let hash = bytes::<32>(block.field("hash")?)?;
                 // Deep forks can include archived blocks at/below the root;
@@ -498,15 +509,12 @@ impl ForkChain {
         }
     }
     fn persist_invalid(&mut self, hashes: &BTreeSet<Hash>) -> ChainResult<()> {
-        let writes: Vec<_> = hashes
-            .iter()
-            .filter(|hash| {
-                self.archive
-                    .get("fork_invalid", hash.as_slice(), None)
-                    .is_none()
-            })
-            .map(|hash| Write::put("fork_invalid", *hash, [1]))
-            .collect();
+        let mut writes = Vec::new();
+        for hash in hashes {
+            if self.archive.get("fork_invalid", hash, None)?.is_none() {
+                writes.push(Write::put("fork_invalid", *hash, [1]));
+            }
+        }
         if !writes.is_empty() {
             self.commit_archive(writes)?
         }
@@ -549,27 +557,47 @@ fn consensus_rejection(error: &ValidationError) -> bool {
 struct History<'a> {
     headers: &'a BTreeMap<Hash, mmx::BlockHeader>,
     archive: &'a Database,
+    cache: &'a super::cache::Headers,
 }
 impl HeaderSource for History<'_> {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
         if let Some(header) = self.headers.get(hash) {
             return Ok(Some(header.clone()));
         }
-        archive_header(self.archive, hash).map_err(|e| ProofError::Invalid(e.to_string()))
+        cached_header(self.archive, self.cache, hash)
+            .map_err(|e| ProofError::Invalid(e.to_string()))
     }
 }
 impl HeaderSource for ForkChain {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
-        archive_header(&self.archive, hash).map_err(|e| ProofError::Invalid(e.to_string()))
+        cached_header(&self.archive, &self.headers, hash)
+            .map_err(|e| ProofError::Invalid(e.to_string()))
     }
 }
+fn cached_header(
+    archive: &Database,
+    cache: &super::cache::Headers,
+    hash: &Hash,
+) -> ChainResult<Option<mmx::BlockHeader>> {
+    if let Some(header) = cache.get(hash) {
+        return Ok(Some(header));
+    }
+    let header = archive_header(archive, hash)?;
+    if let Some(header) = &header {
+        if header.hash.0 != *hash {
+            return Err(invalid("fork header key mismatch"));
+        }
+        cache.insert(header);
+    }
+    Ok(header)
+}
 fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::BlockHeader>> {
-    if let Some(wire) = archive.get("fork_headers", hash, None) {
-        return Ok(Some(mmx::BlockHeader::decode(wire)?));
+    if let Some(wire) = archive.get("fork_headers", hash, None)? {
+        return Ok(Some(mmx::BlockHeader::decode(&wire)?));
     }
     archive
-        .get("fork_blocks", hash, None)
-        .map(|wire| header(&Record::decode(wire)?))
+        .get("fork_blocks", hash, None)?
+        .map(|wire| header(&Record::decode(&wire)?))
         .transpose()
 }
 fn header(block: &Record) -> ChainResult<mmx::BlockHeader> {

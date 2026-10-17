@@ -369,10 +369,14 @@ fn invalid_ledger_effects_cannot_stage_chain_metadata_or_lose_existing_pending_w
     assert_eq!(db.database().version(), 1);
     assert_eq!(db.get_balance(&[1; 32], &[0; 32]).unwrap(), Some(100));
     assert_eq!(
-        db.database().get("unrelated", b"pending", None),
-        Some(b"original".as_slice())
+        db.database().get("unrelated", b"pending", None).unwrap(),
+        Some(b"original".to_vec())
     );
-    assert!(db.database().get("chain_meta", b"tip", None).is_none());
+    assert!(db
+        .database()
+        .get("chain_meta", b"tip", None)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -806,6 +810,15 @@ fn rollback_to_every_selected_height_survives_reopen_and_retains_all_orphans() {
     assert!(chain.rollback_to(3).is_err());
     for height in (0..=2).rev() {
         chain.rollback_to(height).unwrap();
+        if height < 2 {
+            // Rewind must invalidate selected-header caches while the orphan
+            // archive still retains the exact old signed record.
+            assert!(chain
+                .selected()
+                .header(&block_hash(&steps[1]))
+                .unwrap()
+                .is_none());
+        }
         verify_step(
             chain.selected(),
             if height == 0 {

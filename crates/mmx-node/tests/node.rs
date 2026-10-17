@@ -108,13 +108,15 @@ impl Source for MemorySource {
 fn socket_sync_deep_fork_rollback_restart_and_rpc_read_the_same_native_ledger() {
     let (network, g, steps, deep) = fixture();
     let serving = node(&network);
-    for step in &steps[..2] {
-        serving
-            .lock()
-            .unwrap()
-            .receive(&wire(&step["block"]))
-            .unwrap();
-    }
+    let mut initial = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&steps[0]["block"]),
+            wire(&steps[1]["block"]),
+        ],
+        wrong: false,
+    };
+    sync::synchronize(&mut initial, &serving, &AtomicBool::new(false), |_| {}).unwrap();
     let mut server = peer::Server::bind("127.0.0.1:0", serving.clone()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let receiving = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
@@ -178,13 +180,15 @@ fn socket_sync_deep_fork_rollback_restart_and_rpc_read_the_same_native_ledger() 
     // Native alternate-root fixture replaces both selected blocks, with all old
     // branches retained and no explicit pre-validation rollback.
     serving.lock().unwrap().begin_resync();
-    for step in &deep {
-        serving
-            .lock()
-            .unwrap()
-            .receive(&wire(&step["block"]))
-            .unwrap();
-    }
+    let mut alternate = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&deep[0]["block"]),
+            wire(&deep[1]["block"]),
+        ],
+        wrong: false,
+    };
+    sync::synchronize(&mut alternate, &serving, &AtomicBool::new(false), |_| {}).unwrap();
     check(&serving, &deep[1]);
     receiving.lock().unwrap().begin_resync();
     let progress =
@@ -224,6 +228,20 @@ fn socket_sync_deep_fork_rollback_restart_and_rpc_read_the_same_native_ledger() 
 fn sync_rejects_wrong_genesis_discontinuous_blocks_and_cancelled_download_without_rewind() {
     let (network, g, steps, _) = fixture();
     let n = node(&network);
+    // Native historical download ignores unrelated live block broadcasts.
+    n.lock()
+        .unwrap()
+        .receive(&wire(&steps[0]["block"]))
+        .unwrap();
+    n.lock().unwrap().tick().unwrap();
+    check(&n, &g);
+    assert!(n
+        .lock()
+        .unwrap()
+        .chain()
+        .block(&hash(&wire(&steps[0]["block"]), "hash").unwrap())
+        .unwrap()
+        .is_none());
     let mut source = MemorySource {
         blocks: vec![wire(&g["block"]), wire(&steps[0]["block"])],
         wrong: true,

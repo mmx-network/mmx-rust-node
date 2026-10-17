@@ -9,6 +9,8 @@ description = "Versioned storage foundation for the MMX Rust node"
 [dependencies]
 thiserror.workspace = true
 crc32fast.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

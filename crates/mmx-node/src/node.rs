@@ -48,7 +48,8 @@ fn bytes(v: impl Into<Vec<u8>>) -> Value {
 
 impl Node {
     pub fn open(path: impl AsRef<Path>, network: &Network) -> Result<Self> {
-        let mut chain = ForkChain::open(path.as_ref().join("chain"), network.params.clone())?;
+        let mut chain =
+            ForkChain::open_indexed(path.as_ref().join("chain"), network.params.clone())?;
         if chain.selected().tip()?.is_none() {
             chain.initialize(&network.assets)?;
         }
@@ -115,6 +116,10 @@ impl Node {
     }
     pub fn begin_resync(&mut self) {
         self.synced = false;
+    }
+    /// Native Node coalesces queued proof/vote work in its periodic update.
+    pub fn tick(&mut self) -> Result<()> {
+        self.update().map(|_| ())
     }
     pub fn root_height(&self) -> u32 {
         self.root
@@ -279,7 +284,7 @@ impl Node {
     }
     pub fn receive(&mut self, message: &Record) -> Result<()> {
         match message.name.as_str() {
-            "mmx.Block" => {
+            "mmx.Block" if self.synced => {
                 self.chain
                     .admit(message, &self.work.iter().cloned().collect::<Vec<_>>())?;
                 self.pending.insert(hash(message, "hash")?, message.clone());
@@ -305,7 +310,6 @@ impl Node {
             "mmx.ValidatorVote" => {
                 self.chain
                     .admit_vote(message, vnx::util::get_wall_time_millis())?;
-                self.update()?;
             }
             "mmx.ProofResponse" => {
                 if !mmx_consensus::response::is_valid(message)? {
@@ -313,7 +317,6 @@ impl Node {
                 }
                 self.responses
                     .push((message.clone(), vnx::util::get_wall_time_millis()));
-                self.update()?;
             }
             // Other broadcasts are not ledger admissions. Transaction submission
             // and farmer response relay are separate from the read/sync service.

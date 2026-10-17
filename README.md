@@ -79,9 +79,11 @@ reads only. Native compressed peer requests carry lossless block records.
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
 A mainnet smoke test connected to a native peer advertising height 5,513,516 and
-validated the first 80 blocks. This is evidence of native interoperability, not a
-claim that a complete mainnet sync has finished. The current database indexes all
-versions in RAM and the sync implementation still needs throughput/scaling work.
+validated the first 80 blocks; the indexed build imported that history, resumed
+the download and served HTTP RPC during live mainnet sync. This is evidence of
+native interoperability, not a
+claim that a complete mainnet sync has finished. The node uses an indexed disk backend with every historical version retained.
+Sync throughput and remaining peer services are still being improved.
 
 The example executes MMX instructions, charges gas, stages contract state, and
 commits it to disk. Running it again reopens the database and increments the same
@@ -91,7 +93,7 @@ counter. It does not require the C++ repository or a running MMX node.
 
 | Crate | Implemented |
 | --- | --- |
-| `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
+| `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and both an indexed SQLite WAL backend and a durable journal backend. Exclusive writer locking and atomic rollback/replacement protect both. |
 | `mmx-node` | Executable, native Zstd peer protocol, historical download with ancestor discovery and native fork choice, live block/VDF/vote admission, durable rewind/restart, VNX public reads and HTTP JSON-RPC. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hashes/costs and authorization, header/vote/farmer-response authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
@@ -393,7 +395,7 @@ supply. `append()` authenticates the header, derives challenges/infusions and th
 VDF payout from stored history, links independently verified VDF points, verifies
 space work/transitions, resolves NFT targets and validates the body. It commits
 VM writes, balances, deployments, transaction indexes, supply, lossless records,
-height indexes and the selected tip in one journal frame. Block height `h` writes
+height indexes and the selected tip in one durable database transaction. Block height `h` writes
 at version `h` and commits version `h + 1`. Reopen checks the exact stored chain
 parameters and the tip/height/version relationship. Headers have their own table
 and retain the signed Block's stored hash when sliced to BlockHeader.
@@ -411,7 +413,7 @@ appended explicitly. Selected block/header/transaction archives rewind with the
 ledger. `reorganize(first_height, &blocks_with_verified_work)` validates the
 replacement on a detached ledger and publishes it with `replace_suffix` only
 after every block succeeds. Genesis cannot be replaced. Failed execution or
-journal I/O cannot expose a partially reverted chain.
+database I/O cannot expose a partially reverted chain.
 
 `chain::forks::ForkChain` adds a separate durable archive, independent of selected
 ledger rollback. `admit()` checks native block commitments and farmer signatures,
@@ -537,10 +539,39 @@ original bytes for consensus inputs.
 Variant bytes and raw strings; it is used to persist deployments without a JSON
 round trip. It remains distinct from hash serialization.
 
-The disk backend uses a **new Rust journal format**, not the C++ database files.
-Use a separate data directory. It retains all history in memory and replays the
-journal on open; scalable indexing, compaction, and flush scheduling are later
-work. Reproducing the C++ block/index file format is not a port requirement.
+The node defaults to `Store::open_indexed()` / `ForkChain::open_indexed()`, using
+SQLite WAL with full synchronous commits and indexed versioned rows. Point reads,
+size-first ranges, prefix scans and inclusive historical reads share the journal's
+logical behavior. Storage adapters use fallible owned reads so disk failures are
+reported. `Store::open()` and `Database::open()` retain the original journal
+backend for existing library callers and reference tests.
+
+Indexed forks keep a read snapshot of the original database and store speculative
+changes in private disk databases. They do not copy retained history or buffer an
+entire replacement in RAM. Publication copies the staged suffix and updates the
+tip/version in one SQLite transaction, including replacements larger than 64 MiB.
+Snapshot identity/generation checks reject stale or foreign replacements. Failed
+writes poison the handle until reopen; uncommitted publication recovers the old
+state and committed publication recovers the new state. No history is pruned.
+
+Existing Rust journals import once on indexed open, retaining the source journal.
+Journal callers then reject that directory to prevent divergent writable copies.
+Bounded header caches avoid repeated historical decoding; selected-chain caches
+are cleared on rewind/replacement. The checked-in type registry is parsed once,
+with independent registries returned for each native stream. Historical sync
+ignores unrelated live block broadcasts, and a periodic update coalesces queued
+proof/vote processing as in C++.
+
+Initial schema/import is published by an atomic file rename; unpublished staging
+directories are removed after restart. Tests compare the two backends across
+pending writes, deletes, ranges, historical reads, every rewind, nested snapshots,
+reopen, migration, injected write failures, abrupt process exit before/after
+publication, and a 65 MiB branch replacement.
+
+The journal backend uses a **new Rust journal format**, independent of C++ files.
+Use a separate data directory. This reference backend retains history in memory
+and replays the journal on open; the node uses the indexed backend above.
+Reproducing the C++ block/index file format is not a port requirement.
 Uncommitted writes are discarded on reopen. Complete records with invalid
 checksums are reported as corruption; only an incomplete final record is removed
 during recovery.
@@ -766,7 +797,7 @@ alongside any semantic changes to the port.
 1. Sync throughput, peer scheduling/relay and specialized
    history indexes, building on the executable node and durable fork selection.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
-3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
+3. Database compaction, cache/flush tuning and benchmarks,
    using an independent disk format while preserving logical state semantics.
 4. Remaining node RPCs, wallet and block-production services, carrying over the
    relevant original tests as each component becomes executable.

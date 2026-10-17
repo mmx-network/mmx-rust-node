@@ -142,6 +142,24 @@ fn main() -> Result<()> {
         http.address()
     );
     let mut workers = Vec::new();
+    {
+        let node = node.clone();
+        let stop = stop.clone();
+        workers.push(thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                for _ in 0..10 {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                if let Err(e) = node.lock().unwrap().tick() {
+                    eprintln!("Node update failed: {e}");
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
     if !options.offline {
         // More than one peer can contribute competing branches; ledger updates
         // are serialized while network requests run outside the node lock.

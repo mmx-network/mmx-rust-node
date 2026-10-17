@@ -4,7 +4,7 @@ use crate::{
     value::{FLAG_CONST, FLAG_KEY},
     Address, CodecError, Value, Var, MAX_KEY_BYTES, MEM_STATIC,
 };
-use mmx_db::{Database, Write};
+use mmx_db::{Database, Store, Write};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -96,12 +96,14 @@ pub trait Storage {
 
 /// The RAM and disk backends share table semantics and validation.
 pub struct StorageDb {
-    database: Database,
+    database: Store,
 }
 
 impl StorageDb {
-    pub fn new(database: Database) -> Self {
-        Self { database }
+    pub fn new(database: impl Into<Store>) -> Self {
+        Self {
+            database: database.into(),
+        }
     }
     pub fn memory() -> Self {
         Self::new(Database::memory())
@@ -109,10 +111,13 @@ impl StorageDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::new(Database::open(path)?))
     }
-    pub fn database(&self) -> &Database {
+    pub fn open_indexed(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::new(Store::open_indexed(path)?))
+    }
+    pub fn database(&self) -> &Store {
         &self.database
     }
-    pub fn database_mut(&mut self) -> &mut Database {
+    pub fn database_mut(&mut self) -> &mut Store {
         &mut self.database
     }
 
@@ -137,7 +142,7 @@ impl StorageDb {
         height: Option<u32>,
     ) -> Result<Option<u128>> {
         self.database
-            .get("balances", &balance_key(contract, currency), height)
+            .get("balances", &balance_key(contract, currency), height)?
             .map(|bytes| {
                 Ok(u128::from_le_bytes(
                     bytes
@@ -157,8 +162,8 @@ impl StorageDb {
     ) -> Result<Option<Var>> {
         let (table, key) = data_key(contract, address, key);
         self.database
-            .get(table, &key, height)
-            .map(decode_var)
+            .get(table, &key, height)?
+            .map(|bytes| decode_var(&bytes))
             .transpose()
     }
 
@@ -170,7 +175,7 @@ impl StorageDb {
         height: Option<u32>,
     ) -> Result<Vec<(u64, Var)>> {
         self.database
-            .scan("storage", &contract[..20], height)
+            .scan("storage", &contract[..20], height)?
             .into_iter()
             .filter_map(|row| {
                 if row.key.len() != 28 {
@@ -190,7 +195,7 @@ impl StorageDb {
     ) -> Result<Vec<(u64, Var)>> {
         let (_, prefix) = data_key(contract, address, None);
         self.database
-            .scan("storage_entries", &prefix, height)
+            .scan("storage_entries", &prefix, height)?
             .into_iter()
             .map(|row| {
                 if row.key.len() != 36 {
@@ -206,7 +211,7 @@ impl StorageDb {
 impl Storage for StorageDb {
     fn get_total_supply(&self, currency: &Address) -> Result<Option<u128>> {
         self.database
-            .get("total_supply", currency, None)
+            .get("total_supply", currency, None)?
             .map(|bytes| {
                 Ok(u128::from_le_bytes(
                     bytes
@@ -218,7 +223,7 @@ impl Storage for StorageDb {
     }
     fn get_transaction_index(&self, id: &Address) -> Result<Option<TransactionIndex>> {
         self.database
-            .get("transactions", id, None)
+            .get("transactions", id, None)?
             .map(|bytes| {
                 if bytes.len() != 12 {
                     return Err(Error::Invalid("transaction index length"));
@@ -240,7 +245,7 @@ impl Storage for StorageDb {
     fn lookup(&self, contract: &Address, value: &Value) -> Result<Option<u64>> {
         let key = index_key(contract, value)?;
         self.database
-            .get("storage_index", &key, None)
+            .get("storage_index", &key, None)?
             .map(|data| {
                 if data.len() != 8 {
                     return Err(Error::Invalid("index address length"));
@@ -263,7 +268,7 @@ impl Storage for StorageDb {
 
     fn get_contract(&self, address: &Address) -> Result<Option<ContractData>> {
         self.database
-            .get("contracts", address, None)
+            .get("contracts", address, None)?
             .map(|bytes| {
                 if bytes.len() < 8 {
                     return Err(Error::Invalid("contract record length"));

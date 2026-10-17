@@ -10,6 +10,9 @@ use std::io::{Read, Seek, SeekFrom, Write as IoWrite};
 use std::path::Path;
 
 use thiserror::Error;
+mod indexed;
+pub mod store;
+pub use store::Store;
 
 const MAGIC: &[u8; 8] = b"MMXRDB\x01\n";
 const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -19,13 +22,15 @@ const FRAME_HEADER: u64 = 12;
 pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
     #[error("corrupt database: {0}")]
     Corrupt(&'static str),
     #[error("invalid version transition from {current} to {requested}")]
     Version { current: u32, requested: u32 },
     #[error("invalid table name or entry size")]
     InvalidEntry,
-    #[error("journal write failed; close and reopen the database")]
+    #[error("database write failed; close and reopen the database")]
     Poisoned,
     #[error("replacement snapshot does not share the retained history")]
     SnapshotMismatch,
@@ -113,6 +118,11 @@ impl Database {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = std::path::absolute(path)?;
+        if path.join("state.sqlite").exists() {
+            return Err(Error::Corrupt(
+                "indexed database requires Store::open_indexed",
+            ));
+        }
         let mut parents_to_sync = Vec::new();
         for directory in path.ancestors().take_while(|directory| !directory.exists()) {
             if let Some(parent) = directory.parent() {

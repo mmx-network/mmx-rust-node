@@ -2,6 +2,7 @@
 //! records, height indexes and the tip commit together at the block's height.
 //! ChainState verifies extensions/replacements; `forks` adds orphan retention
 //! and branch selection using the native policy in `choice`.
+mod cache;
 pub mod choice;
 pub mod forks;
 pub mod genesis;
@@ -63,27 +64,36 @@ fn invalid(message: &'static str) -> ChainError {
 pub struct ChainState {
     storage: StorageDb,
     params: mmx::ChainParams,
+    headers: cache::Headers,
 }
 impl ChainState {
     pub fn memory(params: mmx::ChainParams) -> Self {
         Self {
             storage: StorageDb::memory(),
             params,
+            headers: Default::default(),
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
+        Self::with_storage(StorageDb::open(path)?, params)
+    }
+    pub fn open_indexed(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
+        Self::with_storage(StorageDb::open_indexed(path)?, params)
+    }
+    fn with_storage(storage: StorageDb, params: mmx::ChainParams) -> ChainResult<Self> {
         let chain = Self {
-            storage: StorageDb::open(path)?,
+            storage,
             params,
+            headers: Default::default(),
         };
         let db = chain.storage.database();
         if db.version() == 0 {
-            if db.get("chain_meta", b"tip", None).is_some() {
+            if db.get("chain_meta", b"tip", None)?.is_some() {
                 return Err(invalid("tip in an empty chain"));
             }
         } else {
-            if db.get("chain_meta", b"params", None)
-                != Some(chain.params.encode(&mmx_types::vnx_registry()?)?.as_slice())
+            if db.get("chain_meta", b"params", None)?
+                != Some(chain.params.encode(&mmx_types::vnx_registry()?)?)
             {
                 return Err(invalid("chain parameter mismatch"));
             }
@@ -105,7 +115,7 @@ impl ChainState {
         &self.params
     }
     pub fn tip(&self) -> ChainResult<Option<mmx::BlockHeader>> {
-        let Some(hash) = self.storage.database().get("chain_meta", b"tip", None) else {
+        let Some(hash) = self.storage.database().get("chain_meta", b"tip", None)? else {
             return Ok(None);
         };
         self.header(&hash.try_into().map_err(|_| invalid("tip hash length"))?)?
@@ -114,39 +124,47 @@ impl ChainState {
     pub fn hash_at(&self, height: u32) -> ChainResult<Option<Hash>> {
         self.storage
             .database()
-            .get("chain_height", &height.to_be_bytes(), None)
+            .get("chain_height", &height.to_be_bytes(), None)?
             .map(|v| v.try_into().map_err(|_| invalid("height hash length")))
             .transpose()
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
-        let Some(wire) = self.storage.database().get("chain_blocks", hash, None) else {
+        let Some(wire) = self.storage.database().get("chain_blocks", hash, None)? else {
             return Ok(None);
         };
-        let block = Record::decode(wire)?;
+        let block = Record::decode(&wire)?;
         if block.name != "mmx.Block" || bytes::<32>(block.field("hash")?)? != *hash {
             return Err(invalid("block archive key mismatch"));
         }
         Ok(Some(block))
     }
     pub fn header(&self, hash: &Hash) -> ChainResult<Option<mmx::BlockHeader>> {
-        self.storage
+        if let Some(header) = self.headers.get(hash) {
+            return Ok(Some(header));
+        }
+        let header = self
+            .storage
             .database()
-            .get("chain_headers", hash, None)
+            .get("chain_headers", hash, None)?
             .map(|wire| {
-                let header = mmx::BlockHeader::decode(wire)?;
+                let header = mmx::BlockHeader::decode(&wire)?;
                 if header.hash.0 != *hash {
                     return Err(invalid("header archive key mismatch"));
                 }
                 Ok(header)
             })
-            .transpose()
+            .transpose()?;
+        if let Some(header) = &header {
+            self.headers.insert(header);
+        }
+        Ok(header)
     }
     pub fn transaction(&self, id: &Address) -> ChainResult<Option<Record>> {
         self.storage
             .database()
-            .get("chain_transactions", id, None)
+            .get("chain_transactions", id, None)?
             .map(|wire| {
-                let tx = Record::decode(wire)?;
+                let tx = Record::decode(&wire)?;
                 if tx.name != "mmx.Transaction" || bytes::<32>(tx.field("id")?)? != *id {
                     return Err(invalid("transaction archive key mismatch"));
                 }
@@ -227,6 +245,7 @@ impl ChainState {
         let mut branch = Self {
             storage: StorageDb::new(self.storage.database().fork(height)?),
             params: self.params.clone(),
+            headers: Default::default(),
         };
         let mut receipts = Vec::new();
         for (block, points, mode) in blocks {
@@ -235,6 +254,7 @@ impl ChainState {
         self.storage
             .database_mut()
             .replace_suffix(height, branch.storage.database())?;
+        self.headers.clear();
         Ok(receipts)
     }
     fn vdf_payout(&self, height: u32, parent: &mmx::BlockHeader) -> ChainResult<Option<Address>> {
@@ -315,6 +335,7 @@ impl ChainState {
     /// appended explicitly. Orphan archives/fork choice are not maintained here.
     pub fn revert(&mut self, height: u32) -> ChainResult<()> {
         self.storage.database_mut().revert(height)?;
+        self.headers.clear();
         Ok(())
     }
 }
