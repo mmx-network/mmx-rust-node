@@ -415,6 +415,223 @@ fn two_lying_peers_cannot_hide_the_third_peers_valid_chain() {
     );
 }
 #[test]
+fn rejected_extensions_from_two_peers_cannot_hold_sync_open_past_the_honest_tip() {
+    struct Changing {
+        source: Fake,
+        params: mmx::ChainParams,
+    }
+    impl PeerSource for Changing {
+        fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+            if self.source.id != 1 && start == 1 && count == 2 {
+                // Supply fresh commitments during the final probe, after the
+                // original suffix was rejected. Static validity is insufficient.
+                let block = self.source.blocks.get_mut(&2).unwrap();
+                let reward = block.field("reward_amount")?.uint()?;
+                block
+                    .fields
+                    .insert("reward_amount".into(), Value::Uint(reward + 100));
+                resign(block, &self.params);
+            }
+            self.source.hashes(start, count)
+        }
+        fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
+            self.source.fetch(hashes)
+        }
+        fn synced_height(&mut self) -> Result<Option<u32>> {
+            self.source.synced_height()
+        }
+    }
+    let (network, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut sources = vec![(
+        [1; 32],
+        Changing {
+            source: Fake::new(1, &blocks[..2], &events),
+            params: network.params.clone(),
+        },
+    )];
+    let mut reference = ForkChain::memory(network.params.clone());
+    reference.initialize(&network.assets).unwrap();
+    reference.admit_blocks(&blocks[1..2]).unwrap();
+    reference
+        .update_sync_at(hash(&blocks[0], "hash").unwrap(), None, 0)
+        .unwrap();
+    for liar in 2..=3 {
+        let mut bad = blocks.clone();
+        let reward = bad[2].field("reward_amount").unwrap().uint().unwrap();
+        bad[2].fields.insert(
+            "reward_amount".into(),
+            Value::Uint(reward + u64::from(liar)),
+        );
+        resign(&mut bad[2], &network.params);
+        // The first extension has real CPU space work and a valid signature;
+        // ledger validation must reject its reward instead of trusting its hash.
+        let context =
+            mmx_consensus::transitions::ProofContext::resolve(&bad[2], &network.params, &reference)
+                .unwrap();
+        mmx_consensus::transitions::verify_evidence(&bad[2], &network.params, &context).unwrap();
+        for height in 3..=128 {
+            let mut child = bad[2].clone();
+            child.fields.insert("height".into(), Value::Uint(height));
+            child.fields.insert(
+                "prev".into(),
+                Value::Bytes(hash(bad.last().unwrap(), "hash").unwrap().to_vec()),
+            );
+            resign(&mut child, &network.params);
+            bad.push(child);
+        }
+        sources.push((
+            [liar; 32],
+            Changing {
+                source: Fake::new(liar, &bad, &events),
+                params: network.params.clone(),
+            },
+        ));
+    }
+    let mut pool = PeerPool::new(sources);
+    let progress = synchronize_peers(&mut pool, &node, &AtomicBool::new(false), |_| {}).unwrap();
+    let local = node.lock().unwrap();
+    assert_eq!(progress.selected, 1);
+    assert!(
+        local.is_synced(),
+        "known rejected extensions cannot keep historical mode open"
+    );
+    assert_eq!(
+        local.chain.selected().tip().unwrap().unwrap().hash.0,
+        hash(&blocks[1], "hash").unwrap()
+    );
+    assert!(local.sync_pending.is_empty());
+    let fetched = counts(&events);
+    assert!(
+        fetched.values().all(|&n| n == 1),
+        "including discarded prefetch and final tip probes"
+    );
+    assert_eq!(progress.body_requests as usize, fetched.len());
+    assert_eq!(local.sync_body_requests, progress.body_requests);
+}
+
+#[test]
+fn a_valid_extension_discovered_in_the_final_probe_is_applied_before_live_mode() {
+    struct Growing {
+        source: Fake,
+        first: bool,
+    }
+    impl PeerSource for Growing {
+        fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+            let mut hashes = self.source.hashes(start, count)?;
+            if self.first {
+                self.first = false;
+                for (offset, hash) in hashes.iter_mut().enumerate() {
+                    if start + offset as u32 >= 2 {
+                        *hash = None;
+                    }
+                }
+            }
+            Ok(hashes)
+        }
+        fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
+            self.source.fetch(hashes)
+        }
+        fn synced_height(&mut self) -> Result<Option<u32>> {
+            Ok(Some(if self.first { 1 } else { 2 }))
+        }
+    }
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = PeerPool::new(
+        (1..=3)
+            .map(|id| {
+                (
+                    [id; 32],
+                    Growing {
+                        source: Fake::new(id, &blocks, &events),
+                        first: true,
+                    },
+                )
+            })
+            .collect(),
+    );
+    let progress = synchronize_peers(&mut pool, &node, &AtomicBool::new(false), |_| {}).unwrap();
+    let local = node.lock().unwrap();
+    assert_eq!(progress.selected, 2);
+    assert!(local.is_synced());
+    assert_eq!(
+        local.chain.selected().tip().unwrap().unwrap().hash.0,
+        hash(&blocks[2], "hash").unwrap()
+    );
+    assert!(local.sync_pending.is_empty());
+    assert_eq!(progress.body_requests, 2);
+    assert!(counts(&events).values().all(|&n| n == 1));
+}
+
+#[test]
+fn unsupported_inputs_do_not_advance_state_or_masquerade_as_an_empty_peak() {
+    let (network, node, blocks) = fixture();
+    let mut unsupported = blocks.clone();
+    for block in &mut unsupported[1..] {
+        if let Value::Sequence(proofs) = block.fields.get_mut("proof").unwrap() {
+            if let Value::Record(proof) = &mut proofs[0] {
+                proof.name = "mmx.UnimplementedProof".into();
+            }
+        }
+    }
+    assert!(
+        mmx_execution::block::prevalidate(&unsupported[1], &network.params)
+            .unwrap_err()
+            .is_unsupported()
+    );
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = peers(&unsupported, &events);
+    pool.timeout = Duration::from_millis(5);
+    let failure = synchronize_peers(&mut pool, &node, &AtomicBool::new(false), |_| {}).unwrap_err();
+    assert!(failure
+        .downcast_ref::<mmx_execution::transaction::ValidationError>()
+        .unwrap()
+        .is_unsupported());
+    let local = node.lock().unwrap();
+    assert_eq!(local.chain.selected().tip().unwrap().unwrap().height, 0);
+    assert!(!local.is_synced());
+    assert!(local.sync_pending.is_empty());
+    assert!(local
+        .chain
+        .block(&hash(&blocks[1], "hash").unwrap())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn unsupported_counterfeits_are_retried_before_giving_up_on_the_honest_providers_content() {
+    let (_, node, blocks) = fixture();
+    let mut counterfeit = blocks.clone();
+    for block in &mut counterfeit[1..] {
+        if let Value::Sequence(proofs) = block.fields.get_mut("proof").unwrap() {
+            if let Value::Record(proof) = &mut proofs[0] {
+                proof.name = "mmx.UnimplementedProof".into();
+            }
+        }
+    }
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut honest = Fake::new(1, &blocks, &events);
+    honest.hash_delay = Duration::from_millis(20);
+    let mut pool = PeerPool::new(vec![
+        ([1; 32], honest),
+        ([2; 32], Fake::new(2, &counterfeit, &events)),
+        ([3; 32], Fake::new(3, &counterfeit, &events)),
+    ]);
+    pool.timeout = Duration::from_millis(5);
+    let progress = synchronize_peers(&mut pool, &node, &AtomicBool::new(false), |_| {}).unwrap();
+    let local = node.lock().unwrap();
+    assert_eq!(progress.selected, 2);
+    assert!(local.is_synced());
+    assert_eq!(
+        local.chain.selected().tip().unwrap().unwrap().hash.0,
+        hash(&blocks[2], "hash").unwrap()
+    );
+    assert_eq!(progress.body_retries, 4);
+    assert!(counts(&events).values().all(|&n| n == 3));
+}
+
+#[test]
 fn a_second_provider_is_used_only_after_the_original_lease_times_out() {
     let (_, node, blocks) = fixture();
     let events = Arc::new(Mutex::new(vec![]));

@@ -49,6 +49,26 @@ pub enum ValidationError {
     Mismatch(String),
 }
 impl ValidationError {
+    /// An implementation gap is not evidence that a peer's candidate violates
+    /// consensus. Callers must retain the distinction when classifying failures.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(
+            self,
+            Self::Consensus(mmx_consensus::Error::Unsupported(_))
+                | Self::Header(mmx_consensus::header::HeaderError::Input(
+                    mmx_consensus::Error::Unsupported(_)
+                ))
+                | Self::Proof(mmx_consensus::proof::ProofError::Input(
+                    mmx_consensus::Error::Unsupported(_)
+                ))
+                | Self::Vdf(mmx_consensus::vdf::VdfError::Input(
+                    mmx_consensus::Error::Unsupported(_)
+                ))
+                | Self::Vdf(mmx_consensus::vdf::VdfError::History(
+                    mmx_consensus::proof::ProofError::Input(mmx_consensus::Error::Unsupported(_))
+                ))
+        )
+    }
     fn rejects(&self) -> bool {
         matches!(
             self,

@@ -483,6 +483,9 @@ impl ForkChain {
                 points.insert(h.hash.0, work.clone());
             } else if let Some(result) = checked.remove(&h.hash.0) {
                 match result {
+                    Err(error @ ProofError::Input(mmx_consensus::Error::Unsupported(_))) => {
+                        return Err(error.into());
+                    }
                     Err(_) => bad = true,
                     Ok(evidence) => {
                         verified = true;
@@ -630,12 +633,13 @@ impl ForkChain {
     }
 }
 fn consensus_rejection(error: &ValidationError) -> bool {
-    !matches!(
-        error,
-        ValidationError::Storage(_)
-            | ValidationError::Consensus(mmx_consensus::Error::Unsupported(_))
-            | ValidationError::Execution(mmx_vm::Error::Storage(_))
-    )
+    !error.is_unsupported()
+        && !matches!(
+            error,
+            ValidationError::Storage(_)
+                | ValidationError::Consensus(mmx_consensus::Error::Unsupported(_))
+                | ValidationError::Execution(mmx_vm::Error::Storage(_))
+        )
 }
 struct History<'a> {
     headers: &'a BTreeMap<Hash, Arc<mmx::BlockHeader>>,

@@ -117,7 +117,15 @@ Download windows retain up to 64
 heights and target 8 MiB, including competing candidates, in an atomic archive
 transaction. Progress logs separate hash queries, bodies, archive publication,
 proofs and ledger replay. A final multi-peer tip probe runs after publication;
-a changing tip keeps the node in historical mode. HTTP status includes `sync_peers`.
+a changing valid tip keeps the node in historical mode. Heights containing only
+consensus-rejected candidates do not extend the sync peak. Any queued successor
+window is drained into the archive without advancing the active view, and fresh
+tip-probe candidates pass the same CPU and ledger checks before live mode starts.
+Incomplete ancestry remains eligible for backwards recovery. HTTP status includes `sync_peers`.
+Unsupported implementation features remain errors, not consensus rejections.
+Other claimants of the same content are tried after the normal lease expires
+before reporting such an error, so a malformed counterfeit cannot hide a body
+that an honest provider can supply.
 One bounded producer queries the next window while the current one validates.
 It registers pending heights before peer I/O, using the existing root's lookahead,
 and joins before those clients are reused on error or cancellation. Missing

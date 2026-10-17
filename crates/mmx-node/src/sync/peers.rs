@@ -106,6 +106,19 @@ struct Fetch {
     tried: BTreeSet<usize>,
     retry_at: Option<Instant>,
 }
+struct Published {
+    missing: Missing,
+    start: u32,
+    usable: Vec<bool>,
+}
+impl Published {
+    fn empty(&self) -> Option<u32> {
+        self.usable
+            .iter()
+            .position(|&usable| !usable)
+            .map(|offset| self.start + offset as u32)
+    }
+}
 impl<S: PeerSource> PeerPool<S> {
     pub fn new(mut peers: Vec<(Hash, S)>) -> Self {
         peers.shuffle(&mut rand::thread_rng());
@@ -368,6 +381,7 @@ impl<S: PeerSource> PeerPool<S> {
             backpressure_retries: 0,
         };
         let body_started = Instant::now();
+        let mut unsupported = BTreeMap::new();
         let mut bytes = 0usize;
         // Bound each group by unique content count, including competing
         // candidates. Keep this aggregate bound when increasing per-connection
@@ -429,6 +443,9 @@ impl<S: PeerSource> PeerPool<S> {
                     }
                 }
                 for key in exhausted {
+                    if let Some(failure) = unsupported.remove(&key) {
+                        return Err(failure);
+                    }
                     complete(&mut self.completed, &jobs[&key], None);
                 }
                 let results = thread::scope(|scope| {
@@ -482,10 +499,18 @@ impl<S: PeerSource> PeerPool<S> {
                                         .is_ok_and(|height| job.heights.contains(&height))
                                     && hash(&block, "hash").ok() == Some(requested_id)
                                     && hash(&block, "content_hash").ok() == Some(job.hash.content);
-                                if matches
-                                    && mmx_execution::block::prevalidate(&block, &params).is_ok()
-                                {
-                                    complete(&mut self.completed, job, Some(block));
+                                if matches {
+                                    match mmx_execution::block::prevalidate(&block, &params) {
+                                        Ok(()) => complete(&mut self.completed, job, Some(block)),
+                                        Err(failure) if failure.is_unsupported() => {
+                                            unsupported.insert(
+                                                key,
+                                                Box::new(failure)
+                                                    as Box<dyn std::error::Error + Send + Sync>,
+                                            );
+                                        }
+                                        Err(_) => (),
+                                    }
                                 }
                             }
                         }
@@ -629,25 +654,38 @@ fn synchronize_inner(
         let end = next
             .checked_add(window.heights.len() as u32)
             .ok_or_else(|| error("sync height overflow"))?;
-        let empty = window
+        let raw_empty = window
             .heights
             .iter()
             .position(Vec::is_empty)
             .map(|offset| next + offset as u32);
-        let mut missing = publish_with(window, node, &mut progress, |local, missing| {
+        let mut prefetched = None;
+        let published = publish_with(window, node, &mut progress, |local, missing| {
             let limit = local
                 .root
                 .saturating_add(local.chain.selected().params().commit_delay)
                 .saturating_add(1000);
-            if empty.is_none() && missing.is_empty() && end <= limit && end < u32::MAX {
-                pool.prefetch(
-                    end,
-                    BATCH_BLOCKS.min(limit - end + 1).min(u32::MAX - end),
-                    local,
-                )?;
+            if raw_empty.is_none() && missing.is_empty() && end <= limit && end < u32::MAX {
+                let count = BATCH_BLOCKS.min(limit - end + 1).min(u32::MAX - end);
+                pool.prefetch(end, count, local)?;
+                prefetched = Some((end, count));
             }
             Ok(())
         })?;
+        let empty = published.empty();
+        let mut missing = published.missing;
+        if empty.is_some() {
+            if let Some((start, count)) = prefetched {
+                // Consensus can reject a statically valid suffix after its
+                // successor was queued. Drain and retain that one bounded
+                // window before the final probe, without activating it.
+                let download = Instant::now();
+                let retained = pool.window(start, count)?;
+                progress.download_time += download.elapsed();
+                account_window(&retained, &mut progress);
+                progress.downloaded += retained.heights.iter().map(Vec::len).sum::<usize>() as u32;
+            }
+        }
         let walked_back = !missing.is_empty();
         // A peer can reorganize between replies inside one hash window. Begin
         // at the missing parent's height, including when it is in that window,
@@ -670,22 +708,22 @@ fn synchronize_inner(
                 let download = Instant::now();
                 let last = pool.window(back - 1, 1)?;
                 progress.download_time += download.elapsed();
-                missing.extend(publish_with(
-                    last,
-                    node,
-                    &mut progress,
-                    |local, discovered| hold_missing(local, missing.iter().chain(discovered)),
-                )?);
+                missing.extend(
+                    publish_with(last, node, &mut progress, |local, discovered| {
+                        hold_missing(local, missing.iter().chain(discovered))
+                    })?
+                    .missing,
+                );
                 back -= 1;
             } else {
                 back -= count;
             }
-            missing.extend(publish_with(
-                window,
-                node,
-                &mut progress,
-                |local, discovered| hold_missing(local, missing.iter().chain(discovered)),
-            )?);
+            missing.extend(
+                publish_with(window, node, &mut progress, |local, discovered| {
+                    hold_missing(local, missing.iter().chain(discovered))
+                })?
+                .missing,
+            );
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
             missing = missing
                 .into_iter()
@@ -723,11 +761,20 @@ fn synchronize_inner(
                 // Re-query all peers after publication, rather than trusting a
                 // stale advertised height or requiring a majority hash. New
                 // content is fetched once; completed content is reused.
+                let download = Instant::now();
                 let probe = pool.window(selected_height, 2)?;
-                if probe.heights[0]
+                progress.download_time += download.elapsed();
+                let advertised_selected = probe.heights[0]
                     .iter()
-                    .any(|b| hash(b, "hash").ok() == Some(selected_hash))
-                    && probe.heights.get(1).is_some_and(Vec::is_empty)
+                    .any(|b| hash(b, "hash").ok() == Some(selected_hash));
+                // Fresh variants must pass consensus too. Merely presenting a
+                // self-consistent hash/signature cannot keep historical mode
+                // open after their space work or ledger transition is rejected.
+                let probe = publish_with(probe, node, &mut progress, |_, _| Ok(()))?;
+                if advertised_selected
+                    && probe.usable.first() == Some(&true)
+                    && probe.usable.get(1) == Some(&false)
+                    && probe.missing.is_empty()
                 {
                     let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
                     if local
@@ -739,36 +786,39 @@ fn synchronize_inner(
                         local.synced = true;
                         local.update()?;
                     }
-                } else if probe
-                    .heights
-                    .get(1)
-                    .is_some_and(|values| !values.is_empty())
-                {
+                } else if probe.usable.get(1) == Some(&true) {
                     next = peak;
                     continue;
                 }
             }
+            progress.elapsed = started.elapsed();
+            report(&progress);
             return Ok(progress);
         }
         next = end;
     }
 }
-fn publish_with(
-    window: Window,
-    node: &Arc<Mutex<Node>>,
-    progress: &mut Progress,
-    before_update: impl FnOnce(&mut Node, &Missing) -> Result<()>,
-) -> Result<Missing> {
+fn account_window(window: &Window, progress: &mut Progress) {
     progress.hash_time += window.hash_time;
     progress.body_time += window.body_time;
     progress.body_requests += window.body_requests;
     progress.body_retries += window.body_retries;
     progress.archive_time += window.archive_time;
     progress.backpressure_retries += window.backpressure_retries;
+}
+fn publish_with(
+    window: Window,
+    node: &Arc<Mutex<Node>>,
+    progress: &mut Progress,
+    before_update: impl FnOnce(&mut Node, &Missing) -> Result<()>,
+) -> Result<Published> {
+    account_window(&window, progress);
     let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
     let params = local.chain.selected().params();
     let mut blocks = Vec::new();
+    let mut accepted = Vec::new();
     for values in &window.heights {
+        let mut ids = Vec::new();
         for block in values {
             let Value::Int(stamp) = block.field("time_stamp")? else {
                 continue;
@@ -779,9 +829,11 @@ fn publish_with(
                 params.block_interval_ms,
                 100,
             ) {
+                ids.push(hash(block, "hash")?);
                 blocks.push(block.clone());
             }
         }
+        accepted.push(ids);
     }
     let archive = Instant::now();
     local.chain.admit_blocks(&blocks)?;
@@ -800,8 +852,7 @@ fn publish_with(
     // Empty replies do not authorize replay of retained future orphans. Keep
     // the active view at the contiguous prefix actually supplied by peers,
     // including when resuming an explicit rewind with a larger archive.
-    let supplied = window
-        .heights
+    let supplied = accepted
         .iter()
         .take_while(|values| !values.is_empty())
         .count() as u32;
@@ -819,7 +870,14 @@ fn publish_with(
         .tip()?
         .ok_or_else(|| error("missing selected tip"))?
         .height;
-    Ok(missing)
+    Ok(Published {
+        missing,
+        start: window.start,
+        usable: accepted
+            .into_iter()
+            .map(|ids| ids.iter().any(|id| !result.invalid.contains(id)))
+            .collect(),
+    })
 }
 
 fn hold_missing<'a>(
