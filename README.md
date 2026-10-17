@@ -63,6 +63,10 @@ Default listeners are local: native peers on the configured network port
 `--http-listen`. `--sync-once` exits after coordinated sync. Ctrl-C stops the
 servers and sync workers; each selected batch is already durable.
 
+Use `--data-dir` to place the unpruned ledger and archive on a fast local disk.
+Sync performs fully synchronous publication, so contention from other disk
+workloads can dominate validation time. The data path may also be a symlink.
+
 ```sh
 curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"get_status"}'
@@ -82,8 +86,9 @@ A second provider is tried only after the original 15-second request lease
 expires. Restart, rewind and tip probes reuse matching archived content.
 
 This ports the height-job approach in native `Router::process()` and
-`Node::sync_result()`, with a minimum of three rather than the upstream default
-of two. All candidates reach native fork choice, CPU proof checks and ledger
+`Node::sync_result()`, with the requested minimum of three. Upstream declares
+two in `modules/Router.vni` and configures five in `config/default/Router.json`.
+All candidates reach native fork choice, CPU proof checks and ledger
 validation; a rejected candidate does not discard another peer's valid block.
 Unknown parents trigger bounded backwards discovery above genesis. Download
 never lowers the fork-choice root to force acceptance of a peer branch. Native lookahead and
