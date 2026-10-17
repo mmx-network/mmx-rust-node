@@ -39,6 +39,17 @@ struct Entry {
     proofs: Vec<Record>,
     invalid: bool,
 }
+
+/// An owned, consistent view of archived bodies. Indexed storage shares its
+/// committed MVCC prefix, so readers do not hold the node's ledger mutex.
+pub struct BlockSnapshot {
+    archive: Database,
+}
+impl BlockSnapshot {
+    pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
+        archive_block(&self.archive, hash)
+    }
+}
 pub struct ForkChain {
     chain: ChainState,
     archive: Database,
@@ -191,6 +202,11 @@ impl ForkChain {
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
         archive_block(&self.archive, hash)
+    }
+    pub fn block_snapshot(&self) -> ChainResult<BlockSnapshot> {
+        Ok(BlockSnapshot {
+            archive: self.archive.fork(self.archive.version())?,
+        })
     }
 
     pub fn initialize(&mut self, assets: &genesis::Assets) -> ChainResult<block::Receipt> {

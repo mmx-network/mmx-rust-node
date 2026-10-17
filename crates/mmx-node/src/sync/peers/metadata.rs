@@ -254,8 +254,19 @@ impl<S: PeerSource> PeerPool<S> {
             if replies.len() >= MIN_PEERS {
                 return Ok(replies);
             }
-            if self.len() < MIN_PEERS || !self.peers.iter().any(|p| p.inflight.is_some()) {
+            // Draining can return a stale connection owner after every current
+            // job has finished. It still needs a fresh query for this window.
+            let available = self
+                .peers
+                .iter()
+                .any(|p| p.active && p.qualified && p.source.is_some() && !asked.contains(&p.id));
+            if self.len() < MIN_PEERS
+                || (!available && !self.peers.iter().any(|p| p.inflight.is_some()))
+            {
                 return Err(error("fewer than three peers answered the hash window"));
+            }
+            if available {
+                continue;
             }
             if let Some(observation) = self.receive_metadata(Duration::from_millis(50))? {
                 if observation.query == query {

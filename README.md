@@ -128,10 +128,15 @@ Unsupported implementation features remain errors, not consensus rejections.
 Other claimants of the same content are tried after the normal lease expires
 before reporting such an error, so a malformed counterfeit cannot hide a body
 that an honest provider can supply.
-One bounded producer queries the next window while the current one validates.
-It registers pending heights before peer I/O, using the existing root's lookahead,
-and joins before those clients are reused on error or cancellation. Missing
-ancestors and empty tip windows suspend prefetch. HTTP status also counts body
+
+One bounded producer downloads the next window while the current one validates.
+It captures an owned archive snapshot and chain parameters while registering
+pending heights, using the existing root's lookahead. Both hash and body requests
+then run without the ledger mutex; restart/rewind reuse checks read that snapshot.
+The reader is released before durable archival so it does not pin the archive WAL
+during publication. The producer joins before those clients are reused on error
+or cancellation. Missing ancestors and empty tip windows suspend prefetch.
+HTTP status also counts body
 requests and timeout reassignments; logs distinguish network stages from the
 remaining download wait after overlap.
 Completed prefetched bodies are retained before the producer replies, including

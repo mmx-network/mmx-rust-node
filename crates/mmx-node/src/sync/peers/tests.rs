@@ -910,6 +910,120 @@ fn empty_height_replies_do_not_replay_unadvertised_future_orphans_after_rewind_o
 }
 
 #[test]
+fn archive_body_snapshots_survive_later_commits_and_the_original_node() {
+    for indexed in [false, true] {
+        let (network, memory, blocks) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let node = if indexed {
+            Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()))
+        } else {
+            memory
+        };
+        let snapshot = {
+            let mut local = node.lock().unwrap();
+            local.chain.admit_blocks(&blocks[1..2]).unwrap();
+            local.chain.block_snapshot().unwrap()
+        };
+        node.lock()
+            .unwrap()
+            .chain
+            .admit_blocks(&blocks[2..])
+            .unwrap();
+        drop(node);
+        let first = hash(&blocks[1], "hash").unwrap();
+        let second = hash(&blocks[2], "hash").unwrap();
+        let (retained, later) = thread::spawn(move || {
+            (
+                snapshot.block(&first).unwrap(),
+                snapshot.block(&second).unwrap(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(retained, Some(blocks[1].clone()));
+        assert!(
+            later.is_none(),
+            "a committed snapshot cannot see later arrivals"
+        );
+    }
+}
+
+#[test]
+fn prefetched_bodies_download_while_the_consumer_holds_the_ledger() {
+    use std::sync::mpsc::{channel, Sender};
+    struct Probe {
+        source: Fake,
+        started: Sender<()>,
+    }
+    impl PeerSource for Probe {
+        fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+            self.source.hashes(start, count)
+        }
+        fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
+            self.started.send(())?;
+            self.source.fetch(hashes)
+        }
+        fn synced_height(&mut self) -> Result<Option<u32>> {
+            self.source.synced_height()
+        }
+    }
+    for indexed in [false, true] {
+        let (network, memory, blocks) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let node = if indexed {
+            Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()))
+        } else {
+            memory
+        };
+        let events = Arc::new(Mutex::new(vec![]));
+        let (started, received) = channel();
+        let mut pool = PeerPool::new(
+            (1..=3)
+                .map(|id| {
+                    (
+                        [id; 32],
+                        Probe {
+                            source: Fake::new(id, &blocks, &events),
+                            started: started.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let stop = AtomicBool::new(false);
+        prefetch::with_pool(&mut pool, &node, &stop, |producer| {
+            let mut local = node.lock().unwrap();
+            producer.prefetch(1, 2, &mut local)?;
+            // A body request must start before this lock is released. Waiting
+            // for hash replies alone would leave network and replay serialized.
+            received.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(local.chain.block(&hash(&blocks[1], "hash")?)?.is_none());
+            drop(local);
+            let window = producer.window(1, 2)?;
+            assert_eq!((window.body_requests, window.body_retries), (2, 0));
+            assert_eq!(
+                window.heights,
+                [vec![blocks[1].clone()], vec![blocks[2].clone()]]
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            counts(&events).values().copied().collect::<Vec<_>>(),
+            [1, 1]
+        );
+        let local = node.lock().unwrap();
+        assert!(local.sync_pending.is_empty());
+        assert!(local
+            .chain
+            .block(&hash(&blocks[2], "hash").unwrap())
+            .unwrap()
+            .is_some());
+        assert_eq!(local.chain.selected().tip().unwrap().unwrap().height, 0);
+    }
+}
+
+#[test]
 fn prefetch_starts_three_hash_queries_while_the_consumer_holds_the_ledger() {
     use std::sync::mpsc::{channel, Sender};
     struct Probe(Sender<()>);

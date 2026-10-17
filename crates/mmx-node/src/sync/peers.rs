@@ -111,6 +111,18 @@ struct Published {
     start: u32,
     usable: Vec<bool>,
 }
+struct ReadContext {
+    blocks: mmx_execution::chain::forks::BlockSnapshot,
+    params: mmx_types::mmx::ChainParams,
+}
+impl ReadContext {
+    fn new(local: &Node) -> Result<Self> {
+        Ok(Self {
+            blocks: local.chain.block_snapshot()?,
+            params: local.chain.selected().params().clone(),
+        })
+    }
+}
 impl Published {
     fn empty(&self) -> Option<u32> {
         self.usable
@@ -227,16 +239,19 @@ impl<S: PeerSource> PeerPool<S> {
         if count == 0 || count > BATCH_BLOCKS || start.checked_add(count).is_none() {
             return Err(error("invalid coordinated download window"));
         }
-        node.lock()
-            .map_err(|_| error("node lock poisoned"))?
-            .sync_pending
-            .extend(start..start + count);
-        self.prepared_window(start, count, node, stop)
+        let context = {
+            let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            let context = ReadContext::new(&local)?;
+            local.sync_pending.extend(start..start + count);
+            context
+        };
+        self.prepared_window(start, count, context, node, stop)
     }
     fn prepared_window(
         &mut self,
         start: u32,
         count: u32,
+        context: ReadContext,
         node: &Arc<Mutex<Node>>,
         stop: &AtomicBool,
     ) -> Result<Window> {
@@ -247,7 +262,7 @@ impl<S: PeerSource> PeerPool<S> {
             Err(error("sync cancelled"))
         } else {
             self.refresh().and_then(|target| {
-                self.window_inner(start, count, node, stop)
+                self.window_inner(start, count, &context, stop)
                     .map(|mut window| {
                         window.target = target;
                         window.body_requests = self.body_requests - initial_requests;
@@ -258,6 +273,9 @@ impl<S: PeerSource> PeerPool<S> {
                     })
             })
         };
+        // Release the archive reader before the durable writer publishes this
+        // window, leaving a reader gap in which its WAL can be recycled.
+        drop(context);
         let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
         // Retain completed bodies even if the consumer is cancelled before it
         // receives this window. The active view still ends at sync_pos, so this
@@ -288,7 +306,7 @@ impl<S: PeerSource> PeerPool<S> {
         &mut self,
         start: u32,
         count: u32,
-        node: &Arc<Mutex<Node>>,
+        context: &ReadContext,
         stop: &AtomicBool,
     ) -> Result<Window> {
         if stop.load(Ordering::Relaxed) {
@@ -300,9 +318,6 @@ impl<S: PeerSource> PeerPool<S> {
         let hash_started = Instant::now();
         let observations = self.observations(start, count, stop);
         let hash_time = hash_started.elapsed();
-        node.lock()
-            .map_err(|_| error("node lock poisoned"))?
-            .sync_peers = self.len();
         let observations = observations?;
         let mut jobs: BTreeMap<(u32, Hash), Fetch> = BTreeMap::new();
         for (peer, hashes) in observations {
@@ -339,7 +354,6 @@ impl<S: PeerSource> PeerPool<S> {
         // Reuse already archived content on restart, rewind and tip probes.
         // A matching chain ID alone is insufficient: legacy content can differ.
         {
-            let local = node.lock().map_err(|_| error("node lock poisoned"))?;
             for (key, job) in &jobs {
                 if !self.completed.contains_key(key) {
                     let cached = self.completed.iter().find_map(|((_, content), block)| {
@@ -352,7 +366,7 @@ impl<S: PeerSource> PeerPool<S> {
                         continue;
                     }
                     for (_, id) in &job.providers {
-                        if let Some(block) = local.chain.block(id)? {
+                        if let Some(block) = context.blocks.block(id)? {
                             if hash(&block, "content_hash")? == job.hash.content {
                                 complete(&mut self.completed, job, Some(block));
                                 break;
@@ -362,13 +376,7 @@ impl<S: PeerSource> PeerPool<S> {
                 }
             }
         }
-        let params = node
-            .lock()
-            .map_err(|_| error("node lock poisoned"))?
-            .chain
-            .selected()
-            .params()
-            .clone();
+        let params = &context.params;
         let mut output = Window {
             start,
             target: 0,
@@ -500,7 +508,7 @@ impl<S: PeerSource> PeerPool<S> {
                                     && hash(&block, "hash").ok() == Some(requested_id)
                                     && hash(&block, "content_hash").ok() == Some(job.hash.content);
                                 if matches {
-                                    match mmx_execution::block::prevalidate(&block, &params) {
+                                    match mmx_execution::block::prevalidate(&block, params) {
                                         Ok(()) => complete(&mut self.completed, job, Some(block)),
                                         Err(failure) if failure.is_unsupported() => {
                                             unsupported.insert(

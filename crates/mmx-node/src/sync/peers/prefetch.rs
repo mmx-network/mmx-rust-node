@@ -1,5 +1,5 @@
 //! One multi-peer window ahead, with a single owner for all hash/body jobs.
-use super::{PeerPool, PeerSource, Window, WindowSource, BATCH_BLOCKS};
+use super::{PeerPool, PeerSource, ReadContext, Window, WindowSource, BATCH_BLOCKS};
 use crate::{error, Node, Result};
 use std::{
     sync::{
@@ -12,7 +12,7 @@ use std::{
 
 enum Command {
     Refresh,
-    Window(u32, u32),
+    Window(u32, u32, Box<ReadContext>),
 }
 enum Reply {
     Refresh(Result<u32>),
@@ -65,8 +65,9 @@ impl WindowSource for Producer<'_> {
         }
         // The caller already holds the ledger mutex. Register here so the
         // producer can begin peer I/O while that caller validates the ledger.
+        let context = ReadContext::new(local)?;
         local.sync_pending.extend(start..start + count);
-        self.send(Command::Window(start, count))?;
+        self.send(Command::Window(start, count, Box::new(context)))?;
         self.pending = true;
         Ok(())
     }
@@ -103,8 +104,8 @@ pub(super) fn with_pool<S: PeerSource, T>(
             while let Ok(command) = incoming.recv() {
                 let reply = match command {
                     Command::Refresh => Reply::Refresh(pool.refresh()),
-                    Command::Window(start, count) => {
-                        Reply::Window(pool.prepared_window(start, count, node, stop))
+                    Command::Window(start, count, context) => {
+                        Reply::Window(pool.prepared_window(start, count, *context, node, stop))
                     }
                 };
                 if outgoing.send(reply).is_err() {
