@@ -206,9 +206,9 @@ The body API checks reward activation, fee buffers, project address continuity,
 reward votes/adjustments, reward amounts and VDF payout cadence. Public
 `block::economics` helpers preserve native rounding/wrapping and select the VDF
 winner from authenticated ancestors, including tie-breaking with the oldest
-visited ancestor's proof hash. NFT reward-target resolution, archival indexes,
-genesis initialization and chain selection remain to be ported. A successful
-body validation is not a complete block acceptance decision.
+visited ancestor's proof hash. Archival indexes, genesis initialization and
+chain selection remain to be ported. A successful body validation is not a
+complete block acceptance decision.
 
 `mmx_consensus::header` exposes exact header hash serialization, hash/content-hash
 calculation, static validity, farmer authentication and contextual scalar checks.
@@ -250,8 +250,9 @@ and prepared body settlement, requiring the same trusted parent in both contexts
 Header hashes and the farmer signature are checked before CPU space work. The
 lower-level `block::prepare()` continues to expect separately verified space
 proofs/transitions. These two APIs require separately verified VDF work/output
-linkage and NFT reward targets before accepting a block; iteration counts alone
-do not establish VDF work.
+linkage before accepting a block; iteration counts alone do not establish VDF
+work. Every body preparation API checks NFT reward targets against the original
+ledger snapshot.
 
 `mmx_consensus::vdf` ports ProofOfTime and VDF_Point hash serialization and static
 validity, timelord authentication, history-dependent admission and portable CPU
@@ -270,8 +271,28 @@ metadata or compare block reward addresses with point reward addresses.
 `block::prepare_with_vdf()` authenticates the header, resolves its proof context
 from trusted history, links admitted VDF points, verifies space proofs/transitions
 and prepares atomic body settlement. Supply points verified with the same chain
-parameters. NFT reward-target resolution, the ancestor-derived VDF payout winner,
-durable header storage and chain selection remain the caller's responsibility.
+parameters. The ancestor-derived VDF payout winner, durable header storage and
+chain selection remain the caller's responsibility.
+
+`mmx_execution::nft::target()` implements native Plot NFT reward resolution. It
+falls back to the contract address when the executable, binary or
+`mmx_reward_target` method is absent. Otherwise it calls that method using the
+ledger peak's height and protocol version, a canonical address string or null
+farmer argument, null user/transaction ID, the contract address and chain network.
+It uses `max_tx_cost` without charging contract metadata reads. Method visibility
+and constructor flags do not restrict this native call; the method's const flag
+controls storage immutability, and every call discards writes and transfers.
+Remote calls and contract-read callbacks remain unavailable in this path, as in
+C++. The return conversion preserves native VNX behavior, including invalid
+address strings becoming zero and byte lists being truncated or zero-padded.
+All list elements are read before conversion, including those beyond byte 32.
+
+Block validation requires `reward_contract` to match the first NFT proof only
+when `reward_addr` is present, resolves the target with `reward_account`, and
+checks the result before transaction execution. It uses the parent's height:
+an NFT unlocking at the candidate's height remains locked during that block's
+reward validation. Calls cannot observe transactions or new deployments in the
+candidate block, and their temporary writes never enter the settlement batch.
 
 `mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
 conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
@@ -482,8 +503,16 @@ exact proof/point preimages and hashes, signatures and failure order, zero/odd
 segment counts, production segment size, chunk boundaries, corruption, iteration
 wrapping, commit-delay history, signed metadata exemptions and multi-step output
 chains. CPU cases run both native hardware dispatch and its fallback. Combined
-cases prepare or reject empty block
-bodies without publishing state on rejection or abort.
+cases prepare or reject empty block bodies without publishing state on rejection
+or abort.
+
+NFT rewards add **212 native comparisons**: 185 target-resolution calls and 27
+authenticated block reward-field cases. They execute the original Plot NFT
+contract at lock/unlock and hardfork boundaries, compare fallback and return
+conversion rules, lookup/failure order, method flags, gas boundaries, ignored
+transfers and stored collection failures. Block cases check target/contract
+mismatches and parent height at unlock. Tests verify that target calls and
+rejected/aborted blocks preserve the ledger snapshot.
 
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
@@ -505,6 +534,7 @@ python3 tools/generate_block_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_header_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_work_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_vdf_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_nft_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -514,8 +544,8 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. NFT reward targets, genesis, archival indexes and durable chain-state
-   application/reorgs, building on block-body validation and atomic settlement.
+1. Genesis, archival indexes and durable chain-state application/reorgs, building
+   on block-body validation and atomic settlement.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.

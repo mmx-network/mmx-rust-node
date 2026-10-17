@@ -73,6 +73,100 @@ enum Target {
 }
 
 impl<S: Storage> Engine<'_, S> {
+    /// Native vm::read(address).to<addr_t>(), used by NFT reward resolution.
+    /// This is VNX conversion: invalid strings become zero, binary/list results
+    /// truncate or zero-pad, and small integers become the first byte. Traverse
+    /// every collection element before conversion, preserving read gas/errors.
+    pub fn read_address_result(&mut self, address: u64) -> Result<Address> {
+        use crate::value::{FLAG_DELETED, FLAG_STORED};
+        #[derive(Clone, Copy)]
+        enum Destination {
+            Address,
+            Byte(usize),
+            Discard,
+        }
+        enum Read {
+            Memory(u64),
+            Entry(u64, u64),
+            Value(Var),
+        }
+        use Destination::*;
+        let mut out = [0; 32];
+        let mut pending = vec![(Read::Memory(address), Address)];
+        while let Some((read, destination)) = pending.pop() {
+            let var = match read {
+                Read::Memory(a) => self.read_var(a)?,
+                Read::Entry(a, key) => self.read_entry_var(a, key)?,
+                Read::Value(v) => Some(v),
+            };
+            let Some(var) = var else { continue };
+            let scalar = matches!(var.value, Value::Bool(_))
+                || matches!(var.value, Value::Uint(v) if v >> 64 == U256::zero());
+            let byte = match var.value {
+                Value::Ref(a) => {
+                    pending.push((Read::Memory(a), destination));
+                    continue;
+                }
+                Value::Bool(v) => u8::from(v),
+                Value::Uint(v) if v >> 64 == U256::zero() => v.low_u32() as u8,
+                Value::Uint(v) => {
+                    // Arbitrary HRPs are accepted: even a native hexadecimal
+                    // integer string can be a valid Bech32m address.
+                    if matches!(destination, Address) {
+                        out = crate::address::decode(format!("0x{v:x}").as_bytes())
+                            .unwrap_or([0; 32]);
+                    }
+                    0
+                }
+                Value::String(v) => {
+                    if matches!(destination, Address) {
+                        out = crate::address::decode(&v).unwrap_or([0; 32]);
+                    }
+                    0
+                }
+                Value::Binary(v) => {
+                    if matches!(destination, Address) {
+                        let n = v.len().min(out.len());
+                        out[..n].copy_from_slice(&v[..n]);
+                    }
+                    0
+                }
+                Value::Array { address, size } => {
+                    for i in (0..size).rev() {
+                        let dst = if matches!(destination, Address) && i < 32 {
+                            Byte(i as usize)
+                        } else {
+                            Discard
+                        };
+                        pending.push((Read::Entry(address, i as u64), dst));
+                    }
+                    continue;
+                }
+                Value::Map { address } => {
+                    if var.flags & FLAG_STORED != 0 {
+                        return Err(Error::State("cannot read map from storage"));
+                    }
+                    for ((_, key), value) in
+                        self.entries.range((address, 0)..=(address, u64::MAX)).rev()
+                    {
+                        if value.flags & FLAG_DELETED == 0 {
+                            pending.push((Read::Value(value.clone()), Discard));
+                            pending.push((Read::Memory(*key), Discard));
+                        }
+                    }
+                    0
+                }
+                _ => 0,
+            };
+            match destination {
+                Address if scalar => out[0] = byte,
+                Byte(i) => out[i] = byte,
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
     /// Load native constants in order, then decode code, initialize map keys,
     /// and check the gas meter. Bytecode trailing bytes follow native decoding.
     pub fn load_binary(&mut self, binary: &Binary) -> Result<Vec<Instruction>> {

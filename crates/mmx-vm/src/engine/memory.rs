@@ -355,7 +355,7 @@ impl<S: Storage> Engine<'_, S> {
         Ok(Some(address))
     }
 
-    fn read_entry_var(&mut self, address: u64, key: u64) -> Result<Option<Var>> {
+    pub(super) fn read_entry_var(&mut self, address: u64, key: u64) -> Result<Option<Var>> {
         if let Some(var) = self.entries.get(&(address, key)) {
             return Ok((var.flags & FLAG_DELETED == 0).then(|| var.clone()));
         }

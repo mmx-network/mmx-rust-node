@@ -3,7 +3,8 @@
 //! and contextual scalar checks are enforced here. `prepare_with_proofs` also
 //! verifies CPU space work and header transitions against trusted chain context.
 //! `prepare_with_vdf` additionally links verified timelord work using history.
-//! The caller must still resolve NFT reward targets and the VDF payout winner.
+//! NFT reward targets are resolved against the parent ledger snapshot. The
+//! caller supplies the VDF payout winner from authenticated ancestor headers.
 //! This API does not select a chain or advance the database version.
 pub mod economics;
 
@@ -100,7 +101,8 @@ impl<S: BlockStorage> PreparedBlock<'_, S> {
     }
 }
 /// Validate the header envelope and body after the chain layer verifies proof
-/// work/transitions and reward targets. Nothing is published until `commit`;
+/// work/transitions. NFT reward targets are checked here against the original
+/// ledger snapshot. Nothing is published until `commit`;
 /// dropping the prepared block aborts every transaction.
 pub fn prepare<'a, S: BlockStorage>(
     storage: &'a mut S,
@@ -131,7 +133,7 @@ pub fn execute<S: BlockStorage>(
     prepare(storage, context, block)?.commit()
 }
 /// Verify native space work and header transitions before preparing the body.
-/// VDF work/output linkage and reward target resolution remain prerequisites.
+/// VDF work/output linkage remains a prerequisite.
 pub fn prepare_with_proofs<'a, S: BlockStorage>(
     storage: &'a mut S,
     context: &BlockContext,
@@ -166,8 +168,8 @@ fn proof_rejection(error: ValidationError) -> Rejected {
 }
 /// Authenticate the header, resolve proof transitions from trusted history and
 /// link its output to CPU-verified VDF points before preparing atomic settlement.
-/// Points must have been admitted with the same chain parameters. Reward-target
-/// resolution and the trusted parent's correspondence to the ledger remain the
+/// Points must have been admitted with the same chain parameters. The expected
+/// VDF payout and the trusted parent's correspondence to the ledger remain the
 /// caller's responsibility; this function does not select or publish a chain.
 pub fn prepare_with_vdf<'a, S, H>(
     storage: &'a mut S,
@@ -222,7 +224,11 @@ pub fn transaction_root(hashes: &[Address]) -> Address {
     }
     nodes.first().copied().unwrap_or_default()
 }
-fn envelope(context: &BlockContext, block: &Record) -> Result<(), ValidationError> {
+fn envelope<S: Storage>(
+    storage: &S,
+    context: &BlockContext,
+    block: &Record,
+) -> Result<(), ValidationError> {
     if block.name != "mmx.Block" {
         return Err(invalid("expected block"));
     }
@@ -268,7 +274,7 @@ fn envelope(context: &BlockContext, block: &Record) -> Result<(), ValidationErro
     if total_cost > p.max_block_cost {
         return Err(invalid("block cost too high"));
     }
-    economics::validate_fields(context, block)?;
+    economics::validate_fields(storage, context, block)?;
     Ok(())
 }
 fn build<S: Storage>(
@@ -277,7 +283,7 @@ fn build<S: Storage>(
     block: &Record,
     rejected: &mut Rejected,
 ) -> Result<(Receipt, TransactionBatch), ValidationError> {
-    envelope(context, block)?;
+    envelope(storage, context, block)?;
     let p = &context.params;
     let txs = block
         .field("tx_list")?

@@ -3,9 +3,11 @@
 //! module combines native hashing, authorization, balances, fees and execution.
 //! The `block` module adds header authentication, reservations, shared VM state,
 //! ordering and economics. Its proof-aware API also verifies CPU space work and
-//! header transitions. VDF work and chain selection remain separate stages.
+//! header transitions, with verified VDF linkage available separately. NFT
+//! reward targets use the original ledger snapshot. Chain selection is separate.
 pub mod block;
 mod contracts;
+pub mod nft;
 mod overlay;
 pub mod transaction;
 mod wire;

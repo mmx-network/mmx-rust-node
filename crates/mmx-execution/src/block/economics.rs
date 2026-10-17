@@ -94,7 +94,8 @@ fn signed(r: &Record, name: &str) -> Result<i64, ValidationError> {
         _ => Err(invalid("signed reward field")),
     }
 }
-pub(super) fn validate_fields(
+pub(super) fn validate_fields<S: mmx_vm::Storage>(
+    storage: &S,
     context: &BlockContext,
     block: &Record,
 ) -> Result<(), ValidationError> {
@@ -111,6 +112,7 @@ pub(super) fn validate_fields(
     if !(-1..=1).contains(&vote) {
         return Err(invalid("invalid reward_vote"));
     }
+    crate::nft::validate(storage, context, block)?;
     let (base, sum, count) = if height.is_multiple_of(p.reward_adjust_interval) {
         (new_base_reward(p, prev)?, vote as i32, u32::from(vote != 0))
     } else {
