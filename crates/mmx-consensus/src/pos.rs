@@ -1,6 +1,7 @@
 //! Native CPU proof recomputation. Consensus proofs contain 256 uncompressed X
 //! values; compressed plotting/proving, remote compute and GPU paths are separate.
 use crate::Hash;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::BTreeSet;
 
@@ -115,8 +116,11 @@ pub fn compute(xs: &[u32], id: &Hash, ksize: u8) -> Result<Vec<Entry>> {
         .collect();
     let mut meta = Vec::with_capacity(xs.len());
     let mut entries = Vec::with_capacity(xs.len());
-    for (i, x) in xs.iter().enumerate() {
-        let (y, m) = compute_f1(*x, id, ksize)?;
+    // F1 inputs are independent. Indexed collection preserves native X order
+    // before deterministic metadata sorting and proof backtracing.
+    let initial: Vec<_> = xs.par_iter().map(|x| compute_f1(*x, id, ksize)).collect();
+    for (i, value) in initial.into_iter().enumerate() {
+        let (y, m) = value?;
         entries.push((y, i));
         meta.push(m);
     }

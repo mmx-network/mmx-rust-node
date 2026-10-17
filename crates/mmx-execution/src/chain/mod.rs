@@ -197,6 +197,15 @@ impl ChainState {
         points: &[VerifiedPoint],
         mode: ValidationMode,
     ) -> ChainResult<block::Receipt> {
+        self.append_evidence(candidate, points, mode, None)
+    }
+    fn append_evidence(
+        &mut self,
+        candidate: &Record,
+        points: &[VerifiedPoint],
+        mode: ValidationMode,
+        evidence: Option<&mmx_consensus::transitions::VerifiedHeader>,
+    ) -> ChainResult<block::Receipt> {
         let previous = self
             .tip()?
             .ok_or_else(|| invalid("chain is not initialized"))?;
@@ -209,11 +218,12 @@ impl ChainState {
             previous,
             expected_vdf_payout,
         };
-        block::verify_history(
+        block::verify_history_evidence(
             &context,
             candidate,
             self,
             (mode == ValidationMode::Live).then_some(points),
+            evidence,
         )?;
         let (receipt, batch) = block::prepare_batch(&self.storage, &context, candidate)?;
         self.publish(candidate, &batch, false)?;
@@ -226,18 +236,26 @@ impl ChainState {
         height: u32,
         blocks: &[(Record, Vec<VerifiedPoint>)],
     ) -> ChainResult<Vec<block::Receipt>> {
-        self.reorganize_mixed(
+        self.reorganize_stream(
             height,
-            &blocks
+            blocks
                 .iter()
-                .map(|(b, p)| (b.clone(), p.clone(), ValidationMode::Live))
-                .collect::<Vec<_>>(),
+                .map(|(b, p)| Ok((b.clone(), p.clone(), ValidationMode::Live, None))),
+            true,
         )
     }
-    pub(crate) fn reorganize_mixed(
+    pub(crate) fn reorganize_stream(
         &mut self,
         height: u32,
-        blocks: &[(Record, Vec<VerifiedPoint>, ValidationMode)],
+        blocks: impl IntoIterator<
+            Item = ChainResult<(
+                Record,
+                Vec<VerifiedPoint>,
+                ValidationMode,
+                Option<mmx_consensus::transitions::VerifiedHeader>,
+            )>,
+        >,
+        collect_receipts: bool,
     ) -> ChainResult<Vec<block::Receipt>> {
         if height == 0 {
             return Err(invalid("cannot replace genesis"));
@@ -248,8 +266,12 @@ impl ChainState {
             headers: Default::default(),
         };
         let mut receipts = Vec::new();
-        for (block, points, mode) in blocks {
-            receipts.push(branch.append_mode(block, points, *mode)?);
+        for entry in blocks {
+            let (block, points, mode, evidence) = entry?;
+            let receipt = branch.append_evidence(&block, &points, mode, evidence.as_ref())?;
+            if collect_receipts {
+                receipts.push(receipt);
+            }
         }
         self.storage
             .database_mut()

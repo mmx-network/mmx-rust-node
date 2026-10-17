@@ -10,7 +10,6 @@ use mmx_types::mmx;
 use mmx_vm::Storage;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs::OpenOptions,
     io::{Read, Write},
     path::Path,
 };
@@ -68,16 +67,11 @@ impl Node {
                         break key;
                     }
                 };
-                let mut options = OpenOptions::new();
-                options.write(true).create_new(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                let mut file = options.open(key_path)?;
-                file.write_all(&key.to_bytes())?;
-                file.sync_all()?;
+                let mut temporary = tempfile::NamedTempFile::new_in(path.as_ref())?;
+                temporary.write_all(&key.to_bytes())?;
+                temporary.as_file().sync_all()?;
+                temporary.persist_noclobber(key_path).map_err(|e| e.error)?;
+                std::fs::File::open(path.as_ref())?.sync_all()?;
                 key
             }
             Err(e) => return Err(e.into()),
@@ -136,8 +130,45 @@ impl Node {
         Ok(())
     }
     pub(crate) fn update(&mut self) -> Result<Update> {
+        let selected = self.chain.selected();
+        let tip = selected
+            .tip()?
+            .ok_or_else(|| error("missing selected tip"))?;
+        self.chain.set_tip_limit(Some(if self.synced {
+            tip.height.saturating_add(1000)
+        } else {
+            self.sync_pos.saturating_sub(1).max(tip.height)
+        }));
+        let selected = self.chain.selected();
+        let root = selected
+            .header(
+                &selected
+                    .hash_at(self.root)?
+                    .ok_or_else(|| error("missing selected root"))?,
+            )?
+            .ok_or_else(|| error("missing root header"))?;
+        let mut inputs: BTreeSet<Hash> = self
+            .chain
+            .verified_vdf_inputs(self.root)?
+            .into_iter()
+            .collect();
+        for height in self.root..=tip.height {
+            let header = selected
+                .header(
+                    &selected
+                        .hash_at(height)?
+                        .ok_or_else(|| error("missing selected height"))?,
+                )?
+                .ok_or_else(|| error("missing selected header"))?;
+            inputs.insert(header.vdf_output.0);
+        }
         for work in &self.work {
             let id = hash(work, "content_hash")?;
+            if work.field("start")?.uint()? < root.vdf_iters
+                || !inputs.contains(&hash(work, "input")?)
+            {
+                continue;
+            }
             if !self.verified_work.contains_key(&id) {
                 if let Ok(point) =
                     mmx_consensus::vdf::verify(work, self.chain.selected().params(), &self.chain)
@@ -145,6 +176,19 @@ impl Node {
                     self.verified_work.insert(id, point);
                 }
             }
+            if let Some(point) = self.verified_work.get(&id) {
+                inputs.insert(point.point().output.0);
+            }
+        }
+        self.verified_work
+            .retain(|_, p| p.point().start >= root.vdf_iters);
+        let work = self
+            .verified_work
+            .values()
+            .map(|p| Record::from_generated(p.proof()))
+            .collect::<mmx_consensus::Result<Vec<_>>>()?;
+        for block in self.pending.values() {
+            self.chain.admit(block, &work)?;
         }
         self.chain
             .cache_verified_work(&self.verified_work.values().cloned().collect::<Vec<_>>())?;
@@ -285,8 +329,7 @@ impl Node {
     pub fn receive(&mut self, message: &Record) -> Result<()> {
         match message.name.as_str() {
             "mmx.Block" if self.synced => {
-                self.chain
-                    .admit(message, &self.work.iter().cloned().collect::<Vec<_>>())?;
+                self.chain.admit(message, &[])?;
                 self.pending.insert(hash(message, "hash")?, message.clone());
                 self.update()?;
             }
@@ -300,10 +343,6 @@ impl Node {
                     if let Some(old) = self.work.pop_front() {
                         self.verified_work.remove(&hash(&old, "content_hash")?);
                     }
-                }
-                let work: Vec<_> = self.work.iter().cloned().collect();
-                for block in self.pending.values() {
-                    self.chain.admit(block, &work)?;
                 }
                 self.update()?;
             }

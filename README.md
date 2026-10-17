@@ -17,8 +17,9 @@ approximations.
 
 ## Build and run
 
-Requires Rust 1.89 or newer. The disk backend currently targets Unix filesystems
-with file locking, directory sync, and file sync support.
+Requires Rust 1.89 or newer and a C toolchain for bundled SQLite/Zstd. The disk
+backend currently targets Unix filesystems with file locking, directory sync,
+and file sync support.
 
 Clone with `git clone --recurse-submodules`, or initialize the VNX dependency in
 an existing checkout:
@@ -68,6 +69,24 @@ curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"get_block_hash","params":{"height":100}}'
 ```
 
+Sync pipelines four native requests at a time, correlates out-of-order replies
+while servicing peer requests, and retains each download window in one atomic
+archive transaction. A moving peer tip keeps the node in historical mode until
+the selected tip matches a stable advertised tip; download never lowers the
+fork-choice root to force acceptance of a peer branch. Native lookahead and
+strict future-timestamp bounds also apply. The active view includes the selected
+tip and downloaded prefix; retained future orphans are not automatically selected
+after an offline rewind. Tests cover holding each requested height across timer
+updates/restarts, then replaying when sync resumes.
+
+CPU proof recomputation parallelizes independent F1 inputs while preserving the
+native canonical proof order. `RAYON_NUM_THREADS` can bound the worker pool.
+Fork admission retains immutable space/transition evidence bound to every header
+field (including legacy unhashed fields), exact parameters and resolved ancestry.
+Replay rechecks that binding, header authentication, VDF linkage and full ledger
+execution; stale evidence falls back to work verification. It never bypasses
+body validation, and deep-prefix replay still re-verifies space work.
+
 The read API supports parameters, heights/sync status, genesis/VDF hashes,
 blocks/headers by hash/height, transaction lookup/height/block IDs, contracts and
 balances. HTTP accepts bare names or `mmx.Node.*`; `get_status` adds node status.
@@ -78,12 +97,12 @@ reads only. Native compressed peer requests carry lossless block records.
 
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A mainnet smoke test connected to a native peer advertising height 5,513,516 and
-validated the first 80 blocks; the indexed build imported that history, resumed
-the download and served HTTP RPC during live mainnet sync. This is evidence of
-native interoperability, not a
-claim that a complete mainnet sync has finished. The node uses an indexed disk backend with every historical version retained.
-Sync throughput and remaining peer services are still being improved.
+A mainnet smoke test connected to a native peer advertising height 5,514,074 and
+validated through height 800. The indexed build imported the earlier journal,
+resumed the download and served HTTP RPC during mainnet sync. A complete mainnet
+sync has not finished. The node uses an indexed disk backend with every
+historical version retained. Sync throughput and remaining peer services are
+still being improved.
 
 The example executes MMX instructions, charges gas, stages contract state, and
 commits it to disk. Running it again reopens the database and increments the same
@@ -429,7 +448,12 @@ tip. Losing blocks remain available through `ForkChain::block()`. Missing parent
 or work leave candidates waiting; invalid bodies are excluded and selection
 continues with another candidate. Alternate-root branches wait for backwards
 sync when native policy requires it and replay the prefix below the old root
-before switching. The caller tracks the selected root after a deep fork.
+before switching. That historical prefix rechecks space proofs and full execution
+without old PoTs, matching native `fork_to`; live blocks above the root still
+require VDF evidence. The node preserves its current root while downloading
+competing branches and updates the root hash only after branch selection.
+Replacements stream records and discard intermediate receipts during node replay,
+so a deep fork does not accumulate complete block bodies/results in RAM.
 
 The standalone `chain::choice::select()` ports native proof/invalid propagation,
 wrapping cumulative votes, root/peak weight comparisons, height/hash tie-breaks
@@ -454,8 +478,8 @@ parsing, and signature verification shares the VM/authorization cache.
 every later ledger/index version while retaining every archived branch. Any
 selected height, including genesis, is supported; no root/checkpoint introduces
 an irreversible state cutoff. Reopen and subsequent fork selection can replay
-the retained branches. Sync orchestration,
-archive pruning, specialized wallet/trading indexes and node-service caches remain to be ported.
+the retained branches. Specialized wallet/trading indexes, archive compaction
+and remaining node services are separate port stages.
 
 The live node admits signed farmer `ProofResponse` envelopes only after native
 hash, plot identity, signature, selected-history challenge/difficulty and CPU space
@@ -536,7 +560,7 @@ their tags, and non-native Variant types retain their original payload.
 JSON-backed Variant fields cannot represent every native distinction. Use
 original bytes for consensus inputs.
 `Record::encode()` re-emits current-schema VNX records while preserving original
-Variant bytes and raw strings; it is used to persist deployments without a JSON
+Variant bytes and raw strings, declaring repeated dynamic classes once per stream; it is used to persist deployments without a JSON
 round trip. It remains distinct from hash serialization.
 
 The node defaults to `Store::open_indexed()` / `ForkChain::open_indexed()`, using
@@ -562,7 +586,8 @@ with independent registries returned for each native stream. Historical sync
 ignores unrelated live block broadcasts, and a periodic update coalesces queued
 proof/vote processing as in C++.
 
-Initial schema/import is published by an atomic file rename; unpublished staging
+Node identity creation and initial schema/import use atomic file publication.
+Unpublished staging
 directories are removed after restart. Tests compare the two backends across
 pending writes, deletes, ranges, historical reads, every rewind, nested snapshots,
 reopen, migration, injected write failures, abrupt process exit before/after

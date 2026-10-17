@@ -251,6 +251,13 @@ fn sync_rejects_wrong_genesis_discontinuous_blocks_and_cancelled_download_withou
     source.wrong = false;
     assert!(sync::synchronize(&mut source, &n, &AtomicBool::new(true), |_| {}).is_err());
     check(&n, &g);
+    source.blocks[1]
+        .fields
+        .insert("time_stamp".into(), V::Int(i64::MAX));
+    let failure = sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap_err();
+    assert!(failure.to_string().contains("too far in the future"));
+    check(&n, &g);
+    source.blocks[1] = wire(&steps[0]["block"]);
     source.blocks[0]
         .fields
         .insert("hash".into(), V::Bytes(vec![1; 32]));
@@ -370,4 +377,169 @@ fn farmer_response_waits_for_verified_future_vdf_then_live_block_uses_the_same_e
         .receive(&wire(&steps[0]["block"]))
         .unwrap();
     check(&n, &steps[0]);
+}
+
+#[test]
+fn downloading_a_competing_branch_keeps_the_native_root_until_an_explicit_rewind() {
+    let (network, g, steps, deep) = fixture();
+    let mut chain = ForkChain::memory(network.params.clone());
+    chain.initialize(&network.assets).unwrap();
+    for step in &steps[..2] {
+        chain.admit(&wire(&step["block"]), &[]).unwrap();
+    }
+    chain
+        .update_sync_at(hash(&wire(&g["block"]), "hash").unwrap(), None, 0)
+        .unwrap();
+    let n = Arc::new(Mutex::new(
+        Node::from_chain(chain, SigningKey::from_slice(&[2; 32]).unwrap()).unwrap(),
+    ));
+    assert_eq!(n.lock().unwrap().root_height(), 2); // native restart: commit_delay=0
+    let mut source = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&deep[0]["block"]),
+            wire(&deep[1]["block"]),
+        ],
+        wrong: false,
+    };
+    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(n.lock().unwrap().root_height(), 2);
+    assert!(!n.lock().unwrap().is_synced());
+    check(&n, &steps[1]);
+    // Native fork choice requires a candidate above the existing root. Download
+    // must not silently rebase policy to genesis just to select a peer's branch.
+    n.lock().unwrap().rollback_to(0).unwrap();
+    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    check(&n, &deep[1]);
+    assert!(n.lock().unwrap().is_synced());
+}
+#[test]
+fn a_moving_peer_tip_does_not_prematurely_enable_live_admission() {
+    struct Advancing {
+        source: MemorySource,
+        queries: u32,
+    }
+    impl Source for Advancing {
+        fn height(&mut self) -> Result<u32> {
+            self.queries += 1;
+            Ok(if self.queries == 1 { 1 } else { 2 })
+        }
+        fn hash_at(&mut self, h: u32) -> Result<Option<Hash>> {
+            self.source.hash_at(h)
+        }
+        fn block_at(&mut self, h: u32) -> Result<Option<Record>> {
+            self.source.block_at(h)
+        }
+    }
+    let (network, g, steps, _) = fixture();
+    let n = node(&network);
+    let mut source = Advancing {
+        source: MemorySource {
+            blocks: vec![
+                wire(&g["block"]),
+                wire(&steps[0]["block"]),
+                wire(&steps[1]["block"]),
+            ],
+            wrong: false,
+        },
+        queries: 0,
+    };
+    let first = sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(first.selected, 1);
+    assert!(!n.lock().unwrap().is_synced());
+    let second = sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(second.downloaded, 1);
+    assert!(n.lock().unwrap().is_synced());
+    check(&n, &steps[1]);
+}
+
+#[test]
+fn native_peer_pipeline_correlates_reordered_returns_and_services_peer_requests() {
+    let (network, _, steps, _) = fixture();
+    let n = node(&network);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let expected: Vec<_> = steps[..2].iter().map(|s| Some(wire(&s["block"]))).collect();
+    let replies = expected.clone();
+    let thread = std::thread::spawn(move || {
+        let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            requests.push(c.receive(Duration::from_secs(2)).unwrap().unwrap());
+        }
+        c.send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(99)),
+                ("method".into(), V::Record(record("mmx.Router.get_id", []))),
+            ],
+        ))
+        .unwrap();
+        for r in requests.into_iter().rev() {
+            let height =
+                mmx_node::node::number(r.field("method").unwrap().record().unwrap(), "height")
+                    .unwrap();
+            let result = record(
+                "mmx.Node.get_block_at.return",
+                [(
+                    "_ret_0".into(),
+                    V::Record(replies[(height - 1) as usize].clone().unwrap()),
+                )],
+            );
+            c.send(&record(
+                "mmx.Return",
+                [
+                    ("id".into(), r.field("id").unwrap().clone()),
+                    ("result".into(), V::Record(result)),
+                ],
+            ))
+            .unwrap();
+        }
+        let response = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(mmx_node::node::number(&response, "id").unwrap(), 99);
+        assert_eq!(
+            response.field("result").unwrap().record().unwrap().name,
+            "mmx.Router.get_id.return"
+        );
+    });
+    let mut client = peer::Client::connect(&address.to_string(), n).unwrap();
+    assert_eq!(client.blocks_at(1, 2).unwrap(), expected);
+    thread.join().unwrap();
+}
+
+#[test]
+fn offline_rewinds_stay_at_the_requested_height_across_ticks_and_restarts() {
+    let (network, g, steps, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let mut n = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
+    let mut source = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&steps[0]["block"]),
+            wire(&steps[1]["block"]),
+        ],
+        wrong: false,
+    };
+    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    check(&n, &steps[1]);
+    for height in [1, 0] {
+        n.lock().unwrap().rollback_to(height).unwrap();
+        for _ in 0..2 {
+            n.lock().unwrap().tick().unwrap();
+        }
+        check(&n, if height == 0 { &g } else { &steps[0] });
+        drop(n);
+        n = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
+        n.lock().unwrap().tick().unwrap();
+        check(&n, if height == 0 { &g } else { &steps[0] });
+        assert!(n
+            .lock()
+            .unwrap()
+            .chain()
+            .block(&hash(&wire(&steps[1]["block"]), "hash").unwrap())
+            .unwrap()
+            .is_some());
+    }
+    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    check(&n, &steps[1]);
 }

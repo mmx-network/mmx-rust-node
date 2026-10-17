@@ -83,3 +83,16 @@ fn root_policy_rejects_undefined_native_division_and_noncontiguous_history() {
         )
         .is_err());
 }
+
+#[test]
+fn native_sync_future_timestamp_filter_has_a_strict_signed_boundary() {
+    use mmx_execution::chain::sync::allows_timestamp;
+    for stamp in [i64::MIN, -1, 0, 9000, 9999] {
+        assert!(allows_timestamp(stamp, 9000, 10, 100));
+    }
+    for stamp in [10000, 10001, i64::MAX] {
+        assert!(!allows_timestamp(stamp, 9000, 10, 100));
+    }
+    assert!(allows_timestamp(499, -500, 10, 100));
+    assert!(!allows_timestamp(500, -500, 10, 100));
+}

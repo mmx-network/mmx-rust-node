@@ -17,6 +17,17 @@ pub trait Source {
     fn height(&mut self) -> Result<u32>;
     fn hash_at(&mut self, height: u32) -> Result<Option<Hash>>;
     fn block_at(&mut self, height: u32) -> Result<Option<Record>>;
+    fn blocks_at(&mut self, start: u32, count: u32) -> Result<Vec<Option<Record>>> {
+        (0..count)
+            .map(|i| {
+                self.block_at(
+                    start
+                        .checked_add(i)
+                        .ok_or_else(|| error("sync height overflow"))?,
+                )
+            })
+            .collect()
+    }
 }
 impl Source for Client {
     fn height(&mut self) -> Result<u32> {
@@ -27,6 +38,9 @@ impl Source for Client {
     }
     fn block_at(&mut self, h: u32) -> Result<Option<Record>> {
         Client::block_at(self, h)
+    }
+    fn blocks_at(&mut self, start: u32, count: u32) -> Result<Vec<Option<Record>>> {
+        Client::blocks_at(self, start, count)
     }
 }
 #[derive(Clone, Debug, Default)]
@@ -47,6 +61,7 @@ pub fn synchronize(
     let chain = local.chain.selected();
     let genesis = chain.hash_at(0)?.ok_or_else(|| error("missing genesis"))?;
     let tip = chain.tip()?.ok_or_else(|| error("missing tip"))?;
+    let interval = chain.params().block_interval_ms;
     drop(local);
     if source.hash_at(0)? != Some(genesis) {
         return Err(error("peer genesis mismatch"));
@@ -91,38 +106,62 @@ pub fn synchronize(
         .checked_add(1)
         .ok_or_else(|| error("sync height overflow"))?;
     while next <= target {
+        let limit = {
+            let local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            local
+                .root
+                .saturating_add(local.chain.selected().params().commit_delay)
+                .saturating_add(1000)
+        };
+        if next > limit {
+            return Err(error("sync lookahead exhausted before root advancement"));
+        }
         let mut batch = Vec::new();
         let mut size = 0;
-        while next <= target && batch.len() < 16 && size < 8 * 1024 * 1024 {
+        while next <= target && next <= limit && batch.len() < 16 && size < 8 * 1024 * 1024 {
             if stop.load(Ordering::Relaxed) {
                 return Err(error("sync cancelled"));
             }
-            let block = source
-                .block_at(next)?
-                .ok_or_else(|| error("peer omitted advertised block"))?;
-            if block.name != "mmx.Block"
-                || number(&block, "height")? != next
-                || hash(&block, "prev")? != expected
-            {
-                return Err(error("peer changed branch or returned wrong block"));
+            let count = (target - next + 1)
+                .min(4)
+                .min(16 - batch.len() as u32)
+                .min(limit - next + 1);
+            let blocks = source.blocks_at(next, count)?;
+            if blocks.len() != count as usize {
+                return Err(error("peer omitted advertised block window"));
             }
-            expected = hash(&block, "hash")?;
-            size += block.encode()?.len();
-            batch.push(block);
-            next = next
-                .checked_add(1)
-                .ok_or_else(|| error("sync height overflow"))?;
+            for block in blocks {
+                let block = block.ok_or_else(|| error("peer omitted advertised block"))?;
+                if !mmx_execution::chain::sync::allows_timestamp(
+                    match block.field("time_stamp")? {
+                        mmx_consensus::Value::Int(t) => *t,
+                        _ => return Err(error("invalid signed block timestamp")),
+                    },
+                    vnx::util::get_wall_time_millis(),
+                    interval,
+                    100,
+                ) {
+                    return Err(error("peer block is too far in the future"));
+                }
+                if block.name != "mmx.Block"
+                    || number(&block, "height")? != next
+                    || hash(&block, "prev")? != expected
+                {
+                    return Err(error("peer changed branch or returned wrong block"));
+                }
+                expected = hash(&block, "hash")?;
+                size += block.encode()?.len();
+                batch.push(block);
+                next = next
+                    .checked_add(1)
+                    .ok_or_else(|| error("sync height overflow"))?;
+            }
         }
         let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
         if local.synced {
             return Err(error("historical download requested after live transition"));
         }
-        if progress.downloaded == 0 {
-            local.root = local.root.min(common);
-        }
-        for block in &batch {
-            local.chain.admit(block, &[])?;
-        }
+        local.chain.admit_blocks(&batch)?;
         local.sync_pos = next;
         let result = local.update()?;
         if batch
@@ -146,6 +185,7 @@ pub fn synchronize(
     let remote = source
         .hash_at(target)?
         .ok_or_else(|| error("peer lost tip"))?;
+    let current_target = source.height()?;
     let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
     // Restart loses transient native proof flags. Rebuild the selected window
     // in sync mode even when no new block needed downloading before going live.
@@ -156,7 +196,7 @@ pub fn synchronize(
         .tip()?
         .ok_or_else(|| error("missing selected tip"))?;
     progress.selected = selected.height;
-    if selected.height == target && selected.hash.0 == remote {
+    if current_target == target && selected.height == target && selected.hash.0 == remote {
         local.synced = true;
         local.update()?;
     }

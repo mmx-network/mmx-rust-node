@@ -11,6 +11,3 @@ thiserror.workspace = true
 crc32fast.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

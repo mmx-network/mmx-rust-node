@@ -168,34 +168,73 @@ impl Client {
         })
     }
     pub fn call(&mut self, method: Record) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        let expected = format!("{}.return", method.name);
-        self.connection.send(&record(
-            "mmx.Request",
-            [
-                ("id".into(), Value::Uint(id.into())),
-                ("method".into(), Value::Record(method)),
-            ],
-        ))?;
+        self.call_many(vec![method])?
+            .pop()
+            .ok_or_else(|| error("missing peer result"))
+    }
+    fn call_many(&mut self, methods: Vec<Record>) -> Result<Vec<Value>> {
+        let mut pending = std::collections::BTreeMap::new();
+        let mut results = vec![None; methods.len()];
+        for (index, method) in methods.into_iter().enumerate() {
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            pending.insert(id, (index, format!("{}.return", method.name)));
+            self.connection.send(&record(
+                "mmx.Request",
+                [
+                    ("id".into(), Value::Uint(id.into())),
+                    ("method".into(), Value::Record(method)),
+                ],
+            ))?;
+        }
         let end = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < end {
+        while !pending.is_empty() && Instant::now() < end {
             let Some(message) = self.connection.receive(Duration::from_millis(500))? else {
                 continue;
             };
             if message.name == "mmx.Return" {
-                if number(&message, "id")? != id {
+                let Some((index, expected)) = pending.remove(&number(&message, "id")?) else {
                     continue;
-                }
+                };
                 let result = message.field("result")?.record()?;
                 if result.name != expected {
                     return Err(error(format!("unexpected peer result: {}", result.name)));
                 }
-                return Ok(result.field("_ret_0")?.clone());
+                results[index] = Some(result.field("_ret_0")?.clone());
+            } else {
+                self.handle(&message)?;
             }
-            self.handle(&message)?;
         }
-        Err(error("peer request timed out"))
+        results
+            .into_iter()
+            .map(|v| v.ok_or_else(|| error("peer request timed out")))
+            .collect()
+    }
+    /// Four outstanding native requests avoid a full round trip per block
+    /// without filling a native peer's ten-MiB outbound queue.
+    pub fn blocks_at(&mut self, start: u32, count: u32) -> Result<Vec<Option<Record>>> {
+        if count > 4 {
+            return Err(error("peer request window exceeds four blocks"));
+        }
+        let methods = (0..count)
+            .map(|i| {
+                let height = start
+                    .checked_add(i)
+                    .ok_or_else(|| error("peer height overflow"))?;
+                Ok(record(
+                    "mmx.Node.get_block_at",
+                    [("height".into(), Value::Uint(height.into()))],
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.call_many(methods)?
+            .into_iter()
+            .map(|v| match v {
+                Value::Null => Ok(None),
+                Value::Record(b) => Ok(Some(b)),
+                _ => Err(error("invalid peer block result")),
+            })
+            .collect()
     }
     fn handle(&mut self, message: &Record) -> Result<()> {
         if message.name == "mmx.Request" {

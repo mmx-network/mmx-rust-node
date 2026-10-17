@@ -208,6 +208,15 @@ pub(crate) fn verify_history<H: mmx_consensus::transitions::history::HeaderSourc
     history: &H,
     points: Option<&[mmx_consensus::vdf::VerifiedPoint]>,
 ) -> Result<(), Rejected> {
+    verify_history_evidence(context, block, history, points, None)
+}
+pub(crate) fn verify_history_evidence<H: mmx_consensus::transitions::history::HeaderSource>(
+    context: &BlockContext,
+    block: &Record,
+    history: &H,
+    points: Option<&[mmx_consensus::vdf::VerifiedPoint]>,
+    evidence: Option<&mmx_consensus::transitions::VerifiedHeader>,
+) -> Result<(), Rejected> {
     let verification = (|| {
         // Reject unauthenticated headers before history resolution or CPU work.
         if !mmx_consensus::header::is_valid(block, &context.params)? {
@@ -222,7 +231,9 @@ pub(crate) fn verify_history<H: mmx_consensus::transitions::history::HeaderSourc
         if let Some(points) = points {
             mmx_consensus::vdf::link_block(block, &context.params, history, points)?;
         }
-        mmx_consensus::transitions::verify_header(block, &context.params, &proofs)?;
+        if !evidence.is_some_and(|e| e.matches(block, &context.params, &proofs)) {
+            mmx_consensus::transitions::verify_header(block, &context.params, &proofs)?;
+        }
         Ok::<_, ValidationError>(())
     })();
     verification.map_err(proof_rejection)

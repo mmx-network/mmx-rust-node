@@ -3,6 +3,11 @@
 use super::{invalid, ChainResult};
 use std::collections::BTreeSet;
 
+/// Native sync_result's strict filter over signed header/clock timestamps.
+pub fn allows_timestamp(stamp: i64, now_ms: i64, interval_ms: i64, max_future: u32) -> bool {
+    stamp < now_ms.wrapping_add(interval_ms.wrapping_mul(i64::from(max_future)))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Block {
     pub height: u32,

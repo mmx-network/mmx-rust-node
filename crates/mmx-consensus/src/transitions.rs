@@ -10,12 +10,54 @@ use mmx_types::mmx;
 use primitive_types::U256;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProofContext {
     pub parent: mmx::BlockHeader,
     pub iteration_counts: Vec<u64>,
     pub challenge: Hash,
     pub space_diff: u64,
+}
+/// Immutable space-work/transition evidence, bound to every header field,
+/// exact chain parameters and the complete resolved ancestry context. Header
+/// authentication, VDF linkage and full ledger validation remain separate gates.
+#[derive(Clone, Debug)]
+pub struct VerifiedHeader {
+    header: Record,
+    params: mmx::ChainParams,
+    context: ProofContext,
+}
+fn header_fields(record: &Record) -> Record {
+    Record {
+        name: record.name.clone(),
+        fields: record
+            .fields
+            .iter()
+            .filter(|(n, _)| n.as_str() != "tx_list")
+            .map(|(n, v)| (n.clone(), v.clone()))
+            .collect(),
+    }
+}
+impl VerifiedHeader {
+    pub fn matches(
+        &self,
+        record: &Record,
+        params: &mmx::ChainParams,
+        context: &ProofContext,
+    ) -> bool {
+        self.params == *params && self.context == *context && self.header == header_fields(record)
+    }
+}
+pub fn verify_evidence(
+    record: &Record,
+    params: &mmx::ChainParams,
+    context: &ProofContext,
+) -> ProofResult<VerifiedHeader> {
+    verify_header(record, params, context)?;
+    Ok(VerifiedHeader {
+        header: header_fields(record),
+        params: params.clone(),
+        context: context.clone(),
+    })
 }
 pub fn proof_chain(
     params: &mmx::ChainParams,

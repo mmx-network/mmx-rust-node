@@ -517,7 +517,7 @@ fn invalid_branch_body_is_excluded_without_reverting_selected_state() {
 }
 
 #[test]
-fn alternate_root_waits_for_work_and_backwards_sync_then_replays_the_deep_branch() {
+fn alternate_root_waits_for_live_work_and_backwards_sync_then_replays_without_old_pots() {
     use mmx_execution::chain::forks::ForkChain;
     let (g, steps) = synthetic();
     let deep = rows()
@@ -535,14 +535,14 @@ fn alternate_root_waits_for_work_and_backwards_sync_then_replays_the_deep_branch
     chain.update(block_hash(&g), None).unwrap();
     verify_step(chain.selected(), &steps[1]);
     chain.admit(&record(&deep[0]["block"]), &[]).unwrap();
-    retain(&mut chain, &deep[1]);
+    chain.admit(&record(&deep[1]["block"]), &[]).unwrap();
     let update = chain.update(block_hash(&steps[0]), None).unwrap();
     assert!(update.waiting.contains(&block_hash(&deep[1])));
     assert!(!update.invalid.contains(&block_hash(&deep[1])));
     verify_step(chain.selected(), &steps[1]);
     drop(chain);
     let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
-    retain(&mut chain, &deep[0]);
+    retain(&mut chain, &deep[1]);
     chain.update(block_hash(&steps[0]), Some(0)).unwrap();
     verify_step(chain.selected(), &steps[1]);
     let update = chain.update(block_hash(&steps[0]), None).unwrap();
@@ -869,4 +869,96 @@ fn historical_sync_checks_space_body_and_state_then_requires_vdf_for_new_live_bl
     retain(&mut forks, &steps[1]);
     forks.update_at(root, None, 2).unwrap();
     verify_step(forks.selected(), &steps[1]);
+}
+
+#[test]
+fn download_archive_batches_are_atomic_and_preserve_existing_work_and_first_records() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open_indexed(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    let mut bad = record(&steps[1]["block"]);
+    bad.fields.insert(
+        "content_hash".into(),
+        mmx_consensus::Value::Bytes(vec![0; 32]),
+    );
+    assert!(chain
+        .admit_blocks(&[record(&steps[0]["block"]), bad])
+        .is_err());
+    assert!(chain.block(&block_hash(&steps[0])).unwrap().is_none());
+    verify_step(chain.selected(), &g);
+    retain(&mut chain, &steps[0]);
+    chain
+        .admit_blocks(&[
+            record(&steps[0]["block"]),
+            record(&steps[1]["block"]),
+            record(&steps[0]["block"]),
+        ])
+        .unwrap();
+    chain.update_at(block_hash(&g), None, 0).unwrap();
+    verify_step(chain.selected(), &steps[0]);
+    retain(&mut chain, &steps[1]);
+    chain.update_at(block_hash(&g), None, 1).unwrap();
+    verify_step(chain.selected(), &steps[1]);
+    drop(chain);
+    let mut chain = ForkChain::open_indexed(dir.path(), params(&g)).unwrap();
+    verify_step(chain.selected(), &steps[1]);
+    chain.rollback_to(0).unwrap();
+    chain.update_sync_at(block_hash(&g), None, 2).unwrap();
+    verify_step(chain.selected(), &steps[1]);
+}
+
+#[test]
+fn verified_header_evidence_binds_unhashed_fields_parameters_and_ancestry_context() {
+    use mmx_consensus::{
+        transitions::{self, ProofContext},
+        Value as V,
+    };
+    let (g, steps) = synthetic();
+    let p = params(&g);
+    let mut chain = ChainState::memory(p.clone());
+    chain.initialize(&assets(&g)).unwrap();
+    let block = record(&steps[0]["block"]);
+    let context = ProofContext::resolve(&block, &p, &chain).unwrap();
+    let evidence = transitions::verify_evidence(&block, &p, &context).unwrap();
+    assert!(evidence.matches(&block, &p, &context));
+    let mut changed = block.clone();
+    let mut proof_chain = changed
+        .field("proof_chain")
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .to_vec();
+    proof_chain[0] ^= 1;
+    changed
+        .fields
+        .insert("proof_chain".into(), V::Bytes(proof_chain));
+    // The first fixture block precedes hardfork2: proof_chain is not committed by
+    // its legacy header hash. Evidence still binds the exact field value.
+    assert_eq!(
+        mmx_consensus::header::calc_hash(&changed, &p).unwrap(),
+        mmx_consensus::header::calc_hash(&block, &p).unwrap()
+    );
+    assert!(!evidence.matches(&changed, &p, &context));
+    let mut other = p.clone();
+    other.network.push('x');
+    assert!(!evidence.matches(&block, &other, &context));
+    let mut ancestry = context.clone();
+    ancestry.iteration_counts[0] += 1;
+    assert!(!evidence.matches(&block, &p, &ancestry));
+    let mut ancestor = context.clone();
+    ancestor.parent.hash.0[0] ^= 1;
+    assert!(!evidence.matches(&block, &p, &ancestor));
+    let mut invalid = block.clone();
+    if let V::Sequence(proofs) = invalid.fields.get_mut("proof").unwrap() {
+        if let V::Record(proof) = &mut proofs[0] {
+            proof
+                .fields
+                .insert("difficulty".into(), V::Uint(context.space_diff + 1));
+        }
+    }
+    assert!(transitions::verify_evidence(&invalid, &p, &context).is_err());
+    assert!(!evidence.matches(&invalid, &p, &context));
+    assert!(evidence.matches(&block, &p, &context));
 }

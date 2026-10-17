@@ -44,6 +44,9 @@ pub struct ForkChain {
     sync_verified: BTreeSet<Hash>,
     verified: BTreeMap<Hash, Vec<vdf::VerifiedPoint>>,
     verified_work: BTreeMap<Hash, vdf::VerifiedPoint>,
+    evidence: BTreeMap<Hash, transitions::VerifiedHeader>,
+    connected: BTreeSet<Hash>,
+    tip_limit: Option<u32>,
     headers: super::cache::Headers,
 }
 impl ForkChain {
@@ -55,6 +58,9 @@ impl ForkChain {
             sync_verified: BTreeSet::new(),
             verified: BTreeMap::new(),
             verified_work: BTreeMap::new(),
+            evidence: BTreeMap::new(),
+            connected: BTreeSet::new(),
+            tip_limit: None,
             headers: Default::default(),
         }
     }
@@ -78,6 +84,9 @@ impl ForkChain {
             sync_verified: BTreeSet::new(),
             verified: BTreeMap::new(),
             verified_work: BTreeMap::new(),
+            evidence: BTreeMap::new(),
+            connected: BTreeSet::new(),
+            tip_limit: None,
             headers: Default::default(),
         };
         if chain.archive.version() != 0
@@ -117,11 +126,35 @@ impl ForkChain {
             self.sync_verified.clear();
             self.verified.clear();
             self.verified_work.clear();
+            self.evidence.clear();
+            self.connected.clear();
         }
         Ok(())
     }
     pub fn vote_count(&self, block: &Hash) -> u32 {
         self.voting.count(block)
+    }
+    /// Bound the active download view without pruning any archived branch.
+    pub fn set_tip_limit(&mut self, height: Option<u32>) {
+        self.tip_limit = height;
+    }
+    pub fn verified_vdf_inputs(&self, root_height: u32) -> ChainResult<Vec<Hash>> {
+        self.connected
+            .iter()
+            .filter_map(|hash| {
+                let header = cached_header(&self.archive, &self.headers, hash);
+                match header {
+                    Ok(Some(h))
+                        if h.height > root_height
+                            && self.tip_limit.is_none_or(|limit| h.height <= limit) =>
+                    {
+                        Some(Ok(h.vdf_output.0))
+                    }
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .collect()
     }
     pub fn set_vote_history_limit(&mut self, max_history: u32) {
         self.voting.set_history_limit(max_history);
@@ -153,17 +186,9 @@ impl ForkChain {
         Ok(())
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
-        self.archive
-            .get("fork_blocks", hash, None)?
-            .map(|b| {
-                let block = Record::decode(&b)?;
-                if bytes::<32>(block.field("hash")?)? != *hash || block.name != "mmx.Block" {
-                    return Err(invalid("fork archive key mismatch"));
-                }
-                Ok(block)
-            })
-            .transpose()
+        archive_block(&self.archive, hash)
     }
+
     pub fn initialize(&mut self, assets: &genesis::Assets) -> ChainResult<block::Receipt> {
         if self.chain.tip()?.is_some() {
             return Err(invalid("chain already initialized"));
@@ -199,6 +224,45 @@ impl ForkChain {
             vdf::authenticate(proof)?;
         }
         self.retain(block, proofs)
+    }
+    /// Atomically retain a historical download window with no attached PoTs.
+    /// First-record and height/arrival ordering match sequential admission.
+    pub fn admit_blocks(&mut self, blocks: &[Record]) -> ChainResult<()> {
+        if self.chain.tip()?.is_none() {
+            return Err(invalid("chain is not initialized"));
+        }
+        let mut writes = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut arrival = self.archive.version();
+        for block in blocks {
+            let height = uint(block, "height")? as u32;
+            if height == 0 {
+                return Err(invalid("cannot admit another genesis"));
+            }
+            block::prevalidate(block, self.chain.params())?;
+            let hash = bytes::<32>(block.field("hash")?)?;
+            if !seen.insert(hash) || self.archive.get("fork_blocks", &hash, None)?.is_some() {
+                continue;
+            }
+            let key = [height.to_be_bytes(), arrival.to_be_bytes()].concat();
+            arrival = arrival
+                .checked_add(1)
+                .ok_or_else(|| invalid("fork archive version limit"))?;
+            writes.extend([
+                Write::put("fork_order", key, hash),
+                Write::put("fork_work", hash, pack(&[])?),
+                Write::put("fork_blocks", hash, block.encode()?),
+                Write::put(
+                    "fork_headers",
+                    hash,
+                    header(block)?.encode(&mmx_types::vnx_registry()?)?,
+                ),
+            ]);
+        }
+        if !writes.is_empty() {
+            self.archive.commit_batch(arrival, writes)?;
+        }
+        Ok(())
     }
     fn retain(&mut self, block: &Record, proofs: &[Record]) -> ChainResult<()> {
         let hash = bytes::<32>(block.field("hash")?)?;
@@ -258,6 +322,10 @@ impl ForkChain {
         unpack(&data)
     }
     fn entries(&self, root_height: u32) -> ChainResult<Vec<Entry>> {
+        let end = self
+            .tip_limit
+            .and_then(|h| h.checked_add(1))
+            .map(|h| [h.to_be_bytes(), 0u32.to_be_bytes()].concat());
         self.archive
             .scan_range(
                 "fork_order",
@@ -266,7 +334,7 @@ impl ForkChain {
                     0u32.to_be_bytes(),
                 ]
                 .concat(),
-                None,
+                end.as_deref(),
                 None,
             )?
             .into_iter()
@@ -342,6 +410,8 @@ impl ForkChain {
             cache: &self.headers,
         };
         self.verified.retain(|hash, _| headers.contains_key(hash));
+        self.evidence.retain(|hash, _| headers.contains_key(hash));
+        self.sync_verified.retain(|hash| headers.contains_key(hash));
         let mut out = Update::default();
         let mut candidates = Vec::new();
         let mut points = BTreeMap::new();
@@ -357,16 +427,20 @@ impl ForkChain {
                 points.insert(h.hash.0, work.clone());
             } else {
                 if let Some(parent) = history.get_header(&h.prev.0)? {
-                    let work: Vec<_> = entry
-                        .proofs
-                        .iter()
-                        .filter_map(|p| {
-                            self.verified_work
-                                .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
-                                .cloned()
-                                .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
-                        })
-                        .collect();
+                    let work: Vec<_> = if mode == ValidationMode::HistoricalSync {
+                        vec![]
+                    } else {
+                        entry
+                            .proofs
+                            .iter()
+                            .filter_map(|p| {
+                                self.verified_work
+                                    .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
+                                    .cloned()
+                                    .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
+                            })
+                            .collect()
+                    };
                     if mode == ValidationMode::HistoricalSync
                         || self.sync_verified.contains(&h.hash.0)
                         || vdf::link_block(&entry.block, self.chain.params(), &history, &work)
@@ -377,21 +451,24 @@ impl ForkChain {
                             self.chain.params(),
                             &history,
                         ) {
-                            if context.parent != parent
-                                || transitions::verify_header(
+                            if context.parent != parent {
+                                bad = true;
+                            } else {
+                                match transitions::verify_evidence(
                                     &entry.block,
                                     self.chain.params(),
                                     &context,
-                                )
-                                .is_err()
-                            {
-                                bad = true;
-                            } else {
-                                verified = true;
-                                if mode == ValidationMode::HistoricalSync {
-                                    self.sync_verified.insert(h.hash.0);
+                                ) {
+                                    Err(_) => bad = true,
+                                    Ok(evidence) => {
+                                        verified = true;
+                                        self.evidence.insert(h.hash.0, evidence);
+                                        if mode == ValidationMode::HistoricalSync {
+                                            self.sync_verified.insert(h.hash.0);
+                                        }
+                                        points.insert(h.hash.0, work);
+                                    }
                                 }
-                                points.insert(h.hash.0, work);
                             }
                         }
                     }
@@ -428,6 +505,12 @@ impl ForkChain {
         self.persist_invalid(&out.invalid)?;
         loop {
             let selection = choice::select(root_header.height, root, sync_pending, &candidates);
+            self.connected = selection
+                .states
+                .iter()
+                .filter(|(_, s)| s.all_proofs_verified)
+                .map(|(hash, _)| *hash)
+                .collect();
             out.best = selection.best;
             for (hash, state) in selection.states {
                 if state.invalid {
@@ -440,59 +523,33 @@ impl ForkChain {
                 return Ok(out);
             }
             let (common, line) = self.line(best)?;
-            let mut branch = Vec::new();
-            let mut missing_work = false;
-            for block in line {
-                let history = History {
-                    headers: &headers,
-                    archive: &self.archive,
-                    cache: &self.headers,
-                };
-                let hash = bytes::<32>(block.field("hash")?)?;
-                // Deep forks can include archived blocks at/below the root;
-                // their work is reverified and their complete bodies replayed.
-                let work = if let Some(work) = points.get(&hash) {
-                    work.clone()
-                } else {
-                    self.work(&hash)?
-                        .iter()
-                        .filter_map(|p| {
-                            self.verified_work
-                                .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
-                                .cloned()
-                                .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
-                        })
-                        .collect()
-                };
-                let validation = if self.sync_verified.contains(&hash) {
+            let archive = &self.archive;
+            let sync_verified = &self.sync_verified;
+            let evidence = &self.evidence;
+            let branch = line.iter().map(|hash| {
+                let block =
+                    archive_block(archive, hash)?.ok_or_else(|| invalid("missing replay block"))?;
+                // Native fork_to re-verifies space proofs and bodies below a
+                // replacement root without requiring historical PoTs. New live
+                // blocks above the root still require verified VDF evidence.
+                let validation = if uint(&block, "height")? <= u64::from(root_header.height)
+                    || sync_verified.contains(hash)
+                {
                     ValidationMode::HistoricalSync
                 } else {
                     mode
                 };
-                if validation == ValidationMode::Live
-                    && vdf::link_block(&block, self.chain.params(), &history, &work).is_err()
-                {
-                    missing_work = true;
-                    break;
-                }
-                branch.push((block, work, validation));
-            }
-            if missing_work {
-                out.waiting.insert(best);
-                candidates
-                    .iter_mut()
-                    .find(|c| c.hash == best)
-                    .expect("selected candidate")
-                    .proof_verified = false;
-                continue;
-            }
-            match self.chain.reorganize_mixed(common.height + 1, &branch) {
+                let work = points.get(hash).cloned().unwrap_or_default();
+                let evidence = evidence.get(hash).cloned();
+                Ok((block, work, validation, evidence))
+            });
+            match self
+                .chain
+                .reorganize_stream(common.height + 1, branch, false)
+            {
                 Ok(_) => {
                     out.common_ancestor = Some(common.hash.0);
-                    out.applied = branch
-                        .iter()
-                        .map(|(block, _, _)| bytes(block.field("hash").expect("validated hash")))
-                        .collect::<Result<_, _>>()?;
+                    out.applied = line;
                     return Ok(out);
                 }
                 Err(ChainError::Block(error)) if consensus_rejection(&error.error) => {
@@ -520,15 +577,13 @@ impl ForkChain {
         }
         Ok(())
     }
-    fn line(&self, hash: Hash) -> ChainResult<(mmx::BlockHeader, Vec<Record>)> {
+    fn line(&self, hash: Hash) -> ChainResult<(mmx::BlockHeader, Vec<Hash>)> {
         let mut current = hash;
         let mut line = Vec::new();
         let mut expected = None;
         loop {
-            let block = self
-                .block(&current)?
+            let h = cached_header(&self.archive, &self.headers, &current)?
                 .ok_or_else(|| invalid("missing fork ancestor"))?;
-            let h = header(&block)?;
             if expected.is_some_and(|height| height != h.height) {
                 return Err(invalid("fork ancestor height mismatch"));
             }
@@ -541,8 +596,8 @@ impl ForkChain {
                     .checked_sub(1)
                     .ok_or_else(|| invalid("foreign fork genesis"))?,
             );
+            line.push(current);
             current = h.prev.0;
-            line.push(block);
         }
     }
 }
@@ -574,6 +629,19 @@ impl HeaderSource for ForkChain {
             .map_err(|e| ProofError::Invalid(e.to_string()))
     }
 }
+fn archive_block(archive: &Database, hash: &Hash) -> ChainResult<Option<Record>> {
+    archive
+        .get("fork_blocks", hash, None)?
+        .map(|b| {
+            let block = Record::decode(&b)?;
+            if block.name != "mmx.Block" || bytes::<32>(block.field("hash")?)? != *hash {
+                return Err(invalid("fork archive key mismatch"));
+            }
+            Ok(block)
+        })
+        .transpose()
+}
+
 fn cached_header(
     archive: &Database,
     cache: &super::cache::Headers,
@@ -601,9 +669,15 @@ fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::Bl
         .transpose()
 }
 fn header(block: &Record) -> ChainResult<mmx::BlockHeader> {
-    let mut header = block.clone();
-    header.name = "mmx.BlockHeader".into();
-    header.fields.remove("tx_list");
+    let header = Record {
+        name: "mmx.BlockHeader".into(),
+        fields: block
+            .fields
+            .iter()
+            .filter(|(name, _)| name.as_str() != "tx_list")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
     Ok(mmx::BlockHeader::decode(&header.encode()?)?)
 }
 fn pack(values: &[Vec<u8>]) -> ChainResult<Vec<u8>> {

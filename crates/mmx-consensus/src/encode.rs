@@ -1,7 +1,7 @@
 use crate::{hash::registry, input, Error, Record, Result, Value};
 use vnx::{binary::Writer, code::Code, TypeCode};
 
-struct Encoder(Vec<u8>);
+struct Encoder(Vec<u8>, std::collections::BTreeSet<u64>);
 impl Encoder {
     fn record(&mut self, record: &Record, header: bool, depth: usize) -> Result<()> {
         if depth > 512 {
@@ -9,9 +9,14 @@ impl Encoder {
         }
         let schema = registry().by_name(&record.name)?;
         if header {
-            let mut writer = Writer::new(Vec::new(), registry().clone());
-            writer.write_type_code(schema)?;
-            self.0.extend(writer.into_inner());
+            // A native stream declares each dynamic class once. Repeating the
+            // schema for every transaction can make a valid block exceed an
+            // operational wire/database limit solely through metadata overhead.
+            if self.1.insert(schema.code_hash) {
+                let mut writer = Writer::new(Vec::new(), registry().clone());
+                writer.write_type_code(schema)?;
+                self.0.extend(writer.into_inner());
+            }
             self.0.extend(15u16.to_le_bytes());
             self.0.extend(schema.code_hash.to_le_bytes());
         }
@@ -201,7 +206,7 @@ impl Encoder {
     }
 }
 pub(crate) fn encode(record: &Record) -> Result<Vec<u8>> {
-    let mut encoder = Encoder(Vec::new());
+    let mut encoder = Encoder(Vec::new(), Default::default());
     encoder.record(record, true, 0)?;
     Ok(encoder.0)
 }

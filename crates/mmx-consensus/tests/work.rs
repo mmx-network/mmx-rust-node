@@ -305,3 +305,31 @@ fn native_memory_hash_space_work_header_transitions_and_ancestor_lookup() {
         ])
     );
 }
+
+#[test]
+fn proof_recomputation_is_identical_with_one_or_four_workers() {
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let four = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let mut count = 0;
+    for text in include_str!("fixtures/work.jsonl").lines() {
+        let r: Value = serde_json::from_str(text).unwrap();
+        if r["kind"] != "compute" {
+            continue;
+        }
+        let input = xs(&r["xs"]);
+        let id = hash(&r["id"]);
+        let k = r["ksize"].as_u64().unwrap() as u8;
+        let a = one.install(|| pos::compute(&input, &id, k));
+        let b = four.install(|| pos::compute(&input, &id, k));
+        assert_eq!(a, b);
+        assert_eq!(a.is_ok(), r["result"] == "OK");
+        count += 1;
+    }
+    assert_eq!(count, 4);
+}

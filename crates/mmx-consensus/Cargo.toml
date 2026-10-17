@@ -13,6 +13,7 @@ vnx.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 primitive-types.workspace = true
+rayon = "1.11"
 
 [dev-dependencies]
 mmx-vm.workspace = true
