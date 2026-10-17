@@ -63,6 +63,7 @@ impl<'a, S: Storage> Overlay<'a, S> {
                 .map(|(a, c)| (*a, c.clone()))
                 .collect(),
             transactions: Vec::new(),
+            supplies: Vec::new(),
         }
     }
 }
@@ -72,6 +73,24 @@ pub(crate) struct Shared<'a, S>(pub Rc<RefCell<Overlay<'a, S>>>);
 impl<S> Clone for Shared<'_, S> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
+    }
+}
+impl<S: Storage> Shared<'_, S> {
+    /// Carry VM effects between block transactions. Chain contracts and indexes
+    /// remain at the original snapshot until the complete block is published.
+    pub(crate) fn absorb_vm(&mut self, batch: &TransactionBatch) -> storage::Result<()> {
+        let mut groups = BTreeMap::<Address, Vec<StorageWrite>>::new();
+        for (contract, write) in &batch.writes {
+            groups.entry(*contract).or_default().push(write.clone());
+        }
+        for (contract, writes) in groups {
+            self.apply(&contract, &writes)?;
+        }
+        let state = self.0.borrow();
+        for balance in &batch.balances {
+            state.set_balance(balance.contract, balance.currency, balance.amount);
+        }
+        Ok(())
     }
 }
 impl<S: Storage> Storage for Shared<'_, S> {

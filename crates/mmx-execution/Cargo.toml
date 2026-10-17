@@ -11,6 +11,7 @@ mmx-vm.workspace = true
 mmx-types.workspace = true
 mmx-consensus.workspace = true
 thiserror.workspace = true
+sha2.workspace = true
 vnx.workspace = true
 
 [dev-dependencies]

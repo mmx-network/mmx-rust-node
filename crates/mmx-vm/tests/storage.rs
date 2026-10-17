@@ -207,6 +207,7 @@ fn transaction_batch_validates_every_contract_before_publishing_any_table() {
                 contract_read_cost: 48,
             },
         )],
+        supplies: vec![([3; 32], 99)],
         contracts: vec![(
             [4; 32],
             ContractData {
@@ -220,6 +221,7 @@ fn transaction_batch_validates_every_contract_before_publishing_any_table() {
     assert_eq!(db.get_balance(&[1; 32], &[3; 32]).unwrap(), None);
     assert_eq!(db.get_contract(&[4; 32]).unwrap(), None);
     assert_eq!(db.get_transaction_index(&[5; 32]).unwrap(), None);
+    assert_eq!(db.get_total_supply(&[3; 32]).unwrap(), None);
     assert_eq!(
         db.read(&[9; 32], MEM_STATIC, None).unwrap().unwrap().value,
         Value::from(73u64)

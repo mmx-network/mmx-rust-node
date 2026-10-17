@@ -52,11 +52,12 @@ pub struct TransactionBatch {
     pub balances: Vec<BalanceWrite>,
     pub contracts: Vec<(Address, ContractData)>,
     pub transactions: Vec<(Address, TransactionIndex)>,
+    pub supplies: Vec<(Address, u128)>,
 }
 
 pub trait AtomicStorage: Storage {
-    /// All state, contracts, balances and transaction indexes publish together,
-    /// or none of them do. Every field of the batch must be applied.
+    /// All state, contracts, balances, indexes and supply counters publish
+    /// together, or none of them do. Every batch field must be applied.
     fn apply_transaction(&mut self, batch: &TransactionBatch) -> Result<()>;
 }
 
@@ -65,7 +66,13 @@ pub trait AtomicStorage: Storage {
 /// in the same atomic batch. VM-only backends need not implement this trait.
 pub trait LedgerStorage: AtomicStorage {}
 
+/// Block settlement additionally reads and atomically publishes total supply.
+pub trait BlockStorage: LedgerStorage {}
+
 pub trait Storage {
+    fn get_total_supply(&self, _currency: &Address) -> Result<Option<u128>> {
+        Err(Error::Invalid("supply queries unsupported by this backend"))
+    }
     fn get_transaction_index(&self, _id: &Address) -> Result<Option<TransactionIndex>> {
         Ok(None)
     }
@@ -197,6 +204,18 @@ impl StorageDb {
 }
 
 impl Storage for StorageDb {
+    fn get_total_supply(&self, currency: &Address) -> Result<Option<u128>> {
+        self.database
+            .get("total_supply", currency, None)
+            .map(|bytes| {
+                Ok(u128::from_le_bytes(
+                    bytes
+                        .try_into()
+                        .map_err(|_| Error::Invalid("supply length"))?,
+                ))
+            })
+            .transpose()
+    }
     fn get_transaction_index(&self, id: &Address) -> Result<Option<TransactionIndex>> {
         self.database
             .get("transactions", id, None)
@@ -306,11 +325,15 @@ impl AtomicStorage for StorageDb {
             bytes.extend(index.contract_read_cost.to_le_bytes());
             batch.push(Write::put("transactions", id, bytes));
         }
+        for (currency, amount) in &transaction.supplies {
+            batch.push(Write::put("total_supply", currency, amount.to_le_bytes()));
+        }
         self.database.apply(batch)?;
         Ok(())
     }
 }
 impl LedgerStorage for StorageDb {}
+impl BlockStorage for StorageDb {}
 
 fn balance_key(contract: &Address, currency: &Address) -> Vec<u8> {
     contract.iter().chain(currency).copied().collect()

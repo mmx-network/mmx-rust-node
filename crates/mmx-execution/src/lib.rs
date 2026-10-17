@@ -1,7 +1,9 @@
-//! Contract execution and single-transaction validation with atomic settlement.
+//! Contract execution, transaction and block-body validation with atomic settlement.
 //! The invocation API accepts authenticated, funded calls. The `transaction`
-//! module combines native hashing, authorization, balances, fees and execution;
-//! block validation and chain selection remain outside this crate.
+//! module combines native hashing, authorization, balances, fees and execution.
+//! The `block` module adds reservations, shared VM state, ordering and economics.
+//! Header/proof verification and chain selection remain outside this crate.
+pub mod block;
 mod contracts;
 mod overlay;
 pub mod transaction;

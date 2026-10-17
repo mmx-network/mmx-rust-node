@@ -50,7 +50,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hash serialization, transaction IDs/content hashes, contract/operation/solution/result hashes, static validity, costs, PubKey/MultiSig authentication and transaction signature selection. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
-| `mmx-execution` | Contract loading/calls, constructors and metadata reads; complete single-transaction validation with authorization, balances, fees, deposits, execution-result matching and deferred atomic settlement. |
+| `mmx-execution` | Contract loading/calls and constructors; transaction validation plus block-body commitments, reservations, shared execution, fee ordering, rewards/supply and deferred atomic settlement. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
 The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
@@ -171,10 +171,43 @@ contract record is absent. Error codes, addresses and operation indexes are
 enforced when matching results; diagnostic line/message fields retain the native
 consensus exemption.
 
-This is a single-transaction API. Whole-block reservations, transaction ordering,
-shared execution contexts across transactions, rewards/supply and archival indexes,
-block validation and chain selection remain to be ported. Sequentially committing
-transactions through this API does not implement native whole-block validation.
+Sequentially committing transactions through the single-transaction API does not
+implement native block validation. Use `mmx_execution::block::prepare()` for a
+post-genesis block body, after the chain layer verifies its header. `BlockContext`
+supplies the verified parent corresponding to the backend snapshot and the
+expected VDF payout. The body API checks parent linkage/height, transaction
+content hashes, the native binary-tree root, cost/fee/count commitments and
+limits, transaction activation, duplicate IDs, descending fee ratios and the
+size-dependent minimum fee tiers.
+
+Before execution, the body API reserves every transaction fee and successful
+transaction's explicit inputs against the original ledger snapshot. It computes
+native dependency locks and predecessor sets, then executes serially in block
+order, a valid schedule for the native dependency graph. VM state and spending
+caches carry forward between successful transactions. Authorization, explicit
+funding and contract metadata continue to read the chain snapshot: earlier block
+outputs cannot fund later validation or VM spending, and new deployments remain
+unavailable to other transactions until block application.
+
+`PreparedBlock::receipt()` exposes the validated results, execution plan, ordered
+block inputs/outputs and supply deltas. A rejected block publishes nothing,
+including earlier successful transactions. Dropping the preparation aborts it;
+commit publishes VM state, deployments, all settlement balances, transaction
+indexes and supply counters together. Settlement credits every block output,
+including VDF, farmer and project rewards, before applying clamped input debits.
+Native total-supply accounting clamps each currency's net issuance to zero
+before adding it to the persisted counter. `BlockStorage` requires supply queries
+and atomic publication in addition to the ledger capability; `StorageDb`
+implements it. The caller separately advances the database version.
+
+The body API checks reward activation, fee buffers, project address continuity,
+reward votes/adjustments, reward amounts and VDF payout cadence. Public
+`block::economics` helpers preserve native rounding/wrapping and select the VDF
+winner from authenticated ancestors, including tie-breaking with the oldest
+visited ancestor's proof hash. Header hashes/farmer signatures, proof/VDF and
+difficulty/timestamp verification, NFT reward-target resolution, archival indexes,
+genesis initialization and chain selection remain to be ported. A successful body
+validation is not a complete block acceptance decision.
 
 `mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
 conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
@@ -348,6 +381,17 @@ Additional tests cover prepare/abort, durable commit, reopen, duplicate checks a
 rollback of transaction indexes. Consensus fixtures also round-trip losslessly
 through the byte-preserving VNX encoder.
 
+Block processing adds **114 native block comparisons**, **468 economic cases**
+and **80 VDF winner cases**. The oracle compiles the original block validator,
+dependency preparation and transaction methods with serial task scheduling.
+Cases compare reservations, dependency/predecessor sets, shared state/spending,
+child rollback, deposits, deployment visibility, forged isolated-state results,
+fee tiers, body commitments, rewards, every VM write, ordered inputs/outputs,
+settled balances and supply counters. Arithmetic cases include 64-bit wrapping,
+fee rounding, vote thresholds and reward bounds. VDF cases cover counts, ties,
+the oldest hash salt and short history. Durable tests cover whole-block abort,
+reopen, index/supply rollback and preservation of pre-existing pending writes.
+
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
 transactions/contracts, and call a generated MMX client through the VNX runtime.
@@ -364,6 +408,7 @@ python3 tools/generate_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_consensus_fixtures.py --source ~/workspace/mmx-node
 # Optional: --suite hashes or --suite authorization
 python3 tools/generate_transaction_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_block_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -373,8 +418,9 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Whole-block transaction reservations/execution, ordering, rewards/supply,
-   archival indexes and block validation, building on single-transaction validation.
+1. Header hashing/authentication, proof/VDF and difficulty validation, NFT reward
+   targets, genesis, archival indexes and durable chain-state application/reorgs,
+   building on block-body validation and atomic settlement.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.

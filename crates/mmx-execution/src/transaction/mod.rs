@@ -133,8 +133,13 @@ pub fn prepare<'a, S: LedgerStorage>(
 ) -> std::result::Result<PreparedTransaction<'a, S>, Rejected> {
     let mut info = ErrorInfo::default();
     let mut cost = 0;
-    let (result, batch) =
-        build(&*storage, context, tx, &mut info, &mut cost).map_err(|error| Rejected {
+    let (result, batch) = build(&*storage, &*storage, context, tx, &mut info, &mut cost)
+        .and_then(|(result, mut batch)| {
+            let sender = bytes(tx.field("sender")?.optional()?.expect("sender validated"))?;
+            batch.balances = settle(&*storage, tx, &result, sender)?;
+            Ok((result, batch))
+        })
+        .map_err(|error| Rejected {
             error,
             info,
             total_cost: cost,
@@ -154,19 +159,19 @@ fn dynamic(message: &str) -> ValidationError {
 fn malformed(message: &str) -> ValidationError {
     mmx_consensus::Error::Input(message.into()).into()
 }
-fn bytes<const L: usize>(v: &N) -> std::result::Result<[u8; L], ValidationError> {
+pub(crate) fn bytes<const L: usize>(v: &N) -> std::result::Result<[u8; L], ValidationError> {
     v.bytes()?.try_into().map_err(|_| malformed("byte length"))
 }
-fn uint(r: &Record, name: &str) -> std::result::Result<u64, ValidationError> {
+pub(crate) fn uint(r: &Record, name: &str) -> std::result::Result<u64, ValidationError> {
     Ok(r.field(name)?.uint()?)
 }
-fn optional_record(v: &N) -> std::result::Result<Option<&Record>, ValidationError> {
+pub(crate) fn optional_record(v: &N) -> std::result::Result<Option<&Record>, ValidationError> {
     Ok(v.optional()?.map(N::record).transpose()?)
 }
 fn amount(r: &Record) -> std::result::Result<u128, ValidationError> {
     Ok(u128::from_le_bytes(bytes(r.field("amount")?)?))
 }
-fn io(r: &Record) -> std::result::Result<Output, ValidationError> {
+pub(crate) fn io(r: &Record) -> std::result::Result<Output, ValidationError> {
     Ok(Output {
         address: bytes(r.field("address")?)?,
         contract: bytes(r.field("contract")?)?,
@@ -245,8 +250,37 @@ impl<S: Storage> Balances<'_, S> {
         Ok(self.values.get_mut(&key))
     }
 }
-fn build<S: Storage>(
+pub(crate) fn locks<S: Storage>(
     storage: &S,
+    context: &TransactionContext,
+    tx: &Record,
+) -> std::result::Result<BTreeSet<Address>, ValidationError> {
+    let deployment = optional_record(tx.field("deploy")?)?
+        .map(|r| {
+            r.encode().map(|bytes| ContractData {
+                bytes,
+                read_cost: 0,
+            })
+        })
+        .transpose()?;
+    let ctx = Context {
+        txid: bytes(tx.field("id")?)?,
+        max_rcall_depth: context.params.max_rcall_depth,
+        max_rcall_width: context.params.max_rcall_width as usize,
+        deployment,
+        ..Default::default()
+    };
+    let calls = tx
+        .field("execute")?
+        .seq()?
+        .iter()
+        .map(|v| Ok(Invocation::new(bytes(v.record()?.field("address")?)?, b"")))
+        .collect::<std::result::Result<Vec<_>, ValidationError>>()?;
+    Ok(prepare_locks(storage, &ctx, &calls)?)
+}
+pub(crate) fn build<S: Storage, V: Storage>(
+    storage: &S,
+    execution: &V,
     context: &TransactionContext,
     tx: &Record,
     info: &mut ErrorInfo,
@@ -318,19 +352,13 @@ fn build<S: Storage>(
     // prepare_context is outside the native dynamic-failure handler. A bad
     // dependency graph rejects the transaction, rather than charging a failure.
     if exec_context.locked_contracts.is_none() {
-        let invocations = tx
-            .field("execute")?
-            .seq()?
-            .iter()
-            .map(|v| invocation(v.record()?))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        exec_context.locked_contracts = Some(prepare_locks(storage, &exec_context, &invocations)?);
+        exec_context.locked_contracts = Some(locks(storage, context, tx)?);
     }
     let mut receipt = Receipt {
         total_cost: *cost,
         ..Default::default()
     };
-    let shared = Shared(Rc::new(RefCell::new(Overlay::new(storage))));
+    let shared = Shared(Rc::new(RefCell::new(Overlay::new(execution))));
     let body = run(
         storage,
         context,
@@ -388,9 +416,6 @@ fn build<S: Storage>(
     } else {
         shared.0.borrow().batch()
     };
-    // VM debits are validation effects. Final balances follow block application:
-    // credit all outputs first, then clamp input/fee debits against the snapshot.
-    batch.balances = settle(storage, tx, &result, sender)?;
     batch.transactions.push((
         txid,
         TransactionIndex {
@@ -401,13 +426,13 @@ fn build<S: Storage>(
     Ok((result, batch))
 }
 #[allow(clippy::too_many_arguments)]
-fn run<S: Storage>(
+fn run<S: Storage, V: Storage>(
     storage: &S,
     context: &TransactionContext,
     tx: &Record,
     ctx: &Context,
     available: u64,
-    shared: &Shared<'_, S>,
+    shared: &Shared<'_, V>,
     balances: &mut Balances<'_, S>,
     receipt: &mut Receipt,
     info: &mut ErrorInfo,

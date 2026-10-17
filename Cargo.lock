@@ -550,6 +550,7 @@ dependencies = [
  "mmx-consensus",
  "mmx-types",
  "mmx-vm",
+ "sha2",
  "tempfile",
  "thiserror",
  "vnx",
