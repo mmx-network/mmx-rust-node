@@ -1,17 +1,18 @@
 //! MMX-specific contract VM. VNX serialization is maintained in `vnx-rust`.
 
+pub mod address;
 pub mod engine;
 pub mod instruction;
 pub mod storage;
 pub mod value;
 
-pub use engine::{Engine, Error, Result};
+pub use engine::{Engine, Error, Host, NoHost, Output, Result};
 pub use instruction::{Instruction, Opcode};
 pub use primitive_types::U256;
 pub use storage::{Storage, StorageDb};
 pub use value::{Value, Var};
 
-/// Raw contract address/hash bytes; Bech32 presentation belongs to the node layer.
+/// Raw contract address/hash bytes (little endian for address presentation).
 pub type Address = [u8; 32];
 
 pub const SEG_SIZE: u64 = 0x4000000;

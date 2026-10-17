@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/mmx-db", "crates/mmx-vm"]
+members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm"]
+exclude = ["vendor/vnx-rust"]
 resolver = "2"
 
 [workspace.package]
@@ -10,10 +11,14 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 mmx-db = { path = "crates/mmx-db" }
+mmx-types = { path = "crates/mmx-types" }
+vnx = { path = "vendor/vnx-rust/crates/vnx" }
+vnx-codegen = { path = "vendor/vnx-rust/crates/vnx-codegen" }
 thiserror = "2"
 crc32fast = "1.5"
 primitive-types = { version = "0.12", default-features = false, features = ["std"] }
 sha2 = "0.10"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 tempfile = "3"
 
 [profile.release]

@@ -1,0 +1,20 @@
+package mmx;
+
+class ProofOfSpaceOG extends ProofOfSpace {
+	
+	uchar ksize;
+	
+	hash_t seed;
+	
+	vector<uint> proof_xs;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash() const;
+	
+	hash_t calc_proof_hash() const;
+	
+	void validate() const;
+	
+}

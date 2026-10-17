@@ -1,0 +1,62 @@
+package vnx.addons;
+
+module HttpServer implements HttpComponent {
+	
+	vnx.TopicPtr output_request;			// HttpRequest
+	vnx.TopicPtr output_response;			// HttpResponse
+	
+	int port = 8080;
+	string host = "localhost";				// use "0.0.0.0" to listen on all interfaces
+	
+	bool non_blocking = true;				// if to send requests non-blocking (fail in case of overload)
+	bool show_info = false;					// if to show access info
+	bool show_warnings = false;				// if to show access failures
+	bool error_payload = true;				// if to enable error message replies (text/plain)
+	bool auto_session = false;				// if to create sessions automatically
+	bool allow_anon_login = false;			// if to allow anonymous sessions
+	bool enable_deflate = true;				// if to enable deflate compression
+	
+	int num_threads = 4;					// number of threads for compression etc
+	int session_size = 3;					// number of 64-bit values for session ids
+	int deflate_level = 6;					// deflate compression level
+	int max_connections = 100;				// -1 = infinite
+	int listen_queue_size = 100;
+	int stats_interval_ms = 10000;			// -1 = disable [ms]
+	int connection_timeout_ms = 30000;		// -1 = disable [ms]
+	
+	long session_timeout = 86400;			// (timeout < zero) = infinite [sec]
+	long max_payload_size = 16777216;		// -1 = unlimited [bytes]
+	long max_chunk_size = 1048576;			// maximum chunk size for chunked transfer encoding [bytes]
+	long min_compress_size = 4096;			// minimum payload size to consider compressing [bytes]
+	
+	set<string> do_compress;				// mime types to compress
+	
+	map<string, string> components;			// [url path => module name]
+	map<string, string> charset;			// [mime type => default charset]
+	
+	vector<pair<string, string>> add_headers;		// [key => value]
+	
+	map<string, string> token_map;					// for token based authentication [token => access_level]
+	
+	string default_access;							// default access role for anonymous clients
+	string cookie_policy = "SameSite=Strict;";		// See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie/
+	string session_coookie_name = "hsid";
+	string token_header_name = "x-api-token";
+	
+	
+	/* Possible GET/POST parameters:
+	 * - user (user name)
+	 * - passwd_hex (SHA256 hex string password)
+	 * - passwd_plain (plaintext password)
+	 * - redirect (redirect url)
+	 */
+	string login_path = "/login";
+	
+	string logout_path = "/logout";
+	
+	string session_path = "/session";
+	
+	
+	void handle(HttpChunk sample);
+	
+}

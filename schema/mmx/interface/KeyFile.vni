@@ -1,0 +1,9 @@
+package mmx;
+
+class KeyFile {
+	
+	hash_t seed_value;
+	
+	optional<string> finger_print;		// set if passphrase used
+	
+}

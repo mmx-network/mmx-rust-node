@@ -1,0 +1,5 @@
+package mmx;
+
+struct txout_t extends txio_t {
+	
+}

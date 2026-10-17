@@ -1,0 +1,30 @@
+package mmx;
+
+struct peer_info_t {
+	
+	ulong id;
+	
+	string address;
+	
+	node_type_e type;
+	
+	int ping_ms;
+	
+	uint height;
+	uint version;
+	
+	long recv_timeout_ms;			// delta since last reply [ms]
+	long connect_time_ms;			// how long peer is connected [ms]
+	
+	ulong bytes_send;
+	ulong bytes_recv;
+	
+	double pending_cost;
+	double compression_ratio;		// for send only
+	
+	bool is_synced;
+	bool is_paused;
+	bool is_blocked;
+	bool is_outbound;
+	
+}

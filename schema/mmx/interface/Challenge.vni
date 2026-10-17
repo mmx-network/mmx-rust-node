@@ -1,0 +1,11 @@
+package mmx;
+
+class Challenge {
+	
+	uint vdf_height;
+	
+	hash_t challenge;
+	
+	ulong difficulty;
+	
+}

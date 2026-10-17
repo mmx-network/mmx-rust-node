@@ -1,0 +1,24 @@
+package mmx;
+
+class ProofOfSpace {
+	
+	ushort score;
+	
+	hash_t plot_id;
+	
+	hash_t challenge;				// global challenge (not plot local)
+	
+	ulong difficulty;
+	
+	pubkey_t farmer_key;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash() const;
+	
+	hash_t calc_proof_hash() const;
+	
+	void validate() const;
+	
+}

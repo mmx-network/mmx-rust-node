@@ -1,0 +1,23 @@
+package mmx.contract;
+
+import mmx.hash_t;
+import mmx.addr_t;
+
+class TokenBase extends mmx.Contract {
+	
+	string name;
+	
+	string symbol;
+	
+	int decimals = 0;
+	
+	vnx.Variant meta_data;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash(bool full_hash, uint hash_version) const;
+	
+	ulong num_bytes() const;
+	
+}

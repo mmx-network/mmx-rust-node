@@ -1,0 +1,19 @@
+package mmx;
+
+struct account_t {
+	
+	uint index;
+	
+	uint num_addresses = 1;
+	
+	string name;
+	
+	string key_file;
+	
+	string finger_print;
+	
+	bool with_passphrase;
+	
+	bool is_hidden;
+	
+}

@@ -1,0 +1,40 @@
+package mmx.contract;
+
+import mmx.hash_t;
+import mmx.addr_t;
+import mmx.compile_flags_t;
+
+class Binary extends mmx.Contract {
+	
+	string name;
+	
+	map<string, uint> fields;
+	
+	map<string, method_t> methods;
+	
+	vector<uchar> constant;
+	
+	vector<uchar> binary;
+	
+	map<uint, uint> line_info;
+	
+	string source;
+	
+	string compiler;
+	
+	compile_flags_t build_flags;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash(bool full_hash, uint hash_version) const;
+	
+	ulong num_bytes() const;
+	
+	optional<uint> find_field(string name) const;
+	
+	optional<method_t> find_method(string name) const;
+	
+	optional<uint> find_line(uint address) const;
+	
+}

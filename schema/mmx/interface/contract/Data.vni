@@ -1,0 +1,17 @@
+package mmx.contract;
+
+import mmx.hash_t;
+import mmx.addr_t;
+
+class Data extends mmx.Contract {
+	
+	vnx.Variant value;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash(bool full_hash, uint hash_version) const;
+	
+	ulong num_bytes() const;
+	
+}

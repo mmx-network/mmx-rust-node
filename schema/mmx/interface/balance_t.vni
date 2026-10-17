@@ -1,0 +1,15 @@
+package mmx;
+
+struct balance_t {
+	
+	uint128 spendable;
+	
+	uint128 reserved;
+	
+	uint128 locked;
+	
+	uint128 total;
+	
+	bool is_validated;		// if token is in whitelist
+	
+}

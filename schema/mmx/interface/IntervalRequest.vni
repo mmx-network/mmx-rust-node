@@ -1,0 +1,14 @@
+package mmx;
+
+class IntervalRequest {
+	
+	uint vdf_height;
+	
+	ulong start;
+	ulong end;
+	
+	hash_t infuse;
+	
+	optional<hash_t> input;
+	
+}

@@ -1,0 +1,7 @@
+package mmx;
+
+class WalletFile {
+	
+	vector<addr_t> addresses;
+	
+}

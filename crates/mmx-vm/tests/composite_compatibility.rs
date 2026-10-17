@@ -2,7 +2,7 @@
 //! returned values, heap addresses, failure gas/codes/PCs, and persistence bytes.
 use mmx_vm::{
     storage::{self, StorageWrite},
-    Address, Engine, Error, Instruction, Opcode, Storage, StorageDb, Value, Var, MEM_EXTERN,
+    Address, Engine, Error, Host, Instruction, Opcode, Storage, StorageDb, Value, Var, MEM_EXTERN,
     MEM_HEAP, MEM_STACK, MEM_STATIC, U256,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
@@ -24,6 +24,9 @@ fn raw(value: Option<Value>) -> String {
 }
 
 impl Storage for Recorder {
+    fn get_balance(&self, c: &Address, currency: &Address) -> storage::Result<Option<u128>> {
+        self.0.borrow().storage.get_balance(c, currency)
+    }
     fn read(&self, c: &Address, a: u64, k: Option<u64>) -> storage::Result<Option<Var>> {
         self.0.borrow().storage.read(c, a, k)
     }
@@ -118,6 +121,17 @@ fn program(text: &str, aliases: &BTreeMap<String, u64>) -> Vec<Instruction> {
                 "SIZE" => Opcode::Size,
                 "TYPE" => Opcode::Type,
                 "FAIL" => Opcode::Fail,
+                "CONV" => Opcode::Conv,
+                "MEMCPY" => Opcode::Memcpy,
+                "SHA256" => Opcode::Sha256,
+                "VERIFY" => Opcode::Verify,
+                "LOG" => Opcode::Log,
+                "EVENT" => Opcode::Event,
+                "SEND" => Opcode::Send,
+                "MINT" => Opcode::Mint,
+                "BALANCE" => Opcode::Balance,
+                "RCALL" => Opcode::RemoteCall,
+                "CREAD" => Opcode::ContractRead,
                 _ => panic!("invalid test opcode: {}", f[0]),
             };
             let mut args = [0; 4];
@@ -129,13 +143,154 @@ fn program(text: &str, aliases: &BTreeMap<String, u64>) -> Vec<Instruction> {
         .collect()
 }
 
+#[derive(Default)]
+struct TestHost {
+    enabled: bool,
+    effects: String,
+}
+impl Host<Recorder> for TestHost {
+    fn logs_enabled(&self) -> bool {
+        self.enabled
+    }
+    fn events_enabled(&self) -> bool {
+        self.enabled
+    }
+    fn remote_calls_enabled(&self) -> bool {
+        self.enabled
+    }
+    fn contract_reads_enabled(&self) -> bool {
+        self.enabled
+    }
+    fn log(
+        &mut self,
+        _: &mut Engine<'_, Recorder>,
+        level: u32,
+        message: &[u8],
+    ) -> mmx_vm::Result<()> {
+        self.effects.push_str(&format!(
+            "L,{level},{};",
+            raw(Some(Value::String(message.to_vec())))
+        ));
+        Ok(())
+    }
+    fn event(
+        &mut self,
+        vm: &mut Engine<'_, Recorder>,
+        name: &[u8],
+        data: u64,
+    ) -> mmx_vm::Result<()> {
+        self.effects.push_str(&format!(
+            "E,{},{};",
+            raw(Some(Value::String(name.to_vec()))),
+            raw(vm.read(data)?)
+        ));
+        Ok(())
+    }
+    fn remote_call(
+        &mut self,
+        vm: &mut Engine<'_, Recorder>,
+        name: &[u8],
+        method: &[u8],
+        nargs: u32,
+    ) -> mmx_vm::Result<()> {
+        self.effects.push_str(&format!(
+            "R,{},{},{nargs};",
+            raw(Some(Value::String(name.to_vec()))),
+            raw(Some(Value::String(method.to_vec())))
+        ));
+        if method == b"fail" {
+            return Err(Error::State("host rejected call"));
+        }
+        let stack = vm.stack_address()?;
+        if nargs > 0 {
+            vm.copy(stack, stack + 1)?;
+        } else {
+            vm.write(stack, Value::from(42u64))?;
+        }
+        Ok(())
+    }
+    fn read_contract(
+        &mut self,
+        vm: &mut Engine<'_, Recorder>,
+        address: &Address,
+        field: &[u8],
+        dst: u64,
+    ) -> mmx_vm::Result<()> {
+        self.effects.push_str(&format!(
+            "C,{},{};",
+            raw(Some(Value::Binary(address.to_vec()))),
+            raw(Some(Value::String(field.to_vec())))
+        ));
+        vm.write(dst, Value::from(1337u64))
+    }
+}
+
 fn execute(
     vm: &mut Engine<'_, Recorder>,
     aliases: &mut BTreeMap<String, u64>,
     command: &str,
+    host: &mut TestHost,
+    state: &Rc<RefCell<State>>,
 ) -> Result<String, Error> {
     let f: Vec<_> = command.split(' ').collect();
     match f[0] {
+        "hooks" => host.enabled = f[1] == "1",
+        "balance" => {
+            let Value::Binary(currency) = value(f[1], aliases) else {
+                panic!("balance currency");
+            };
+            state.borrow_mut().storage.set_balance(
+                &[0; 32],
+                &currency.try_into().unwrap(),
+                f[2].parse().unwrap(),
+            )?;
+        }
+        "signature" => {
+            use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+            let mut secret = [0; 32];
+            secret[31] = 1;
+            let key = SigningKey::from_slice(&secret).unwrap();
+            let mut msg = [0; 32];
+            msg[0] = 42;
+            let sig: Signature = key.sign_prehash(&msg).unwrap();
+            vm.write(1, Value::Binary(msg.to_vec()))?;
+            vm.write(
+                2,
+                Value::Binary(
+                    key.verifying_key()
+                        .to_encoded_point(true)
+                        .as_bytes()
+                        .to_vec(),
+                ),
+            )?;
+            vm.write(3, Value::Binary(sig.to_bytes().to_vec()))?;
+            return Ok(format!(
+                "{},{},{}",
+                raw(vm.read(1)?),
+                raw(vm.read(2)?),
+                raw(vm.read(3)?)
+            ));
+        }
+        "effects" => {
+            let mut effects = host.effects.clone();
+            let (outputs, minted) = vm.outputs()?;
+            for (kind, values) in [("S", outputs), ("M", minted)] {
+                for out in values {
+                    effects.push_str(&format!(
+                        "{kind},{},{},{},{};",
+                        raw(Some(Value::Binary(out.contract.to_vec()))),
+                        raw(Some(Value::Binary(out.address.to_vec()))),
+                        out.amount,
+                        raw(out.memo.clone().map(Value::String))
+                    ));
+                }
+            }
+            return Ok(if effects.is_empty() {
+                "-".to_owned()
+            } else {
+                effects
+            });
+        }
         "init" => vm.init()?,
         "budget" => vm.gas_limit = vm.gas_used + address(f[1], aliases),
         "write" => vm.write(address(f[1], aliases), value(f[2], aliases))?,
@@ -180,7 +335,7 @@ fn execute(
             ))
         }
         "commit" => vm.commit()?,
-        "run" => vm.run(&program(f[1], aliases), 0)?,
+        "run" => vm.run_with_host(&program(f[1], aliases), 0, host)?,
         _ => panic!("invalid test command: {command}"),
     }
     Ok("-".to_owned())
@@ -195,11 +350,12 @@ fn check(
     state: &Rc<RefCell<State>>,
 ) {
     let context = format!("{}: {}", row[0], row[1]);
+    let diagnostic = format!("{result:?}");
     let actual = match result {
         Ok(value) => value,
         Err(_) => "ERR".to_owned(),
     };
-    assert_eq!(actual, row[2], "result {context}");
+    assert_eq!(actual, row[2], "result {context}: {diagnostic}");
     assert_eq!(gas.to_string(), row[3], "gas {context}");
     assert_eq!(code.to_string(), row[4], "error code {context}");
     assert_eq!(
@@ -231,6 +387,7 @@ fn scenario(rows: &[Vec<&str>]) {
             let mut recorder = Recorder(state.clone());
             let mut vm = Engine::new([0; 32], &mut recorder, f[1] == "1", 1, 1_000_000);
             check(row, Ok("-".to_owned()), 0, 0, None, &state);
+            let mut host = TestHost::default();
             cursor += 1;
             while cursor < rows.len()
                 && !["new", "durable", "revert"]
@@ -238,7 +395,7 @@ fn scenario(rows: &[Vec<&str>]) {
             {
                 let row = &rows[cursor];
                 state.borrow_mut().writes.clear();
-                let result = execute(&mut vm, &mut aliases, row[1]);
+                let result = execute(&mut vm, &mut aliases, row[1], &mut host, &state);
                 if result.is_err() && row[1] == "commit" {
                     assert!(
                         state.borrow().writes.is_empty(),
@@ -279,11 +436,20 @@ fn scenario(rows: &[Vec<&str>]) {
 
 #[test]
 fn composite_state_gas_and_failures_match_cpp() {
-    let rows: Vec<Vec<&str>> = include_str!("fixtures/composites.tsv")
+    replay(include_str!("fixtures/composites.tsv"));
+}
+
+#[test]
+fn feature_state_gas_and_failures_match_cpp() {
+    replay(include_str!("fixtures/features.tsv"));
+}
+
+fn replay(fixture: &str) {
+    let rows: Vec<Vec<&str>> = fixture
         .lines()
         .map(|line| line.split('\t').collect())
         .collect();
-    assert!(rows.len() > 1000);
+    assert!(!rows.is_empty());
     let mut start = 0;
     while start < rows.len() {
         let mut end = start + 1;

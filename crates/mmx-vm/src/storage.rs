@@ -29,6 +29,13 @@ pub struct StorageWrite {
 pub trait Storage {
     fn read(&self, contract: &Address, address: u64, key: Option<u64>) -> Result<Option<Var>>;
     fn lookup(&self, contract: &Address, value: &Value) -> Result<Option<u64>>;
+    /// Ledger snapshot supplied by the transaction executor. VM SEND debits
+    /// its private cache; publishing transfers belongs to that executor.
+    fn get_balance(&self, _contract: &Address, _currency: &Address) -> Result<Option<u128>> {
+        Err(Error::Invalid(
+            "balance queries unsupported by this backend",
+        ))
+    }
     /// Implementations must apply the entire batch or leave storage unchanged.
     fn apply(&mut self, contract: &Address, writes: &[StorageWrite]) -> Result<()>;
 }
@@ -53,6 +60,38 @@ impl StorageDb {
     }
     pub fn database_mut(&mut self) -> &mut Database {
         &mut self.database
+    }
+
+    pub fn set_balance(
+        &mut self,
+        contract: &Address,
+        currency: &Address,
+        amount: u128,
+    ) -> Result<()> {
+        self.database.insert(
+            "balances",
+            &balance_key(contract, currency),
+            &amount.to_le_bytes(),
+        )?;
+        Ok(())
+    }
+
+    pub fn balance_at(
+        &self,
+        contract: &Address,
+        currency: &Address,
+        height: Option<u32>,
+    ) -> Result<Option<u128>> {
+        self.database
+            .get("balances", &balance_key(contract, currency), height)
+            .map(|bytes| {
+                Ok(u128::from_le_bytes(
+                    bytes
+                        .try_into()
+                        .map_err(|_| Error::Invalid("balance length"))?,
+                ))
+            })
+            .transpose()
     }
 
     pub fn read_at(
@@ -111,6 +150,9 @@ impl StorageDb {
 }
 
 impl Storage for StorageDb {
+    fn get_balance(&self, contract: &Address, currency: &Address) -> Result<Option<u128>> {
+        self.balance_at(contract, currency, None)
+    }
     fn read(&self, contract: &Address, address: u64, key: Option<u64>) -> Result<Option<Var>> {
         self.read_at(contract, address, key, None)
     }
@@ -161,6 +203,10 @@ impl Storage for StorageDb {
         self.database.apply(batch)?;
         Ok(())
     }
+}
+
+fn balance_key(contract: &Address, currency: &Address) -> Vec<u8> {
+    contract.iter().chain(currency).copied().collect()
 }
 
 pub fn data_key(contract: &Address, address: u64, entry: Option<u64>) -> (&'static str, Vec<u8>) {

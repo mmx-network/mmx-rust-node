@@ -4,13 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "MMX contract value codecs and scalar bytecode interpreter"
+description = "MMX contract values and bytecode interpreter with persistent collections"
 
 [dependencies]
 mmx-db.workspace = true
+mmx-types.workspace = true
+vnx.workspace = true
 thiserror.workspace = true
 primitive-types.workspace = true
 sha2.workspace = true
+k256.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

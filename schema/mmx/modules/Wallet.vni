@@ -1,0 +1,171 @@
+package mmx;
+
+module Wallet implements vnx.addons.HttpComponent {
+	
+	vector<string> key_files;
+	
+	vector<account_t> accounts;				// index starts at max_key_files
+	
+	string config_path;
+	string storage_path;
+	string database_path = "wallet/";
+	string node_server = "Node";
+	
+	uint max_key_files = 100;
+	uint num_addresses = 100;
+	uint max_addresses = 10000;
+	uint default_expire = 100;				// when transactions expire
+	
+	int lock_timeout_sec = 600;				// when to auto-lock after unlock [sec]
+	int cache_timeout_ms = 1000;			// how often to update from node [ms]
+	
+	set<addr_t> token_whitelist;
+	
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* send(uint index, uint128 amount, addr_t dst_addr, addr_t currency, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* send_many(uint index, vector<pair<addr_t, uint128>> amounts, addr_t currency, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* send_from(uint index, uint128 amount, addr_t dst_addr, addr_t src_addr, addr_t currency, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* deploy(uint index, Contract* contract, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* execute(uint index, addr_t address, string method, vector<vnx.Variant> args, optional<uint> user, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* deposit(	uint index, addr_t address, string method, vector<vnx.Variant> args,
+							uint128 amount, addr_t currency, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* make_offer(uint index, uint owner, uint128 bid_amount, addr_t bid_currency,
+							uint128 ask_amount, addr_t ask_currency, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* offer_trade(uint index, addr_t address, uint128 amount, uint dst_addr, uint128 price, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* offer_withdraw(uint index, addr_t address, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* accept_offer(uint index, addr_t address, uint dst_addr, uint128 price, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* cancel_offer(uint index, addr_t address, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* swap_trade(uint index, addr_t address, uint128 amount, addr_t currency, optional<uint128> min_trade, int num_iter = 20, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* swap_add_liquid(uint index, addr_t address, uint128 amount[2], uint pool_idx, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* swap_rem_liquid(uint index, addr_t address, uint128 amount[2], spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* plotnft_exec(addr_t address, string method, vector<vnx.Variant> args, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* plotnft_create(uint index, string name, optional<uint> owner, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* complete(uint index, Transaction* tx, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Transaction* sign_off(uint index, Transaction* tx, spend_options_t options) const;
+	
+	@Permission(permission_e.SPENDING)
+	Solution* sign_msg(uint index, addr_t address, hash_t msg) const;
+	
+	void send_off(uint index, Transaction* tx) const;
+	
+	void mark_spent(uint index, map<pair<addr_t, addr_t>, uint128> amounts);
+	
+	void reserve(uint index, map<pair<addr_t, addr_t>, uint128> amounts);
+	
+	void release(uint index, map<pair<addr_t, addr_t>, uint128> amounts);
+	
+	void release_all();
+	
+	void reset_cache(uint index);
+	
+	void update_cache(uint index) const;
+	
+	vector<tx_entry_t> get_history(uint index, query_filter_t filter) const;
+	
+	vector<tx_log_entry_t> get_tx_log(uint index, int limit = 100) const;
+	
+	vector<txin_t> gather_inputs_for(uint index, uint128 amount, addr_t currency, spend_options_t options) const;
+	
+	balance_t get_balance(uint index, addr_t currency) const;
+	
+	map<addr_t, balance_t> get_balances(uint index, bool with_zero) const;
+	
+	map<addr_t, balance_t> get_total_balances(vector<addr_t> addresses) const;
+	
+	map<addr_t, balance_t> get_contract_balances(addr_t address) const;
+	
+	map<addr_t, Contract*> get_contracts(uint index, optional<string> type_name, optional<hash_t> type_hash) const;
+	
+	map<addr_t, Contract*> get_contracts_owned(uint index, optional<string> type_name, optional<hash_t> type_hash) const;
+	
+	vector<offer_data_t> get_offers(uint index, bool state) const;
+	
+	map<addr_t, pair<addr_t, uint128>[2]> get_swap_liquidity(uint index) const;
+	
+	addr_t get_address(uint index, uint offset) const;
+	
+	vector<addr_t> get_all_addresses(int index) const;				// (index == -1) -> all wallets
+	
+	int find_wallet_by_addr(addr_t address) const;
+	
+	account_info_t get_account(uint index) const;
+	
+	vector<account_info_t> get_all_accounts() const;
+	
+	bool is_locked(uint index) const;
+	
+	void lock(uint index);
+	
+	void unlock(uint index, string passphrase);
+	
+	void add_account(uint index, account_t config, optional<string> passphrase);
+	
+	void create_account(account_t config, optional<string> passphrase);
+	
+	void create_wallet(account_t config, optional<string> words, optional<string> passphrase);
+	
+	void import_wallet(account_t config, KeyFile* key_file, optional<string> passphrase);
+	
+	void remove_account(uint index, uint account);
+	
+	void set_address_count(uint index, uint count);
+	
+	vector<string> get_mnemonic_wordlist(string lang = "en") const;
+	
+	set<addr_t> get_token_list() const;
+	
+	void add_token(addr_t address);
+	
+	void rem_token(addr_t address);
+	
+	@Permission(permission_e.SPENDING)
+	KeyFile* export_wallet(uint index) const;
+	
+	@Permission(permission_e.SPENDING)
+	hash_t get_master_seed(uint index) const;
+	
+	@Permission(permission_e.SPENDING)
+	vector<string> get_mnemonic_seed(uint index) const;
+	
+	@Permission(permission_e.SPENDING)
+	pair<skey_t, pubkey_t> get_farmer_keys(uint index) const;
+	
+	@Permission(permission_e.SPENDING)
+	vector<pair<skey_t, pubkey_t>> get_all_farmer_keys() const;
+	
+}

@@ -1,0 +1,86 @@
+package mmx;
+
+class BlockHeader {
+	
+	uint version;						// block format
+	uint support_flags;					// consensus flags
+	
+	hash_t hash;
+	hash_t prev;
+	
+	uint height;
+	uint vdf_height;
+	ulong nonce;
+	long time_stamp;					// UNIX [ms]
+	
+	ulong time_diff;
+	ulong space_diff;
+	
+	uint128 weight;
+	uint128 total_weight;
+	
+	uint vdf_count;						// how many blocks delta
+	ulong vdf_iters;
+	hash_t vdf_output;
+	vector<addr_t> vdf_reward_addr;			// for this block
+	optional<addr_t> vdf_reward_payout;		// for bundle payout
+	
+	vector<ProofOfSpace*> proof;
+	
+	hash_t proof_hash;
+	hash_t proof_chain;
+	hash_t challenge;					// for proof lookups
+	
+	bool is_space_fork;					// if challenge is infused + space_diff update
+	uint space_fork_len;				// current length of space fork
+	uint space_fork_proofs;				// total number of proofs since last space fork
+	
+	ulong reward_amount;
+	optional<addr_t> reward_addr;
+	optional<addr_t> reward_contract;		// plot NFT address
+	optional<addr_t> reward_account;		// farmer account
+	
+	char reward_vote;					// 0 = unchanged, 1 = up, -1 = down
+	int  reward_vote_sum;
+	uint reward_vote_count;
+	ulong base_reward;
+	
+	addr_t project_addr;
+	
+	ulong static_cost;
+	ulong total_cost;
+	
+	uint tx_count;
+	ulong tx_fees;
+	ulong txfee_buffer;
+	
+	hash_t tx_hash;
+	
+	optional<signature_t> farmer_sig;
+	
+	hash_t content_hash;
+	
+	
+	bool is_valid(ChainParams* params) const;
+	
+	hash_t calc_hash(ChainParams* params) const;
+	
+	hash_t calc_content_hash() const;
+	
+	void validate() const;
+	
+	BlockHeader* get_header() const;
+	
+	pubkey_t get_farmer_key() const;
+	
+	block_index_t get_block_index(long file_offset) const;
+	
+	void set_space_diff(ChainParams* params, BlockHeader* prev);
+	
+	void set_base_reward(ChainParams* params, BlockHeader* prev);
+	
+	
+	static const uint SUPPORT_HARDFORK1 = 0x1;
+	static const uint SUPPORT_HARDFORK2 = 0x2;
+	
+}

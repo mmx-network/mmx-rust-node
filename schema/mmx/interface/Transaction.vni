@@ -1,0 +1,76 @@
+package mmx;
+
+class Transaction extends TransactionBase {
+	
+	uint version;
+	
+	uint expires = -1;					// height
+	
+	uint fee_ratio = 1024;				// 1024 = 1.0
+	
+	uint static_cost;
+	
+	uint max_fee_amount;
+	
+	tx_note_e note;
+	
+	ulong nonce;
+	
+	string network;
+	
+	optional<addr_t> sender;			// to pay for tx fee (first signature)
+	
+	vector<txin_t> inputs;
+	
+	vector<txout_t> outputs;
+	
+	vector<Operation*> execute;
+	
+	vector<Solution*> solutions;
+	
+	Contract* deploy;
+	
+	optional<exec_result_t> exec_result;
+	
+	hash_t content_hash;				// full hash including solutions and exec_result
+	
+	static const uint MAX_SOLUTIONS = 65535;		// limit of 16-bit solution index
+	
+	
+	void reset(ChainParams* params);
+	
+	void update(exec_result_t result, ChainParams* params);
+	
+	void finalize();
+	
+	void add_input(addr_t currency, addr_t address, uint128 amount);
+	
+	void add_output(addr_t currency, addr_t address, uint128 amount, optional<string> memo);
+	
+	void merge_sign(Transaction* tx);
+	
+	bool is_valid(ChainParams* params) const;
+	
+	bool is_signed() const;
+	
+	bool did_fail() const;
+	
+	hash_t calc_hash(bool full_hash = false) const;
+	
+	ulong calc_cost(ChainParams* params) const;
+	
+	Solution* get_solution(uint index) const;
+	
+	vector<txin_t> get_inputs() const;
+	
+	vector<txout_t> get_outputs() const;
+	
+	vector<Operation*> get_operations() const;
+	
+	map<addr_t, pair<uint128, uint128>> get_balance() const;
+	
+	vector<uchar> hash_serialize(bool full_hash = false) const;
+	
+	tx_index_t get_tx_index(ChainParams* params, BlockHeader* block, long file_offset) const;
+	
+}

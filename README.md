@@ -19,6 +19,16 @@ approximations.
 Requires Rust 1.89 or newer. The disk backend currently targets Unix filesystems
 with file locking, directory sync, and file sync support.
 
+Clone with `git clone --recurse-submodules`, or initialize the VNX dependency in
+an existing checkout:
+
+```sh
+git submodule update --init --recursive
+```
+
+Normal builds use the checked-in VNI declarations and the Rust VNX submodule;
+they do not need the C++ checkout, CMake, or a C++ compiler.
+
 ```sh
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -37,12 +47,15 @@ counter. It does not require the C++ repository or a running MMX node.
 | Crate | Implemented |
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
+| `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
-The interpreter executes 39 of the 48 recognized opcodes: copy/clear and cloning,
+The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
 branches and local calls, unsigned 256-bit arithmetic, comparisons, logical and
 bitwise operations, shifts, type/size queries, string/binary concatenation and
-slicing, arrays/maps and entry access, SHA-256, and explicit failures.
+slicing, arrays/maps and entry access, conversions, SHA-256, secp256k1 signature
+verification, transfers, balances, events, logs, cross-contract hooks, and explicit
+failures.
 Multiplication preserves both the legacy overflow rule and the protocol-version-1
 fix.
 
@@ -52,15 +65,27 @@ cleanup. `COPY`, `CLR`, `SIZE`, and `CONCAT` include their collection paths.
 `CLONE` allocates a copied value and returns a reference; references inside a
 collection keep their aliases rather than being recursively deep-cloned.
 
-The 9 remaining opcodes return explicit unsupported errors:
+`CONV` includes native integer parsing/wrapping, bases, byte order, and MMX
+Bech32m address presentation. Address decoding retains the reference's accepted
+HRPs, uppercase encoding, and unused padding bits. `VERIFY` uses Rust `k256`,
+including compact signature validation and high-S rejection. The native signature
+cache's initially zero tuple and its eviction behavior are preserved and tested;
+changing that upstream quirk requires an agreed consensus change.
 
-| Area | Opcodes |
-| --- | --- |
-| Conversion | `CONV` |
-| Signature verification | `VERIFY` |
-| Assets | `SEND`, `MINT`, `BALANCE` |
-| Cross-contract access | `RCALL`, `CREAD` |
-| Logs/events | `LOG`, `EVENT` |
+`SEND`, `MINT`, and `BALANCE` use a private per-currency balance cache and stage
+transaction outputs with raw byte memos. `StorageDb` supports versioned balance
+snapshots. VM execution does not publish ledger debits or outputs; the transaction
+executor must apply them together with contract state. `Engine::outputs()` exposes
+staged transfers only after successful execution, and refuses them after failure.
+
+`Engine::run_with_host()` supplies `LOG`, `EVENT`, `RCALL`, and `CREAD` through the
+`Host` trait. Callbacks can read VM values, charge gas, execute child bytecode, and
+write return values. Remote calls enforce frame, argument, and recursion limits,
+then clean up arguments while preserving the return slot. With no host, logs and
+events skip their values, while remote calls and contract reads fail as in C++.
+Hosts must stage their own effects and discard them on transaction failure. The
+node's contract loader, dependency resolver, and transaction-wide execution overlay
+are still to be ported; these services are not implemented by the hook interface.
 
 New heap objects are reclaimed when their last reference is released. Objects
 loaded from storage stay pinned, matching C++; copying stored maps and erasing
@@ -97,15 +122,39 @@ during recovery.
 MMX-specific value and instruction encodings target the little-endian reference
 format. Contract storage preserves the original 20-byte contract prefix and
 big-endian cell/entry addresses; value-index keys use the full 32-byte contract
-address. Raw address bytes are used until the address presentation layer is ported.
+address. Address presentation uses the consensus Bech32m codec in `mmx_vm::address`.
 
 ## VNX integration
 
-VNX serialization is being ported independently in `~/workspace/vnx-rust`.
-This workspace does not implement VNX type codes, reflection, object envelopes,
-RPC, or transport. MMX's `var_t` and symbol-compressed `instr_t` formats are
-application-specific and live in `mmx-vm`. Connect to the VNX Rust crates once
-their public API is available; do not duplicate that project's work here.
+[VNX Rust](https://github.com/mmx-network/vnx-rust) is included as the pinned
+[`vendor/vnx-rust`](vendor/vnx-rust) Git submodule. Workspace path dependencies
+use its `vnx` runtime and `vnx-codegen` generator. Update the gitlink deliberately
+and run the compatibility tests when adopting a new revision.
+
+`mmx-types` compiles the declarations in [`schema`](schema) at build time and
+exports `mmx`, `vnx`, `vnx_registry()`, and the `VnxType` trait. The snapshot
+contains MMX declarations and the VNX/VNX-addons declarations needed to resolve
+their dependencies; source revisions are recorded in
+[`schema/origin.json`](schema/origin.json). The VM uses the generated native error
+codes, and tests carry an MMX contract binary through VNX serialization into VM
+execution.
+
+VNX provides serialization, reflection, runtime, RPC and transport. MMX's `var_t`
+and symbol-compressed `instr_t` formats remain application-specific in `mmx-vm`.
+Generated declarations do not implement native MMX validation, transaction
+hashing, consensus, or node services. VNX wire serialization must not be used as
+a substitute for MMX's consensus hash serialization. Fixed byte arrays retain
+their declared wire layout; address presentation, amount arithmetic and crypto
+operations belong to the MMX port.
+
+To refresh the schema snapshot and native identity fixtures from the reference:
+
+```sh
+python3 tools/update_schemas.py --source ~/workspace/mmx-node
+```
+
+This copies protocol declarations and reads generated C++ type metadata without
+running or linking C++; review schema and fixture changes together.
 
 ## Tests and compatibility
 
@@ -123,11 +172,22 @@ addresses, gas, error codes/locations, and every successful persistence write.
 Each relevant operation is replayed with gas just below, at, and above its
 reference cost; compound operations also sweep intermediate gas limits.
 
+An additional **26,343** C++ trace steps cover the remaining nine opcodes:
+type/format conversion matrices, address edge cases, signature scalar limits and
+cache eviction, transfers and memos, cached balances, callback effects, remote
+return values and stack cleanup, indirect operand ordering, and gas boundaries.
+Tests also execute real child bytecode through the host interface, verify that
+failed executions hide transfers, and reopen/roll back balance snapshots.
+
 These fixtures validate the covered VM behavior, not complete consensus
-compatibility. Extend coverage to host operations and transaction/block execution
-as those layers are ported. Storage implementation changes must preserve the
+compatibility. Extend coverage to transaction/block execution as those layers
+are ported. Storage implementation changes must preserve the
 same logical reads, state updates, and VM gas independently of physical I/O or
 cache behavior.
+
+The generated bindings also check **638 native C++ type/code hash pairs** and
+**644 registry descriptors**, decode public native wire fixtures, round-trip
+transactions/contracts, and call a generated MMX client through the VNX runtime.
 
 Additional tests cover malformed/truncated input, invalid versions, atomic batch
 validation, single-writer locking, checksum failures, every truncation point in a
@@ -147,14 +207,15 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Conversions, crypto verification, host execution hooks, executable contracts,
-   and the JavaScript-subset compiler and contract tests.
-2. Transaction-scoped storage overlays and cross-contract execution, carrying
-   over the remaining engine tests and extending failure/gas differential tests.
+1. Executable contract loading, the JavaScript-subset compiler, and the original
+   contract tests.
+2. Transaction-scoped storage overlays, dependency resolution, and cross-contract
+   execution services behind the VM hooks, including atomic ledger/output
+   publication and failure/gas differential tests.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.
-4. VNX-backed types/serialization, transactions, chain state, consensus,
-   networking, RPC, and node services, carrying over the relevant original tests
+4. Transactions, chain state, consensus, networking, RPC, and node services using
+   the generated types and VNX runtime, carrying over the relevant original tests
    as each component becomes executable.
 
 Licensed under Apache-2.0, following the original MMX project. See [LICENSE](LICENSE).

@@ -1,0 +1,23 @@
+package mmx.operation;
+
+import mmx.hash_t;
+import mmx.addr_t;
+
+class Execute extends mmx.Operation {
+	
+	string method;
+	
+	vector<vnx.Variant> args;
+	
+	optional<addr_t> user;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash(bool full_hash, uint hash_version) const;
+	
+	ulong calc_cost(mmx.ChainParams* params) const;
+	
+	vnx.Variant get_arg(uint index) const;
+	
+}

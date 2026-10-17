@@ -1,0 +1,18 @@
+package mmx;
+
+struct txio_t {
+	
+	addr_t address;
+	
+	addr_t contract;
+	
+	uint128 amount;
+	
+	optional<string> memo;
+	
+	static const uint MAX_MEMO_SIZE = 64;
+	
+	
+	ulong calc_cost(ChainParams* params) const;
+	
+}

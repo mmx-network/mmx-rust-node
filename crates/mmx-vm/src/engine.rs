@@ -1,5 +1,5 @@
 //! MMX bytecode execution with VM heap ownership and persistent collections.
-//! Node host operations are ported separately.
+//! Node services are supplied through the explicit Host interface.
 
 use crate::{
     instruction::{BITWISE, CATCH_OVERFLOW, REF_A, REF_B},
@@ -22,7 +22,11 @@ pub const STORAGE_WRITE_BYTE_COST: u64 = 50;
 pub const MAX_CALL_RECURSION: usize = 1000;
 pub const MAX_ERASE_RECURSION: usize = 100;
 
+mod conversion;
+mod host;
 mod memory;
+pub use conversion::Conversion;
+pub use host::{Host, NoHost, Output};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -38,8 +42,14 @@ pub enum Error {
     Overflow,
     #[error("division by zero")]
     DivisionByZero,
-    #[error("opcode not yet ported: {0:?}")]
-    UnsupportedOpcode(Opcode),
+    #[error("invalid conversion")]
+    Conversion,
+    #[error("invalid signature or public key encoding")]
+    Signature,
+    #[error("host service unavailable: {0}")]
+    HostUnavailable(&'static str),
+    #[error("invalid transfer: {0}")]
+    Transfer(&'static str),
     #[error("invalid map key")]
     InvalidKey,
     #[error("out of memory")]
@@ -92,6 +102,9 @@ pub struct Engine<'a, S: Storage> {
     frames: Vec<Frame>,
     initialized: bool,
     failed: bool,
+    balances: BTreeMap<Address, u128>,
+    outputs: Vec<Output>,
+    mint_outputs: Vec<Output>,
 }
 
 impl<'a, S: Storage> Engine<'a, S> {
@@ -120,6 +133,9 @@ impl<'a, S: Storage> Engine<'a, S> {
             frames: Vec::new(),
             initialized: false,
             failed: false,
+            balances: BTreeMap::new(),
+            outputs: Vec::new(),
+            mint_outputs: Vec::new(),
         }
     }
 
@@ -139,6 +155,15 @@ impl<'a, S: Storage> Engine<'a, S> {
     /// Execute without mutating the backend. An error permanently prevents
     /// this engine instance from publishing its accumulated writes.
     pub fn run(&mut self, code: &[Instruction], entry: u32) -> Result<()> {
+        self.run_with_host(code, entry, &mut NoHost)
+    }
+
+    pub fn run_with_host<H: Host<S> + ?Sized>(
+        &mut self,
+        code: &[Instruction],
+        entry: u32,
+        host: &mut H,
+    ) -> Result<()> {
         if !self.initialized || self.failed || !self.frames.is_empty() {
             return Err(Error::State(
                 "run requires an initialized, healthy, idle engine",
@@ -155,7 +180,7 @@ impl<'a, S: Storage> Engine<'a, S> {
             let result = code
                 .get(frame.pc as usize)
                 .ok_or(Error::InstructionPointer(frame.pc))
-                .and_then(|instr| self.exec(*instr))
+                .and_then(|instr| self.exec(*instr, host))
                 .and_then(|()| self.check_gas());
             if let Err(error) = result {
                 self.failed = true;
@@ -187,7 +212,7 @@ impl<'a, S: Storage> Engine<'a, S> {
 
     fn check_gas(&mut self) -> Result<()> {
         if self.gas_used > self.gas_limit {
-            self.error_code = 3169221647; // error_code_e::TXFEE_OVERRUN
+            self.error_code = mmx_types::mmx::error_code_e::TXFEE_OVERRUN.value;
             return Err(Error::OutOfGas {
                 used: self.gas_used,
                 limit: self.gas_limit,
@@ -239,7 +264,21 @@ impl<'a, S: Storage> Engine<'a, S> {
         }
     }
 
-    fn exec(&mut self, instr: Instruction) -> Result<()> {
+    // GCC's native opcode dispatch evaluates arguments right to left. This
+    // order matters when indirect operands load storage or fail validation.
+    fn operands(&mut self, instr: Instruction, immediates: u8, count: usize) -> Result<[u64; 4]> {
+        let mut args = [0; 4];
+        for i in (0..count).rev() {
+            args[i] = if immediates & (1 << i) != 0 {
+                self.immediate(instr, i)?
+            } else {
+                self.address(instr, i)?
+            };
+        }
+        Ok(args)
+    }
+
+    fn exec<H: Host<S> + ?Sized>(&mut self, instr: Instruction, host: &mut H) -> Result<()> {
         use Opcode::*;
         self.spend(INSTR_COST);
         match instr.code {
@@ -252,8 +291,7 @@ impl<'a, S: Storage> Engine<'a, S> {
                 self.erase(address)?;
             }
             Copy | Clone => {
-                let dst = self.address(instr, 0)?;
-                let src = self.address(instr, 1)?;
+                let [dst, src, _, _] = self.operands(instr, 0, 2)?;
                 if instr.code == Copy {
                     self.copy(dst, src)?;
                 } else {
@@ -444,17 +482,11 @@ impl<'a, S: Storage> Engine<'a, S> {
                 self.write_value(dst, Value::from(value), false)?;
             }
             Get | Set | Erase => {
-                let a = self.address(instr, 0)?;
-                let b = self.address(instr, 1)?;
+                let [a, b, c, _] =
+                    self.operands(instr, 0, if instr.code == Erase { 2 } else { 3 })?;
                 match instr.code {
-                    Get => {
-                        let c = self.address(instr, 2)?;
-                        self.get(a, b, c, instr.flags)?;
-                    }
-                    Set => {
-                        let c = self.address(instr, 2)?;
-                        self.set(a, b, c)?;
-                    }
+                    Get => self.get(a, b, c, instr.flags)?,
+                    Set => self.set(a, b, c)?,
                     Erase => {
                         if !matches!(self.load(a)?, Value::Map { .. }) {
                             return Err(Error::Type("map"));
@@ -468,8 +500,7 @@ impl<'a, S: Storage> Engine<'a, S> {
                 }
             }
             PushBack | PopBack => {
-                let a = self.address(instr, 0)?;
-                let b = self.address(instr, 1)?;
+                let [a, b, _, _] = self.operands(instr, 0, 2)?;
                 if instr.code == PushBack {
                     if a == b {
                         return Err(Error::State("push_back destination equals source"));
@@ -481,11 +512,19 @@ impl<'a, S: Storage> Engine<'a, S> {
                 }
             }
             Concat | Memcpy | Sha256 => {
-                let dst = self.address(instr, 0)?;
-                let src = self.address(instr, 1)?;
+                let [dst, src, rhs_or_count, offset] = self.operands(
+                    instr,
+                    if instr.code == Memcpy { 0b1100 } else { 0 },
+                    instr.code.nargs(),
+                )?;
                 let source = self.load(src)?;
+                let other = if instr.code == Concat {
+                    Some(self.load(rhs_or_count)?)
+                } else {
+                    None
+                };
                 if instr.code == Concat && matches!(source, Value::Array { .. }) {
-                    let rhs = self.address(instr, 2)?;
+                    let rhs = rhs_or_count;
                     self.concat_arrays(dst, src, rhs)?;
                     self.frames.last_mut().unwrap().pc += 1;
                     return Ok(());
@@ -496,9 +535,7 @@ impl<'a, S: Storage> Engine<'a, S> {
                     _ => return Err(Error::Type("string or binary")),
                 };
                 if instr.code == Concat {
-                    let rhs = self.address(instr, 2)?;
-                    let other = self.load(rhs)?;
-                    let more = match other {
+                    let more = match other.unwrap() {
                         Value::String(v) if is_string => v,
                         Value::Binary(v) if !is_string => v,
                         _ => return Err(Error::Type("same string or binary type")),
@@ -508,8 +545,7 @@ impl<'a, S: Storage> Engine<'a, S> {
                     }
                     bytes.extend(more);
                 } else if instr.code == Memcpy {
-                    let count = self.immediate(instr, 2)?;
-                    let offset = self.immediate(instr, 3)?;
+                    let count = rhs_or_count;
                     if offset > bytes.len() as u64 || count > bytes.len() as u64 - offset {
                         return Err(Error::Bounds);
                     }
@@ -525,6 +561,76 @@ impl<'a, S: Storage> Engine<'a, S> {
                 };
                 self.write_value(dst, value, instr.code != Sha256)?;
             }
+            Conv => {
+                let [dst, src, dflags, sflags] = self.operands(instr, 0b1100, 4)?;
+                self.convert(dst, src, dflags, sflags)?;
+            }
+            Verify => {
+                let [dst, msg, key, signature] = self.operands(instr, 0, 4)?;
+                self.verify(dst, msg, key, signature)?;
+            }
+            Log => {
+                let [level, msg, _, _] = self.operands(instr, 1, 2)?;
+                let level = level as u32;
+                if host.logs_enabled() {
+                    let msg = self.string(msg)?;
+                    host.log(self, level, &msg)?;
+                }
+            }
+            Event => {
+                let [name, data, _, _] = self.operands(instr, 0, 2)?;
+                if host.events_enabled() {
+                    let name = self.string(name)?;
+                    host.event(self, &name, data)?;
+                }
+            }
+            Send => {
+                let [address, amount, currency, memo] = self.operands(instr, 0, 4)?;
+                self.send(address, amount, currency, memo)?;
+            }
+            Mint => {
+                let [address, amount, memo, _] = self.operands(instr, 0, 3)?;
+                self.mint(address, amount, memo)?;
+            }
+            Balance => {
+                let [dst, currency, _, _] = self.operands(instr, 0, 2)?;
+                let (_, balance) = self.balance(currency)?;
+                self.write_value(dst, Value::Uint(U256::from(balance)), false)?;
+            }
+            RemoteCall => {
+                let [name, method, offset, nargs] = self.operands(instr, 0b1100, 4)?;
+                if offset >= STACK_SIZE {
+                    return Err(Error::StackOverflow);
+                }
+                if self.frames.len() >= MAX_CALL_RECURSION {
+                    return Err(Error::RecursionOverflow);
+                }
+                if nargs > 4096 {
+                    return Err(Error::Bounds);
+                }
+                if !host.remote_calls_enabled() {
+                    return Err(Error::HostUnavailable("remote calls"));
+                }
+                self.spend(CALL_COST);
+                let mut frame = *self.frames.last().unwrap();
+                frame.stack += offset;
+                self.frames.push(frame);
+                // Native GCC evaluates the method argument before the name.
+                let method = self.string(method)?;
+                let name = self.string(name)?;
+                host.remote_call(self, &name, &method, nargs as u32)?;
+                self.clear_stack(frame.stack + 1)?;
+                self.frames.pop();
+            }
+            ContractRead => {
+                let [dst, address, field, _] = self.operands(instr, 0, 3)?;
+                if !host.contract_reads_enabled() {
+                    return Err(Error::HostUnavailable("contract reads"));
+                }
+                let field = self.string(field)?;
+                let address = self.binary_address(address)?;
+                host.read_contract(self, &address, &field, dst)?;
+            }
             Fail => {
                 let code = self.immediate(instr, 1)? as u32;
                 self.error_code = code;
@@ -535,12 +641,14 @@ impl<'a, S: Storage> Engine<'a, S> {
                     Some(Value::Bool(v)) => v.to_string(),
                     Some(Value::Uint(v)) => v.to_string(),
                     Some(Value::Binary(v)) => {
-                        // Address presentation for 32-byte binaries belongs
-                        // to the node layer; retain their raw hex here.
                         let mut message = String::from("0x");
-                        for byte in v {
+                        for byte in &v {
                             use std::fmt::Write;
-                            write!(&mut message, "{byte:02x}").unwrap();
+                            write!(&mut message, "{byte:02X}").unwrap();
+                        }
+                        if let Ok(address) = v.try_into() {
+                            message.push_str(" | ");
+                            message.push_str(&crate::address::encode(&address));
                         }
                         message
                     }
@@ -551,7 +659,6 @@ impl<'a, S: Storage> Engine<'a, S> {
                 };
                 return Err(Error::Fail { code, message });
             }
-            other => return Err(Error::UnsupportedOpcode(other)),
         }
         if let Some(frame) = self.frames.last_mut() {
             frame.pc += 1;

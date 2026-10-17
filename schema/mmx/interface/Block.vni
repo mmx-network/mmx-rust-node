@@ -1,0 +1,22 @@
+package mmx;
+
+class Block extends BlockHeader {
+	
+	vector<Transaction*> tx_list;
+	
+	
+	void finalize(ChainParams* params);
+	
+	bool is_valid(ChainParams* params) const;
+	
+	hash_t calc_tx_hash() const;
+	
+	BlockHeader* get_header() const;
+	
+	vector<Transaction*> get_transactions() const;
+	
+	vector<txio_entry_t> get_inputs(ChainParams* params) const;
+	
+	vector<txio_entry_t> get_outputs(ChainParams* params) const;
+	
+}

@@ -1,0 +1,32 @@
+package mmx;
+
+class ProofResponse {
+	
+	hash_t hash;
+	
+	uint vdf_height;
+	
+	ProofOfSpace* proof;
+	
+	signature_t farmer_sig;
+	
+	hash_t content_hash;
+	
+	// --- below fields are not hashed (for local use only) ---
+	
+	vnx.Hash64 farmer_addr;
+	
+	string harvester;
+	
+	long lookup_time_ms;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash() const;
+	
+	hash_t calc_content_hash() const;
+	
+	void validate() const;
+	
+}

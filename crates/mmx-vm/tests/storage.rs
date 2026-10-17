@@ -150,3 +150,36 @@ fn storage_round_trips_all_value_types_on_disk() {
         );
     }
 }
+
+#[test]
+fn balance_snapshots_survive_reopen_and_rollback_with_full_address_isolation() {
+    let directory = tempfile::tempdir().unwrap();
+    let contract = [1; 32];
+    let mut other = contract;
+    other[31] = 2;
+    let currency = [3; 32];
+    {
+        let mut db = StorageDb::open(directory.path()).unwrap();
+        assert_eq!(db.get_balance(&contract, &currency).unwrap(), None);
+        db.set_balance(&contract, &currency, u128::MAX).unwrap();
+        db.set_balance(&other, &currency, 7).unwrap();
+        db.database_mut().commit(1).unwrap();
+        db.set_balance(&contract, &currency, 12).unwrap();
+        db.database_mut().commit(2).unwrap();
+    }
+    {
+        let mut db = StorageDb::open(directory.path()).unwrap();
+        assert_eq!(
+            db.balance_at(&contract, &currency, Some(0)).unwrap(),
+            Some(u128::MAX)
+        );
+        assert_eq!(db.get_balance(&contract, &currency).unwrap(), Some(12));
+        assert_eq!(db.get_balance(&other, &currency).unwrap(), Some(7));
+        db.database_mut().revert(1).unwrap();
+    }
+    let db = StorageDb::open(directory.path()).unwrap();
+    assert_eq!(
+        db.get_balance(&contract, &currency).unwrap(),
+        Some(u128::MAX)
+    );
+}

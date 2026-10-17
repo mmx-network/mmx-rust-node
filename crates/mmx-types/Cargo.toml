@@ -1,0 +1,13 @@
+[package]
+name = "mmx-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Generated MMX wire types and RPC bindings using native Rust VNX"
+
+[dependencies]
+vnx.workspace = true
+
+[build-dependencies]
+vnx-codegen.workspace = true

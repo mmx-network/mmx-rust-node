@@ -1,0 +1,29 @@
+package mmx;
+
+module WebAPI implements vnx.addons.HttpComponent {
+	
+	vnx.TopicPtr input_blocks = "node.verified_blocks";
+	vnx.TopicPtr input_proofs = "harvester.proof";
+	
+	string node_server = "Node";
+	string wallet_server = "Wallet";
+	string farmer_server = "Farmer";
+	string exchange_server = "ExchClient";
+	
+	string config_path;
+	
+	uint max_recursion = 100;
+	uint max_log_history = 10000;
+	
+	uint sync_delay = 18;					// blocks after sync for public service
+	
+	uint cache_max_age = 0;					// 0 = no-cache
+	
+	
+	void shutdown();
+	
+	void handle(Block sample);
+	void handle(ProofResponse sample);
+	void handle(vnx.LogMsg sample);
+	
+}

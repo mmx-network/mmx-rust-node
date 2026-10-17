@@ -1,0 +1,26 @@
+package mmx;
+
+class Partial {
+	
+	uint vdf_height;
+	
+	hash_t hash;
+	
+	addr_t contract;					// plot NFT
+	
+	addr_t account;						// payout address
+	
+	string pool_url;
+	
+	string harvester;					// name (defaults to hostname)
+	
+	uint lookup_time_ms;
+	
+	ProofOfSpace* proof;
+	
+	optional<signature_t> farmer_sig;
+	
+	
+	hash_t calc_hash() const;
+	
+}

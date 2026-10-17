@@ -1,0 +1,31 @@
+package mmx.contract;
+
+import mmx.hash_t;
+import mmx.addr_t;
+
+class Executable extends TokenBase {
+	
+	addr_t binary;
+	
+	string init_method = "init";
+	
+	vector<vnx.Variant> init_args;
+	
+	map<string, addr_t> depends;
+	
+	
+	bool is_valid() const;
+	
+	addr_t get_external(string name) const;
+	
+	hash_t calc_hash(bool full_hash, uint hash_version) const;
+	
+	ulong calc_cost(mmx.ChainParams* params) const;
+	
+	ulong num_bytes() const;
+	
+	vnx.Variant read_field(string name) const;
+	
+	vnx.Variant get_arg(uint index) const;
+	
+}

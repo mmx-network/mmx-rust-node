@@ -1,0 +1,34 @@
+package mmx;
+
+class tx_info_t {
+	
+	hash_t id;
+	
+	uint expires;
+
+	bool did_fail;
+	optional<uint> height;
+	optional<long> time_stamp;		// UNIX [ms]
+	optional<hash_t> block;
+	optional<string> message;
+	
+	uint fee;
+	uint cost;
+	
+	tx_note_e note;
+	
+	optional<addr_t> sender;
+	
+	vector<txin_t> inputs;
+	vector<txout_t> outputs;
+	
+	vector<Operation*> operations;
+	
+	Contract* deployed;
+	
+	map<addr_t, uint128> input_amounts;
+	map<addr_t, uint128> output_amounts;
+	
+	map<addr_t, Contract*> contracts;
+	
+}

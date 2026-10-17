@@ -1,0 +1,14 @@
+package mmx;
+
+struct txin_t extends txio_t {
+	
+	ushort solution = -1;			// not part of crypto hash
+	
+	uchar flags;					// not part of crypto hash
+	
+	
+	static const uchar IS_EXEC = 1;
+	
+	static const ushort NO_SOLUTION = -1;
+	
+}

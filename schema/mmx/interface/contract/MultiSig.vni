@@ -1,0 +1,23 @@
+package mmx.contract;
+
+import mmx.hash_t;
+import mmx.addr_t;
+
+class MultiSig extends mmx.Contract {
+	
+	uint num_required;
+	
+	set<addr_t> owners;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash(bool full_hash, uint hash_version) const;
+	
+	ulong num_bytes() const;
+	
+	void validate(mmx.Solution* solution, hash_t txid, uint tx_version) const;
+	
+	vnx.Variant read_field(string name) const;
+	
+}

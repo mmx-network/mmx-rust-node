@@ -1,0 +1,12 @@
+package mmx;
+
+enum tx_type_e {
+	
+	SPEND,
+	RECEIVE,
+	TXFEE,
+	REWARD,
+	VDF_REWARD,
+	PROJECT_REWARD,
+	
+}

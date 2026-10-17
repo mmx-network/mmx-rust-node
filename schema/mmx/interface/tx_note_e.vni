@@ -1,0 +1,20 @@
+package mmx;
+
+enum tx_note_e {
+	
+	REWARD,
+	TRANSFER,
+	WITHDRAW,
+	CLAIM,
+	BURN,
+	OFFER,
+	TRADE,
+	MINT,
+	DEPLOY,
+	MUTATE,
+	EXECUTE,
+	DEPOSIT,
+	REVOKE,
+	TIMELORD_REWARD
+	
+}

@@ -1,0 +1,14 @@
+package mmx;
+
+class TransactionBase {
+	
+	hash_t id;
+	
+	
+	hash_t calc_hash(bool full_hash = false) const;
+	
+	ulong calc_cost(ChainParams* params) const;
+	
+	static TransactionBase* create_ex(hash_t id);
+	
+}

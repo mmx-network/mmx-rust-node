@@ -304,7 +304,7 @@ fn invalid_memory_type_and_instruction_fail_closed() {
     engine.init().unwrap();
     assert!(matches!(
         engine.run(&[instr(O::Send, 0, 0, 0)], 0),
-        Err(Error::UnsupportedOpcode(O::Send))
+        Err(Error::Missing(0))
     ));
     assert!(engine.commit().is_err());
     let mut engine = Engine::new([0; 32], &mut storage, false, 1, 100_000);
@@ -389,7 +389,7 @@ fn scalar_fail_messages_match_reference_formatting() {
         (Value::Nil, "null"),
         (Value::Bool(false), "false"),
         (Value::from(42u64), "42"),
-        (Value::Binary(vec![0, 255]), "0x00ff"),
+        (Value::Binary(vec![0, 255]), "0x00FF"),
     ] {
         let mut storage = StorageDb::memory();
         let mut engine = Engine::new([0; 32], &mut storage, false, 1, 100_000);

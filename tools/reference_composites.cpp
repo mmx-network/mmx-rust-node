@@ -2,6 +2,7 @@
 // reads, heap addresses, failures, gas, and every successful persistence write.
 #include <mmx/vm/Engine.h>
 #include <mmx/vm/StorageDB.h>
+#include <mmx/signature_t.hpp>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -23,10 +24,15 @@ std::string raw(const var_t* var, bool flags = false) {
 struct Recorder : Storage {
     std::shared_ptr<StorageDB> db;
     mutable std::string writes;
+    std::map<addr_t, uint128> balances;
     Recorder(const std::string& path, std::shared_ptr<DataBase> database) : db(std::make_shared<StorageDB>(path, database)) {}
     std::unique_ptr<var_t> read(const addr_t& c, uint64_t a) const override { return db->read(c, a); }
     std::unique_ptr<var_t> read(const addr_t& c, uint64_t a, uint64_t k) const override { return db->read(c, a, k); }
     uint64_t lookup(const addr_t& c, const var_t& value) const override { return db->lookup(c, value); }
+    std::unique_ptr<uint128> get_balance(const addr_t&, const addr_t& currency) override {
+        const auto i = balances.find(currency);
+        return i == balances.end() ? nullptr : std::make_unique<uint128>(i->second);
+    }
     void write(const addr_t& c, uint64_t a, const var_t& v) override {
         db->write(c, a, v);
         writes += std::to_string(a) + ",-," + raw(&v, true) + ";";
@@ -49,6 +55,7 @@ struct Runner {
     std::shared_ptr<Recorder> storage;
     std::unique_ptr<Engine> vm;
     std::map<std::string, uint64_t> aliases;
+    std::string effects;
     Runner(const std::string& path) {
         std::filesystem::create_directories(path);
         database = std::make_shared<DataBase>(1);
@@ -102,7 +109,43 @@ struct Runner {
     std::string execute(const std::string& command) {
         const auto f = split(command, ' ');
         const auto& op = f[0];
-        if(op == "new") { vm = std::make_unique<Engine>(addr_t(), storage, f[1] == "1", 1); vm->gas_limit = 1000000; }
+        if(op == "new") { vm = std::make_unique<Engine>(addr_t(), storage, f[1] == "1", 1); vm->gas_limit = 1000000; effects.clear(); }
+        else if(op == "balance") storage->balances[((binary_t&)*value(f[1])).to_addr()] = uint128(uint256_t(f[2].c_str(), 10));
+        else if(op == "hooks") {
+            if(f[1] == "1") {
+                vm->log_func = [this](uint32_t level, const std::string& message) {
+                    const auto v = binary_t::alloc(message); effects += "L," + std::to_string(level) + "," + raw(v.get()) + ";";
+                };
+                vm->event_func = [this](const std::string& name, uint64_t data) {
+                    const auto v = binary_t::alloc(name); effects += "E," + raw(v.get()) + "," + raw(vm->read(data)) + ";";
+                };
+                vm->remote_call = [this](const std::string& name, const std::string& method, uint32_t nargs) {
+                    effects += "R," + raw(binary_t::alloc(name).get()) + "," + raw(binary_t::alloc(method).get()) + "," + std::to_string(nargs) + ";";
+                    const auto stack = MEM_STACK + vm->get_frame().stack_ptr;
+                    if(method == "fail") throw std::logic_error("host rejected call");
+                    if(nargs) vm->copy(stack, stack + 1);
+                    else vm->write(stack, uint_t(42));
+                };
+                vm->read_contract = [this](const addr_t& address, const std::string& field, uint64_t dst) {
+                    effects += "C," + raw(to_binary(address).get()) + "," + raw(binary_t::alloc(field).get()) + ";";
+                    vm->write(dst, uint_t(1337));
+                };
+            } else { vm->log_func = {}; vm->event_func = {}; vm->remote_call = {}; vm->read_contract = {}; }
+        }
+        else if(op == "signature") {
+            skey_t skey; skey[31] = 1;
+            hash_t hash; hash[0] = 42;
+            const pubkey_t key(skey);
+            const auto sig = signature_t::sign(skey, hash);
+            vm->write(1, *to_binary(hash)); vm->write(2, *to_binary(key)); vm->write(3, *to_binary(sig));
+            return raw(vm->read(1)) + "," + raw(vm->read(2)) + "," + raw(vm->read(3));
+        }
+        else if(op == "effects") {
+            std::string out = effects;
+            for(const auto& v : vm->outputs) out += "S," + raw(to_binary(v.contract).get()) + "," + raw(to_binary(v.address).get()) + "," + v.amount.str(10) + "," + (v.memo ? raw(binary_t::alloc(*v.memo).get()) : "-") + ";";
+            for(const auto& v : vm->mint_outputs) out += "M," + raw(to_binary(v.contract).get()) + "," + raw(to_binary(v.address).get()) + "," + v.amount.str(10) + "," + (v.memo ? raw(binary_t::alloc(*v.memo).get()) : "-") + ";";
+            return out.empty() ? "-" : out;
+        }
         else if(op == "init") vm->init();
         else if(op == "budget") vm->gas_limit = vm->gas_used + address(f[1]);
         else if(op == "write") vm->write(address(f[1]), *value(f[2]));
@@ -131,7 +174,24 @@ struct Runner {
 };
 
 int main(int argc, char** argv) {
+    if(argc == 2 && std::string(argv[1]) == "--collision") {
+        secp256k1_init();
+        skey_t skey; skey[31] = 1;
+        const auto target = uint64_t(vnx::Hash64(signature_t().crc64(), vnx::Hash64(0))) % 16384;
+        for(uint64_t i = 1; i < 1000000; ++i) {
+            hash_t hash; hash.from_uint(i);
+            const auto sig = signature_t::sign(skey, hash);
+            if(uint64_t(vnx::Hash64(sig.crc64(), vnx::Hash64(0))) % 16384 == target) {
+                std::cout << "b:" << raw(to_binary(hash).get()).substr(10) << '\n'
+                    << "b:" << raw(to_binary(pubkey_t(skey)).get()).substr(10) << '\n'
+                    << "b:" << raw(to_binary(sig).get()).substr(10) << '\n';
+                return 0;
+            }
+        }
+        return 1;
+    }
     if(argc != 4) return 1;
+    secp256k1_init();
     std::ifstream cases(argv[1]); std::ofstream out(argv[2]);
     std::string name, command; std::unique_ptr<Runner> runner;
     size_t count = 0;

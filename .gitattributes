@@ -1,0 +1,2 @@
+# Preserve upstream VNI snapshots, including their original whitespace.
+schema/**/*.vni -whitespace

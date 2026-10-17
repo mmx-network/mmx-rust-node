@@ -1,0 +1,21 @@
+package mmx.contract;
+
+import mmx.hash_t;
+import mmx.addr_t;
+
+class WebData extends mmx.Contract {
+	
+	string mime_type;
+	
+	vnx.Buffer payload;
+	
+	
+	bool is_valid() const;
+	
+	hash_t calc_hash(bool full_hash, uint hash_version) const;
+	
+	ulong num_bytes() const;
+	
+	vnx.Variant read_field(string name) const;
+	
+}

@@ -1,0 +1,9 @@
+package mmx;
+
+enum node_type_e {
+	
+	FULL_NODE,
+	LIGHT_NODE,
+	API_CLIENT,
+	
+}
