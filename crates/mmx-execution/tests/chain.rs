@@ -822,3 +822,38 @@ fn rollback_to_every_selected_height_survives_reopen_and_retains_all_orphans() {
     chain.update_at(root, None, 1).unwrap();
     verify_step(chain.selected(), &steps[1]);
 }
+
+#[test]
+fn historical_sync_checks_space_body_and_state_then_requires_vdf_for_new_live_blocks() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let root = block_hash(&g);
+    let mut selected = ChainState::memory(params(&g));
+    selected.initialize(&assets(&g)).unwrap();
+    assert!(selected.append(&record(&steps[0]["block"]), &[]).is_err());
+    verify_step(&selected, &g);
+    selected.append_sync(&record(&steps[0]["block"])).unwrap();
+    verify_step(&selected, &steps[0]);
+    let mut forks = ForkChain::memory(params(&g));
+    forks.initialize(&assets(&g)).unwrap();
+    forks.admit(&record(&steps[0]["block"]), &[]).unwrap();
+    assert!(forks.update_at(root, None, 0).unwrap().best.is_none());
+    forks.update_sync_at(root, None, 0).unwrap();
+    verify_step(forks.selected(), &steps[0]);
+    // A signed header with invalid declared execution cost still fails during sync.
+    let bad = rows()
+        .into_iter()
+        .find(|r| r["kind"] == "fork_rejection")
+        .unwrap();
+    forks.admit(&record(&bad["block"]), &[]).unwrap();
+    let out = forks.update_sync_at(root, None, 3).unwrap();
+    assert!(out.invalid.contains(&block_hash(&bad)));
+    verify_step(forks.selected(), &steps[0]);
+    forks.admit(&record(&steps[1]["block"]), &[]).unwrap();
+    let live = forks.update_at(root, None, 1).unwrap();
+    assert!(live.waiting.contains(&block_hash(&steps[1])));
+    verify_step(forks.selected(), &steps[0]);
+    retain(&mut forks, &steps[1]);
+    forks.update_at(root, None, 2).unwrap();
+    verify_step(forks.selected(), &steps[1]);
+}

@@ -198,6 +198,16 @@ pub(crate) fn verify_with_vdf<H: mmx_consensus::transitions::history::HeaderSour
     history: &H,
     points: &[mmx_consensus::vdf::VerifiedPoint],
 ) -> Result<(), Rejected> {
+    verify_history(context, block, history, Some(points))
+}
+/// Native historical sync omits VDF linkage, but keeps all header, space work,
+/// body and ledger checks. Live admission must use `verify_with_vdf`.
+pub(crate) fn verify_history<H: mmx_consensus::transitions::history::HeaderSource>(
+    context: &BlockContext,
+    block: &Record,
+    history: &H,
+    points: Option<&[mmx_consensus::vdf::VerifiedPoint]>,
+) -> Result<(), Rejected> {
     let verification = (|| {
         // Reject unauthenticated headers before history resolution or CPU work.
         if !mmx_consensus::header::is_valid(block, &context.params)? {
@@ -209,7 +219,9 @@ pub(crate) fn verify_with_vdf<H: mmx_consensus::transitions::history::HeaderSour
         if proofs.parent != context.previous {
             return Err(invalid("proof context parent mismatch"));
         }
-        mmx_consensus::vdf::link_block(block, &context.params, history, points)?;
+        if let Some(points) = points {
+            mmx_consensus::vdf::link_block(block, &context.params, history, points)?;
+        }
         mmx_consensus::transitions::verify_header(block, &context.params, &proofs)?;
         Ok::<_, ValidationError>(())
     })();

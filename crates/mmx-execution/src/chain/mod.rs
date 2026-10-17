@@ -6,6 +6,7 @@ pub mod choice;
 pub mod forks;
 pub mod genesis;
 pub mod network;
+pub mod sync;
 pub mod voting;
 use crate::{
     block,
@@ -46,6 +47,13 @@ pub enum ChainError {
     Vote(#[from] mmx_consensus::vote::VoteError),
 }
 pub type ChainResult<T> = Result<T, ChainError>;
+/// Native Node skips VDF verification only while fetching historical blocks.
+/// Both modes verify space work, authentication, transitions and full execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValidationMode {
+    Live,
+    HistoricalSync,
+}
 fn invalid(message: &'static str) -> ChainError {
     ChainError::Invalid(message)
 }
@@ -158,6 +166,17 @@ impl ChainState {
         candidate: &Record,
         points: &[VerifiedPoint],
     ) -> ChainResult<block::Receipt> {
+        self.append_mode(candidate, points, ValidationMode::Live)
+    }
+    pub fn append_sync(&mut self, candidate: &Record) -> ChainResult<block::Receipt> {
+        self.append_mode(candidate, &[], ValidationMode::HistoricalSync)
+    }
+    fn append_mode(
+        &mut self,
+        candidate: &Record,
+        points: &[VerifiedPoint],
+        mode: ValidationMode,
+    ) -> ChainResult<block::Receipt> {
         let previous = self
             .tip()?
             .ok_or_else(|| invalid("chain is not initialized"))?;
@@ -170,7 +189,12 @@ impl ChainState {
             previous,
             expected_vdf_payout,
         };
-        block::verify_with_vdf(&context, candidate, self, points)?;
+        block::verify_history(
+            &context,
+            candidate,
+            self,
+            (mode == ValidationMode::Live).then_some(points),
+        )?;
         let (receipt, batch) = block::prepare_batch(&self.storage, &context, candidate)?;
         self.publish(candidate, &batch, false)?;
         Ok(receipt)
@@ -182,6 +206,19 @@ impl ChainState {
         height: u32,
         blocks: &[(Record, Vec<VerifiedPoint>)],
     ) -> ChainResult<Vec<block::Receipt>> {
+        self.reorganize_mixed(
+            height,
+            &blocks
+                .iter()
+                .map(|(b, p)| (b.clone(), p.clone(), ValidationMode::Live))
+                .collect::<Vec<_>>(),
+        )
+    }
+    pub(crate) fn reorganize_mixed(
+        &mut self,
+        height: u32,
+        blocks: &[(Record, Vec<VerifiedPoint>, ValidationMode)],
+    ) -> ChainResult<Vec<block::Receipt>> {
         if height == 0 {
             return Err(invalid("cannot replace genesis"));
         }
@@ -190,8 +227,8 @@ impl ChainState {
             params: self.params.clone(),
         };
         let mut receipts = Vec::new();
-        for (block, points) in blocks {
-            receipts.push(branch.append(block, points)?);
+        for (block, points, mode) in blocks {
+            receipts.push(branch.append_mode(block, points, *mode)?);
         }
         self.storage
             .database_mut()

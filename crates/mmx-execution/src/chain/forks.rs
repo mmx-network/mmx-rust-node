@@ -2,7 +2,7 @@
 //! updates. Root advancement, sync scheduling and archive pruning are separate.
 use super::{
     choice::{self, Anchor, Candidate},
-    genesis, invalid, voting, ChainError, ChainResult, ChainState,
+    genesis, invalid, voting, ChainError, ChainResult, ChainState, ValidationMode,
 };
 use crate::{
     block,
@@ -39,6 +39,9 @@ pub struct ForkChain {
     chain: ChainState,
     archive: Database,
     voting: voting::Voting,
+    // Native proof flags survive the transition out of historical sync, but
+    // reset on restart/explicit rewind. Never promote a new live block here.
+    sync_verified: BTreeSet<Hash>,
 }
 impl ForkChain {
     pub fn memory(params: mmx::ChainParams) -> Self {
@@ -46,6 +49,7 @@ impl ForkChain {
             chain: ChainState::memory(params),
             archive: Database::memory(),
             voting: voting::Voting::default(),
+            sync_verified: BTreeSet::new(),
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
@@ -53,6 +57,7 @@ impl ForkChain {
             chain: ChainState::open(path.as_ref().join("selected"), params)?,
             archive: Database::open(path.as_ref().join("archive"))?,
             voting: voting::Voting::default(),
+            sync_verified: BTreeSet::new(),
         };
         if chain.archive.version() != 0
             && chain.archive.get("fork_meta", b"params", None)
@@ -94,6 +99,7 @@ impl ForkChain {
         if height < tip.height {
             self.chain.revert(height + 1)?;
             self.voting.reset();
+            self.sync_verified.clear();
         }
         Ok(())
     }
@@ -255,6 +261,25 @@ impl ForkChain {
         sync_pending: Option<u32>,
         now_ms: i64,
     ) -> ChainResult<Update> {
+        self.update_mode(root, sync_pending, now_ms, ValidationMode::Live)
+    }
+    /// Historical sync matches native `!is_synced`: only VDF linkage is omitted.
+    /// Node must apply the native proof-density root policy before committing.
+    pub fn update_sync_at(
+        &mut self,
+        root: Hash,
+        sync_pending: Option<u32>,
+        now_ms: i64,
+    ) -> ChainResult<Update> {
+        self.update_mode(root, sync_pending, now_ms, ValidationMode::HistoricalSync)
+    }
+    fn update_mode(
+        &mut self,
+        root: Hash,
+        sync_pending: Option<u32>,
+        now_ms: i64,
+        mode: ValidationMode,
+    ) -> ChainResult<Update> {
         let root_header = self
             .chain
             .header(&root)?
@@ -286,7 +311,11 @@ impl ForkChain {
                         .iter()
                         .filter_map(|p| vdf::verify(p, self.chain.params(), &history).ok())
                         .collect();
-                    if vdf::link_block(&entry.block, self.chain.params(), &history, &work).is_ok() {
+                    if mode == ValidationMode::HistoricalSync
+                        || self.sync_verified.contains(&h.hash.0)
+                        || vdf::link_block(&entry.block, self.chain.params(), &history, &work)
+                            .is_ok()
+                    {
                         if let Ok(context) = transitions::ProofContext::resolve(
                             &entry.block,
                             self.chain.params(),
@@ -303,6 +332,9 @@ impl ForkChain {
                                 bad = true;
                             } else {
                                 verified = true;
+                                if mode == ValidationMode::HistoricalSync {
+                                    self.sync_verified.insert(h.hash.0);
+                                }
                                 self.voting.register(
                                     &entry.block,
                                     h,
@@ -367,11 +399,18 @@ impl ForkChain {
                         .filter_map(|p| vdf::verify(p, self.chain.params(), &history).ok())
                         .collect()
                 };
-                if vdf::link_block(&block, self.chain.params(), &history, &work).is_err() {
+                let validation = if self.sync_verified.contains(&hash) {
+                    ValidationMode::HistoricalSync
+                } else {
+                    mode
+                };
+                if validation == ValidationMode::Live
+                    && vdf::link_block(&block, self.chain.params(), &history, &work).is_err()
+                {
                     missing_work = true;
                     break;
                 }
-                branch.push((block, work));
+                branch.push((block, work, validation));
             }
             if missing_work {
                 out.waiting.insert(best);
@@ -382,12 +421,12 @@ impl ForkChain {
                     .proof_verified = false;
                 continue;
             }
-            match self.chain.reorganize(common.height + 1, &branch) {
+            match self.chain.reorganize_mixed(common.height + 1, &branch) {
                 Ok(_) => {
                     out.common_ancestor = Some(common.hash.0);
                     out.applied = branch
                         .iter()
-                        .map(|(block, _)| bytes(block.field("hash").expect("validated hash")))
+                        .map(|(block, _, _)| bytes(block.field("hash").expect("validated hash")))
                         .collect::<Result<_, _>>()?;
                     return Ok(out);
                 }

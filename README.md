@@ -409,8 +409,17 @@ parsing, and signature verification shares the VM/authorization cache.
 every later ledger/index version while retaining every archived branch. Any
 selected height, including genesis, is supported; no root/checkpoint introduces
 an irreversible state cutoff. Reopen and subsequent fork selection can replay
-the retained branches. Root advancement/commit scheduling, sync orchestration,
+the retained branches. Sync orchestration,
 archive pruning, specialized wallet/trading indexes and node-service caches remain to be ported.
+
+Historical block download uses explicit `append_sync()` / `update_sync_at()`
+entry points. As in native `!is_synced`, only VDF linkage is omitted; space work,
+signatures, header transitions and complete ledger execution still apply.
+Already verified sync proofs remain eligible when switching to live mode, while
+new live blocks require verified VDF points. These flags reset on restart.
+`chain::sync::Policy` ports native proof-density root advancement, including weak
+fork delays, sync positions, pending jobs and integer widths. Soft roots never
+remove rollback history. Its oracle compares 262 native commit schedules.
 
 ```rust
 let mut forks = mmx_execution::chain::forks::ForkChain::open(path, params)?;
@@ -688,6 +697,7 @@ python3 tools/generate_chain_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_network_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_fork_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_vote_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_sync_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -697,7 +707,7 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Root advancement, chain sync and
+1. Chain sync and
    specialized history indexes, building on durable fork application/selection.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
