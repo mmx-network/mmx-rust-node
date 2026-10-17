@@ -1,4 +1,4 @@
-use mmx_consensus::{Record, ValidationParams, Value, Variant};
+use mmx_consensus::{Record, StreamEncoder, ValidationParams, Value, Variant};
 use mmx_types::mmx;
 
 #[test]
@@ -119,6 +119,45 @@ fn native_consensus_hashes_validity_costs_and_serialization() {
         count += 1;
     }
     assert_eq!(count, 824, "missing native fixtures");
+}
+
+#[test]
+fn continuous_wire_streams_round_trip_the_entire_native_corpus_without_repeating_declarations() {
+    let records: Vec<_> = include_str!("fixtures/native.tsv")
+        .lines()
+        .map(|line| Record::decode(&unhex(line.split('\t').nth(2).unwrap())).unwrap())
+        .collect();
+    assert_eq!(records.len(), 824);
+    let mut encoder = StreamEncoder::default();
+    let mut registry = vnx::Registry::new();
+    for pass in 0..2 {
+        for record in &records {
+            let bytes = encoder.encode(record).unwrap();
+            assert_eq!(
+                Record::decode_with_registry(&bytes, &mut registry).unwrap(),
+                *record
+            );
+            if pass == 1 {
+                assert_eq!(bytes, record.encode_compact().unwrap(), "{}", record.name);
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_stream_encoding_preserves_existing_declarations_and_does_not_announce_new_ones() {
+    let first = Record::from_generated(&mmx::Transaction::default()).unwrap();
+    let second = Record::from_generated(&mmx::contract::Executable::default()).unwrap();
+    let mut broken = second.clone();
+    broken.fields.pop_first().unwrap();
+    let mut encoder = StreamEncoder::default();
+    assert_eq!(encoder.encode(&first).unwrap(), first.encode().unwrap());
+    assert!(encoder.encode(&broken).is_err());
+    assert_eq!(
+        encoder.encode(&first).unwrap(),
+        first.encode_compact().unwrap()
+    );
+    assert_eq!(encoder.encode(&second).unwrap(), second.encode().unwrap());
 }
 
 #[test]

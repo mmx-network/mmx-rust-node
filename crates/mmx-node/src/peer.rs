@@ -51,10 +51,13 @@ fn optional_block_hash(value: Value) -> Result<Option<BlockHash>> {
 
 pub fn encode_frame(value: &Record) -> Result<Vec<u8>> {
     let raw = value.encode()?;
+    frame_bytes(&raw)
+}
+fn frame_bytes(raw: &[u8]) -> Result<Vec<u8>> {
     if raw.len() > MAX_FRAME {
         return Err(error("peer record exceeds frame limit"));
     }
-    let data = zstd::stream::encode_all(raw.as_slice(), 3)?;
+    let data = zstd::stream::encode_all(raw, 3)?;
     if data.len() > MAX_FRAME {
         return Err(error("compressed peer frame exceeds limit"));
     }
@@ -96,6 +99,7 @@ fn decode_frame_with_registry(
 pub struct Connection {
     stream: TcpStream,
     registry: vnx::Registry,
+    outbound: mmx_consensus::StreamEncoder,
     last_size: usize,
 }
 impl Connection {
@@ -117,11 +121,30 @@ impl Connection {
         Ok(Self {
             stream,
             registry: vnx::Registry::new(),
+            outbound: Default::default(),
             last_size: 0,
         })
     }
     pub fn send(&mut self, value: &Record) -> Result<()> {
-        self.stream.write_all(&encode_frame(value)?)?;
+        self.send_batch(std::slice::from_ref(value))
+    }
+    fn send_batch(&mut self, values: &[Record]) -> Result<()> {
+        // Encoding, frame limits and I/O can all fail. Only successful writes
+        // may announce schemas to this connection's subsequent frames.
+        let mut outbound = self.outbound.clone();
+        let mut batch = Vec::new();
+        for value in values {
+            let frame = frame_bytes(&outbound.encode(value)?)?;
+            if batch.len().saturating_add(frame.len()) > MAX_FRAME + 8 {
+                return Err(error("peer write batch exceeds limit"));
+            }
+            batch.extend_from_slice(&frame);
+        }
+        if let Err(e) = self.stream.write_all(&batch) {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            return Err(e.into());
+        }
+        self.outbound = outbound;
         Ok(())
     }
     /// None means idle before the first frame byte. Partial-frame timeouts close
@@ -287,6 +310,7 @@ impl Client {
         while (!pending.is_empty() || !queued.is_empty()) && Instant::now() < end {
             if Instant::now() >= send_after && (!draining || pending.is_empty()) {
                 draining = false;
+                let mut batch = Vec::new();
                 while pending.len() < request_window {
                     let Some(index) = queued.pop_front() else {
                         break;
@@ -295,13 +319,18 @@ impl Client {
                     let id = self.next_id;
                     self.next_id = self.next_id.wrapping_add(1);
                     pending.insert(id, (index, format!("{}.return", method.name)));
-                    self.connection.send(&record(
+                    batch.push(record(
                         "mmx.Request",
                         [
                             ("id".into(), Value::Uint(id.into())),
                             ("method".into(), Value::Record(method.clone())),
                         ],
-                    ))?;
+                    ));
+                }
+                if !batch.is_empty() {
+                    // Keep independent native frames, but avoid one tiny TCP
+                    // write per RPC exhausting a WAN congestion window.
+                    self.connection.send_batch(&batch)?;
                 }
             }
             let mut idle = end
@@ -630,6 +659,113 @@ impl Drop for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_announcements_are_connection_local_and_failed_frames_do_not_advance_them() {
+        fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
+            let mut header = [0; 8];
+            stream.read_exact(&mut header).unwrap();
+            let size = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+            assert!(size <= MAX_FRAME);
+            let mut frame = vec![0; 8 + size];
+            frame[..8].copy_from_slice(&header);
+            stream.read_exact(&mut frame[8..]).unwrap();
+            frame
+        }
+        fn reply(bytes: Vec<u8>) -> Record {
+            record(
+                "mmx.Return",
+                [
+                    ("id".into(), Value::Uint(7)),
+                    (
+                        "result".into(),
+                        Value::Record(record(
+                            "mmx.Router.get_peers.return",
+                            [("_ret_0".into(), Value::Sequence(vec![Value::String(bytes)]))],
+                        )),
+                    ),
+                ],
+            )
+        }
+        let query = record(
+            "mmx.Request",
+            [
+                ("id".into(), Value::Uint(7)),
+                (
+                    "method".into(),
+                    Value::Record(record(
+                        "mmx.Node.get_block_hash_ex",
+                        [("height".into(), Value::Uint(1200))],
+                    )),
+                ),
+            ],
+        );
+        let expected_query = query.clone();
+        let expected_reply = reply(b"127.0.0.1:11337".to_vec());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let first = read_frame(&mut stream);
+            let repeated = read_frame(&mut stream);
+            let next_class = read_frame(&mut stream);
+            assert_eq!(first, encode_frame(&expected_query).unwrap());
+            assert!(repeated.len() < first.len());
+            eprintln!(
+                "hash request frame bytes: first={}, repeated={}",
+                first.len(),
+                repeated.len()
+            );
+            assert!(
+                decode_frame(&repeated).is_err(),
+                "a continuing frame needs its stream registry"
+            );
+            let mut registry = vnx::Registry::new();
+            for frame in [&first, &repeated] {
+                assert_eq!(
+                    decode_frame_with_registry(frame, &mut registry).unwrap().0,
+                    expected_query
+                );
+            }
+            assert_eq!(
+                decode_frame_with_registry(&next_class, &mut registry)
+                    .unwrap()
+                    .0,
+                expected_reply
+            );
+            assert_eq!(
+                stream.read(&mut [0]).unwrap(),
+                0,
+                "failed batches must not send a prefix"
+            );
+            drop(stream);
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            assert_eq!(
+                read_frame(&mut stream),
+                first,
+                "a new connection must announce schemas again"
+            );
+        });
+        let mut connection = Connection::connect(&address.to_string()).unwrap();
+        connection.send(&query).unwrap();
+        connection.send(&query).unwrap();
+        let oversized = reply(vec![b'x'; MAX_FRAME]);
+        let next = reply(b"127.0.0.1:11337".to_vec());
+        assert!(connection.send_batch(&[next.clone(), oversized]).is_err());
+        connection.send(&next).unwrap();
+        drop(connection);
+        Connection::connect(&address.to_string())
+            .unwrap()
+            .send(&query)
+            .unwrap();
+        server.join().unwrap();
+    }
 
     #[test]
     fn trickled_headers_and_payloads_share_a_deadline_and_cannot_be_reused_after_timeout() {

@@ -24,6 +24,24 @@ fn declaration(schema: &TypeCode) -> Result<&'static [u8]> {
 }
 
 struct Encoder(Vec<u8>, std::collections::BTreeSet<u64>, bool);
+
+/// Native continuous-stream encoding: announce each dynamic class once, while
+/// retaining exact Variant bytes and checked-in schema identities.
+#[derive(Clone, Default)]
+pub struct StreamEncoder {
+    declared: std::collections::BTreeSet<u64>,
+}
+impl StreamEncoder {
+    /// Failed encodings leave the stream state unchanged. Transport callers
+    /// must also commit this state only after successfully sending the bytes.
+    pub fn encode(&mut self, record: &Record) -> Result<Vec<u8>> {
+        let mut encoder = Encoder(Vec::new(), self.declared.clone(), true);
+        encoder.record(record, true, 0)?;
+        self.declared = encoder.1;
+        Ok(encoder.0)
+    }
+}
+
 impl Encoder {
     fn record(&mut self, record: &Record, header: bool, depth: usize) -> Result<()> {
         if depth > 512 {

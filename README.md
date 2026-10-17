@@ -113,6 +113,13 @@ owner is joined before the pool closes. Whole frames share a ten-second deadline
 across header and payload reads, also bounded by the client's fifteen-second RPC
 deadline. Trickling bytes cannot extend either deadline; failed frames close the
 connection.
+Each connection retains independent input/output type state. Outgoing dynamic
+classes are declared once, as in native `TypeOutput`; queued RPCs share a bounded
+TCP write while retaining separate native compressed frames. A representative
+hash-query frame shrinks from 296 to 45 bytes after its first declaration.
+Schema state advances only after the whole batch is sent. Encoding/frame-limit
+failures send no prefix and retain the previous state; partial writes close the
+connection. Reconnecting announces the schemas again.
 Download windows retain up to 128
 heights and target 8 MiB, including competing candidates, in an atomic archive
 transaction. A connection has at most 128 metadata requests outstanding, so a
@@ -694,8 +701,10 @@ their tags, and non-native Variant types retain their original payload.
 `Record::from_generated()` is convenient for generated declarations, but their
 JSON-backed Variant fields cannot represent every native distinction. Use
 original bytes for consensus inputs.
-`Record::encode()` re-emits current-schema VNX records while preserving original
-Variant bytes and raw strings, declaring repeated dynamic classes once per stream; it is used to persist deployments without a JSON
+`Record::encode()` emits self-contained current-schema VNX records while preserving
+original Variant bytes and raw strings, declaring repeated dynamic classes once
+within the value. `StreamEncoder` retains declarations across continuing peer
+frames. Standalone encoding is used to persist deployments without a JSON
 round trip. It remains distinct from hash serialization.
 
 The node defaults to `Store::open_indexed()` / `ForkChain::open_indexed()`, using

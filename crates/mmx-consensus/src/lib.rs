@@ -23,6 +23,7 @@ mod wire;
 
 use std::collections::BTreeMap;
 
+pub use encode::StreamEncoder;
 pub use validation::ValidationParams;
 pub type Hash = [u8; 32];
 pub type Result<T> = std::result::Result<T, Error>;
