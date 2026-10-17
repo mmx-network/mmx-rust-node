@@ -90,6 +90,12 @@ when needed, avoiding another disk copy of all space proofs. Existing separate
 header rows remain readable. Admission/publication warms the immutable cache only
 after its transaction succeeds. Cold reads and replacement tests preserve legacy
 unhashed fields even when a replacement block has the same ID.
+Stored blocks and transaction records use a versioned descriptor-free payload:
+class identities resolve against the exact checked-in schema, while raw Variant
+bytes remain untouched. Unknown identities, truncation and trailing data fail.
+The reader also accepts earlier self-describing database rows. Peer decoding
+continues to require native stream descriptors; storage lookup is a separate API.
+The compact form round-trips all 824 native serialization fixtures.
 
 For repeatable performance comparisons, keep an earlier release binary and use
 an already downloaded range. The benchmark makes SQLite backups, downloads that
@@ -98,6 +104,8 @@ and reports elapsed time plus RPC latency. The source database is left intact.
 
 ```sh
 cargo run --release -p mmx-consensus --example bench_pos -- 100
+# Supply a self-describing native block to benchmark its first complete proof:
+cargo run --release -p mmx-consensus --example bench_pos -- 200 /tmp/block.vnx
 python3 tools/bench_sync.py --source-dir ./mmx-data \
   --baseline /tmp/mmx-node.before --candidate target/release/mmx-node \
   --from-height 4000 --to-height 4500 --output ./tmp/sync-benchmark

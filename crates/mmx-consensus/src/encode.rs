@@ -23,7 +23,7 @@ fn declaration(schema: &TypeCode) -> Result<&'static [u8]> {
     Ok(slot.get().expect("initialized descriptor declaration"))
 }
 
-struct Encoder(Vec<u8>, std::collections::BTreeSet<u64>);
+struct Encoder(Vec<u8>, std::collections::BTreeSet<u64>, bool);
 impl Encoder {
     fn record(&mut self, record: &Record, header: bool, depth: usize) -> Result<()> {
         if depth > 512 {
@@ -34,7 +34,7 @@ impl Encoder {
             // A native stream declares each dynamic class once. Repeating the
             // schema for every transaction can make a valid block exceed an
             // operational wire/database limit solely through metadata overhead.
-            if self.1.insert(schema.code_hash) {
+            if self.2 && self.1.insert(schema.code_hash) {
                 self.0.extend_from_slice(declaration(schema)?);
             }
             self.0.extend(15u16.to_le_bytes());
@@ -226,7 +226,13 @@ impl Encoder {
     }
 }
 pub(crate) fn encode(record: &Record) -> Result<Vec<u8>> {
-    let mut encoder = Encoder(Vec::new(), Default::default());
+    with_declarations(record, true)
+}
+pub(crate) fn compact(record: &Record) -> Result<Vec<u8>> {
+    with_declarations(record, false)
+}
+fn with_declarations(record: &Record, enabled: bool) -> Result<Vec<u8>> {
+    let mut encoder = Encoder(Vec::new(), Default::default(), enabled);
     encoder.record(record, true, 0)?;
     Ok(encoder.0)
 }

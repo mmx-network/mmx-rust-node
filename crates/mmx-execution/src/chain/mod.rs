@@ -4,6 +4,7 @@
 //! and branch selection using the native policy in `choice`.
 mod cache;
 pub mod choice;
+mod codec;
 pub mod forks;
 pub mod genesis;
 pub mod network;
@@ -132,7 +133,7 @@ impl ChainState {
         let Some(wire) = self.storage.database().get("chain_blocks", hash, None)? else {
             return Ok(None);
         };
-        let block = Record::decode(&wire)?;
+        let block = codec::decode(&wire)?;
         if block.name != "mmx.Block" || bytes::<32>(block.field("hash")?)? != *hash {
             return Err(invalid("block archive key mismatch"));
         }
@@ -168,7 +169,7 @@ impl ChainState {
             .database()
             .get("chain_transactions", id, None)?
             .map(|wire| {
-                let tx = Record::decode(&wire)?;
+                let tx = codec::decode(&wire)?;
                 if tx.name != "mmx.Transaction" || bytes::<32>(tx.field("id")?)? != *id {
                     return Err(invalid("transaction archive key mismatch"));
                 }
@@ -323,7 +324,7 @@ impl ChainState {
         let hash = bytes::<32>(block.field("hash")?)?;
         let header = block_header(block)?;
         let mut writes = vec![
-            Write::put("chain_blocks", hash, block.encode()?),
+            Write::put("chain_blocks", hash, codec::encode(block)?),
             Write::put("chain_height", height.to_be_bytes(), hash),
             Write::put("chain_meta", b"tip", hash),
         ];
@@ -339,7 +340,7 @@ impl ChainState {
             writes.push(Write::put(
                 "chain_transactions",
                 bytes::<32>(tx.field("id")?)?,
-                tx.encode()?,
+                codec::encode(tx)?,
             ));
         }
         self.storage.commit_transaction(batch, writes, next)?;

@@ -2,7 +2,7 @@
 //! updates. Root advancement, sync scheduling and archive pruning are separate.
 use super::{
     choice::{self, Anchor, Candidate},
-    genesis, invalid, voting, ChainError, ChainResult, ChainState, ValidationMode,
+    codec, genesis, invalid, voting, ChainError, ChainResult, ChainState, ValidationMode,
 };
 use crate::{
     block,
@@ -257,7 +257,7 @@ impl ForkChain {
             writes.extend([
                 Write::put("fork_order", key, hash),
                 Write::put("fork_work", hash, pack(&[])?),
-                Write::put("fork_blocks", hash, block.encode()?),
+                Write::put("fork_blocks", hash, codec::encode(block)?),
             ]);
         }
         if !writes.is_empty() {
@@ -295,7 +295,7 @@ impl ForkChain {
             }
             let key = [height.to_be_bytes(), self.archive.version().to_be_bytes()].concat();
             writes.push(Write::put("fork_order", key, hash));
-            writes.push(Write::put("fork_blocks", hash, block.encode()?));
+            writes.push(Write::put("fork_blocks", hash, codec::encode(block)?));
             retained_header = Some(header(block)?);
         }
         self.commit_archive(writes)?;
@@ -650,7 +650,7 @@ fn archive_block(archive: &Database, hash: &Hash) -> ChainResult<Option<Record>>
     archive
         .get("fork_blocks", hash, None)?
         .map(|b| {
-            let block = Record::decode(&b)?;
+            let block = codec::decode(&b)?;
             if block.name != "mmx.Block" || bytes::<32>(block.field("hash")?)? != *hash {
                 return Err(invalid("fork archive key mismatch"));
             }
@@ -688,7 +688,7 @@ fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::Bl
     }
     archive
         .get("fork_blocks", hash, None)?
-        .map(|wire| header(&Record::decode(&wire)?))
+        .map(|wire| header(&codec::decode(&wire)?))
         .transpose()
 }
 fn header(block: &Record) -> ChainResult<mmx::BlockHeader> {

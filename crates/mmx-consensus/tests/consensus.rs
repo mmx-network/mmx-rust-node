@@ -84,6 +84,12 @@ fn native_consensus_hashes_validity_costs_and_serialization() {
         let roundtrip =
             Record::decode(&encoded).unwrap_or_else(|e| panic!("{label}: roundtrip {e}"));
         assert_eq!(roundtrip, record, "{label}: lossless VNX roundtrip");
+        let compact = record.encode_compact().unwrap();
+        assert_eq!(
+            Record::decode_compact(&compact).unwrap(),
+            record,
+            "{label}: compact storage roundtrip"
+        );
         let valid = record.is_valid(&p).map(|v| u8::from(v).to_string());
         assert_eq!(result(valid), f[3], "{label}: validity");
         assert_eq!(result(record.calc_cost(&p)), f[4], "{label}: cost");
@@ -113,6 +119,26 @@ fn native_consensus_hashes_validity_costs_and_serialization() {
         count += 1;
     }
     assert_eq!(count, 824, "missing native fixtures");
+}
+
+#[test]
+fn compact_storage_requires_known_schema_identities_and_a_complete_payload() {
+    let record = Record::from_generated(&mmx::Transaction::default()).unwrap();
+    let compact = record.encode_compact().unwrap();
+    assert!(compact.len() < record.encode().unwrap().len());
+    // Descriptor-free storage must not silently enable trusted schema fallback
+    // on the ordinary standalone native-wire decoder.
+    assert!(Record::decode(&compact).is_err());
+    for end in [0, 1, 2, 9, compact.len() - 1] {
+        assert!(Record::decode_compact(&compact[..end]).is_err());
+    }
+    let mut trailing = compact.clone();
+    trailing.push(0);
+    assert!(Record::decode_compact(&trailing).is_err());
+    let mut unknown = compact.clone();
+    unknown[2..10].fill(0);
+    assert!(Record::decode_compact(&unknown).is_err());
+    assert_eq!(Record::decode_compact(&compact).unwrap(), record);
 }
 
 #[test]

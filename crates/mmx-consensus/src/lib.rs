@@ -132,6 +132,17 @@ impl Record {
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode::encode(self)
     }
+    /// Storage payload with checked-in class identities but no descriptor
+    /// declarations. Opaque Variant bytes remain exact. This is separate from
+    /// native peer encoding and must be read with `decode_compact`.
+    pub fn encode_compact(&self) -> Result<Vec<u8>> {
+        encode::compact(self)
+    }
+    /// Resolve a storage payload against the exact checked-in descriptors.
+    /// Unknown schema identities and trailing or incomplete data are errors.
+    pub fn decode_compact(bytes: &[u8]) -> Result<Self> {
+        wire::compact(bytes)
+    }
     pub fn field(&self, name: &str) -> Result<&Value> {
         self.fields
             .get(name)

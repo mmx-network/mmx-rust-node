@@ -5,8 +5,18 @@ use vnx::{binary::Reader, code::Code, Registry, TypeCode};
 struct Parser<'a> {
     input: &'a [u8],
     registry: Registry,
+    trusted_fallback: bool,
 }
 impl<'a> Parser<'a> {
+    fn schema(&self, hash: u64) -> vnx::Result<&TypeCode> {
+        self.registry.get(hash).or_else(|e| {
+            if self.trusted_fallback {
+                crate::hash::registry().get(hash)
+            } else {
+                Err(e)
+            }
+        })
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if n > self.input.len() {
             return Err(input("truncated payload"));
@@ -51,7 +61,7 @@ impl<'a> Parser<'a> {
                 15 | 0x0f00 => {
                     let big = tag == 0x0f00;
                     let hash = self.number(8, big)?;
-                    let schema = self.registry.get(hash)?.clone();
+                    let schema = self.schema(hash)?.clone();
                     return self.record(&schema, depth + 1);
                 }
                 _ => return Err(input("expected native record")),
@@ -242,7 +252,7 @@ impl<'a> Parser<'a> {
                 let hash = owner
                     .and_then(|o| o.depends.get(*index))
                     .ok_or_else(|| input("struct dependency"))?;
-                let schema = self.registry.get(*hash)?.clone();
+                let schema = self.schema(*hash)?.clone();
                 self.record(&schema, depth + 1)?
             }
             _ => return Err(Error::Unsupported(format!("VNX code {code:?}"))),
@@ -378,16 +388,26 @@ pub(crate) fn decode_with_registry(bytes: &[u8], registry: &mut Registry) -> Res
     let mut parser = Parser {
         input: bytes,
         registry: registry.clone(),
+        trusted_fallback: false,
     };
+    let record = parse_record(&mut parser)?;
+    *registry = parser.registry;
+    Ok(record)
+}
+pub(crate) fn compact(bytes: &[u8]) -> Result<Record> {
+    parse_record(&mut Parser {
+        input: bytes,
+        registry: Registry::new(),
+        trusted_fallback: true,
+    })
+}
+fn parse_record(parser: &mut Parser<'_>) -> Result<Record> {
     let value = parser.any(0)?;
     if !parser.input.is_empty() {
         return Err(input("trailing bytes"));
     }
     match value {
-        V::Record(r) => {
-            *registry = parser.registry;
-            Ok(r)
-        }
+        V::Record(r) => Ok(r),
         _ => Err(input("expected record")),
     }
 }
@@ -395,6 +415,7 @@ pub(crate) fn variant(bytes: &[u8]) -> Result<Variant> {
     let mut parser = Parser {
         input: bytes,
         registry: Registry::new(),
+        trusted_fallback: false,
     };
     let value = parser.value(&Code::Dynamic, None, 0)?;
     if !parser.input.is_empty() {
