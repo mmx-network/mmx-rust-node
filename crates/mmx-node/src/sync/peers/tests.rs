@@ -7,7 +7,7 @@ use vnx::serde_json::{self, Value as Json};
 #[derive(Clone, Debug)]
 enum Event {
     Hash(u8, u32, u32),
-    Fetch(Hash, Instant),
+    Fetch(u8, Hash, Instant),
 }
 #[derive(Clone)]
 struct Fake {
@@ -17,6 +17,7 @@ struct Fake {
     events: Arc<Mutex<Vec<Event>>>,
     fail_hash: bool,
     fail_first: Arc<AtomicBool>,
+    hash_delay: Duration,
 }
 impl Fake {
     fn new(id: u8, blocks: &[Record], events: &Arc<Mutex<Vec<Event>>>) -> Self {
@@ -30,6 +31,7 @@ impl Fake {
             events: events.clone(),
             fail_hash: false,
             fail_first: Arc::new(AtomicBool::new(false)),
+            hash_delay: Duration::ZERO,
         }
     }
 }
@@ -42,6 +44,7 @@ impl PeerSource for Fake {
         if self.fail_hash {
             return Err(error("simulated hash timeout"));
         }
+        thread::sleep(self.hash_delay);
         (start..start + count)
             .map(|h| {
                 Ok(self.claims.get(&h).copied().or_else(|| {
@@ -61,7 +64,7 @@ impl PeerSource for Fake {
                 self.events
                     .lock()
                     .unwrap()
-                    .push(Event::Fetch(*id, Instant::now()));
+                    .push(Event::Fetch(self.id, *id, Instant::now()));
                 if self.fail_first.swap(false, Ordering::Relaxed) {
                     return Ok(None);
                 }
@@ -130,7 +133,7 @@ fn peers(blocks: &[Record], events: &Arc<Mutex<Vec<Event>>>) -> PeerPool<Fake> {
 fn counts(events: &Arc<Mutex<Vec<Event>>>) -> BTreeMap<Hash, usize> {
     let mut out = BTreeMap::new();
     for event in &*events.lock().unwrap() {
-        if let Event::Fetch(hash, _) = event {
+        if let Event::Fetch(_, hash, _) = event {
             *out.entry(*hash).or_default() += 1;
         }
     }
@@ -202,6 +205,39 @@ fn matching_claims_download_once_and_restart_reuses_exact_archived_content() {
     );
     stop.store(true, Ordering::Relaxed);
     assert!(fresh.window(1, 2, &node, &stop).is_err());
+}
+
+#[test]
+fn common_content_uses_the_fastest_claimant_without_reducing_hash_observers() {
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = peers(&blocks, &events);
+    for peer in &mut pool.peers {
+        if peer.source.id != 1 {
+            peer.source.hash_delay = Duration::from_millis(50);
+        }
+    }
+    let window = pool.window(1, 2, &node, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        window.heights,
+        vec![vec![blocks[1].clone()], vec![blocks[2].clone()]]
+    );
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Hash(_, 1, 2)))
+            .count(),
+        3
+    );
+    let providers: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Fetch(peer, _, _) => Some(*peer),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(providers, [1, 1]);
 }
 fn resign(block: &mut Record, params: &mmx::ChainParams) {
     let id = mmx_consensus::header::calc_hash(block, params).unwrap();
@@ -285,7 +321,7 @@ fn a_second_provider_is_used_only_after_the_original_lease_times_out() {
         .unwrap()
         .iter()
         .filter_map(|event| match event {
-            Event::Fetch(_, at) => Some(*at),
+            Event::Fetch(_, _, at) => Some(*at),
             _ => None,
         })
         .collect();

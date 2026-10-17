@@ -52,6 +52,7 @@ struct Peer<S> {
     source: S,
     active: bool,
     height: u32,
+    latency: Duration,
 }
 pub struct PeerPool<S> {
     peers: Vec<Peer<S>>,
@@ -89,6 +90,7 @@ impl<S: PeerSource> PeerPool<S> {
                 source,
                 active: true,
                 height: 0,
+                latency: Duration::MAX,
             })
             .collect();
         Self {
@@ -123,6 +125,7 @@ impl<S: PeerSource> PeerPool<S> {
             source,
             active: true,
             height: 0,
+            latency: Duration::MAX,
         });
         self.refreshed = Instant::now() - Duration::from_secs(10);
         true
@@ -179,12 +182,16 @@ impl<S: PeerSource> PeerPool<S> {
                 .enumerate()
                 .filter(|(_, p)| p.active)
                 .map(|(index, peer)| {
-                    scope.spawn(move || match peer.source.hashes(start, count) {
-                        Ok(values) if values.len() == count as usize => Some((index, values)),
-                        _ => {
-                            peer.active = false;
-                            None
+                    scope.spawn(move || {
+                        let requested = Instant::now();
+                        match peer.source.hashes(start, count) {
+                            Ok(values) if values.len() == count as usize => Some((index, values)),
+                            _ => {
+                                peer.active = false;
+                                None
+                            }
                         }
+                        .inspect(|_| peer.latency = requested.elapsed())
                     })
                 })
                 .collect();
@@ -369,12 +376,20 @@ impl<S: PeerSource> PeerPool<S> {
                         continue;
                     }
                     job.providers.shuffle(&mut rand::thread_rng());
-                    if let Some(&(peer, block_id)) = job.providers.iter().find(|&&(p, _)| {
-                        self.peers[p].active && !job.tried.contains(&p) && assigned[p].len() < 4
-                    }) {
-                        job.tried.insert(peer);
-                        job.retry_at = Some(now + self.timeout);
-                        assigned[peer].push((*key, block_id));
+                    if let Some(&(peer, block_id)) = job
+                        .providers
+                        .iter()
+                        .filter(|&&(p, _)| self.peers[p].active && !job.tried.contains(&p))
+                        .min_by_key(|&&(p, _)| self.peers[p].latency)
+                    {
+                        // Keep the fastest claimant's four-request pipeline
+                        // full instead of assigning the same common chain to
+                        // slow claimants merely because its slots are occupied.
+                        if assigned[peer].len() < 4 {
+                            job.tried.insert(peer);
+                            job.retry_at = Some(now + self.timeout);
+                            assigned[peer].push((*key, block_id));
+                        }
                     } else if !job
                         .providers
                         .iter()

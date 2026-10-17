@@ -93,7 +93,10 @@ after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
 
 Each connection correlates reordered native returns while serving peer requests,
-with at most four body requests outstanding. Download windows retain up to 64
+with at most four body requests outstanding. Common content is fetched from its
+fastest successful hash claimant; all selected peers still supply hash responses,
+and a slower provider is tried only after the request lease expires.
+Download windows retain up to 64
 heights and target 8 MiB, including competing candidates, in an atomic archive
 transaction. Progress logs separate hash queries, bodies, archive publication,
 proofs and ledger replay. A final multi-peer tip probe runs after publication;
