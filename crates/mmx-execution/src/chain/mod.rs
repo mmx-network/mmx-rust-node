@@ -24,7 +24,7 @@ use mmx_consensus::{
 use mmx_db::Write;
 use mmx_types::{mmx, VnxType};
 use mmx_vm::{storage::TransactionBatch, Address, StorageDb};
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Instant};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChainError {
@@ -212,6 +212,7 @@ impl ChainState {
         mode: ValidationMode,
         evidence: Option<&mmx_consensus::transitions::VerifiedHeader>,
     ) -> ChainResult<block::Receipt> {
+        let began = Instant::now();
         let previous = self
             .tip()?
             .ok_or_else(|| invalid("chain is not initialized"))?;
@@ -224,6 +225,7 @@ impl ChainState {
             previous,
             expected_vdf_payout,
         };
+        let prepared_context = Instant::now();
         block::verify_history_evidence(
             &context,
             candidate,
@@ -231,8 +233,18 @@ impl ChainState {
             (mode == ValidationMode::Live).then_some(points),
             evidence,
         )?;
+        let verified = Instant::now();
         let (receipt, batch) = block::prepare_batch(&self.storage, &context, candidate)?;
+        let executed = Instant::now();
         self.publish(candidate, &batch, false)?;
+        if block::profile_replay() && context.previous.height.wrapping_add(1).is_multiple_of(128) {
+            eprintln!("Replay block: height={} context_us={:.3} history_us={:.3} body_us={:.3} publish_us={:.3}",
+                context.previous.height.wrapping_add(1),
+                prepared_context.duration_since(began).as_secs_f64() * 1e6,
+                verified.duration_since(prepared_context).as_secs_f64() * 1e6,
+                executed.duration_since(verified).as_secs_f64() * 1e6,
+                executed.elapsed().as_secs_f64() * 1e6);
+        }
         Ok(receipt)
     }
     /// Speculate on a detached ledger. A failed block or journal write cannot
@@ -279,9 +291,17 @@ impl ChainState {
                 receipts.push(receipt);
             }
         }
+        let publication = Instant::now();
         self.storage
             .database_mut()
             .replace_suffix(height, branch.storage.database())?;
+        if block::profile_replay() {
+            eprintln!(
+                "Replay publication: start={height} blocks={} seconds={:.6}",
+                branch.storage.database().version().saturating_sub(height),
+                publication.elapsed().as_secs_f64()
+            );
+        }
         self.headers = branch.headers;
         Ok(receipts)
     }

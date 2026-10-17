@@ -27,7 +27,14 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
+    sync::LazyLock,
 };
+
+pub(crate) fn profile_replay() -> bool {
+    static ENABLED: LazyLock<bool> =
+        LazyLock::new(|| std::env::var_os("MMX_PROFILE_REPLAY").is_some());
+    *ENABLED
+}
 
 #[derive(Clone, Debug)]
 pub struct BlockContext {
@@ -231,7 +238,15 @@ pub(crate) fn verify_history_evidence<H: mmx_consensus::transitions::history::He
         if let Some(points) = points {
             mmx_consensus::vdf::link_block(block, &context.params, history, points)?;
         }
-        if !evidence.is_some_and(|e| e.matches(block, &context.params, &proofs)) {
+        let reused = evidence.is_some_and(|e| e.matches(block, &context.params, &proofs));
+        if profile_replay() && uint(block, "height")?.is_multiple_of(128) {
+            eprintln!(
+                "Replay evidence: height={} provided={} reused={reused}",
+                uint(block, "height")?,
+                evidence.is_some()
+            );
+        }
+        if !reused {
             mmx_consensus::transitions::verify_header(block, &context.params, &proofs)?;
         }
         Ok::<_, ValidationError>(())

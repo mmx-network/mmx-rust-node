@@ -197,11 +197,22 @@ and reports elapsed time plus RPC latency. The source database is left intact.
 cargo run --release -p mmx-consensus --example bench_pos -- 100
 # Supply a self-describing native block to benchmark its first complete proof:
 cargo run --release -p mmx-consensus --example bench_pos -- 200 /tmp/block.vnx
+cargo run --release -p mmx-node --example bench_validation -- \
+  --peer 127.0.0.1:12337 --blocks 128 --rounds 20
 cargo build --release -p mmx-node --example serve_snapshot
 python3 tools/bench_sync.py --source-dir ./mmx-data \
   --baseline /tmp/mmx-node.before --candidate target/release/mmx-node \
   --from-height 4000 --to-height 4500 --output ./tmp/sync-benchmark
 ```
+
+`bench_validation` profiles cached bodies from a running local node. It reports
+first-pass and warm farmer authentication, static validity, typed-header
+conversion, validator/history lookup, CPU space work and wire encoding as JSON
+lines. It loads preceding headers for the ancestry-dependent measurements.
+Set `MMX_PROFILE_REPLAY=1` when launching the node to sample replay's context,
+history, execution and private-publication costs every 128 heights. It also logs
+proof-evidence reuse and each durable suffix replacement's deletion, row-copy
+and commit times.
 
 The sync benchmark starts three frozen snapshot peers with independent node
 identities, then uses the production coordinator. `serve_snapshot` is a local

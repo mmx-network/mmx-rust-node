@@ -396,16 +396,27 @@ impl Disk {
         )?;
         let result = (|| -> Result<()> {
             let tx = self.conn.transaction()?;
+            let began = Instant::now();
             tx.execute("DELETE FROM history WHERE v>=?1", [version])?;
+            let deleted = Instant::now();
             tx.execute(
                 "INSERT INTO history SELECT * FROM branch_delta.history ORDER BY t,n,k,v",
                 [],
             )?;
+            let copied = Instant::now();
             tx.execute(
                 "UPDATE meta SET version=?1,generation=?2 WHERE id=0",
                 params![branch.local.version, generation],
             )?;
             tx.commit()?;
+            if std::env::var_os("MMX_PROFILE_REPLAY").is_some() {
+                eprintln!(
+                    "Replay SQL: delete_ms={:.3} copy_ms={:.3} commit_ms={:.3}",
+                    deleted.duration_since(began).as_secs_f64() * 1e3,
+                    copied.duration_since(deleted).as_secs_f64() * 1e3,
+                    copied.elapsed().as_secs_f64() * 1e3
+                );
+            }
             Ok(())
         })();
         let detach = self.conn.execute("DETACH DATABASE branch_delta", []);
