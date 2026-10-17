@@ -1,0 +1,70 @@
+#include <mmx/helpers.h>
+namespace mmx {
+struct GenesisReference {
+    std::shared_ptr<ChainParams> params;
+    std::map<std::string,std::shared_ptr<const Transaction>> assets;
+    std::shared_ptr<const Block> result;
+    std::ostringstream sink;
+    static constexpr int INFO=0;
+    std::ostream& log(int){return sink;}
+    std::string read_file(const std::string&)const{return vnx::to_string(assets.at("rewards"));}
+    std::shared_ptr<const Transaction> read_transaction(const std::string& path)const{const auto key=path.substr(path.rfind('/')+1);auto i=assets.find(key);return i==assets.end()?nullptr:i->second;}
+    void apply(std::shared_ptr<const Block> b,std::nullptr_t){result=b;}
+    void commit(std::shared_ptr<const Block>){}
+    void init_chain();
+};
+// MMX_GENESIS_METHOD
+}
+const std::vector<std::string> asset_names={"tx_offer_binary.dat","tx_swap_binary.dat","tx_token_binary.dat","tx_plot_nft_binary.dat","tx_nft_binary.dat","tx_template_binary.dat","tx_escrow_binary.dat","tx_time_lock_binary.dat","tx_relay_binary.dat"};
+template<class T>std::shared_ptr<T> decode_wire(const std::string& text){const auto b=vnx::from_hex_string(text);vnx::VectorInputStream s(&b);vnx::TypeInput in(&s);std::shared_ptr<T> v;vnx::read(in,v);return v;}
+template<class F>std::string outcome(F f){try{f();return "OK";}catch(const std::exception&e){return e.what();}}
+vnx::Object settled(std::shared_ptr<const Block> b,std::shared_ptr<ChainParams> p,Balances& balances,std::map<addr_t,uint128>& supplies){
+    std::map<addr_t,uint128> delta;for(const auto&o:b->get_outputs(p)){balances[{o.address,o.contract}]+=o.amount;delta[o.contract]+=o.amount;}
+    for(const auto&i:b->get_inputs(p)){auto f=balances.find({i.address,i.contract});if(f!=balances.end())clamped_sub_assign(f->second,i.amount);clamped_sub_assign(delta[i.contract],i.amount);}
+    for(const auto&d:delta)if(d.second)supplies[d.first]+=d.second;
+    vnx::Object out;std::vector<vnx::Object> bs,ss;for(const auto&e:balances){vnx::Object r;r["address"]=hx(e.first.first);r["currency"]=hx(e.first.second);r["amount"]=e.second.str();bs.push_back(r);}for(const auto&e:supplies){vnx::Object r;r["currency"]=hx(e.first);r["amount"]=e.second.str();ss.push_back(r);}out["balances"]=bs;out["supplies"]=ss;return out;
+}
+std::ofstream chain_output;size_t chain_count=0;
+vnx::Object emit_genesis(const std::string& name,GenesisReference& g){
+    vnx::Object row;row["kind"]="genesis";row["name"]=name;row["params"]=wire(g.params);std::vector<std::string> bins;for(const auto&n:asset_names)bins.push_back(wire(g.assets.at(n)));row["binaries"]=bins;
+    auto rewards=g.assets.find("rewards"),relay=g.assets.find("tx_project_relay.dat");row["rewards"]=rewards==g.assets.end()?std::string():wire(rewards->second);row["relay"]=relay==g.assets.end()?std::string():wire(relay->second);
+    row["result"]=outcome([&]{g.init_chain();});if(g.result){row["block"]=wire(g.result);Balances balances;std::map<addr_t,uint128> supplies;row["state"]=settled(g.result,g.params,balances,supplies);std::vector<vnx::Object> contracts,indexes;for(const auto&tx:g.result->tx_list){auto i=tx->get_tx_index(g.params,g.result,0);vnx::Object r;r["id"]=hx(tx->id);r["cost"]=i.contract_read_cost;indexes.push_back(r);if(tx->deploy&&(!tx->exec_result||!tx->exec_result->did_fail)){r["wire"]=wire(tx->deploy);contracts.push_back(r);}}row["contracts"]=contracts;row["indexes"]=indexes;}
+    chain_output<<vnx::to_string(row)<<'\n';++chain_count;return row;
+}
+void load_network(GenesisReference& g,const std::string& root,const std::string& network){g.params=ChainParams::create();vnx::from_string(mmx::read_file(root+"/config/"+network+"/chain/params.json"),*g.params);
+    for(const auto&n:asset_names){const auto field=n.substr(3,n.size()-7);if(field=="template_binary")continue;std::ifstream file(root+"/config/"+network+"/chain/params/"+field);std::string value;file>>value;if(!value.empty())g.params->set_field(field,vnx::Variant(value));}
+    for(const auto&n:asset_names)g.assets[n]=vnx::read_from_file<Transaction>(root+"/data/"+network+"/"+n);
+    if(network=="mainnet"){g.assets["tx_project_relay.dat"]=vnx::read_from_file<Transaction>(root+"/data/mainnet/tx_project_relay.dat");std::shared_ptr<const Transaction> rewards;vnx::from_string(mmx::read_file(root+"/data/mainnet/tx_testnet_rewards.json"),rewards);g.assets["rewards"]=rewards;}}
+auto clone_storage(std::shared_ptr<StorageRAM> old){auto out=std::make_shared<Recorder>();for(const auto&e:old->get_memory())out->write(e.first.first,e.first.second,*e.second);for(const auto&e:old->get_entries())out->StorageRAM::write(std::get<0>(e.first),std::get<1>(e.first),std::get<2>(e.first),*e.second);out->writes.clear();return out;}
+int main(int argc,char**argv){
+    if(argc!=4)return 1;secp256k1_init();pos::set_remote_compute(false);chain_output.open(argv[1]);
+    for(const auto&network:{std::string("mainnet"),std::string("testnet13")}){GenesisReference g;load_network(g,argv[2],network);emit_genesis(network,g);}
+    for(unsigned mutation=0;mutation<8;++mutation){GenesisReference g;load_network(g,argv[2],"testnet13");
+        if(mutation==0){g.params->initial_time_diff=UINT64_MAX;g.params->time_diff_divider=3;g.params->initial_time_stamp=UINT64_MAX;}
+        if(mutation==1)g.params->hardfork2_height=0;
+        if(mutation>=2){auto tx=std::make_shared<Transaction>(*g.assets[asset_names[0]]);g.assets[asset_names[0]]=tx;if(mutation==2)tx->network="wrong";if(mutation==3)tx->content_hash=hash_t();if(mutation==4){tx->id=addr(999);tx->content_hash=tx->calc_hash(true);}if(mutation==5){tx->static_cost=UINT32_MAX;tx->content_hash=tx->calc_hash(true);}
+            if(mutation>=6){auto r=std::make_shared<exec_result_t>();r->did_fail=mutation==6;r->total_cost=13;r->total_fee=17;tx->sender=addr(3);tx->add_input(addr(0),addr(4),20);tx->add_output(addr(0),addr(3),7);txin_t in;in.address=addr(3);in.amount=5;r->inputs={in};txout_t out;out.address=addr(5);out.amount=9;r->outputs={out};tx->exec_result=*r;tx->id=tx->calc_hash();tx->content_hash=tx->calc_hash(true);}}
+        emit_genesis("testnet_mutation"+std::to_string(mutation),g);
+    }
+    for(unsigned mutation=0;mutation<5;++mutation){GenesisReference g;load_network(g,argv[2],"mainnet");auto tx=std::make_shared<Transaction>(*g.assets["tx_project_relay.dat"]);g.assets["tx_project_relay.dat"]=tx;if(mutation==0)tx->expires=1;if(mutation==1)tx->sender=nullptr;if(mutation==2){auto e=std::make_shared<contract::Executable>(*std::dynamic_pointer_cast<const contract::Executable>(tx->deploy));e->binary=addr(1);tx->deploy=e;}if(mutation==3)tx->content_hash=hash_t();if(mutation==4)g.assets.erase("tx_project_relay.dat");emit_genesis("mainnet_relay"+std::to_string(mutation),g);}
+    std::shared_ptr<ProofOfSpaceOG> witness;std::ifstream work(argv[3]);std::string line;while(std::getline(work,line)){auto r=vnx::from_string<vnx::Object>(line);if(r["kind"].to<std::string>()=="proof"&&r["result"].to<std::string>()=="OK"){auto v=decode_wire<ProofOfSpace>(r["wire"].to<std::string>());witness=std::dynamic_pointer_cast<ProofOfSpaceOG>(v);if(witness)break;}}if(!witness)throw std::logic_error("no space witness");
+    auto p=ChainParams::create();p->min_ksize=8;p->plot_filter=0;p->post_filter=0;p->space_diff_constant=1;p->initial_space_diff=1;p->initial_time_diff=1;p->initial_time_stamp=100000;p->time_diff_constant=2;p->vdf_segment_size=1;p->challenge_delay=1;p->infuse_delay=0;p->commit_delay=0;p->hardfork1_height=2;p->hardfork2_height=2;p->reward_activation=0;p->transaction_activation=0;p->vdf_reward_interval=2;p->reward_adjust_interval=3;
+    const auto y=pos::compute(witness->proof_xs,nullptr,witness->plot_id,8,0).at(0).first;bool found=false;
+    for(unsigned n=0;n<2000000;++n){p->network="rust-chain-"+std::to_string(n);auto challenge=hash_t("MMX/"+p->network+"/challenge/0");if((get_plot_challenge(challenge,witness->plot_id).to_uint<uint32_t>()&255)!=y)continue;witness->challenge=challenge;witness->score=get_proof_score(witness->calc_proof_hash());auto prev=BlockHeader::create();prev->challenge=challenge;auto b=BlockHeader::create();b->height=1;b->vdf_count=1;b->proof_hash=witness->calc_proof_hash();bool fork=false;auto next=calc_next_challenge(p,prev,b,fork);if((get_plot_challenge(next,witness->plot_id).to_uint<uint32_t>()&255)==y){found=true;break;}}
+    if(!found)throw std::logic_error("could not find two-block witness");
+    GenesisReference g;g.params=p;for(unsigned i=0;i<9;++i){auto tx=Transaction::create();tx->network=p->network;tx->nonce=i+1;tx->deploy=binary({{OP_COPY,0,uint32_t(MEM_STATIC),uint32_t(MEM_STACK+1)},{OP_RET}});if(i==1){auto e=contract::Executable::create();e->binary=g.assets.at(asset_names[0])->id;e->init_method="never_execute_at_genesis";tx->deploy=e;}if(i==0)tx->add_output(addr(0),payer(),10000000);tx->id=tx->calc_hash();tx->content_hash=tx->calc_hash(true);g.assets[asset_names[i]]=tx;}
+    emit_genesis("synthetic",g);WorkHistoryReference history;history.params=p;history.headers[g.result->hash]=std::make_shared<BlockHeader>(*g.result->get_header());
+    BlockReference ledger;ledger.params=p;ledger.previous=std::make_shared<BlockHeader>(*g.result->get_header());ledger.state_hash=g.result->hash;auto backend=std::make_shared<Recorder>();ledger.storage=backend;Balances balances;std::map<addr_t,uint128> supplies;settled(g.result,p,balances,supplies);ledger.balance_table=balances;
+    for(const auto&tx:g.result->tx_list){ledger.contracts[tx->id]=std::const_pointer_cast<Contract>(tx->deploy);ledger.tx_index[tx->id]=tx->get_tx_index(p,g.result,0);}
+    std::vector<vnx::Object> steps;BlockReference saved;std::map<addr_t,uint128> saved_supply;std::shared_ptr<Recorder> saved_storage;
+    for(unsigned variant=0;variant<3;++variant){if(variant==2){ledger=saved;supplies=saved_supply;backend=clone_storage(saved_storage);ledger.storage=backend;}
+        auto parent=ledger.previous;const unsigned height=parent->height+1;auto proof=std::make_shared<ProofOfSpaceOG>(*witness);proof->challenge=parent->challenge;proof->score=get_proof_score(proof->calc_proof_hash());
+        auto pot=ProofOfTime::create();pot->vdf_height=height;pot->start=parent->vdf_iters;pot->num_iters=get_block_iters(p,parent->time_diff);pot->segment_size=1;pot->input=parent->vdf_output;pot->prev=parent->hash;pot->reward_addr=addr(8);auto value=hash_t(pot->input+pot->prev);value=hash_t(value+pot->reward_addr);for(unsigned i=0;i<pot->num_iters;++i){value=hash_t(value.data(),32);pot->segments.push_back(value);}pot->hash=pot->calc_hash();pot->timelord_key=pubkey_t(secret());pot->timelord_sig=signature_t::sign(secret(),pot->hash);pot->content_hash=pot->calc_content_hash();history.verify_vdf(pot);history.verify_vdf_cpu(pot);auto point=VDF_Point::create();point->input=pot->input;point->output=value;point->prev=pot->prev;point->num_iters=pot->num_iters;point->reward_addr=pot->reward_addr;history.vdf_tree.emplace(value,point);
+        auto b=Block::create();b->height=height;b->prev=parent->hash;b->time_stamp=parent->time_stamp+p->block_interval_ms;b->time_diff=parent->time_diff;b->vdf_height=height;b->vdf_count=1;b->vdf_iters=parent->vdf_iters+pot->num_iters;b->vdf_output=value;b->vdf_reward_addr={addr(8)};b->proof={proof};b->proof_hash=proof->calc_proof_hash();b->proof_chain=calc_proof_chain(p,parent,b->proof_hash);bool fork=false;b->challenge=calc_next_challenge(p,parent,b,fork);b->is_space_fork=fork;b->set_space_diff(p,parent);b->weight=calc_block_weight(p,b,parent);b->total_weight=parent->total_weight+b->weight;b->reward_addr=payer();b->project_addr=parent->project_addr;b->set_base_reward(p,parent);b->txfee_buffer=calc_new_txfee_buffer(p,parent);if(height%2==0){b->vdf_reward_payout=addr(8);ledger.expected_payout=addr(8);}else ledger.expected_payout=nullptr;if(variant==2)b->nonce=999;
+        auto tx=Transaction::create();tx->network=p->network;tx->nonce=100+height+(variant==2?1000:0);tx->version=get_transaction_version(p,height);tx->sender=payer();tx->max_fee_amount=1000000;tx->add_input(addr(0),payer(),100);tx->inputs.back().solution=0;tx->add_output(addr(0),addr(variant==2?10:9),100);auto op=operation::Execute::create();op->address=g.assets.at(asset_names[1])->id;op->method="run";op->args={vnx::Variant(variant==2?99:height)};tx->execute={op};seal(tx,p);for(const auto&e:ledger.balance_table)backend->set_balance(e.first.first,e.first.second,e.second);auto ctx=ledger.new_exec_context(height);ledger.prepare_context(ctx,tx);auto result=ledger.ReferenceNode::validate(tx,ctx);tx->update(*result,p);b->tx_list={tx};b->finalize(p);b->reward_amount=ledger.calc_block_reward(b,b->tx_fees);b->hash=b->calc_hash(p);b->farmer_sig=signature_t::sign(secret(),b->hash);b->content_hash=b->calc_content_hash();
+        history.verify_proof(b);if(history.find_vdf_points(b).empty())throw std::logic_error("unlinked native chain VDF");auto checked=ledger.validate(b);checked->storage->commit();auto state=settled(b,p,ledger.balance_table,supplies);vnx::Object step;step["block"]=wire(b);step["vdf"]=wire(pot);step["state"]=state;std::vector<vnx::Object> cells;for(const auto&e:backend->get_memory()){vnx::Object r;r["contract"]=hx(e.first.first);r["address"]=e.first.second;const auto data=serialize(*e.second,false,true);r["value"]=hex(data.first.get(),data.second);cells.push_back(r);}step["cells"]=cells;steps.push_back(step);
+        ledger.previous=std::make_shared<BlockHeader>(*b->get_header());ledger.state_hash=b->hash;ledger.tx_index[tx->id]=tx->get_tx_index(p,b,0);history.headers[b->hash]=ledger.previous;
+        if(variant==0){saved=ledger;saved_supply=supplies;saved_storage=clone_storage(backend);}
+    }
+    vnx::Object row;row["kind"]="chain";row["name"]="extensions";row["genesis"]="synthetic";row["steps"]=steps;chain_output<<vnx::to_string(row)<<'\n';++chain_count;std::cerr<<"wrote "<<chain_count<<" native genesis/chain cases\n";
+}

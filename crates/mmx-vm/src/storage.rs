@@ -279,6 +279,27 @@ impl Storage for StorageDb {
 
 impl AtomicStorage for StorageDb {
     fn apply_transaction(&mut self, transaction: &TransactionBatch) -> Result<()> {
+        let batch = self.transaction_writes(transaction)?;
+        self.database.apply(batch)?;
+        Ok(())
+    }
+}
+impl StorageDb {
+    /// Commit ledger effects and chain metadata in a single durable DB frame.
+    /// Additional writes use the caller's own tables; this method does not
+    /// advance visibility or stage any effects before the journal succeeds.
+    pub fn commit_transaction(
+        &mut self,
+        transaction: &TransactionBatch,
+        additional: impl IntoIterator<Item = Write>,
+        next_version: u32,
+    ) -> Result<()> {
+        let mut writes = self.transaction_writes(transaction)?;
+        writes.extend(additional);
+        self.database.commit_batch(next_version, writes)?;
+        Ok(())
+    }
+    fn transaction_writes(&self, transaction: &TransactionBatch) -> Result<Vec<Write>> {
         let mut batch = Vec::new();
         for (contract, write) in &transaction.writes {
             let var = &write.var;
@@ -328,8 +349,7 @@ impl AtomicStorage for StorageDb {
         for (currency, amount) in &transaction.supplies {
             batch.push(Write::put("total_supply", currency, amount.to_le_bytes()));
         }
-        self.database.apply(batch)?;
-        Ok(())
+        Ok(batch)
     }
 }
 impl LedgerStorage for StorageDb {}

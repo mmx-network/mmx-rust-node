@@ -47,6 +47,37 @@ fn original_table_version_and_revert_cases() {
 }
 
 #[test]
+fn commit_batch_coalesces_and_durably_publishes_multiple_tables() {
+    let path = tempfile::tempdir().unwrap();
+    {
+        let mut db = Database::open(path.path()).unwrap();
+        db.insert("ledger", b"balance", b"pending").unwrap();
+        db.commit_batch(
+            1,
+            [
+                Write::put("ledger", b"balance", b"settled"),
+                Write::put("chain", b"tip", b"genesis"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(db.version(), 1);
+        assert!(!db.has_pending());
+    }
+    let mut db = Database::open(path.path()).unwrap();
+    assert_eq!(
+        db.get("ledger", b"balance", Some(0)),
+        Some(b"settled".as_slice())
+    );
+    assert_eq!(
+        db.get("chain", b"tip", Some(0)),
+        Some(b"genesis".as_slice())
+    );
+    db.revert(0).unwrap();
+    assert!(db.get("ledger", b"balance", None).is_none());
+    assert!(db.get("chain", b"tip", None).is_none());
+}
+
+#[test]
 fn original_table_cases_survive_reopen() {
     let path = tempfile::tempdir().unwrap();
     {

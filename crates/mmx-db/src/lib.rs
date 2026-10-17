@@ -254,14 +254,31 @@ impl Database {
     }
 
     pub fn commit(&mut self, next_version: u32) -> Result<()> {
+        self.commit_batch(next_version, [])
+    }
+
+    /// Validate and durably commit additional writes with existing pending
+    /// writes in one frame. Validation or journal failure leaves both visible
+    /// state and the original pending batch unchanged. A journal I/O failure
+    /// poisons the handle; reopen to resolve whether that frame reached disk.
+    pub fn commit_batch(
+        &mut self,
+        next_version: u32,
+        writes: impl IntoIterator<Item = Write>,
+    ) -> Result<()> {
         self.check_writable()?;
         self.check_commit(next_version)?;
+        let mut pending = self.pending.clone();
+        for write in writes {
+            validate(&write)?;
+            pending.insert((write.table, Key(write.key)), write.value);
+        }
         let mut payload = vec![1];
         payload.extend(self.version.to_le_bytes());
         payload.extend(next_version.to_le_bytes());
-        let count = u32::try_from(self.pending.len()).map_err(|_| Error::InvalidEntry)?;
+        let count = u32::try_from(pending.len()).map_err(|_| Error::InvalidEntry)?;
         payload.extend(count.to_le_bytes());
-        for ((table, key), value) in &self.pending {
+        for ((table, key), value) in &pending {
             payload.extend((table.len() as u16).to_le_bytes());
             payload.extend(table.as_bytes());
             payload.extend((key.0.len() as u32).to_le_bytes());
@@ -280,6 +297,7 @@ impl Database {
             }
         }
         self.append(&payload)?;
+        self.pending = pending;
         self.finish_commit(next_version);
         Ok(())
     }
@@ -444,5 +462,57 @@ impl<'a> Input<'a> {
         } else {
             Err(Error::Corrupt("trailing record data"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_batch_failures_preserve_pending_and_visible_state() {
+        let mut db = Database::memory();
+        db.insert("ledger", b"old", b"committed").unwrap();
+        db.commit(1).unwrap();
+        db.insert("ledger", b"pending", b"original").unwrap();
+        let writes = || {
+            [
+                Write::put("ledger", b"new", b"balance"),
+                Write::put("chain_meta", b"tip", b"new block"),
+            ]
+        };
+        assert!(db.commit_batch(1, writes()).is_err());
+        assert!(db
+            .commit_batch(
+                2,
+                writes()
+                    .into_iter()
+                    .chain([Write::put("invalid/table", b"key", b"value")])
+            )
+            .is_err());
+        assert_eq!(db.version(), 1);
+        assert_eq!(
+            db.get("ledger", b"pending", None),
+            Some(b"original".as_slice())
+        );
+        assert!(db.get("ledger", b"new", None).is_none());
+        assert!(db.get("chain_meta", b"tip", None).is_none());
+
+        // A real write to a read-only descriptor fails before publication.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        db.journal = Some(File::open(file.path()).unwrap());
+        assert!(matches!(db.commit_batch(2, writes()), Err(Error::Io(_))));
+        assert_eq!(db.version(), 1);
+        assert_eq!(
+            db.get("ledger", b"old", None),
+            Some(b"committed".as_slice())
+        );
+        assert_eq!(
+            db.get("ledger", b"pending", None),
+            Some(b"original".as_slice())
+        );
+        assert!(db.get("ledger", b"new", None).is_none());
+        assert!(db.get("chain_meta", b"tip", None).is_none());
+        assert!(matches!(db.commit_batch(2, writes()), Err(Error::Poisoned)));
     }
 }

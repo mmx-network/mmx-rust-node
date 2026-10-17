@@ -109,20 +109,27 @@ pub fn prepare<'a, S: BlockStorage>(
     context: &BlockContext,
     block: &Record,
 ) -> Result<PreparedBlock<'a, S>, Rejected> {
+    let (receipt, batch) = prepare_batch(&*storage, context, block)?;
+    Ok(PreparedBlock {
+        storage,
+        receipt,
+        batch,
+    })
+}
+pub(crate) fn prepare_batch<S: Storage>(
+    storage: &S,
+    context: &BlockContext,
+    block: &Record,
+) -> Result<(Receipt, TransactionBatch), Rejected> {
     let mut rejection = Rejected {
         transaction: None,
         error: Box::new(invalid("block validation")),
         info: ErrorInfo::default(),
         total_cost: 0,
     };
-    let (receipt, batch) = build(&*storage, context, block, &mut rejection).map_err(|e| {
+    build(storage, context, block, &mut rejection).map_err(|e| {
         *rejection.error = e;
         rejection
-    })?;
-    Ok(PreparedBlock {
-        storage,
-        receipt,
-        batch,
     })
 }
 pub fn execute<S: BlockStorage>(
@@ -182,6 +189,15 @@ where
     S: BlockStorage,
     H: mmx_consensus::transitions::history::HeaderSource,
 {
+    verify_with_vdf(context, block, history, points)?;
+    prepare(storage, context, block)
+}
+pub(crate) fn verify_with_vdf<H: mmx_consensus::transitions::history::HeaderSource>(
+    context: &BlockContext,
+    block: &Record,
+    history: &H,
+    points: &[mmx_consensus::vdf::VerifiedPoint],
+) -> Result<(), Rejected> {
     let verification = (|| {
         // Reject unauthenticated headers before history resolution or CPU work.
         if !mmx_consensus::header::is_valid(block, &context.params)? {
@@ -197,8 +213,7 @@ where
         mmx_consensus::transitions::verify_header(block, &context.params, &proofs)?;
         Ok::<_, ValidationError>(())
     })();
-    verification.map_err(proof_rejection)?;
-    prepare(storage, context, block)
+    verification.map_err(proof_rejection)
 }
 fn invalid(s: &str) -> ValidationError {
     ValidationError::Dynamic(s.into())
@@ -456,7 +471,10 @@ fn minimum_fees(p: &mmx::ChainParams, txs: &[&Record]) -> Result<(), ValidationE
     }
     Ok(())
 }
-fn reward_outputs(p: &mmx::ChainParams, block: &Record) -> Result<Vec<Output>, ValidationError> {
+pub(crate) fn reward_outputs(
+    p: &mmx::ChainParams,
+    block: &Record,
+) -> Result<Vec<Output>, ValidationError> {
     let mut outputs = Vec::new();
     let mut push = |address, amount| {
         outputs.push(Output {
@@ -482,7 +500,10 @@ fn reward_outputs(p: &mmx::ChainParams, block: &Record) -> Result<Vec<Output>, V
     Ok(outputs)
 }
 type Settlement = (Vec<BalanceWrite>, Vec<(Address, u128)>);
-fn settle<S: Storage>(storage: &S, receipt: &mut Receipt) -> Result<Settlement, ValidationError> {
+pub(crate) fn settle<S: Storage>(
+    storage: &S,
+    receipt: &mut Receipt,
+) -> Result<Settlement, ValidationError> {
     let mut balances = BTreeMap::<(Address, Address), u128>::new();
     for output in &receipt.outputs {
         let key = (output.address, output.contract);

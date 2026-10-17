@@ -2,8 +2,8 @@
 
 A Rust port of [`mmx-node`](https://github.com/madMAx43v3r/mmx-node), starting
 with the smart contract engine and versioned database. This is an early library
-workspace; networking, consensus, wallet services, and a node executable are still
-to be ported.
+workspace; chain selection, networking, wallet services and a node executable
+remain to be ported.
 
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
 `ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
@@ -48,9 +48,9 @@ counter. It does not require the C++ repository or a running MMX node.
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
-| `mmx-consensus` | Native hashes/costs and authorization, header authentication, CPU proof-of-space verification, difficulty/challenge/weight transitions and ancestor lookup. |
+| `mmx-consensus` | Native hashes/costs and authorization, header authentication, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
-| `mmx-execution` | Contract loading/calls and constructors; transaction validation plus block-body commitments, reservations, shared execution, fee ordering, rewards/supply and deferred atomic settlement. |
+| `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native genesis construction and durable selected-chain application/rollback with block/header/transaction archives. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
 The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
@@ -110,9 +110,17 @@ version 0. `revert(v)` discards writes at versions **greater than or equal to**
 stack references and reclaims unreachable new heap objects, then checks the
 entire persistence gas cost before applying one atomic batch to its storage
 backend. `storage.database_mut().commit(next_version)` then makes the staged
-changes durable. This split allows a future transaction/block executor to decide
-when state becomes durable. For now, use a fresh engine per invocation and let the
-caller serialize access to the storage backend.
+changes durable. The low-level APIs keep this split; `chain::ChainState` combines
+validated block effects, archives and tip updates into one durable commit. Use a
+fresh engine per invocation and serialize access to each storage backend.
+
+`Database::commit_batch(next_version, writes)` validates and commits additional
+writes with the original pending batch, without staging them before the journal
+succeeds. Invalid writes, invalid version transitions and journal failures leave
+the original visible/pending state unchanged. `StorageDb::commit_transaction()`
+uses it to combine VM/ledger effects with caller-owned metadata tables. After a
+journal I/O failure the handle rejects further writes; reopening resolves whether
+the complete frame reached disk.
 
 `mmx_execution::prepare()` runs a batch of already authenticated and funded
 invocations against a disposable overlay. It loads native VNX contract records,
@@ -206,9 +214,9 @@ The body API checks reward activation, fee buffers, project address continuity,
 reward votes/adjustments, reward amounts and VDF payout cadence. Public
 `block::economics` helpers preserve native rounding/wrapping and select the VDF
 winner from authenticated ancestors, including tie-breaking with the oldest
-visited ancestor's proof hash. Archival indexes, genesis initialization and
-chain selection remain to be ported. A successful body validation is not a
-complete block acceptance decision.
+visited ancestor's proof hash. A successful body validation requires the chain
+layer's proof work and transitions before block acceptance. `ChainState` supplies
+that integration; fork choice and node services remain separate.
 
 `mmx_consensus::header` exposes exact header hash serialization, hash/content-hash
 calculation, static validity, farmer authentication and contextual scalar checks.
@@ -271,8 +279,8 @@ metadata or compare block reward addresses with point reward addresses.
 `block::prepare_with_vdf()` authenticates the header, resolves its proof context
 from trusted history, links admitted VDF points, verifies space proofs/transitions
 and prepares atomic body settlement. Supply points verified with the same chain
-parameters. The ancestor-derived VDF payout winner, durable header storage and
-chain selection remain the caller's responsibility.
+parameters. Its caller supplies the ancestor-derived VDF payout winner and
+trusted history; `ChainState` derives those inputs from its persisted tip.
 
 `mmx_execution::nft::target()` implements native Plot NFT reward resolution. It
 falls back to the contract address when the executable, binary or
@@ -293,6 +301,42 @@ checks the result before transaction execution. It uses the parent's height:
 an NFT unlocking at the candidate's height remains locked during that block's
 reward validation. Calls cannot observe transactions or new deployments in the
 candidate block, and their temporary writes never enter the settlement batch.
+
+`mmx_execution::chain::genesis::build()` reproduces native genesis construction
+from a trusted `genesis::Assets` manifest. Its nine transactions are ordered as
+offer, swap, token, plot NFT, NFT, template, escrow, time lock and relay. Mainnet
+prepends the testnet rewards transaction and validates a separate project-relay
+transaction to obtain `project_addr`; that relay is not deployed at genesis.
+Other networks use the reference testnet project address. The VDF/challenge
+domains, nonce, initial difficulties, timestamp casts, transaction commitments
+and header hashes retain native rules. Bootstrap transactions receive native
+genesis checks rather than normal transaction validation, and constructors and
+operations do not execute. Supply original, trusted network records: manifest
+file/JSON loading and canonical network configuration are separate work.
+
+`chain::ChainState` owns the storage backend and exposes read-only ledger access.
+`initialize()` applies genesis balances, deployments, read-cost indexes and
+supply. `append()` authenticates the header, derives challenges/infusions and the
+VDF payout from stored history, links independently verified VDF points, verifies
+space work/transitions, resolves NFT targets and validates the body. It commits
+VM writes, balances, deployments, transaction indexes, supply, lossless records,
+height indexes and the selected tip in one journal frame. Block height `h` writes
+at version `h` and commits version `h + 1`. Reopen checks the exact stored chain
+parameters and the tip/height/version relationship. Headers have their own table
+and retain the signed Block's stored hash when sliced to BlockHeader.
+
+```rust
+let mut chain = mmx_execution::chain::ChainState::open(path, params)?;
+chain.initialize(&assets)?; // once, on a fresh chain
+let point = mmx_consensus::vdf::verify(&time_proof, chain.params(), &chain)?;
+chain.append(&candidate_block, &[point])?;
+```
+
+`revert(h)` durably removes selected blocks and ledger effects at heights `>= h`;
+`revert(0)` also removes genesis. A replacement branch can then be verified and
+appended explicitly. Selected block/header/transaction archives rewind with the
+ledger. Orphan retention, automatic fork choice, specialized wallet/trading
+indexes and node-service caches are not implemented by this API.
 
 `mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
 conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
@@ -514,6 +558,16 @@ transfers and stored collection failures. Block cases check target/contract
 mismatches and parent height at unlock. Tests verify that target calls and
 rejected/aborted blocks preserve the ledger snapshot.
 
+Chain fixtures compare **16 native genesis cases** and a **three-block extension
+sequence** with two competing blocks at height 2. Genesis includes the actual
+mainnet and testnet13 assets, relay failures, network/content mutations, timestamp
+and difficulty wrapping, successful/failed result settlement and native
+bootstrap exemptions. Extensions combine
+original CPU space/VDF verification, header/body validation, contract writes,
+signed transfers, rewards and settlement across hardforks 1 and 2. Rust tests
+cover reopen, explicit rollback/replacement, archive/index consistency, parameter
+binding, torn extension recovery, and failed commit preservation of pending state.
+
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
 transactions/contracts, and call a generated MMX client through the VNX runtime.
@@ -535,6 +589,7 @@ python3 tools/generate_header_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_work_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_vdf_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_nft_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_chain_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -544,8 +599,8 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Genesis, archival indexes and durable chain-state application/reorgs, building
-   on block-body validation and atomic settlement.
+1. Canonical network asset/config loading, orphan archives, specialized history
+   indexes and fork choice, building on durable selected-chain application.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.

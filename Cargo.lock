@@ -549,6 +549,7 @@ name = "mmx-execution"
 version = "0.1.0"
 dependencies = [
  "mmx-consensus",
+ "mmx-db",
  "mmx-types",
  "mmx-vm",
  "sha2",
