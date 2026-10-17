@@ -2,8 +2,8 @@
 
 A Rust port of [`mmx-node`](https://github.com/madMAx43v3r/mmx-node), starting
 with the smart contract engine and versioned database. This is an early library
-workspace; chain selection, networking, wallet services and a node executable
-remain to be ported.
+workspace; validator services, chain sync, networking, wallet services and a
+node executable remain to be ported.
 
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
 `ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
@@ -53,7 +53,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hashes/costs and authorization, header authentication, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
-| `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native genesis construction and durable selected-chain application/rollback with block/header/transaction archives. |
+| `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native network bootstrap, durable selected-chain state, orphan archives, native fork-choice policy and atomic branch replacement. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
 The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
@@ -124,6 +124,14 @@ the original visible/pending state unchanged. `StorageDb::commit_transaction()`
 uses it to combine VM/ledger effects with caller-owned metadata tables. After a
 journal I/O failure the handle rejects further writes; reopening resolves whether
 the complete frame reached disk.
+
+`Database::fork(version)` creates a detached, committed snapshot before that
+version. `replace_suffix(version, &branch)` checks that retained history matches
+exactly, then replaces every later version in one journal frame. Historical
+reads, tombstones and version gaps survive replacement. A torn replacement
+recovers the complete old suffix; a complete frame recovers the complete new
+suffix. Both snapshots must have no pending writes. Snapshots currently copy
+the RAM index, and the complete replacement must fit the 64 MiB frame limit.
 
 `mmx_execution::prepare()` runs a batch of already authenticated and funded
 invocations against a disposable overlay. It loads native VNX contract records,
@@ -357,8 +365,41 @@ chain.append(&candidate_block, &[point])?;
 `revert(h)` durably removes selected blocks and ledger effects at heights `>= h`;
 `revert(0)` also removes genesis. A replacement branch can then be verified and
 appended explicitly. Selected block/header/transaction archives rewind with the
-ledger. Orphan retention, automatic fork choice, specialized wallet/trading
-indexes and node-service caches are not implemented by this API.
+ledger. `reorganize(first_height, &blocks_with_verified_work)` validates the
+replacement on a detached ledger and publishes it with `replace_suffix` only
+after every block succeeds. Genesis cannot be replaced. Failed execution or
+journal I/O cannot expose a partially reverted chain.
+
+`chain::forks::ForkChain` adds a separate durable archive, independent of selected
+ledger rollback. `admit()` checks native block commitments and farmer signatures,
+retains disconnected blocks and ordered signed VDF proofs, and merges later
+work without changing the first block's arrival order. The archive writes ahead
+of selected state and binds exact chain parameters and genesis. Reopen does not
+trust saved proof-verification flags: VDF work and space proofs are checked again.
+
+`update(selected_root_hash, lowest_pending_sync_height)` resolves the native
+fork-choice policy, replays the winning branch against its actual ancestor
+snapshot, and atomically switches the ledger, transaction indexes, archives and
+tip. Losing blocks remain available through `ForkChain::block()`. Missing parents
+or work leave candidates waiting; invalid bodies are excluded and selection
+continues with another candidate. Alternate-root branches wait for backwards
+sync when native policy requires it and replay the prefix below the old root
+before switching. The caller tracks the selected root after a deep fork.
+
+The standalone `chain::choice::select()` ports native proof/invalid propagation,
+wrapping cumulative votes, root/peak weight comparisons, height/hash tie-breaks
+and the backwards-sync guard. It accepts already authenticated vote counts.
+`ForkChain` currently counts zero validator votes: vote authentication/eligibility,
+root advancement/commit scheduling, sync orchestration, archive pruning,
+specialized wallet/trading indexes and node-service caches remain to be ported.
+
+```rust
+let mut forks = mmx_execution::chain::forks::ForkChain::open(path, params)?;
+forks.initialize(&assets)?; // once
+let root = forks.selected().hash_at(0)?.unwrap();
+forks.admit(&candidate_block, &[signed_time_proof])?;
+let update = forks.update(root, None)?;
+```
 
 `mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
 conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
@@ -589,6 +630,12 @@ original CPU space/VDF verification, header/body validation, contract writes,
 signed transfers, rewards and settlement across hardforks 1 and 2. Rust tests
 cover reopen, explicit rollback/replacement, archive/index consistency, parameter
 binding, torn extension recovery, and failed commit preservation of pending state.
+Additional native fixtures cover a correctly signed/proof-verified block with an
+incorrect execution cost and a two-block alternate-root branch. Rust tests cover
+out-of-order orphans, deferred work, restart, selected-index rollback, atomic
+replay failures, deep forks, backwards-sync guards and torn branch replacement.
+The fork-choice oracle compares **430 native graphs**, including wrapping votes,
+unverified/invalid ancestors, differing root weights, height/hash ties and sync.
 
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
@@ -612,6 +659,8 @@ python3 tools/generate_work_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_vdf_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_nft_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_chain_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_network_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_fork_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -621,12 +670,12 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Canonical network asset/config loading, orphan archives, specialized history
-   indexes and fork choice, building on durable selected-chain application.
+1. Validator vote authentication/eligibility, root advancement, chain sync and
+   specialized history indexes, building on durable fork application/selection.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.
-4. Chain selection, networking, RPC and node services using
+4. Networking, RPC and node services using
    the generated types and VNX runtime, carrying over the relevant original tests
    as each component becomes executable.
 

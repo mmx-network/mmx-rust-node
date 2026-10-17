@@ -239,25 +239,18 @@ pub fn transaction_root(hashes: &[Address]) -> Address {
     }
     nodes.first().copied().unwrap_or_default()
 }
-fn envelope<S: Storage>(
-    storage: &S,
-    context: &BlockContext,
-    block: &Record,
-) -> Result<(), ValidationError> {
+/// Native Block::is_valid plus farmer authentication, before retaining a fork.
+/// Context, protocol limits, economics and ledger execution are checked later.
+pub fn prevalidate(block: &Record, p: &mmx::ChainParams) -> Result<(), ValidationError> {
     if block.name != "mmx.Block" {
         return Err(invalid("expected block"));
     }
-    let p = &context.params;
     if !mmx_consensus::header::is_valid(block, p)? {
         return Err(invalid("static header validation failed"));
     }
     mmx_consensus::header::authenticate(block)?;
-    mmx_consensus::header::validate_context(block, &context.previous, p)?;
     let height = uint(block, "height")? as u32;
     let txs = block.field("tx_list")?.seq()?;
-    if height < p.transaction_activation && !txs.is_empty() {
-        return Err(invalid("transactions not activated yet"));
-    }
     let mut static_cost = 0u64;
     let mut total_cost = 0u64;
     let mut fees = 0u64;
@@ -268,11 +261,15 @@ fn envelope<S: Storage>(
         if hash != tx.calc_hash(true, 0)? {
             return Err(invalid("invalid transaction content hash"));
         }
-        let result = optional_record(tx.field("exec_result")?)?
-            .ok_or_else(|| invalid("transaction missing exec_result"))?;
+        let result = optional_record(tx.field("exec_result")?)?;
+        if height != 0 && result.is_none() {
+            return Err(invalid("transaction missing exec_result"));
+        }
         static_cost = static_cost.wrapping_add(uint(tx, "static_cost")?);
-        total_cost = total_cost.wrapping_add(uint(result, "total_cost")?);
-        fees = fees.wrapping_add(uint(result, "total_fee")?);
+        if let Some(result) = result {
+            total_cost = total_cost.wrapping_add(uint(result, "total_cost")?);
+            fees = fees.wrapping_add(uint(result, "total_fee")?);
+        }
         hashes.push(hash);
     }
     if uint(block, "static_cost")? != static_cost
@@ -283,6 +280,23 @@ fn envelope<S: Storage>(
     {
         return Err(invalid("block body commitment mismatch"));
     }
+    Ok(())
+}
+fn envelope<S: Storage>(
+    storage: &S,
+    context: &BlockContext,
+    block: &Record,
+) -> Result<(), ValidationError> {
+    let p = &context.params;
+    prevalidate(block, p)?;
+    mmx_consensus::header::validate_context(block, &context.previous, p)?;
+    if uint(block, "height")? < p.transaction_activation as u64
+        && !block.field("tx_list")?.seq()?.is_empty()
+    {
+        return Err(invalid("transactions not activated yet"));
+    }
+    let static_cost = uint(block, "static_cost")?;
+    let total_cost = uint(block, "total_cost")?;
     if static_cost > p.max_block_size {
         return Err(invalid("block size too high"));
     }

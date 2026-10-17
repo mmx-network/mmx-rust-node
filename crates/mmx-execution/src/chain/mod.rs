@@ -1,6 +1,9 @@
 //! Durable selected-chain state. Ledger effects, lossless block/transaction
 //! records, height indexes and the tip commit together at the block's height.
-//! This module verifies extensions; fork choice and orphan retention are separate.
+//! ChainState verifies extensions/replacements; `forks` adds orphan retention
+//! and branch selection using the native policy in `choice`.
+pub mod choice;
+pub mod forks;
 pub mod genesis;
 pub mod network;
 use crate::{
@@ -36,6 +39,8 @@ pub enum ChainError {
     Block(#[from] block::Rejected),
     #[error(transparent)]
     Header(#[from] mmx_consensus::header::HeaderError),
+    #[error(transparent)]
+    Vdf(#[from] mmx_consensus::vdf::VdfError),
 }
 pub type ChainResult<T> = Result<T, ChainError>;
 fn invalid(message: &'static str) -> ChainError {
@@ -166,6 +171,29 @@ impl ChainState {
         let (receipt, batch) = block::prepare_batch(&self.storage, &context, candidate)?;
         self.publish(candidate, &batch, false)?;
         Ok(receipt)
+    }
+    /// Speculate on a detached ledger. A failed block or journal write cannot
+    /// expose a partially reverted chain. `height` is the first replaced block.
+    pub fn reorganize(
+        &mut self,
+        height: u32,
+        blocks: &[(Record, Vec<VerifiedPoint>)],
+    ) -> ChainResult<Vec<block::Receipt>> {
+        if height == 0 {
+            return Err(invalid("cannot replace genesis"));
+        }
+        let mut branch = Self {
+            storage: StorageDb::new(self.storage.database().fork(height)?),
+            params: self.params.clone(),
+        };
+        let mut receipts = Vec::new();
+        for (block, points) in blocks {
+            receipts.push(branch.append(block, points)?);
+        }
+        self.storage
+            .database_mut()
+            .replace_suffix(height, branch.storage.database())?;
+        Ok(receipts)
     }
     fn vdf_payout(&self, height: u32, parent: &mmx::BlockHeader) -> ChainResult<Option<Address>> {
         let interval = self.params.vdf_reward_interval;

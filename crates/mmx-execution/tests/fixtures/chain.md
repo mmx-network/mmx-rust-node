@@ -18,7 +18,7 @@ transaction IDs/static cost. Mainnet's separate project relay determines the
 project address but is not included/deployed. A synthetic executable names a
 nonexistent constructor to prove genesis does not run it.
 
-The final row contains three native verified extensions: heights 1 and 2, then a
+The `chain` row contains three native verified extensions: heights 1 and 2, then a
 competing height-2 block after restoring the native parent snapshot. All execute
 a signed transaction that writes contract storage and transfers funds. Expected
 balances include farmer/project rewards, fees and the ancestor-derived VDF payout.
@@ -34,6 +34,23 @@ of a torn final chain frame must recover the preceding ledger and tip together.
 The DB's smaller-frame tests separately cover every truncation position and
 injected write failure, including preservation of pre-existing pending writes.
 
-These fixtures implement a selected-chain store, not the native node's complete
-fork tree, independent orphan archive, wallet/trade history indexes, mempool,
-validator voting or finality service.
+Two additional rows exercise fork application. `fork_rejection` changes a supplied
+execution cost, recomputes transaction/body/header commitments and signs the
+block again. Native static/space checks pass and native body validation rejects
+the cost mismatch. `deep_fork` changes the height-1 root's nonce, constructs new
+signed/CPU-verified VDF work for its child, verifies both space proofs and executes
+the child against the alternative parent. The new child's nonce is sampled so
+its raw hash wins the native zero-vote tie-break against the original peak.
+Expected balances and VM cells come from native application.
+
+ForkChain tests retain orphans before their parents arrive, reopen, merge later
+work, exclude the rejected body, switch to the hash winner and retain losing
+blocks while removing their selected indexes. Deep-fork tests defer missing work
+below the root, honor backwards-sync guards, replay from genesis, and reopen the
+new branch. Torn selected-journal frames retain the independent archive and
+recover either complete ledger before normal selection resumes. Database tests
+cover every byte of a smaller replacement frame and a real write failure.
+
+The separate `forks.jsonl` oracle covers native selection with validator vote
+counts. Vote authentication/eligibility, root commit/sync scheduling,
+wallet/trade indexes, mempool and finality services are not implemented here.

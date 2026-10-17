@@ -27,6 +27,8 @@ pub enum Error {
     InvalidEntry,
     #[error("journal write failed; close and reopen the database")]
     Poisoned,
+    #[error("replacement snapshot does not share the retained history")]
+    SnapshotMismatch,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -319,6 +321,65 @@ impl Database {
         Ok(())
     }
 
+    /// Detached, committed history before `version`, ready for speculative
+    /// writes at that version. No file handles or pending writes are shared.
+    pub fn fork(&self, version: u32) -> Result<Self> {
+        if version > self.version || self.has_pending() {
+            return Err(Error::SnapshotMismatch);
+        }
+        let mut fork = Self::memory();
+        fork.tables = self.tables.clone();
+        fork.finish_revert(version);
+        Ok(fork)
+    }
+
+    /// Replace history at versions >= `version` with a completely validated
+    /// detached branch. One journal frame publishes the entire replacement;
+    /// validation/I/O failure leaves the old visible state unchanged. Retained
+    /// history must match exactly, preventing adoption of a stale/foreign base.
+    pub fn replace_suffix(&mut self, version: u32, branch: &Self) -> Result<()> {
+        self.check_writable()?;
+        if self.has_pending()
+            || branch.has_pending()
+            || branch.version < version
+            || branch.version == u32::MAX
+            || self.fork(version)?.tables != branch.fork(version)?.tables
+        {
+            return Err(Error::SnapshotMismatch);
+        }
+        let mut entries = Vec::new();
+        for (table, rows) in &branch.tables {
+            for (key, history) in rows {
+                for (height, value) in history.range(version..) {
+                    entries.push((
+                        *height,
+                        Write {
+                            table: table.clone(),
+                            key: key.0.clone(),
+                            value: value.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+        let mut payload = vec![3];
+        payload.extend(version.to_le_bytes());
+        payload.extend(branch.version.to_le_bytes());
+        payload.extend(
+            u32::try_from(entries.len())
+                .map_err(|_| Error::InvalidEntry)?
+                .to_le_bytes(),
+        );
+        for (height, write) in entries {
+            payload.extend(height.to_le_bytes());
+            encode_write(&mut payload, &write)?;
+        }
+        self.append(&payload)?;
+        self.tables = branch.tables.clone();
+        self.version = branch.version;
+        Ok(())
+    }
+
     fn check_writable(&self) -> Result<()> {
         if self.poisoned {
             Err(Error::Poisoned)
@@ -418,10 +479,62 @@ impl Database {
                 }
                 self.finish_revert(version);
             }
+            3 => {
+                let version = input.u32()?;
+                let next = input.u32()?;
+                if version > self.version || next < version || next == u32::MAX {
+                    return Err(Error::Corrupt("replacement version mismatch"));
+                }
+                let mut branch = self.fork(version)?;
+                let count = input.u32()?;
+                for _ in 0..count {
+                    let height = input.u32()?;
+                    let write = input.write()?;
+                    if height < version || height >= next {
+                        return Err(Error::Corrupt("replacement entry version"));
+                    }
+                    if branch
+                        .tables
+                        .entry(write.table)
+                        .or_default()
+                        .entry(Key(write.key))
+                        .or_default()
+                        .insert(height, write.value)
+                        .is_some()
+                    {
+                        return Err(Error::Corrupt("duplicate replacement entry"));
+                    }
+                }
+                input.finish()?;
+                self.tables = branch.tables;
+                self.version = next;
+            }
             _ => return Err(Error::Corrupt("unknown journal operation")),
         }
         Ok(())
     }
+}
+
+fn encode_write(payload: &mut Vec<u8>, write: &Write) -> Result<()> {
+    validate(write)?;
+    payload.extend((write.table.len() as u16).to_le_bytes());
+    payload.extend(write.table.as_bytes());
+    payload.extend((write.key.len() as u32).to_le_bytes());
+    payload.extend(&write.key);
+    payload.extend(
+        write
+            .value
+            .as_ref()
+            .map_or(u32::MAX, |v| v.len() as u32)
+            .to_le_bytes(),
+    );
+    if let Some(value) = &write.value {
+        payload.extend(value)
+    }
+    if payload.len() > MAX_FRAME {
+        return Err(Error::InvalidEntry);
+    }
+    Ok(())
 }
 
 fn validate(write: &Write) -> Result<()> {
@@ -442,6 +555,23 @@ fn validate(write: &Write) -> Result<()> {
 struct Input<'a>(&'a [u8]);
 
 impl<'a> Input<'a> {
+    fn write(&mut self) -> Result<Write> {
+        let size = u16::from_le_bytes(self.take(2)?.try_into().unwrap()) as usize;
+        let table = std::str::from_utf8(self.take(size)?)
+            .map_err(|_| Error::Corrupt("invalid table name"))?
+            .to_owned();
+        let size = self.u32()? as usize;
+        let key = self.take(size)?.to_vec();
+        let size = self.u32()?;
+        let value = if size == u32::MAX {
+            None
+        } else {
+            Some(self.take(size as usize)?.to_vec())
+        };
+        let write = Write { table, key, value };
+        validate(&write).map_err(|_| Error::Corrupt("invalid entry"))?;
+        Ok(write)
+    }
     fn take(&mut self, size: usize) -> Result<&'a [u8]> {
         if size > self.0.len() {
             return Err(Error::Corrupt("truncated record"));
@@ -468,6 +598,27 @@ impl<'a> Input<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_io_failure_keeps_old_suffix_and_poisons_writer() {
+        let mut db = Database::memory();
+        db.commit_batch(1, [Write::put("chain", b"tip", b"old")])
+            .unwrap();
+        let mut branch = db.fork(0).unwrap();
+        branch
+            .commit_batch(1, [Write::put("chain", b"tip", b"new")])
+            .unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        db.journal = Some(File::open(file.path()).unwrap());
+        assert!(matches!(db.replace_suffix(0, &branch), Err(Error::Io(_))));
+        assert_eq!(db.get("chain", b"tip", None), Some(b"old".as_slice()));
+        assert_eq!(db.version(), 1);
+        assert!(!db.has_pending());
+        assert!(matches!(
+            db.replace_suffix(0, &branch),
+            Err(Error::Poisoned)
+        ));
+    }
 
     #[test]
     fn commit_batch_failures_preserve_pending_and_visible_state() {

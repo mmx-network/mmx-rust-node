@@ -47,6 +47,121 @@ fn original_table_version_and_revert_cases() {
 }
 
 #[test]
+fn detached_branch_replacement_preserves_retained_history_and_reopens() {
+    let path = tempfile::tempdir().unwrap();
+    let mut db = Database::open(path.path()).unwrap();
+    db.commit_batch(2, [Write::put("ledger", b"balance", b"base")])
+        .unwrap();
+    db.commit_batch(
+        3,
+        [
+            Write::put("ledger", b"balance", b"old"),
+            Write::put("index", b"old", b"tx"),
+        ],
+    )
+    .unwrap();
+    let mut branch = db.fork(2).unwrap();
+    branch
+        .commit_batch(
+            4,
+            [
+                Write::delete("ledger", b"balance"),
+                Write::put("index", b"new", b"tx"),
+            ],
+        )
+        .unwrap();
+    branch
+        .commit_batch(5, [Write::put("ledger", b"balance", b"new")])
+        .unwrap();
+    assert_eq!(db.get("ledger", b"balance", None), Some(b"old".as_slice()));
+    db.replace_suffix(2, &branch).unwrap();
+    drop(db);
+    let mut db = Database::open(path.path()).unwrap();
+    assert_eq!(db.version(), 5);
+    assert_eq!(
+        db.get("ledger", b"balance", Some(1)),
+        Some(b"base".as_slice())
+    );
+    assert!(db.get("ledger", b"balance", Some(3)).is_none());
+    assert_eq!(
+        db.get("ledger", b"balance", Some(4)),
+        Some(b"new".as_slice())
+    );
+    assert!(db.get("index", b"old", None).is_none());
+    assert_eq!(db.get("index", b"new", None), Some(b"tx".as_slice()));
+    let shorter = db.fork(2).unwrap();
+    db.replace_suffix(2, &shorter).unwrap();
+    assert_eq!(db.version(), 2);
+    assert_eq!(db.get("ledger", b"balance", None), Some(b"base".as_slice()));
+    assert!(db.get("index", b"new", None).is_none());
+    let mut foreign = Database::memory();
+    foreign.commit(2).unwrap();
+    assert!(matches!(
+        db.replace_suffix(2, &foreign),
+        Err(Error::SnapshotMismatch)
+    ));
+    db.insert("pending", b"key", b"original").unwrap();
+    assert!(db.fork(2).is_err());
+    assert!(db.replace_suffix(2, &shorter).is_err());
+    assert_eq!(
+        db.get("pending", b"key", None),
+        Some(b"original".as_slice())
+    );
+}
+
+#[test]
+fn every_torn_replacement_recovers_the_complete_old_or_new_branch() {
+    let path = tempfile::tempdir().unwrap();
+    let mut db = Database::open(path.path()).unwrap();
+    db.commit_batch(1, [Write::put("ledger", b"balance", b"base")])
+        .unwrap();
+    db.commit_batch(
+        2,
+        [
+            Write::put("ledger", b"balance", b"old"),
+            Write::put("chain", b"tip", b"old"),
+        ],
+    )
+    .unwrap();
+    let prefix = std::fs::metadata(path.path().join("journal.mmx"))
+        .unwrap()
+        .len() as usize;
+    let mut branch = db.fork(1).unwrap();
+    branch
+        .commit_batch(
+            2,
+            [
+                Write::put("ledger", b"balance", b"new"),
+                Write::put("chain", b"tip", b"new"),
+            ],
+        )
+        .unwrap();
+    branch
+        .commit_batch(3, [Write::put("index", b"new", b"tx")])
+        .unwrap();
+    db.replace_suffix(1, &branch).unwrap();
+    drop(db);
+    let bytes = std::fs::read(path.path().join("journal.mmx")).unwrap();
+    for cut in prefix..=bytes.len() {
+        let copy = tempfile::tempdir().unwrap();
+        std::fs::write(copy.path().join("journal.mmx"), &bytes[..cut]).unwrap();
+        let recovered = Database::open(copy.path()).unwrap();
+        let complete = cut == bytes.len();
+        let expected = if complete { b"new" } else { b"old" };
+        assert_eq!(recovered.version(), if complete { 3 } else { 2 });
+        assert_eq!(
+            recovered.get("chain", b"tip", None),
+            Some(expected.as_slice())
+        );
+        assert_eq!(
+            recovered.get("ledger", b"balance", None),
+            Some(expected.as_slice())
+        );
+        assert_eq!(recovered.get("index", b"new", None).is_some(), complete);
+    }
+}
+
+#[test]
 fn commit_batch_coalesces_and_durably_publishes_multiple_tables() {
     let path = tempfile::tempdir().unwrap();
     {

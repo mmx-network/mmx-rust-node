@@ -389,3 +389,301 @@ fn reopen_rejects_a_tip_that_does_not_match_the_journal_version() {
     drop(raw);
     assert!(ChainState::open(dir.path(), p).is_err());
 }
+
+fn block_hash(step: &Value) -> Address {
+    record(&step["block"])
+        .field("hash")
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+fn retain(chain: &mut mmx_execution::chain::forks::ForkChain, step: &Value) {
+    chain
+        .admit(&record(&step["block"]), &[record(&step["vdf"])])
+        .unwrap();
+}
+
+#[test]
+fn orphans_arrive_before_parents_reopen_and_switch_to_native_hash_winner() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let p = params(&g);
+    let root = block_hash(&g);
+    let (winner, loser) = if block_hash(&steps[1]) < block_hash(&steps[2]) {
+        (&steps[1], &steps[2])
+    } else {
+        (&steps[2], &steps[1])
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open(dir.path(), p.clone()).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    retain(&mut chain, loser);
+    let update = chain.update(root, None).unwrap();
+    assert!(update.best.is_none());
+    assert!(update.waiting.contains(&block_hash(loser)));
+    verify_step(chain.selected(), &g);
+    drop(chain);
+    let mut chain = ForkChain::open(dir.path(), p.clone()).unwrap();
+    assert_eq!(
+        chain.block(&block_hash(loser)).unwrap(),
+        Some(record(&loser["block"]))
+    );
+    chain.admit(&record(&steps[0]["block"]), &[]).unwrap();
+    assert!(chain.update(root, None).unwrap().best.is_none());
+    retain(&mut chain, &steps[0]);
+    let update = chain.update(root, None).unwrap();
+    assert_eq!(update.applied, [block_hash(&steps[0]), block_hash(loser)]);
+    verify_step(chain.selected(), loser);
+    retain(&mut chain, winner);
+    retain(&mut chain, winner); // repeated bytes cannot change arrival order
+    let update = chain.update(root, None).unwrap();
+    assert_eq!(update.common_ancestor, Some(block_hash(&steps[0])));
+    assert_eq!(update.applied, [block_hash(winner)]);
+    verify_step(chain.selected(), winner);
+    assert!(chain
+        .selected()
+        .block(&block_hash(loser))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        chain.block(&block_hash(loser)).unwrap(),
+        Some(record(&loser["block"]))
+    );
+    let old_tx = record(&loser["block"])
+        .field("tx_list")
+        .unwrap()
+        .seq()
+        .unwrap()[0]
+        .record()
+        .unwrap()
+        .clone();
+    let id = old_tx
+        .field("id")
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(chain.selected().transaction(&id).unwrap().is_none());
+    assert!(chain
+        .selected()
+        .storage()
+        .get_transaction_index(&id)
+        .unwrap()
+        .is_none());
+    drop(chain);
+    let mut chain = ForkChain::open(dir.path(), p.clone()).unwrap();
+    verify_step(chain.selected(), winner);
+    assert!(chain.update(root, None).unwrap().applied.is_empty());
+    assert!(chain.update(block_hash(loser), None).is_err());
+    drop(chain);
+    let mut wrong = p;
+    wrong.network.push_str("wrong");
+    assert!(ForkChain::open(dir.path(), wrong).is_err());
+}
+
+#[test]
+fn invalid_branch_body_is_excluded_without_reverting_selected_state() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let bad = rows()
+        .into_iter()
+        .find(|r| r["kind"] == "fork_rejection")
+        .unwrap();
+    assert_ne!(bad["result"], "OK");
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    retain(&mut chain, &steps[0]);
+    chain.update(block_hash(&g), None).unwrap();
+    retain(&mut chain, &bad);
+    let update = chain.update(block_hash(&g), None).unwrap();
+    assert!(update.invalid.contains(&block_hash(&bad)));
+    verify_step(chain.selected(), &steps[0]);
+    drop(chain);
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    let update = chain.update(block_hash(&g), None).unwrap();
+    assert!(update.invalid.contains(&block_hash(&bad)));
+    assert!(update.applied.is_empty());
+    retain(&mut chain, &steps[2]);
+    chain.update(block_hash(&g), None).unwrap();
+    verify_step(chain.selected(), &steps[2]);
+}
+
+#[test]
+fn alternate_root_waits_for_work_and_backwards_sync_then_replays_the_deep_branch() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let deep = rows()
+        .into_iter()
+        .find(|r| r["kind"] == "deep_fork")
+        .unwrap()["steps"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    retain(&mut chain, &steps[0]);
+    retain(&mut chain, &steps[1]);
+    chain.update(block_hash(&g), None).unwrap();
+    verify_step(chain.selected(), &steps[1]);
+    chain.admit(&record(&deep[0]["block"]), &[]).unwrap();
+    retain(&mut chain, &deep[1]);
+    let update = chain.update(block_hash(&steps[0]), None).unwrap();
+    assert!(update.waiting.contains(&block_hash(&deep[1])));
+    assert!(!update.invalid.contains(&block_hash(&deep[1])));
+    verify_step(chain.selected(), &steps[1]);
+    drop(chain);
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    retain(&mut chain, &deep[0]);
+    chain.update(block_hash(&steps[0]), Some(0)).unwrap();
+    verify_step(chain.selected(), &steps[1]);
+    let update = chain.update(block_hash(&steps[0]), None).unwrap();
+    assert_eq!(update.common_ancestor, Some(block_hash(&g)));
+    assert_eq!(update.applied, [block_hash(&deep[0]), block_hash(&deep[1])]);
+    verify_step(chain.selected(), &deep[1]);
+    assert!(chain.block(&block_hash(&steps[0])).unwrap().is_some());
+    assert!(chain.block(&block_hash(&steps[1])).unwrap().is_some());
+    drop(chain);
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    verify_step(chain.selected(), &deep[1]);
+    assert!(chain
+        .update(block_hash(&deep[0]), None)
+        .unwrap()
+        .applied
+        .is_empty());
+}
+
+#[test]
+fn archive_write_ahead_recovers_initialization_and_binds_exact_genesis() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let mut original = ForkChain::open(dir.path(), params(&g)).unwrap();
+    original.initialize(&assets(&g)).unwrap();
+    drop(original);
+    let copy = tempfile::tempdir().unwrap();
+    fs::create_dir(copy.path().join("archive")).unwrap();
+    fs::copy(
+        dir.path().join("archive/journal.mmx"),
+        copy.path().join("archive/journal.mmx"),
+    )
+    .unwrap();
+    let mut chain = ForkChain::open(copy.path(), params(&g)).unwrap();
+    assert!(chain.selected().tip().unwrap().is_none());
+    let mut different = assets(&g);
+    let tx = &mut different.binaries[8];
+    tx.fields
+        .insert("nonce".into(), mmx_consensus::Value::Uint(9999));
+    tx.fields.insert(
+        "id".into(),
+        mmx_consensus::Value::Bytes(tx.calc_hash(false, 0).unwrap().to_vec()),
+    );
+    tx.fields.insert(
+        "content_hash".into(),
+        mmx_consensus::Value::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
+    );
+    assert!(chain.initialize(&different).is_err());
+    chain.initialize(&assets(&g)).unwrap();
+    verify_step(chain.selected(), &g);
+    let mut tampered = record(&steps[0]["block"]);
+    tampered.fields.insert(
+        "content_hash".into(),
+        mmx_consensus::Value::Bytes(vec![0; 32]),
+    );
+    assert!(chain.admit(&tampered, &[]).is_err());
+    assert!(chain.block(&block_hash(&steps[0])).unwrap().is_none());
+    assert!(chain.admit(&record(&g["block"]), &[]).is_err());
+    verify_step(chain.selected(), &g);
+}
+
+#[test]
+fn speculative_replacement_cannot_publish_a_successful_prefix_before_failure() {
+    let (g, steps) = synthetic();
+    let mut chain = ChainState::memory(params(&g));
+    chain.initialize(&assets(&g)).unwrap();
+    append(&mut chain, &steps[0]);
+    append(&mut chain, &steps[1]);
+    let first = vdf::verify(&record(&steps[0]["vdf"]), chain.params(), &chain).unwrap();
+    let second = vdf::verify(&record(&steps[2]["vdf"]), chain.params(), &chain).unwrap();
+    let mut bad = record(&steps[2]["block"]);
+    bad.fields.insert(
+        "content_hash".into(),
+        mmx_consensus::Value::Bytes(vec![0; 32]),
+    );
+    assert!(chain
+        .reorganize(
+            1,
+            &[
+                (record(&steps[0]["block"]), vec![first.clone()]),
+                (bad, vec![second.clone()])
+            ]
+        )
+        .is_err());
+    verify_step(&chain, &steps[1]);
+    chain
+        .reorganize(
+            1,
+            &[
+                (record(&steps[0]["block"]), vec![first]),
+                (record(&steps[2]["block"]), vec![second]),
+            ],
+        )
+        .unwrap();
+    verify_step(&chain, &steps[2]);
+    assert!(chain.reorganize(0, &[]).is_err());
+}
+
+#[test]
+fn torn_branch_switch_keeps_orphans_and_recovers_old_or_new_ledger_together() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let root = block_hash(&g);
+    let (winner, loser) = if block_hash(&steps[1]) < block_hash(&steps[2]) {
+        (&steps[1], &steps[2])
+    } else {
+        (&steps[2], &steps[1])
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    retain(&mut chain, &steps[0]);
+    retain(&mut chain, loser);
+    chain.update(root, None).unwrap();
+    let prefix = fs::metadata(dir.path().join("selected/journal.mmx"))
+        .unwrap()
+        .len() as usize;
+    retain(&mut chain, winner);
+    chain.update(root, None).unwrap();
+    drop(chain);
+    let data = fs::read(dir.path().join("selected/journal.mmx")).unwrap();
+    let archive = fs::read(dir.path().join("archive/journal.mmx")).unwrap();
+    for cut in [
+        prefix,
+        prefix + 1,
+        prefix + 7,
+        prefix + 11,
+        prefix + 12,
+        (prefix + data.len()) / 2,
+        data.len() - 1,
+        data.len(),
+    ] {
+        let copy = tempfile::tempdir().unwrap();
+        fs::create_dir(copy.path().join("selected")).unwrap();
+        fs::create_dir(copy.path().join("archive")).unwrap();
+        fs::write(copy.path().join("selected/journal.mmx"), &data[..cut]).unwrap();
+        fs::write(copy.path().join("archive/journal.mmx"), &archive).unwrap();
+        let mut recovered = ForkChain::open(copy.path(), params(&g)).unwrap();
+        verify_step(
+            recovered.selected(),
+            if cut == data.len() { winner } else { loser },
+        );
+        assert!(recovered.block(&block_hash(loser)).unwrap().is_some());
+        assert!(recovered.block(&block_hash(winner)).unwrap().is_some());
+        recovered.update(root, None).unwrap();
+        verify_step(recovered.selected(), winner);
+    }
+}
