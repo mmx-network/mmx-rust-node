@@ -22,6 +22,29 @@ use std::{
 const MAGIC: u32 = 0x4B277B06;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
+/// Native get_block_hash_ex: the chain ID and the complete content commitment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockHash {
+    pub block: Hash,
+    pub content: Hash,
+}
+
+fn optional_block_hash(value: Value) -> Result<Option<BlockHash>> {
+    value
+        .optional()?
+        .map(|v| {
+            let pair = v.seq()?;
+            if pair.len() != 2 {
+                return Err(error("invalid peer hash pair"));
+            }
+            Ok(BlockHash {
+                block: pair[0].bytes()?.try_into()?,
+                content: pair[1].bytes()?.try_into()?,
+            })
+        })
+        .transpose()
+}
+
 pub fn encode_frame(value: &Record) -> Result<Vec<u8>> {
     let raw = value.encode()?;
     if raw.len() > MAX_FRAME {
@@ -221,7 +244,119 @@ impl Client {
         }
         results
             .into_iter()
-            .map(|v| v.ok_or_else(|| error("peer request timed out")))
+            .map(|v| {
+                v.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "peer request timed out")
+                        .into()
+                })
+            })
+            .collect()
+    }
+    /// Authenticate the native node ID, reject aliases/self-connections, and
+    /// qualify only synced full nodes on our genesis before using sync data.
+    pub fn qualify(&mut self, genesis: Hash, own_id: Hash) -> Result<(Hash, u32)> {
+        use rand::RngCore;
+        let id: Hash = self
+            .call(record("mmx.Router.get_id", []))?
+            .bytes()?
+            .try_into()?;
+        let info = self.call(record("mmx.Router.get_info", []))?;
+        let info = info.record()?;
+        if id == own_id
+            || crate::node::hash(info, "id")? != id
+            || info.field("type")?.uint()?
+                != u64::from(mmx_types::mmx::node_type_e::FULL_NODE.value)
+        {
+            return Err(error("peer is not a distinct full node"));
+        }
+        let mut challenge = [0; 32];
+        rand::thread_rng().fill_bytes(&mut challenge);
+        let signed = self.call(record(
+            "mmx.Router.sign_msg",
+            [("msg".into(), Value::Bytes(challenge.to_vec()))],
+        ))?;
+        let pair = signed.seq()?;
+        if pair.len() != 2 {
+            return Err(error("invalid peer identity proof"));
+        }
+        let key = pair[0].bytes()?.try_into()?;
+        if mmx_crypto::public_key_address(key) != id
+            || !mmx_crypto::verify(&challenge, key, pair[1].bytes()?.try_into()?)?
+        {
+            return Err(error("peer identity verification failed"));
+        }
+        if self.hash_at(0)? != Some(genesis) {
+            return Err(error("peer genesis mismatch"));
+        }
+        let height = self
+            .synced_height()?
+            .ok_or_else(|| error("peer is not synced"))?;
+        Ok((id, height))
+    }
+    pub fn synced_height(&mut self) -> Result<Option<u32>> {
+        self.call(record("mmx.Node.get_synced_height", []))?
+            .optional()?
+            .map(|v| Ok(u32::try_from(v.uint()?)?))
+            .transpose()
+    }
+    pub fn hash_pairs(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+        if count > 64 {
+            return Err(error("peer hash window exceeds 64 heights"));
+        }
+        let methods = (0..count)
+            .map(|i| {
+                Ok(record(
+                    "mmx.Node.get_block_hash_ex",
+                    [(
+                        "height".into(),
+                        Value::Uint(
+                            start
+                                .checked_add(i)
+                                .ok_or_else(|| error("peer height overflow"))?
+                                .into(),
+                        ),
+                    )],
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.call_many(methods)?
+            .into_iter()
+            .map(optional_block_hash)
+            .collect()
+    }
+    pub fn blocks_by_hash(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
+        if hashes.len() > 4 {
+            return Err(error("peer request window exceeds four blocks"));
+        }
+        self.call_many(
+            hashes
+                .iter()
+                .map(|hash| {
+                    record(
+                        "mmx.Node.get_block",
+                        [("hash".into(), Value::Bytes(hash.to_vec()))],
+                    )
+                })
+                .collect(),
+        )?
+        .into_iter()
+        .map(|value| match value {
+            Value::Null => Ok(None),
+            Value::Record(b) => Ok(Some(b)),
+            _ => Err(error("invalid peer block result")),
+        })
+        .collect()
+    }
+    pub fn known_peers(&mut self) -> Result<Vec<String>> {
+        let value = self.call(record(
+            "mmx.Router.get_peers",
+            [("max_count".into(), Value::Uint(32))],
+        ))?;
+        value
+            .seq()?
+            .iter()
+            .take(32)
+            .map(|v| Ok(std::str::from_utf8(v.text()?)?.to_owned()))
             .collect()
     }
     /// Four outstanding native requests avoid a full round trip per block

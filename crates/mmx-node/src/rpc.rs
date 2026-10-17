@@ -119,7 +119,7 @@ fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
             let inbox = n.inbox().stats()?;
             Ok(
                 json!({"height":tip.height,"vdf_height":tip.vdf_height,"root_height":n.root,
-                "synced":n.synced,"network":n.chain.selected().params().network,
+                "synced":n.synced,"sync_peers":n.sync_peers,"network":n.chain.selected().params().network,
                 "hash":vnx::util::to_hex_string(&tip.hash.0,false,false),
                 "queued_messages":inbox.messages,"queued_bytes":inbox.bytes,"dropped_messages":inbox.dropped}),
             )

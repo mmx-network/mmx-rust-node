@@ -1,6 +1,7 @@
 //! Download complete native blocks without exposing an unvalidated rollback.
 //! A competing branch is archived and replayed atomically by ForkChain; RPC
 //! readers see selected ledger snapshots between download batches.
+pub mod peers;
 mod prefetch;
 use crate::{
     error,
@@ -66,6 +67,8 @@ pub struct Progress {
     pub target: u32,
     pub elapsed: Duration,
     pub download_time: Duration,
+    pub hash_time: Duration,
+    pub body_time: Duration,
     pub archive_time: Duration,
     pub update_time: Duration,
     pub verification_time: Duration,

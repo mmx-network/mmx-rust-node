@@ -49,7 +49,8 @@ Build and start the node using the original public network assets:
 cargo build --release -p mmx-node --locked
 ./target/release/mmx-node --mmx-root ../mmx-node --network mainnet \
   --data-dir ./mmx-data
-# Pin peers with repeated --peer HOST[:PORT]; otherwise use native seed config.
+# Supply seed candidates with --peer HOST[:PORT]; otherwise use native seed config.
+# Discovery fills a random pool of 3–8 distinct authenticated synced full nodes.
 # Serve stored state without network access:
 ./target/release/mmx-node --mmx-root ../mmx-node --offline
 # Keep a chosen height before resuming sync (all later orphans remain archived):
@@ -59,7 +60,7 @@ cargo build --release -p mmx-node --locked
 Default listeners are local: native peers on the configured network port
 (mainnet 11337), VNX service `Node` at `127.0.0.1:11331`, and HTTP JSON-RPC at
 `http://127.0.0.1:11380/rpc`. Override with `--p2p-listen`, `--rpc-listen` and
-`--http-listen`. `--sync-once` exits after reaching a peer tip. Ctrl-C stops the
+`--http-listen`. `--sync-once` exits after coordinated sync. Ctrl-C stops the
 servers and sync workers; each selected batch is already durable.
 
 ```sh
@@ -69,22 +70,36 @@ curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"get_block_hash","params":{"height":100}}'
 ```
 
-Sync pipelines four native requests at a time, correlates out-of-order replies
-while servicing peer requests, and retains each window (up to 64 blocks, targeting 8 MiB)
-in one atomic archive transaction. Progress logs include cumulative throughput,
-download wait, archive and update timings, with proof and replay time within updates.
-One scoped producer can fetch the next window while the current window is
-validated. Single-slot channels bound queued work; byte checks run between
-four-request groups. Prefetch uses the existing root's lookahead, and final peer
-tip/hash checks still run after ledger publication. Errors and cancellation close
-the channels and join the producer before reusing its native connection.
-A moving peer tip keeps the node in historical mode until
-the selected tip matches a stable advertised tip; download never lowers the
-fork-choice root to force acceptance of a peer branch. Native lookahead and
+One coordinator owns historical download jobs. It selects a random pool of
+3–8 synced full nodes, verifies each native signed node ID and genesis, and
+rejects duplicate identities and self-connections. Native peer discovery fills
+the pool; sync waits when fewer than three qualified peers are available.
+For every height, `get_block_hash_ex` collects `(block hash, content hash)` from
+at least three distinct peers. Every unique content hash is fetched once with
+`get_block(hash)` and recomputed/authenticated before archival. Hashes are not
+majority-voted: two lying peers cannot hide the third peer's valid candidate.
+A second provider is tried only after the original 15-second request lease
+expires. Restart, rewind and tip probes reuse matching archived content.
+
+This ports the height-job approach in native `Router::process()` and
+`Node::sync_result()`, with a minimum of three rather than the upstream default
+of two. All candidates reach native fork choice, CPU proof checks and ledger
+validation; a rejected candidate does not discard another peer's valid block.
+Unknown parents trigger bounded backwards discovery above genesis. Download
+never lowers the fork-choice root to force acceptance of a peer branch. Native lookahead and
 strict future-timestamp bounds also apply. The active view includes the selected
 tip and downloaded prefix; retained future orphans are not automatically selected
 after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
+
+Each connection correlates reordered native returns while serving peer requests,
+with at most four body requests outstanding. Download windows retain up to 64
+heights and target 8 MiB, including competing candidates, in an atomic archive
+transaction. Progress logs separate hash queries, bodies, archive publication,
+proofs and ledger replay. A final multi-peer tip probe runs after publication;
+a changing tip keeps the node in historical mode. HTTP status includes `sync_peers`.
+The single-source pipelined helper remains available for fixtures and local
+snapshot tooling; the production executable always uses the peer coordinator.
 
 Peer broadcasts enter a bounded FIFO without taking the ledger mutex, so proof
 validation does not interrupt socket reads. The node update drains and validates
@@ -117,10 +132,16 @@ and reports elapsed time plus RPC latency. The source database is left intact.
 cargo run --release -p mmx-consensus --example bench_pos -- 100
 # Supply a self-describing native block to benchmark its first complete proof:
 cargo run --release -p mmx-consensus --example bench_pos -- 200 /tmp/block.vnx
+cargo build --release -p mmx-node --example serve_snapshot
 python3 tools/bench_sync.py --source-dir ./mmx-data \
   --baseline /tmp/mmx-node.before --candidate target/release/mmx-node \
   --from-height 4000 --to-height 4500 --output ./tmp/sync-benchmark
 ```
+
+The sync benchmark starts three frozen snapshot peers with independent node
+identities, then uses the production coordinator. `serve_snapshot` is a local
+benchmark utility that serves a previously validated archive, without a
+single-peer exception in the node executable.
 
 In a local mainnet replay of heights 4000–4500, these cache/staging changes raised
 the download-and-validation rate from 11.7 to 28.6 blocks/s. Including startup,
@@ -147,9 +168,9 @@ reads only. Native compressed peer requests carry lossless block records.
 
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A mainnet smoke test connected to a native peer advertising height 5,514,074 and
-validated through height 800. The indexed build imported the earlier journal,
-resumed the download and served HTTP RPC during mainnet sync. A complete mainnet
+A mainnet run validated through height 113,248 before replacing the original
+single-peer downloader. Download then resumed with seven authenticated peers
+and HTTP RPC available throughout. A complete mainnet
 sync has not finished. The node uses an indexed disk backend with every
 historical version retained. Sync throughput and remaining peer services are
 still being improved.

@@ -19,6 +19,8 @@ pub struct Node {
     pub(crate) root: u32,
     pub(crate) synced: bool,
     pub(crate) sync_pos: u32,
+    pub(crate) sync_peers: usize,
+    pub(crate) sync_pending: BTreeSet<u32>,
     key: SigningKey,
     work: VecDeque<Record>,
     pending: BTreeMap<Hash, Record>,
@@ -93,6 +95,8 @@ impl Node {
             root,
             synced: false,
             sync_pos: tip.height.saturating_add(1),
+            sync_peers: 0,
+            sync_pending: BTreeSet::new(),
             key,
             work: VecDeque::new(),
             pending: BTreeMap::new(),
@@ -129,6 +133,8 @@ impl Node {
         self.root = height.saturating_sub(self.chain.selected().params().commit_delay);
         self.synced = false;
         self.sync_pos = height.saturating_add(1);
+        self.sync_peers = 0;
+        self.sync_pending.clear();
         self.work.clear();
         self.pending.clear();
         self.verified_work.clear();
@@ -212,9 +218,11 @@ impl Node {
             .ok_or_else(|| error("missing node root"))?;
         let now = vnx::util::get_wall_time_millis();
         let out = if self.synced {
-            self.chain.update_at(root, None, now)?
+            self.chain
+                .update_at(root, self.sync_pending.first().copied(), now)?
         } else {
-            self.chain.update_sync_at(root, None, now)?
+            self.chain
+                .update_sync_at(root, self.sync_pending.first().copied(), now)?
         };
         // A deep branch switch may replace the root's block. Heights remain soft.
         let selected = self.chain.selected();
@@ -259,7 +267,7 @@ impl Node {
             &line,
             self.synced,
             self.sync_pos,
-            &BTreeSet::new(),
+            &self.sync_pending,
         )?;
         if let Some(height) = advance.heights.last() {
             self.root = *height;

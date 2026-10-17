@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir PATH]
@@ -19,7 +19,7 @@ Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
   HTTP JSON-RPC http://127.0.0.1:11380/rpc.
 Historical sync uses configured native seed peers unless --peer is supplied.
 --offline serves the stored ledger without contacting peers.
---sync-once exits after reaching a peer tip. --rollback-to keeps that height.
+--sync-once exits after coordinated sync. Sync requires 3–8 distinct synced peers. --rollback-to keeps that height.
 All heights remain available for rollback; databases retain every ledger version.";
 struct Options {
     root: PathBuf,
@@ -101,7 +101,7 @@ fn main() -> Result<()> {
             .into());
         }
     }
-    let port = network.params.port;
+    let port = u16::try_from(network.params.port)?;
     let peers: Vec<_> = options
         .peers
         .iter()
@@ -161,76 +161,16 @@ fn main() -> Result<()> {
         }));
     }
     if !options.offline {
-        // More than one peer can contribute competing branches; ledger updates
-        // are serialized while network requests run outside the node lock.
-        for address in peers.into_iter().take(8) {
-            let node = node.clone();
-            let stop = stop.clone();
-            let once = options.once;
-            workers.push(thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    let attempt = || -> Result<()> {
-                        let mut peer = peer::Client::connect(&address, node.clone())?;
-                        println!("Connected to {address}");
-                        let mut queried = Instant::now() - Duration::from_secs(10);
-                        let mut changed = Instant::now();
-                        let mut last_height = 0;
-                        while !stop.load(Ordering::Relaxed) {
-                            if !node.lock().unwrap().is_synced() {
-                                let progress = sync::synchronize_pipelined(&mut peer, &node, &stop, |p| {
-                                    println!(
-                                        "Sync {address}: {} / {}, downloaded {} since fork {}, {:.1} blocks/s; download wait {:.3}s archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
-                                        p.selected, p.target, p.downloaded, p.common,
-                                        f64::from(p.downloaded) / p.elapsed.as_secs_f64(),
-                                        p.download_time.as_secs_f64(), p.archive_time.as_secs_f64(),
-                                        p.update_time.as_secs_f64(), p.verification_time.as_secs_f64(),
-                                        p.replay_time.as_secs_f64()
-                                    )
-                                })?;
-                                println!(
-                                    "Peer {address}: selected {} / {}",
-                                    progress.selected, progress.target
-                                );
-                                if node.lock().unwrap().is_synced() && once {
-                                    stop.store(true, Ordering::Relaxed);
-                                    break;
-                                }
-                            }
-                            peer.poll()?;
-                            if queried.elapsed() > Duration::from_secs(10) {
-                                let remote = peer.height()?;
-                                let mut n = node.lock().unwrap();
-                                let current =
-                                    n.chain().selected().tip()?.ok_or("missing tip")?.height;
-                                if current != last_height {
-                                    changed = Instant::now();
-                                    last_height = current;
-                                }
-                                if remote > current && changed.elapsed() > Duration::from_secs(60) {
-                                    // Same sync-loss recovery as native Node: historical
-                                    // admission is re-enabled only after losing live progress.
-                                    n.begin_resync();
-                                }
-                                queried = Instant::now();
-                            }
-                        }
-                        Ok(())
-                    };
-                    if let Err(e) = attempt() {
-                        if !stop.load(Ordering::Relaxed) {
-                            eprintln!("Peer {address}: {e}");
-                        }
-                    }
-                    for _ in 0..20 {
-                        if stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                }
-            }));
-        }
+        let sync_node = node.clone();
+        let sync_stop = stop.clone();
+        workers.push(thread::spawn(move || {
+            if let Err(e) = sync::peers::run(peers, port, &sync_node, &sync_stop, options.once) {
+                eprintln!("Sync coordinator failed: {e}");
+                sync_stop.store(true, Ordering::Relaxed);
+            }
+        }));
     }
+
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(200));
     }

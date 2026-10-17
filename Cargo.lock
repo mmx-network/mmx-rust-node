@@ -717,6 +717,7 @@ dependencies = [
  "mmx-execution",
  "mmx-types",
  "mmx-vm",
+ "rand",
  "tempfile",
  "thiserror",
  "tiny_http",

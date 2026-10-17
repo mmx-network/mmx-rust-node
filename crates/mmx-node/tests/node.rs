@@ -575,6 +575,86 @@ fn native_peer_pipeline_correlates_reordered_returns_and_services_peer_requests(
 }
 
 #[test]
+fn coordinated_socket_sync_authenticates_three_ids_and_uses_native_content_hash_pairs() {
+    let (network, g, steps, _) = fixture();
+    let receiving = node(&network);
+    let genesis = hash(&wire(&g["block"]), "hash").unwrap();
+    let own_id: Hash = receiving
+        .lock()
+        .unwrap()
+        .call(&record("mmx.Router.get_id", []))
+        .unwrap()
+        .field("_ret_0")
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let mut servers = Vec::new();
+    let mut sources = Vec::new();
+    let blocks = vec![
+        wire(&g["block"]),
+        wire(&steps[0]["block"]),
+        wire(&steps[1]["block"]),
+    ];
+    for key in 2..=4 {
+        let mut chain = ForkChain::memory(network.params.clone());
+        chain.initialize(&network.assets).unwrap();
+        let serving = Arc::new(Mutex::new(
+            Node::from_chain(chain, SigningKey::from_slice(&[key; 32]).unwrap()).unwrap(),
+        ));
+        let mut initial = MemorySource {
+            blocks: blocks.clone(),
+            wrong: false,
+        };
+        sync::synchronize(&mut initial, &serving, &AtomicBool::new(false), |_| {}).unwrap();
+        let server = peer::Server::bind("127.0.0.1:0", serving).unwrap();
+        let mut client =
+            peer::Client::connect(&server.address().to_string(), receiving.clone()).unwrap();
+        let (id, height) = client.qualify(genesis, own_id).unwrap();
+        assert_eq!(height, 2);
+        assert!(client.known_peers().unwrap().is_empty());
+        let hashes = client.hash_pairs(1, 2).unwrap();
+        assert_eq!(
+            hashes[0],
+            Some(peer::BlockHash {
+                block: hash(&blocks[1], "hash").unwrap(),
+                content: hash(&blocks[1], "content_hash").unwrap()
+            })
+        );
+        sources.push((id, client));
+        servers.push(server);
+    }
+    let mut pool = sync::peers::PeerPool::new(sources);
+    assert_eq!(pool.len(), 3);
+    let progress =
+        sync::peers::synchronize_peers(&mut pool, &receiving, &AtomicBool::new(false), |_| {})
+            .unwrap();
+    assert_eq!(progress.selected, 2);
+    assert!(receiving.lock().unwrap().is_synced());
+    check(&receiving, &steps[1]);
+    let mut client =
+        peer::Client::connect(&servers[0].address().to_string(), receiving.clone()).unwrap();
+    let id = pool.ids()[0];
+    // Authenticating with the peer's own ID must reject self-connections.
+    let actual_id: Hash = client
+        .call(record("mmx.Router.get_id", []))
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(client.qualify(genesis, actual_id).is_err());
+    assert!(client.qualify([7; 32], own_id).is_err());
+    assert_ne!(id, own_id);
+    drop(client);
+    drop(pool);
+    for server in &mut servers {
+        server.shutdown();
+    }
+}
+
+#[test]
 fn offline_rewinds_stay_at_the_requested_height_across_ticks_and_restarts() {
     let (network, g, steps, _) = fixture();
     let dir = tempfile::tempdir().unwrap();

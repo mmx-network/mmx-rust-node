@@ -19,3 +19,4 @@ zstd = "0.13"
 tiny_http = "0.12"
 ctrlc = "3"
 tempfile.workspace = true
+rand = "0.8"

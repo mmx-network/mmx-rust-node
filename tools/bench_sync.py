@@ -10,7 +10,6 @@ import contextlib
 import json
 from pathlib import Path
 import re
-import shutil
 import signal
 import sqlite3
 import subprocess
@@ -22,7 +21,7 @@ import urllib.request
 
 def snapshot(source, destination):
     destination.mkdir(parents=True)
-    shutil.copy2(source / "identity.key", destination / "identity.key")
+    # Each peer and receiver generates its own authenticated node identity.
     # Archive admission precedes selected publication and never deletes blocks.
     # Snapshot selected first so the subsequent archive includes its entire tip.
     for name in ("selected", "archive"):
@@ -94,6 +93,8 @@ def main():
     parser.add_argument("--source-dir", type=Path, required=True)
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--mirror-binary", type=Path,
+                        help="defaults to examples/serve_snapshot beside candidate")
     parser.add_argument("--mmx-root", type=Path, default=Path("../mmx-node"))
     parser.add_argument("--from-height", type=int, required=True)
     parser.add_argument("--to-height", type=int, required=True)
@@ -105,14 +106,26 @@ def main():
     args.output = args.output.resolve()
     with tempfile.TemporaryDirectory(prefix="sync-bench-", dir=args.output) as temporary:
         directory = Path(temporary)
-        mirror = directory / "mirror"
-        snapshot(args.source_dir.resolve(), mirror)
-        mirror_log = args.output / "mirror.log"
-        with launch(args.candidate.resolve(), args.mmx_root.resolve(), mirror,
-                    mirror_log, "--offline", "--rollback-to", str(args.to_height)) as serving:
-            peer, url = endpoints(serving, mirror_log)
-            expected = status(url)
-            assert expected["height"] == args.to_height, expected
+        mirror_binary = (args.mirror_binary or args.candidate.parent / "examples" / "serve_snapshot").resolve()
+        if not mirror_binary.is_file():
+            parser.error("build the snapshot peer: cargo build --release -p mmx-node --example serve_snapshot")
+        with contextlib.ExitStack() as stack:
+            peers = []
+            expected = None
+            for index in range(3):
+                mirror = directory / f"mirror-{index}"
+                snapshot(args.source_dir.resolve(), mirror)
+                mirror_log = args.output / f"mirror-{index}.log"
+                serving = stack.enter_context(launch(
+                    mirror_binary, args.mmx_root.resolve(), mirror, mirror_log,
+                    "--rollback-to", str(args.to_height)))
+                peer, url = endpoints(serving, mirror_log)
+                current = status(url)
+                assert current["height"] == args.to_height and current["synced"], current
+                if expected is None:
+                    expected = current
+                assert current["hash"] == expected["hash"], current
+                peers.extend(("--peer", peer))
             results = []
             for name, binary in (("baseline", args.baseline), ("candidate", args.candidate)):
                 receiving = directory / name
@@ -122,7 +135,7 @@ def main():
                 latencies = []
                 with launch(binary.resolve(), args.mmx_root.resolve(), receiving, log,
                             "--rollback-to", str(args.from_height), "--sync-once",
-                            "--peer", peer) as process:
+                            *peers) as process:
                     _, rpc = endpoints(process, log)
                     while process.poll() is None:
                         before = time.monotonic()
