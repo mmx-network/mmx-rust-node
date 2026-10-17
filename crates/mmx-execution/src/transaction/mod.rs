@@ -36,6 +36,8 @@ pub enum ValidationError {
     #[error(transparent)]
     Consensus(#[from] mmx_consensus::Error),
     #[error(transparent)]
+    Header(#[from] mmx_consensus::header::HeaderError),
+    #[error(transparent)]
     Storage(#[from] storage::Error),
     #[error(transparent)]
     Execution(#[from] mmx_vm::Error),
@@ -46,7 +48,11 @@ impl ValidationError {
     fn rejects(&self) -> bool {
         matches!(
             self,
-            Self::Static(_) | Self::Consensus(_) | Self::Storage(_) | Self::Mismatch(_)
+            Self::Static(_)
+                | Self::Consensus(_)
+                | Self::Header(_)
+                | Self::Storage(_)
+                | Self::Mismatch(_)
         ) || matches!(self,Self::Authorization(e) if e.is_static_failure())
             || matches!(
                 self,

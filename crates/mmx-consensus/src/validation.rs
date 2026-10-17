@@ -205,6 +205,9 @@ pub(crate) fn is_valid(r: &Record, p: &ValidationParams) -> Result<bool> {
                 }
         }
         "mmx.exec_error_t" => r.text("message")?.len() <= 160,
+        "mmx.ProofOfSpace" | "mmx.ProofOfSpaceOG" | "mmx.ProofOfSpaceNFT" => {
+            crate::proof::is_valid(r)?
+        }
         _ => return Err(Error::Unsupported(r.name.clone())),
     })
 }

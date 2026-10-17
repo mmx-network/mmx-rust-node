@@ -318,6 +318,49 @@ fn later_transaction_rejection_preserves_existing_pending_writes() {
 }
 
 #[test]
+fn header_tampering_and_invalid_farmer_signatures_publish_nothing() {
+    use mmx_consensus::{header, Value as N};
+    let trace = seed("shared_state_v1");
+    let original = record(&trace["block"]);
+    let ctx = context(&trace);
+    let mut db = StorageDb::memory();
+    setup(&mut db, &trace);
+    for field in [
+        "hash",
+        "content_hash",
+        "nonce",
+        "weight",
+        "proof_chain",
+        "time_stamp",
+    ] {
+        let mut block = original.clone();
+        match block.fields.get_mut(field).unwrap() {
+            N::Bytes(v) => v[0] ^= 1,
+            N::Uint(v) => *v = v.wrapping_add(1),
+            N::Int(v) => *v = -1,
+            _ => panic!("unexpected header field"),
+        }
+        assert!(
+            block::prepare(&mut db, &ctx, &block).is_err(),
+            "{field}: accepted tampering"
+        );
+        assert!(!db.database().has_pending(), "{field}: published writes");
+    }
+    let mut block = original;
+    block.fields.insert(
+        "farmer_sig".into(),
+        N::Optional(Some(Box::new(N::Bytes(vec![0; 64])))),
+    );
+    let content = header::calc_content_hash(&block).unwrap();
+    block
+        .fields
+        .insert("content_hash".into(), N::Bytes(content.to_vec()));
+    assert!(header::is_valid(&block, &ctx.params).unwrap());
+    assert!(block::prepare(&mut db, &ctx, &block).is_err());
+    assert!(!db.database().has_pending());
+}
+
+#[test]
 fn native_economic_rounding_wrapping_activation_votes_and_reward_limits() {
     use block::economics;
     let mut count = 0;

@@ -333,6 +333,24 @@ pub(crate) fn calc_hash(record: &Record, full: bool, version: u32) -> Result<Has
         }
         "mmx.contract.Data" => out.fields(record, &["version", "value"])?,
         "mmx.contract.WebData" => out.fields(record, &["version", "mime_type", "payload"])?,
+        "mmx.ProofOfSpaceOG" | "mmx.ProofOfSpaceNFT" => {
+            out.fields(
+                record,
+                &[
+                    "score",
+                    "plot_id",
+                    "challenge",
+                    "difficulty",
+                    "farmer_key",
+                    "ksize",
+                    "seed",
+                    "proof_xs",
+                ],
+            )?;
+            if record.name == "mmx.ProofOfSpaceNFT" {
+                out.field(record, "contract")?;
+            }
+        }
         "mmx.operation.Execute" | "mmx.operation.Deposit" => {
             out.fields(record, &["version", "address", "method", "args", "user"])?;
             if record.name == "mmx.operation.Deposit" {
@@ -374,4 +392,80 @@ pub(crate) fn calc_hash(record: &Record, full: bool, version: u32) -> Result<Has
         _ => return Err(Error::Unsupported(record.name.clone())),
     }
     Ok(Sha256::digest(out.bytes).into())
+}
+
+pub(crate) fn header(record: &Record, hardfork2_height: u32) -> Result<Vec<u8>> {
+    if !matches!(record.name.as_str(), "mmx.Block" | "mmx.BlockHeader") {
+        return Err(input("expected block header"));
+    }
+    let mut out = Writer::new(0);
+    // Native get_type_hash is virtual: a Block retains its derived type hash.
+    out.type_hash(record)?;
+    out.fields(
+        record,
+        &[
+            "version",
+            "support_flags",
+            "prev",
+            "height",
+            "vdf_height",
+            "nonce",
+            "time_stamp",
+            "time_diff",
+            "space_diff",
+        ],
+    )?;
+    for name in ["weight", "total_weight"] {
+        out.name(name);
+        let amount = record.field(name)?.bytes()?;
+        if amount.len() != 16 {
+            return Err(input("uint128 size"));
+        }
+        out.raw(amount);
+    }
+    out.fields(
+        record,
+        &[
+            "vdf_count",
+            "vdf_iters",
+            "vdf_output",
+            "vdf_reward_addr",
+            "vdf_reward_payout",
+        ],
+    )?;
+    out.name("proof");
+    let proofs = record.seq("proof")?;
+    out.vector_header(proofs.len());
+    for proof in proofs {
+        out.blob(&calc_hash(proof.record()?, false, 0)?, false);
+    }
+    out.field(record, "proof_hash")?;
+    if record.uint("height")? >= hardfork2_height as u64 {
+        out.field(record, "proof_chain")?;
+    }
+    out.fields(
+        record,
+        &[
+            "challenge",
+            "is_space_fork",
+            "space_fork_len",
+            "space_fork_proofs",
+            "reward_amount",
+            "reward_addr",
+            "reward_contract",
+            "reward_account",
+            "reward_vote",
+            "reward_vote_sum",
+            "reward_vote_count",
+            "base_reward",
+            "project_addr",
+            "static_cost",
+            "total_cost",
+            "tx_count",
+            "tx_fees",
+            "txfee_buffer",
+            "tx_hash",
+        ],
+    )?;
+    Ok(out.bytes)
 }

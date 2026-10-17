@@ -4,10 +4,14 @@
 //! types and opaque Variant payloads. Generated types are also accepted through
 //! `Record::from_generated`, but their JSON-backed Variant fields cannot express
 //! every native value. The `authorization` module supplies native signature
-//! checks; static validity and authorization remain separate from ledger validation.
+//! checks. The `header` and `proof` modules supply native header authentication,
+//! proof-record hashes and plot identity checks. Proof work and ledger validation
+//! remain separate stages.
 pub mod authorization;
 mod encode;
 mod hash;
+pub mod header;
+pub mod proof;
 mod validation;
 mod wire;
 

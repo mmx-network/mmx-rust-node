@@ -1,8 +1,8 @@
 //! Block-body validation against a fixed chain snapshot, shared VM execution,
-//! and atomic settlement. The caller must first verify the header (hashes,
-//! farmer signature, proofs/VDF, difficulty, timestamps and reward targets).
-//! This API checks body commitments, economics and transaction execution; it
-//! does not select a chain or advance the database version.
+//! and atomic settlement. Header hashes, static validity, farmer authentication
+//! and contextual scalar checks are enforced here. The caller must also verify
+//! space/VDF work, challenge/difficulty transitions, weights and reward targets.
+//! This API does not select a chain or advance the database version.
 pub mod economics;
 
 use crate::{
@@ -97,8 +97,9 @@ impl<S: BlockStorage> PreparedBlock<'_, S> {
         Ok(self.receipt)
     }
 }
-/// Validate a body whose header has already been verified. Nothing is published
-/// until `commit`; dropping the prepared block aborts every transaction.
+/// Validate the header envelope and body after the chain layer verifies proof
+/// work/transitions and reward targets. Nothing is published until `commit`;
+/// dropping the prepared block aborts every transaction.
 pub fn prepare<'a, S: BlockStorage>(
     storage: &'a mut S,
     context: &BlockContext,
@@ -156,17 +157,12 @@ fn envelope(context: &BlockContext, block: &Record) -> Result<(), ValidationErro
         return Err(invalid("expected block"));
     }
     let p = &context.params;
-    let prev = &context.previous;
+    if !mmx_consensus::header::is_valid(block, p)? {
+        return Err(invalid("static header validation failed"));
+    }
+    mmx_consensus::header::authenticate(block)?;
+    mmx_consensus::header::validate_context(block, &context.previous, p)?;
     let height = uint(block, "height")? as u32;
-    if bytes::<32>(block.field("prev")?)? != prev.hash.0 {
-        return Err(invalid("parent snapshot mismatch"));
-    }
-    if height != prev.height.wrapping_add(1) {
-        return Err(invalid("invalid height"));
-    }
-    if uint(block, "version")? != 0 {
-        return Err(invalid("invalid version"));
-    }
     let txs = block.field("tx_list")?.seq()?;
     if height < p.transaction_activation && !txs.is_empty() {
         return Err(invalid("transactions not activated yet"));
