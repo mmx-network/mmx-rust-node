@@ -1,6 +1,7 @@
 //! Download complete native blocks without exposing an unvalidated rollback.
 //! A competing branch is archived and replayed atomically by ForkChain; RPC
 //! readers see selected ledger snapshots between download batches.
+mod prefetch;
 use crate::{
     error,
     node::{hash, number},
@@ -8,6 +9,7 @@ use crate::{
     Node, Result,
 };
 use mmx_consensus::{Hash, Record};
+pub use prefetch::synchronize_pipelined;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -25,6 +27,11 @@ pub trait Source {
     fn height(&mut self) -> Result<u32>;
     fn hash_at(&mut self, height: u32) -> Result<Option<Hash>>;
     fn block_at(&mut self, height: u32) -> Result<Option<Record>>;
+    /// Optionally start the next bounded window while the caller validates the
+    /// current one. Ordinary sources remain synchronous.
+    fn prefetch(&mut self, _start: u32, _count: u32) -> Result<()> {
+        Ok(())
+    }
     fn blocks_at(&mut self, start: u32, count: u32) -> Result<Vec<Option<Record>>> {
         (0..count)
             .map(|i| {
@@ -181,6 +188,20 @@ pub fn synchronize(
         let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
         if local.synced {
             return Err(error("historical download requested after live transition"));
+        }
+        // Use the existing root, before publishing this window. A producer can
+        // fetch conservatively ahead without requiring the node lock during I/O.
+        let lookahead = local
+            .root
+            .saturating_add(local.chain.selected().params().commit_delay)
+            .saturating_add(1000);
+        if next <= target && next <= lookahead {
+            source.prefetch(
+                next,
+                (target - next + 1)
+                    .min(BATCH_BLOCKS)
+                    .min(lookahead - next + 1),
+            )?;
         }
         let archive_started = Instant::now();
         local.chain.admit_blocks(&batch)?;

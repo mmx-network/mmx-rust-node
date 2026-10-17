@@ -116,14 +116,15 @@ fn socket_sync_deep_fork_rollback_restart_and_rpc_read_the_same_native_ledger() 
         ],
         wrong: false,
     };
-    sync::synchronize(&mut initial, &serving, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut initial, &serving, &AtomicBool::new(false), |_| {}).unwrap();
     let mut server = peer::Server::bind("127.0.0.1:0", serving.clone()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let receiving = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
     let mut client =
         peer::Client::connect(&server.address().to_string(), receiving.clone()).unwrap();
     let progress =
-        sync::synchronize(&mut client, &receiving, &AtomicBool::new(false), |_| {}).unwrap();
+        sync::synchronize_pipelined(&mut client, &receiving, &AtomicBool::new(false), |_| {})
+            .unwrap();
     assert_eq!(
         (progress.common, progress.downloaded, progress.selected),
         (0, 2, 2)
@@ -188,11 +189,12 @@ fn socket_sync_deep_fork_rollback_restart_and_rpc_read_the_same_native_ledger() 
         ],
         wrong: false,
     };
-    sync::synchronize(&mut alternate, &serving, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut alternate, &serving, &AtomicBool::new(false), |_| {}).unwrap();
     check(&serving, &deep[1]);
     receiving.lock().unwrap().begin_resync();
     let progress =
-        sync::synchronize(&mut client, &receiving, &AtomicBool::new(false), |_| {}).unwrap();
+        sync::synchronize_pipelined(&mut client, &receiving, &AtomicBool::new(false), |_| {})
+            .unwrap();
     assert_eq!((progress.common, progress.downloaded), (0, 2));
     check(&receiving, &deep[1]);
     http.shutdown();
@@ -221,7 +223,7 @@ fn socket_sync_deep_fork_rollback_restart_and_rpc_read_the_same_native_ledger() 
         ],
         wrong: false,
     };
-    sync::synchronize(&mut source, &receiving, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut source, &receiving, &AtomicBool::new(false), |_| {}).unwrap();
     check(&receiving, &deep[1]);
 }
 #[test]
@@ -246,22 +248,23 @@ fn sync_rejects_wrong_genesis_discontinuous_blocks_and_cancelled_download_withou
         blocks: vec![wire(&g["block"]), wire(&steps[0]["block"])],
         wrong: true,
     };
-    assert!(sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).is_err());
+    assert!(sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).is_err());
     check(&n, &g);
     source.wrong = false;
-    assert!(sync::synchronize(&mut source, &n, &AtomicBool::new(true), |_| {}).is_err());
+    assert!(sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(true), |_| {}).is_err());
     check(&n, &g);
     source.blocks[1]
         .fields
         .insert("time_stamp".into(), V::Int(i64::MAX));
-    let failure = sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap_err();
+    let failure =
+        sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap_err();
     assert!(failure.to_string().contains("too far in the future"));
     check(&n, &g);
     source.blocks[1] = wire(&steps[0]["block"]);
     source.blocks[0]
         .fields
         .insert("hash".into(), V::Bytes(vec![1; 32]));
-    assert!(sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).is_err());
+    assert!(sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).is_err());
     check(&n, &g);
 }
 #[test]
@@ -370,7 +373,7 @@ fn farmer_response_waits_for_verified_future_vdf_then_live_block_uses_the_same_e
         blocks: vec![wire(&g["block"])],
         wrong: false,
     };
-    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     assert!(n.lock().unwrap().is_synced());
     n.lock()
         .unwrap()
@@ -402,14 +405,14 @@ fn downloading_a_competing_branch_keeps_the_native_root_until_an_explicit_rewind
         ],
         wrong: false,
     };
-    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     assert_eq!(n.lock().unwrap().root_height(), 2);
     assert!(!n.lock().unwrap().is_synced());
     check(&n, &steps[1]);
     // Native fork choice requires a candidate above the existing root. Download
     // must not silently rebase policy to genesis just to select a peer's branch.
     n.lock().unwrap().rollback_to(0).unwrap();
-    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     check(&n, &deep[1]);
     assert!(n.lock().unwrap().is_synced());
 }
@@ -444,10 +447,12 @@ fn a_moving_peer_tip_does_not_prematurely_enable_live_admission() {
         },
         queries: 0,
     };
-    let first = sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    let first =
+        sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     assert_eq!(first.selected, 1);
     assert!(!n.lock().unwrap().is_synced());
-    let second = sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    let second =
+        sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     assert_eq!(second.downloaded, 1);
     assert!(n.lock().unwrap().is_synced());
     check(&n, &steps[1]);
@@ -520,7 +525,7 @@ fn offline_rewinds_stay_at_the_requested_height_across_ticks_and_restarts() {
         ],
         wrong: false,
     };
-    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     check(&n, &steps[1]);
     for height in [1, 0] {
         n.lock().unwrap().rollback_to(height).unwrap();
@@ -540,6 +545,6 @@ fn offline_rewinds_stay_at_the_requested_height_across_ticks_and_restarts() {
             .unwrap()
             .is_some());
     }
-    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     check(&n, &steps[1]);
 }

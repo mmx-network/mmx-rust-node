@@ -177,9 +177,9 @@ fn main() -> Result<()> {
                         let mut last_height = 0;
                         while !stop.load(Ordering::Relaxed) {
                             if !node.lock().unwrap().is_synced() {
-                                let progress = sync::synchronize(&mut peer, &node, &stop, |p| {
+                                let progress = sync::synchronize_pipelined(&mut peer, &node, &stop, |p| {
                                     println!(
-                                        "Sync {address}: {} / {}, downloaded {} since fork {}, {:.1} blocks/s; download {:.3}s archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
+                                        "Sync {address}: {} / {}, downloaded {} since fork {}, {:.1} blocks/s; download wait {:.3}s archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
                                         p.selected, p.target, p.downloaded, p.common,
                                         f64::from(p.downloaded) / p.elapsed.as_secs_f64(),
                                         p.download_time.as_secs_f64(), p.archive_time.as_secs_f64(),

@@ -70,9 +70,14 @@ curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
 ```
 
 Sync pipelines four native requests at a time, correlates out-of-order replies
-while servicing peer requests, and retains each window (up to 64 blocks or 8 MiB)
+while servicing peer requests, and retains each window (up to 64 blocks, targeting 8 MiB)
 in one atomic archive transaction. Progress logs include cumulative throughput,
-download, archive and update timings, with proof and replay time within updates.
+download wait, archive and update timings, with proof and replay time within updates.
+One scoped producer can fetch the next window while the current window is
+validated. Single-slot channels bound queued work; byte checks run between
+four-request groups. Prefetch uses the existing root's lookahead, and final peer
+tip/hash checks still run after ledger publication. Errors and cancellation close
+the channels and join the producer before reusing its native connection.
 A moving peer tip keeps the node in historical mode until
 the selected tip matches a stable advertised tip; download never lowers the
 fork-choice root to force acceptance of a peer branch. Native lookahead and
