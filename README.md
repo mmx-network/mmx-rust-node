@@ -70,14 +70,40 @@ curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
 ```
 
 Sync pipelines four native requests at a time, correlates out-of-order replies
-while servicing peer requests, and retains each download window in one atomic
-archive transaction. A moving peer tip keeps the node in historical mode until
+while servicing peer requests, and retains each window (up to 64 blocks or 8 MiB)
+in one atomic archive transaction. Progress logs include cumulative throughput,
+download, archive and update timings, with proof and replay time within updates.
+A moving peer tip keeps the node in historical mode until
 the selected tip matches a stable advertised tip; download never lowers the
 fork-choice root to force acceptance of a peer branch. Native lookahead and
 strict future-timestamp bounds also apply. The active view includes the selected
 tip and downloaded prefix; retained future orphans are not automatically selected
 after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
+
+Immutable header caches are shared across validator/challenge walks. Speculative
+replay retains only cached headers below its replacement height and publishes its
+new cache after the database transaction succeeds. Wire descriptor declarations
+are cached independently of record payloads. Neither cache establishes proof work.
+
+For repeatable performance comparisons, keep an earlier release binary and use
+an already downloaded range. The benchmark makes SQLite backups, downloads that
+same range over native sockets into isolated copies, verifies the final hash,
+and reports elapsed time plus RPC latency. The source database is left intact.
+
+```sh
+cargo run --release -p mmx-consensus --example bench_pos -- 100
+python3 tools/bench_sync.py --source-dir ./mmx-data \
+  --baseline /tmp/mmx-node.before --candidate target/release/mmx-node \
+  --from-height 4000 --to-height 4500 --output ./tmp/sync-benchmark
+```
+
+In a local mainnet replay of heights 4000–4500, these cache/staging changes raised
+the download-and-validation rate from 11.7 to 28.6 blocks/s. Including startup,
+the retained future archive and shutdown, elapsed time fell from 66.9 to 38.3 s.
+Both runs reached `B5801963A9C5BC34E7A277425B07880FA7A428945DE9647B034536E77F19E844`.
+RPC p95 latency during those runs was 2.0 and 2.4 s respectively; larger atomic
+windows improve publication throughput while increasing time between snapshots.
 
 CPU proof recomputation parallelizes independent F1 inputs while preserving the
 native canonical proof order. `RAYON_NUM_THREADS` can bound the worker pool.
@@ -587,7 +613,8 @@ ignores unrelated live block broadcasts, and a periodic update coalesces queued
 proof/vote processing as in C++.
 
 Node identity creation and initial schema/import use atomic file publication.
-Unpublished staging
+Private branch initialization and writes omit fsyncs until publication into the
+primary database's fully synchronous WAL transaction. Unpublished staging
 directories are removed after restart. Tests compare the two backends across
 pending writes, deletes, ranges, historical reads, every rewind, nested snapshots,
 reopen, migration, injected write failures, abrupt process exit before/after

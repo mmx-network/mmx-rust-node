@@ -179,8 +179,12 @@ fn main() -> Result<()> {
                             if !node.lock().unwrap().is_synced() {
                                 let progress = sync::synchronize(&mut peer, &node, &stop, |p| {
                                     println!(
-                                        "Sync {address}: {} / {}, downloaded {} since fork {}",
-                                        p.selected, p.target, p.downloaded, p.common
+                                        "Sync {address}: {} / {}, downloaded {} since fork {}, {:.1} blocks/s; download {:.3}s archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
+                                        p.selected, p.target, p.downloaded, p.common,
+                                        f64::from(p.downloaded) / p.elapsed.as_secs_f64(),
+                                        p.download_time.as_secs_f64(), p.archive_time.as_secs_f64(),
+                                        p.update_time.as_secs_f64(), p.verification_time.as_secs_f64(),
+                                        p.replay_time.as_secs_f64()
                                     )
                                 })?;
                                 println!(

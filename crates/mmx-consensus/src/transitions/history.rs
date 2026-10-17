@@ -8,9 +8,14 @@ use crate::{
 };
 use mmx_types::mmx;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 pub trait HeaderSource {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>>;
+    /// Share immutable ancestry without copying its space-proof payloads.
+    fn get_shared_header(&self, hash: &Hash) -> ProofResult<Option<Arc<mmx::BlockHeader>>> {
+        Ok(self.get_header(hash)?.map(Arc::new))
+    }
 }
 impl HeaderSource for std::collections::BTreeMap<Hash, mmx::BlockHeader> {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
@@ -38,10 +43,10 @@ pub fn challenge<S: HeaderSource>(
         return Ok((value, current.space_diff));
     }
     let target = params.challenge_delay - offset;
-    let mut chain = vec![current.clone()];
+    let mut chain = vec![Arc::new(current.clone())];
     for _ in 0..target {
         let last = chain.last().unwrap();
-        if let Some(parent) = source.get_header(&last.prev.0)? {
+        if let Some(parent) = source.get_shared_header(&last.prev.0)? {
             chain.push(parent);
         } else if last.height != 0 {
             return Err(invalid("cannot find challenge"));
@@ -81,13 +86,13 @@ pub fn infusion<S: HeaderSource>(
     current: &mmx::BlockHeader,
     offset: u32,
 ) -> ProofResult<Infusion> {
-    let mut block = current.clone();
+    let mut block = Arc::new(current.clone());
     if offset < params.infuse_delay {
         let delta = params.infuse_delay - offset;
         let target = block.vdf_height.saturating_sub(delta);
         while block.vdf_height > target {
             block = source
-                .get_header(&block.prev.0)?
+                .get_shared_header(&block.prev.0)?
                 .ok_or_else(|| invalid("cannot find infusion"))?;
         }
     }

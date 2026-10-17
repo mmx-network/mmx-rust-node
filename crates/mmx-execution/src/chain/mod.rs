@@ -22,7 +22,7 @@ use mmx_consensus::{
 use mmx_db::Write;
 use mmx_types::{mmx, VnxType};
 use mmx_vm::{storage::TransactionBatch, Address, StorageDb};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChainError {
@@ -139,7 +139,10 @@ impl ChainState {
         Ok(Some(block))
     }
     pub fn header(&self, hash: &Hash) -> ChainResult<Option<mmx::BlockHeader>> {
-        if let Some(header) = self.headers.get(hash) {
+        Ok(self.shared_header(hash)?.map(|h| h.as_ref().clone()))
+    }
+    fn shared_header(&self, hash: &Hash) -> ChainResult<Option<Arc<mmx::BlockHeader>>> {
+        if let Some(header) = self.headers.get_shared(hash) {
             return Ok(Some(header));
         }
         let header = self
@@ -154,10 +157,7 @@ impl ChainState {
                 Ok(header)
             })
             .transpose()?;
-        if let Some(header) = &header {
-            self.headers.insert(header);
-        }
-        Ok(header)
+        Ok(header.map(|h| self.headers.insert(h)))
     }
     pub fn transaction(&self, id: &Address) -> ChainResult<Option<Record>> {
         self.storage
@@ -263,7 +263,7 @@ impl ChainState {
         let mut branch = Self {
             storage: StorageDb::new(self.storage.database().fork(height)?),
             params: self.params.clone(),
-            headers: Default::default(),
+            headers: self.headers.before(height),
         };
         let mut receipts = Vec::new();
         for entry in blocks {
@@ -276,7 +276,7 @@ impl ChainState {
         self.storage
             .database_mut()
             .replace_suffix(height, branch.storage.database())?;
-        self.headers.clear();
+        self.headers = branch.headers;
         Ok(receipts)
     }
     fn vdf_payout(&self, height: u32, parent: &mmx::BlockHeader) -> ChainResult<Option<Address>> {
@@ -364,6 +364,10 @@ impl ChainState {
 impl HeaderSource for ChainState {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
         self.header(hash)
+            .map_err(|e| ProofError::Invalid(e.to_string()))
+    }
+    fn get_shared_header(&self, hash: &Hash) -> ProofResult<Option<Arc<mmx::BlockHeader>>> {
+        self.shared_header(hash)
             .map_err(|e| ProofError::Invalid(e.to_string()))
     }
 }

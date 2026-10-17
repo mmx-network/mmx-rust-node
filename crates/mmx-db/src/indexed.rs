@@ -11,6 +11,12 @@ use std::{
 };
 
 const APPLICATION_ID: i64 = 0x4D4D5852;
+const SCHEMA: &str = "CREATE TABLE meta(id INTEGER PRIMARY KEY CHECK(id=0),version INTEGER NOT NULL,generation INTEGER NOT NULL);
+    INSERT INTO meta VALUES(0,0,0);
+    CREATE TABLE history(t TEXT NOT NULL,n INTEGER NOT NULL,k BLOB NOT NULL,v INTEGER NOT NULL,value BLOB,PRIMARY KEY(t,n,k,v)) WITHOUT ROWID;
+    CREATE INDEX history_version ON history(v);
+    CREATE INDEX history_key ON history(t,k,v);
+    PRAGMA application_id=1296914514; PRAGMA user_version=1;";
 type Rows = BTreeMap<Key, (u32, Option<Vec<u8>>)>;
 pub(crate) struct Disk {
     conn: Connection,
@@ -88,12 +94,7 @@ impl Disk {
             let mut conn = Connection::open(temporary.path())?;
             conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
             let tx = conn.transaction()?;
-            tx.execute_batch("CREATE TABLE meta(id INTEGER PRIMARY KEY CHECK(id=0),version INTEGER NOT NULL,generation INTEGER NOT NULL);
-                INSERT INTO meta VALUES(0,0,0);
-                CREATE TABLE history(t TEXT NOT NULL,n INTEGER NOT NULL,k BLOB NOT NULL,v INTEGER NOT NULL,value BLOB,PRIMARY KEY(t,n,k,v)) WITHOUT ROWID;
-                CREATE INDEX history_version ON history(v);
-                CREATE INDEX history_key ON history(t,k,v);
-                PRAGMA application_id=1296914514; PRAGMA user_version=1;")?;
+            tx.execute_batch(SCHEMA)?;
             if let Some(legacy) = &legacy {
                 let mut insert = tx.prepare("INSERT INTO history VALUES(?1,?2,?3,?4,?5)")?;
                 for (t, rows) in &legacy.tables {
@@ -168,17 +169,32 @@ impl Disk {
         let directory = tempfile::Builder::new()
             .prefix("branch-")
             .tempdir_in(&self.staging_root)?;
-        let mut local = Disk::open(directory.path())?;
-        local
-            .conn
-            .execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;")?;
-        local
-            .conn
-            .execute("UPDATE meta SET version=?1", [version])?;
-        local.version = version;
-        local._temporary = Some(directory);
-        local.staging_root = self.staging_root.clone();
-        Ok(local)
+        let path = directory.path().to_owned();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path.join("writer.lock"))?;
+        lock.try_lock().map_err(std::io::Error::from)?;
+        let conn = Connection::open(path.join("state.sqlite"))?;
+        // Speculative state has no durable reader until replace() copies it
+        // into the primary WAL transaction. Even initial schema construction
+        // can discard its writes after a crash, avoiding primary-open fsyncs.
+        conn.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;")?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute("UPDATE meta SET version=?1", [version])?;
+        Ok(Disk {
+            conn,
+            path,
+            lock: Arc::new(lock),
+            identity: Arc::new(()),
+            generation: 0,
+            version,
+            pending: BTreeMap::new(),
+            poisoned: false,
+            _temporary: Some(directory),
+            staging_root: self.staging_root.clone(),
+        })
     }
     pub fn get(&self, t: &str, k: &[u8], max: Option<u32>) -> Result<Option<Vec<u8>>> {
         self.readable()?;

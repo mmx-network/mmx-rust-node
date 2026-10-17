@@ -1,5 +1,27 @@
 use crate::{hash::registry, input, Error, Record, Result, Value};
+use std::{
+    collections::BTreeMap,
+    sync::{LazyLock, OnceLock},
+};
 use vnx::{binary::Writer, code::Code, TypeCode};
+
+// Checked-in descriptors are immutable. Rebuilding these self-contained
+// declarations cloned the entire MMX registry for every encoded dynamic class.
+fn declaration(schema: &TypeCode) -> Result<&'static [u8]> {
+    static DECLARATIONS: LazyLock<BTreeMap<u64, OnceLock<Vec<u8>>>> = LazyLock::new(|| {
+        registry()
+            .iter()
+            .map(|code| (code.code_hash, OnceLock::new()))
+            .collect()
+    });
+    let slot = &DECLARATIONS[&schema.code_hash];
+    if slot.get().is_none() {
+        let mut writer = Writer::new(Vec::new(), registry().clone());
+        writer.write_type_code(schema)?;
+        let _ = slot.set(writer.into_inner());
+    }
+    Ok(slot.get().expect("initialized descriptor declaration"))
+}
 
 struct Encoder(Vec<u8>, std::collections::BTreeSet<u64>);
 impl Encoder {
@@ -13,9 +35,7 @@ impl Encoder {
             // schema for every transaction can make a valid block exceed an
             // operational wire/database limit solely through metadata overhead.
             if self.1.insert(schema.code_hash) {
-                let mut writer = Writer::new(Vec::new(), registry().clone());
-                writer.write_type_code(schema)?;
-                self.0.extend(writer.into_inner());
+                self.0.extend_from_slice(declaration(schema)?);
             }
             self.0.extend(15u16.to_le_bytes());
             self.0.extend(schema.code_hash.to_le_bytes());

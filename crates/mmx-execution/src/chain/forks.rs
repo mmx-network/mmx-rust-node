@@ -18,6 +18,8 @@ use mmx_types::{mmx, VnxType};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Default)]
@@ -28,10 +30,12 @@ pub struct Update {
     pub invalid: BTreeSet<Hash>,
     pub waiting: BTreeSet<Hash>,
     pub votes: voting::Report,
+    pub verification_time: Duration,
+    pub replay_time: Duration,
 }
 struct Entry {
     block: Record,
-    header: mmx::BlockHeader,
+    header: Arc<mmx::BlockHeader>,
     proofs: Vec<Record>,
     invalid: bool,
 }
@@ -346,7 +350,8 @@ impl ForkChain {
                 let block = self
                     .block(&hash)?
                     .ok_or_else(|| invalid("missing ordered fork"))?;
-                let header = header(&block)?;
+                let header = cached_header_shared(&self.archive, &self.headers, &hash)?
+                    .ok_or_else(|| invalid("missing ordered header"))?;
                 if row.key.len() != 8 || row.key[..4] != header.height.to_be_bytes() {
                     return Err(invalid("fork order height mismatch"));
                 }
@@ -415,6 +420,7 @@ impl ForkChain {
         let mut out = Update::default();
         let mut candidates = Vec::new();
         let mut points = BTreeMap::new();
+        let verification_started = Instant::now();
         for entry in &entries {
             let h = &entry.header;
             if h.height <= root_header.height {
@@ -499,6 +505,7 @@ impl ForkChain {
             });
         }
         out.votes = self.process_votes(now_ms);
+        out.verification_time = verification_started.elapsed();
         for candidate in &mut candidates {
             candidate.votes = self.voting.count(&candidate.hash);
         }
@@ -543,10 +550,12 @@ impl ForkChain {
                 let evidence = evidence.get(hash).cloned();
                 Ok((block, work, validation, evidence))
             });
-            match self
+            let replay_started = Instant::now();
+            let replay = self
                 .chain
-                .reorganize_stream(common.height + 1, branch, false)
-            {
+                .reorganize_stream(common.height + 1, branch, false);
+            out.replay_time += replay_started.elapsed();
+            match replay {
                 Ok(_) => {
                     out.common_ancestor = Some(common.hash.0);
                     out.applied = line;
@@ -610,22 +619,29 @@ fn consensus_rejection(error: &ValidationError) -> bool {
     )
 }
 struct History<'a> {
-    headers: &'a BTreeMap<Hash, mmx::BlockHeader>,
+    headers: &'a BTreeMap<Hash, Arc<mmx::BlockHeader>>,
     archive: &'a Database,
     cache: &'a super::cache::Headers,
 }
 impl HeaderSource for History<'_> {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
+        Ok(self.get_shared_header(hash)?.map(|h| h.as_ref().clone()))
+    }
+    fn get_shared_header(&self, hash: &Hash) -> ProofResult<Option<Arc<mmx::BlockHeader>>> {
         if let Some(header) = self.headers.get(hash) {
             return Ok(Some(header.clone()));
         }
-        cached_header(self.archive, self.cache, hash)
+        cached_header_shared(self.archive, self.cache, hash)
             .map_err(|e| ProofError::Invalid(e.to_string()))
     }
 }
 impl HeaderSource for ForkChain {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
         cached_header(&self.archive, &self.headers, hash)
+            .map_err(|e| ProofError::Invalid(e.to_string()))
+    }
+    fn get_shared_header(&self, hash: &Hash) -> ProofResult<Option<Arc<mmx::BlockHeader>>> {
+        cached_header_shared(&self.archive, &self.headers, hash)
             .map_err(|e| ProofError::Invalid(e.to_string()))
     }
 }
@@ -647,7 +663,14 @@ fn cached_header(
     cache: &super::cache::Headers,
     hash: &Hash,
 ) -> ChainResult<Option<mmx::BlockHeader>> {
-    if let Some(header) = cache.get(hash) {
+    Ok(cached_header_shared(archive, cache, hash)?.map(|h| h.as_ref().clone()))
+}
+fn cached_header_shared(
+    archive: &Database,
+    cache: &super::cache::Headers,
+    hash: &Hash,
+) -> ChainResult<Option<Arc<mmx::BlockHeader>>> {
+    if let Some(header) = cache.get_shared(hash) {
         return Ok(Some(header));
     }
     let header = archive_header(archive, hash)?;
@@ -655,9 +678,8 @@ fn cached_header(
         if header.hash.0 != *hash {
             return Err(invalid("fork header key mismatch"));
         }
-        cache.insert(header);
     }
-    Ok(header)
+    Ok(header.map(|h| cache.insert(h)))
 }
 fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::BlockHeader>> {
     if let Some(wire) = archive.get("fork_headers", hash, None)? {

@@ -94,10 +94,10 @@ pub fn validators<S: HeaderSource>(
     block: &mmx::BlockHeader,
     max_history: u32,
 ) -> VoteResult<BTreeSet<FarmerKey>> {
-    let mut current = Some(block.clone());
+    let mut current = Some(std::sync::Arc::new(block.clone()));
     for _ in 0..params.commit_delay {
         let Some(header) = current else { break };
-        current = source.get_header(&header.prev.0)?;
+        current = source.get_shared_header(&header.prev.0)?;
     }
     let mut keys = BTreeSet::new();
     for _ in 0..max_history {
@@ -116,7 +116,7 @@ pub fn validators<S: HeaderSource>(
             .map_err(crate::Error::from)?;
             keys.insert(key.0);
         }
-        current = source.get_header(&header.prev.0)?;
+        current = source.get_shared_header(&header.prev.0)?;
     }
     Ok(keys)
 }

@@ -8,10 +8,18 @@ use crate::{
     Node, Result,
 };
 use mmx_consensus::{Hash, Record};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
 };
+
+// Amortize durable archive/ledger publication without retaining a whole chain
+// in RAM. The byte budget and native root/lookahead still bound each window.
+const BATCH_BLOCKS: u32 = 64;
+const BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 pub trait Source {
     fn height(&mut self) -> Result<u32>;
@@ -49,6 +57,12 @@ pub struct Progress {
     pub downloaded: u32,
     pub selected: u32,
     pub target: u32,
+    pub elapsed: Duration,
+    pub download_time: Duration,
+    pub archive_time: Duration,
+    pub update_time: Duration,
+    pub verification_time: Duration,
+    pub replay_time: Duration,
 }
 pub fn synchronize(
     source: &mut impl Source,
@@ -56,6 +70,7 @@ pub fn synchronize(
     stop: &AtomicBool,
     mut report: impl FnMut(&Progress),
 ) -> Result<Progress> {
+    let started = Instant::now();
     let target = source.height()?;
     let local = node.lock().map_err(|_| error("node lock poisoned"))?;
     let chain = local.chain.selected();
@@ -118,13 +133,18 @@ pub fn synchronize(
         }
         let mut batch = Vec::new();
         let mut size = 0;
-        while next <= target && next <= limit && batch.len() < 16 && size < 8 * 1024 * 1024 {
+        let download_started = Instant::now();
+        while next <= target
+            && next <= limit
+            && batch.len() < BATCH_BLOCKS as usize
+            && size < BATCH_BYTES
+        {
             if stop.load(Ordering::Relaxed) {
                 return Err(error("sync cancelled"));
             }
             let count = (target - next + 1)
                 .min(4)
-                .min(16 - batch.len() as u32)
+                .min(BATCH_BLOCKS - batch.len() as u32)
                 .min(limit - next + 1);
             let blocks = source.blocks_at(next, count)?;
             if blocks.len() != count as usize {
@@ -157,13 +177,20 @@ pub fn synchronize(
                     .ok_or_else(|| error("sync height overflow"))?;
             }
         }
+        progress.download_time += download_started.elapsed();
         let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
         if local.synced {
             return Err(error("historical download requested after live transition"));
         }
+        let archive_started = Instant::now();
         local.chain.admit_blocks(&batch)?;
+        progress.archive_time += archive_started.elapsed();
         local.sync_pos = next;
+        let update_started = Instant::now();
         let result = local.update()?;
+        progress.update_time += update_started.elapsed();
+        progress.verification_time += result.verification_time;
+        progress.replay_time += result.replay_time;
         if batch
             .iter()
             .any(|b| hash(b, "hash").is_ok_and(|h| result.invalid.contains(&h)))
@@ -178,6 +205,7 @@ pub fn synchronize(
             .ok_or_else(|| error("missing selected tip"))?
             .height;
         drop(local);
+        progress.elapsed = started.elapsed();
         report(&progress);
     }
     // Repeat the peer's tip hash to detect a mid-download reorganization. Do not
