@@ -124,7 +124,20 @@ impl Connection {
     /// None means idle before the first frame byte. Partial-frame timeouts close
     /// the connection, so a later read can never mistake payload for a header.
     pub fn receive(&mut self, idle: Duration) -> Result<Option<Record>> {
-        self.stream.set_read_timeout(Some(idle))?;
+        self.receive_until(idle, Instant::now() + Duration::from_secs(10))
+    }
+    fn receive_until(&mut self, idle: Duration, end: Instant) -> Result<Option<Record>> {
+        let result = self.receive_frame_until(idle, end);
+        if result.is_err() {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
+        result
+    }
+    fn receive_frame_until(&mut self, idle: Duration, end: Instant) -> Result<Option<Record>> {
+        self.stream.set_read_timeout(Some(
+            idle.min(end.saturating_duration_since(Instant::now()))
+                .max(Duration::from_millis(1)),
+        ))?;
         let mut header = [0; 8];
         match self.stream.read(&mut header[..1]) {
             Ok(0) => return Err(error("peer disconnected")),
@@ -139,9 +152,7 @@ impl Connection {
             }
             Err(e) => return Err(e.into()),
         }
-        self.stream
-            .set_read_timeout(Some(Duration::from_secs(10)))?;
-        self.stream.read_exact(&mut header[1..])?;
+        self.read_frame_bytes(&mut header[1..], end)?;
         let mut size = u32::from_le_bytes(header[..4].try_into()?);
         let magic = u32::from_le_bytes(header[4..].try_into()?);
         if magic == MAGIC.swap_bytes() {
@@ -154,10 +165,42 @@ impl Connection {
         }
         let mut frame = Vec::from(header);
         frame.resize(size as usize + 8, 0);
-        self.stream.read_exact(&mut frame[8..])?;
+        self.read_frame_bytes(&mut frame[8..], end)?;
         let (record, size) = decode_frame_with_registry(&frame, &mut self.registry)?;
         self.last_size = size;
         Ok(Some(record))
+    }
+    fn read_frame_bytes(&mut self, mut bytes: &mut [u8], end: Instant) -> Result<()> {
+        while !bytes.is_empty() {
+            let remaining = end.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "peer frame timed out",
+                )
+                .into());
+            }
+            self.stream.set_read_timeout(Some(remaining))?;
+            match self.stream.read(bytes) {
+                Ok(0) => return Err(error("peer disconnected during frame")),
+                Ok(count) => bytes = &mut bytes[count..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "peer frame timed out",
+                    )
+                    .into());
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
     }
 }
 pub fn respond(
@@ -264,9 +307,10 @@ impl Client {
             if !queued.is_empty() && Instant::now() < send_after {
                 idle = idle.min(send_after.saturating_duration_since(Instant::now()));
             }
-            let Some(message) = self
-                .connection
-                .receive(idle.max(Duration::from_millis(1)))?
+            let Some(message) = self.connection.receive_until(
+                idle.max(Duration::from_millis(1)),
+                end.min(Instant::now() + Duration::from_secs(10)),
+            )?
             else {
                 continue;
             };
@@ -577,5 +621,46 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trickled_headers_and_payloads_share_a_deadline_and_cannot_be_reused_after_timeout() {
+        for prefix in [1, 8] {
+            let frame = encode_frame(&record("mmx.Node.get_height", [])).unwrap();
+            assert!(frame.len() > 16);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (started, ready) = std::sync::mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.write_all(&frame[..prefix]).unwrap();
+                started.send(()).unwrap();
+                for byte in &frame[prefix..] {
+                    thread::sleep(Duration::from_millis(20));
+                    if stream.write_all(&[*byte]).is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut connection = Connection::connect(&address.to_string()).unwrap();
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            let before = Instant::now();
+            let failure = connection
+                .receive_until(Duration::from_secs(1), before + Duration::from_millis(150))
+                .unwrap_err();
+            assert_eq!(
+                failure.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::TimedOut
+            );
+            assert!(before.elapsed() < Duration::from_secs(2));
+            assert!(connection.receive(Duration::from_millis(1)).is_err());
+            drop(connection);
+            server.join().unwrap();
+        }
     }
 }

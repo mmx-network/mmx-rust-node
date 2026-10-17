@@ -23,6 +23,7 @@ pub const MIN_PEERS: usize = 3;
 pub const MAX_PEERS: usize = 8;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 type Missing = BTreeSet<(u32, Hash)>;
+mod metadata;
 mod prefetch;
 
 trait WindowSource {
@@ -33,7 +34,7 @@ trait WindowSource {
 
 /// The transport surface used by the coordinator, also implemented by test
 /// peers so adversarial replies exercise the production scheduler.
-pub trait PeerSource: Send {
+pub trait PeerSource: Send + 'static {
     fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>>;
     fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>>;
     fn synced_height(&mut self) -> Result<Option<u32>>;
@@ -63,10 +64,14 @@ impl PeerSource for Client {
 }
 struct Peer<S> {
     id: Hash,
-    source: S,
+    source: Option<S>,
+    inflight: Option<metadata::Job<S>>,
     active: bool,
+    qualified: bool,
+    needs_status: bool,
     height: u32,
     latency: Duration,
+    backpressure: u64,
 }
 pub struct PeerPool<S> {
     peers: Vec<Peer<S>>,
@@ -78,6 +83,8 @@ pub struct PeerPool<S> {
     body_requests: u64,
     body_retries: u64,
     retired_backpressure: u64,
+    metadata: metadata::Queue,
+    query: u64,
 }
 #[derive(Default)]
 pub struct Window {
@@ -109,10 +116,14 @@ impl<S: PeerSource> PeerPool<S> {
             .take(MAX_PEERS)
             .map(|(id, source)| Peer {
                 id,
-                source,
+                source: Some(source),
+                inflight: None,
                 active: true,
+                qualified: false,
+                needs_status: true,
                 height: 0,
                 latency: Duration::MAX,
+                backpressure: 0,
             })
             .collect();
         Self {
@@ -123,6 +134,8 @@ impl<S: PeerSource> PeerPool<S> {
             body_requests: 0,
             body_retries: 0,
             retired_backpressure: 0,
+            metadata: metadata::Queue::new(),
+            query: 0,
         }
     }
     pub fn len(&self) -> usize {
@@ -143,17 +156,12 @@ impl<S: PeerSource> PeerPool<S> {
             .peers
             .iter()
             .filter(|p| !p.active)
-            .map(|p| p.source.backpressure_retries())
+            .map(|p| p.backpressure)
             .sum::<u64>();
         self.peers.retain(|p| p.active);
     }
     fn backpressure_retries(&self) -> u64 {
-        self.retired_backpressure
-            + self
-                .peers
-                .iter()
-                .map(|p| p.source.backpressure_retries())
-                .sum::<u64>()
+        self.retired_backpressure + self.peers.iter().map(|p| p.backpressure).sum::<u64>()
     }
     pub fn add(&mut self, id: Hash, source: S) -> bool {
         if self.peers.len() >= MAX_PEERS || self.peers.iter().any(|p| p.id == id) {
@@ -161,126 +169,30 @@ impl<S: PeerSource> PeerPool<S> {
         }
         self.peers.push(Peer {
             id,
-            source,
+            source: Some(source),
+            inflight: None,
             active: true,
+            qualified: false,
+            needs_status: true,
             height: 0,
             latency: Duration::MAX,
+            backpressure: 0,
         });
         self.refreshed = Instant::now() - Duration::from_secs(10);
         true
     }
-    pub fn refresh(&mut self) -> Result<u32> {
-        if self.refreshed.elapsed() >= Duration::from_secs(10) {
-            thread::scope(|scope| {
-                let jobs: Vec<_> = self
-                    .peers
-                    .iter_mut()
-                    .filter(|p| p.active)
-                    .map(|peer| {
-                        scope.spawn(move || match peer.source.synced_height() {
-                            Ok(Some(height)) => peer.height = height,
-                            Ok(None) => {
-                                eprintln!(
-                                    "Sync peer {}: no longer synced",
-                                    vnx::util::to_hex_string(&peer.id[..8], true, false)
-                                );
-                                peer.active = false;
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "Sync peer {}: status query failed: {e}",
-                                    vnx::util::to_hex_string(&peer.id[..8], true, false)
-                                );
-                                peer.active = false;
-                            }
-                        })
-                    })
-                    .collect();
-                for job in jobs {
-                    job.join().map_err(|_| error("peer worker panicked"))?;
-                }
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-            })?;
-            self.refreshed = Instant::now();
-        }
-        if self.len() < MIN_PEERS {
-            return Err(error("sync requires at least three distinct synced peers"));
-        }
-        Ok(self
-            .peers
-            .iter()
-            .filter(|p| p.active)
-            .map(|p| p.height)
-            .max()
-            .unwrap_or(0))
-    }
-    /// A height is observed by every member of the randomly selected pool. A
-    /// window is usable only after at least three independent hash responses.
-    fn observations(
-        &mut self,
-        start: u32,
-        count: u32,
-    ) -> Result<Vec<(usize, Vec<Option<BlockHash>>)>> {
-        if count == 0 || count > BATCH_BLOCKS || start.checked_add(count - 1).is_none() {
-            return Err(error("invalid coordinated hash window"));
-        }
-        if self.len() < MIN_PEERS {
-            return Err(error("sync requires at least three distinct synced peers"));
-        }
-        let replies = thread::scope(|scope| {
-            let jobs: Vec<_> = self
-                .peers
-                .iter_mut()
-                .enumerate()
-                .filter(|(_, p)| p.active)
-                .map(|(index, peer)| {
-                    scope.spawn(move || {
-                        let requested = Instant::now();
-                        match peer.source.hashes(start, count) {
-                            Ok(values) if values.len() == count as usize => Some((index, values)),
-                            Ok(values) => {
-                                eprintln!(
-                                    "Sync peer {}: returned {} hash replies for {count} heights",
-                                    vnx::util::to_hex_string(&peer.id[..8], true, false),
-                                    values.len()
-                                );
-                                peer.active = false;
-                                None
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "Sync peer {}: hash query failed: {e}",
-                                    vnx::util::to_hex_string(&peer.id[..8], true, false)
-                                );
-                                peer.active = false;
-                                None
-                            }
-                        }
-                        .inspect(|_| peer.latency = requested.elapsed())
-                    })
-                })
-                .collect();
-            jobs.into_iter()
-                .map(|j| j.join().map_err(|_| error("peer worker panicked")))
-                .collect::<Result<Vec<_>>>()
-        })?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-        if replies.len() < MIN_PEERS {
-            return Err(error("fewer than three peers answered the hash window"));
-        }
-        Ok(replies)
-    }
     pub fn poll(&mut self) -> Result<()> {
+        if !self.peers.iter().any(|p| p.active && p.source.is_some()) {
+            self.poll_metadata()?;
+        }
         thread::scope(|scope| {
             let jobs: Vec<_> = self
                 .peers
                 .iter_mut()
-                .filter(|p| p.active)
+                .filter(|p| p.active && p.source.is_some())
                 .map(|p| {
                     scope.spawn(move || {
-                        if p.source.poll().is_err() {
+                        if p.source.as_mut().unwrap().poll().is_err() {
                             p.active = false;
                         }
                     })
@@ -373,7 +285,7 @@ impl<S: PeerSource> PeerPool<S> {
         // supplied later by a newly discovered peer. Its leases have expired.
         self.completed.retain(|_, block| block.is_some());
         let hash_started = Instant::now();
-        let observations = self.observations(start, count);
+        let observations = self.observations(start, count, stop);
         let hash_time = hash_started.elapsed();
         node.lock()
             .map_err(|_| error("node lock poisoned"))?
@@ -529,7 +441,12 @@ impl<S: PeerSource> PeerPool<S> {
                             let ids = keys.iter().map(|(_, id)| *id).collect::<Vec<_>>();
                             scope.spawn(move || {
                                 let requested = Instant::now();
-                                let result = peer.source.fetch(&ids);
+                                let source = peer
+                                    .source
+                                    .as_mut()
+                                    .expect("hash claimant owns its connection");
+                                let result = source.fetch(&ids);
+                                peer.backpressure = source.backpressure_retries();
                                 if let Err(e) = &result {
                                     eprintln!(
                                         "Sync peer {}: block request failed: {e}",

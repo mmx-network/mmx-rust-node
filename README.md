@@ -101,8 +101,16 @@ updates/restarts, then replaying when sync resumes.
 
 Each connection correlates reordered native returns while serving peer requests,
 with at most four body requests outstanding. Common content is fetched from its
-fastest successful hash claimant; all selected peers still supply hash responses,
-and a slower provider is tried only after the request lease expires.
+fastest successful hash claimant; a slower provider is tried only after the request
+lease expires. Hash requests fan out to available pool members. Each height window
+completes after at least three independent replies, including other replies already
+ready at that point, matching native job completion without majority voting. Later
+replies restore their connection owner and update status, but cannot count toward
+another window. A connection owns at most one metadata operation; every outstanding
+owner is joined before the pool closes. Whole frames share a ten-second deadline
+across header and payload reads, also bounded by the client's fifteen-second RPC
+deadline. Trickling bytes cannot extend either deadline; failed frames close the
+connection.
 Download windows retain up to 64
 heights and target 8 MiB, including competing candidates, in an atomic archive
 transaction. Progress logs separate hash queries, bodies, archive publication,

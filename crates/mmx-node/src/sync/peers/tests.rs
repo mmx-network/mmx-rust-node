@@ -155,7 +155,7 @@ fn requires_three_distinct_hash_responses_before_any_body_download() {
     assert!(node.lock().unwrap().sync_pending.is_empty());
     assert!(events.lock().unwrap().is_empty());
     let mut pool = peers(&blocks, &events);
-    pool.peers[0].source.fail_hash = true;
+    pool.peers[0].source.as_mut().unwrap().fail_hash = true;
     assert!(pool.window(1, 1, &node, &AtomicBool::new(false)).is_err());
     assert!(counts(&events).is_empty());
     assert_eq!(pool.len(), 2);
@@ -210,13 +210,121 @@ fn matching_claims_download_once_and_restart_reuses_exact_archived_content() {
 }
 
 #[test]
+fn three_fresh_observers_progress_without_waiting_for_a_late_peer_and_stale_replies_never_count() {
+    use std::sync::mpsc::{channel, Receiver, Sender};
+    struct Gated {
+        source: Fake,
+        gates: std::collections::VecDeque<(Sender<()>, Receiver<()>)>,
+    }
+    impl PeerSource for Gated {
+        fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+            if self.source.id == 3 && start == 2 {
+                return Err(error("third connection fails in the next window"));
+            }
+            if let Some((started, release)) = self.gates.pop_front() {
+                started.send(())?;
+                release.recv()?;
+            }
+            self.source.hashes(start, count)
+        }
+        fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
+            self.source.fetch(hashes)
+        }
+        fn synced_height(&mut self) -> Result<Option<u32>> {
+            self.source.synced_height()
+        }
+    }
+    struct Release(Vec<Sender<()>>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            for gate in &self.0 {
+                let _ = gate.send(());
+            }
+        }
+    }
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let (old_started, old_entered) = channel();
+    let (old_release, old_resume) = channel();
+    let (new_started, new_entered) = channel();
+    let (new_release, new_resume) = channel();
+    let releases = Release(vec![old_release, new_release]);
+    let mut gates = Some([(old_started, old_resume), (new_started, new_resume)].into());
+    let mut pool = PeerPool::new(
+        (1..=4)
+            .map(|id| {
+                (
+                    [id; 32],
+                    Gated {
+                        source: Fake::new(id, &blocks, &events),
+                        gates: if id == 4 {
+                            gates.take().unwrap()
+                        } else {
+                            Default::default()
+                        },
+                    },
+                )
+            })
+            .collect(),
+    );
+    // Model an already qualified pool so all four connections are available
+    // for the same first-height request before the fourth is deliberately held.
+    pool.refreshed = Instant::now();
+    for peer in &mut pool.peers {
+        peer.qualified = true;
+        peer.needs_status = false;
+        peer.height = 2;
+    }
+    let (first_done, first_reply) = channel();
+    let (second_done, second_reply) = channel();
+    let worker = thread::spawn(move || -> Result<()> {
+        let stop = AtomicBool::new(false);
+        first_done.send(pool.window(1, 1, &node, &stop)?)?;
+        second_done.send(pool.window(2, 1, &node, &stop)?)?;
+        Ok(())
+    });
+    old_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    let first = first_reply.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(first.heights, [vec![blocks[1].clone()]]);
+    assert_eq!(first.body_requests, 1);
+    releases.0[0].send(()).unwrap();
+    new_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    // Two fresh replies plus the fourth connection's old first-height reply
+    // must not authorize downloading a second-height body.
+    let premature = second_reply.recv_timeout(Duration::from_millis(50));
+    releases.0[1].send(()).unwrap();
+    assert!(matches!(
+        premature,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    let second = second_reply.recv_timeout(Duration::from_secs(2)).unwrap();
+    worker.join().unwrap().unwrap();
+    assert_eq!(second.heights, [vec![blocks[2].clone()]]);
+    assert_eq!(second.body_requests, 1);
+    assert!(counts(&events).values().all(|&n| n == 1));
+    let fresh: BTreeSet<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| {
+            if let Event::Hash(id, 2, 1) = e {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(fresh, [1, 2, 4].into());
+}
+
+#[test]
 fn common_content_uses_the_fastest_claimant_without_reducing_hash_observers() {
     let (_, node, blocks) = fixture();
     let events = Arc::new(Mutex::new(vec![]));
     let mut pool = peers(&blocks, &events);
     for peer in &mut pool.peers {
-        if peer.source.id != 1 {
-            peer.source.hash_delay = Duration::from_millis(50);
+        if peer.source.as_ref().unwrap().id != 1 {
+            peer.source.as_mut().unwrap().hash_delay = Duration::from_millis(50);
         }
     }
     let window = pool.window(1, 2, &node, &AtomicBool::new(false)).unwrap();
@@ -313,7 +421,7 @@ fn a_second_provider_is_used_only_after_the_original_lease_times_out() {
     let fail_first = Arc::new(AtomicBool::new(true));
     let mut pool = peers(&blocks, &events);
     for peer in &mut pool.peers {
-        peer.source.fail_first = fail_first.clone();
+        peer.source.as_mut().unwrap().fail_first = fail_first.clone();
     }
     pool.timeout = Duration::from_millis(50);
     let window = pool.window(1, 1, &node, &AtomicBool::new(false)).unwrap();
@@ -338,7 +446,7 @@ fn forged_block_ids_cannot_poison_an_honest_content_hash_claim() {
     let mut pool = peers(&blocks, &events);
     pool.timeout = Duration::from_millis(5);
     for peer in &mut pool.peers[..2] {
-        peer.source.claims.insert(
+        peer.source.as_mut().unwrap().claims.insert(
             1,
             BlockHash {
                 block: [98; 32],
@@ -356,7 +464,7 @@ fn replaying_a_content_hash_at_another_height_does_not_download_it_again() {
     let events = Arc::new(Mutex::new(vec![]));
     let mut pool = peers(&blocks, &events);
     for peer in &mut pool.peers[..2] {
-        peer.source.claims.insert(
+        peer.source.as_mut().unwrap().claims.insert(
             2,
             BlockHash {
                 block: hash(&blocks[1], "hash").unwrap(),
