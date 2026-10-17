@@ -178,6 +178,7 @@ fn matching_claims_download_once_and_restart_reuses_exact_archived_content() {
     let mut pool = peers(&blocks, &events);
     let stop = AtomicBool::new(false);
     let window = pool.window(1, 2, &node, &stop).unwrap();
+    assert_eq!((window.body_requests, window.body_retries), (2, 0));
     assert_eq!(
         window.heights,
         vec![vec![blocks[1].clone()], vec![blocks[2].clone()]]
@@ -198,7 +199,8 @@ fn matching_claims_download_once_and_restart_reuses_exact_archived_content() {
     assert_eq!(voters.len(), 3);
     publish(window, &node, &mut Progress::default()).unwrap();
     let mut fresh = peers(&blocks, &events);
-    fresh.window(1, 2, &node, &stop).unwrap();
+    let reused = fresh.window(1, 2, &node, &stop).unwrap();
+    assert_eq!((reused.body_requests, reused.body_retries), (0, 0));
     assert_eq!(
         counts(&events).values().copied().collect::<Vec<_>>(),
         [1, 1]
@@ -315,6 +317,7 @@ fn a_second_provider_is_used_only_after_the_original_lease_times_out() {
     }
     pool.timeout = Duration::from_millis(50);
     let window = pool.window(1, 1, &node, &AtomicBool::new(false)).unwrap();
+    assert_eq!((window.body_requests, window.body_retries), (2, 1));
     assert_eq!(window.heights[0], vec![blocks[1].clone()]);
     let times: Vec<_> = events
         .lock()
@@ -488,5 +491,161 @@ fn empty_height_replies_do_not_replay_unadvertised_future_orphans_after_rewind_o
             .height,
         2
     );
+    assert!(counts(&events).values().all(|&n| n == 1));
+}
+
+#[test]
+fn prefetch_starts_three_hash_queries_while_the_consumer_holds_the_ledger() {
+    use std::sync::mpsc::{channel, Sender};
+    struct Probe(Sender<()>);
+    impl PeerSource for Probe {
+        fn hashes(&mut self, _: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+            self.0.send(())?;
+            Ok(vec![None; count as usize])
+        }
+        fn fetch(&mut self, _: &[Hash]) -> Result<Vec<Option<Record>>> {
+            Err(error("empty hash replies must not download bodies"))
+        }
+        fn synced_height(&mut self) -> Result<Option<u32>> {
+            Ok(Some(100))
+        }
+    }
+    let (_, node, _) = fixture();
+    let (started, received) = channel();
+    let mut pool = PeerPool::new(
+        (1..=3)
+            .map(|id| ([id; 32], Probe(started.clone())))
+            .collect(),
+    );
+    let stop = AtomicBool::new(false);
+    prefetch::with_pool(&mut pool, &node, &stop, |producer| {
+        let mut local = node.lock().unwrap();
+        producer.prefetch(65, 4, &mut local)?;
+        assert!(
+            producer.prefetch(69, 4, &mut local).is_err(),
+            "only one queued window"
+        );
+        assert_eq!(local.sync_pending, (65..69).collect());
+        for _ in 0..3 {
+            received.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        drop(local);
+        let window = producer.window(65, 4)?;
+        assert_eq!(window.heights.len(), 4);
+        assert!(window.heights.iter().all(Vec::is_empty));
+        assert_eq!(window.target, 100);
+        Ok(())
+    })
+    .unwrap();
+    assert!(node.lock().unwrap().sync_pending.is_empty());
+    // Dropping an unconsumed queued window joins the network owner and clears
+    // its pending-height guards before the same clients can be reused.
+    let result: Result<()> = prefetch::with_pool(&mut pool, &node, &stop, |producer| {
+        let mut local = node.lock().unwrap();
+        producer.prefetch(69, 4, &mut local)?;
+        for _ in 0..3 {
+            received.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        drop(local);
+        Err(error("consumer stopped early"))
+    });
+    assert!(result.is_err());
+    assert!(node.lock().unwrap().sync_pending.is_empty());
+}
+
+#[test]
+fn a_dropped_prefetched_reply_keeps_downloaded_content_for_the_next_sync_attempt() {
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = peers(&blocks, &events);
+    let stop = AtomicBool::new(false);
+    let result: Result<()> = prefetch::with_pool(&mut pool, &node, &stop, |producer| {
+        {
+            let mut local = node.lock().unwrap();
+            producer.prefetch(1, 2, &mut local)?;
+        }
+        producer.refresh()?; // Collect the window before the metadata reply.
+        Err(error("consumer rejected a later operation"))
+    });
+    assert!(result.is_err());
+    assert!(node.lock().unwrap().sync_pending.is_empty());
+    assert_eq!(
+        node.lock()
+            .unwrap()
+            .chain
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
+    );
+    prefetch::with_pool(&mut pool, &node, &stop, |producer| {
+        let window = producer.window(1, 2)?;
+        assert_eq!(
+            window.heights,
+            vec![vec![blocks[1].clone()], vec![blocks[2].clone()]]
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        counts(&events).values().copied().collect::<Vec<_>>(),
+        [1, 1]
+    );
+}
+
+#[test]
+fn unconsumed_prefetch_survives_restart_without_selecting_or_downloading_its_future_blocks() {
+    let (network, _, blocks) = fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let node = Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()));
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = peers(&blocks, &events);
+    let stop = AtomicBool::new(false);
+    let result: Result<()> = prefetch::with_pool(&mut pool, &node, &stop, |producer| {
+        {
+            let mut local = node.lock().unwrap();
+            producer.prefetch(1, 2, &mut local)?;
+        }
+        producer.refresh()?;
+        Err(error("stop before publication"))
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        node.lock()
+            .unwrap()
+            .chain
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
+    );
+    assert!(node
+        .lock()
+        .unwrap()
+        .chain
+        .block(&hash(&blocks[2], "hash").unwrap())
+        .unwrap()
+        .is_some());
+    drop(node);
+    let node = Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()));
+    node.lock().unwrap().tick().unwrap();
+    assert_eq!(
+        node.lock()
+            .unwrap()
+            .chain
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
+    );
+    let progress = synchronize_peers(&mut peers(&blocks, &events), &node, &stop, |_| {}).unwrap();
+    assert_eq!(progress.selected, 2);
+    assert_eq!((progress.body_requests, progress.body_retries), (0, 0));
     assert!(counts(&events).values().all(|&n| n == 1));
 }

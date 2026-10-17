@@ -101,6 +101,15 @@ heights and target 8 MiB, including competing candidates, in an atomic archive
 transaction. Progress logs separate hash queries, bodies, archive publication,
 proofs and ledger replay. A final multi-peer tip probe runs after publication;
 a changing tip keeps the node in historical mode. HTTP status includes `sync_peers`.
+One bounded producer queries the next window while the current one validates.
+It registers pending heights before peer I/O, using the existing root's lookahead,
+and joins before those clients are reused on error or cancellation. Missing
+ancestors and empty tip windows suspend prefetch. HTTP status also counts body
+requests and timeout reassignments; logs distinguish network stages from the
+remaining download wait after overlap.
+Completed prefetched bodies are retained before the producer replies, including
+on cancellation. Reopening the node reuses those bodies after fresh peer hash
+queries; their presence alone does not advance the selected chain.
 The single-source pipelined helper remains available for fixtures and local
 snapshot tooling; the production executable always uses the peer coordinator.
 
@@ -145,6 +154,10 @@ The sync benchmark starts three frozen snapshot peers with independent node
 identities, then uses the production coordinator. `serve_snapshot` is a local
 benchmark utility that serves a previously validated archive, without a
 single-peer exception in the node executable.
+The isolated receiver starts with only the requested prefix, so its missing
+suffix must be downloaded. The harness checks the final hash and, for binaries
+with request counters, exactly one body request per missing block plus timeout
+reassignments. Production rollback continues to retain every archived block.
 
 In a local mainnet replay of heights 4000–4500, these cache/staging changes raised
 the download-and-validation rate from 11.7 to 28.6 blocks/s. Including startup,

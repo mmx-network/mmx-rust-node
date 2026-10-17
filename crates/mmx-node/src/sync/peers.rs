@@ -22,6 +22,13 @@ use std::{
 pub const MIN_PEERS: usize = 3;
 pub const MAX_PEERS: usize = 8;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+mod prefetch;
+
+trait WindowSource {
+    fn refresh(&mut self) -> Result<u32>;
+    fn window(&mut self, start: u32, count: u32) -> Result<Window>;
+    fn prefetch(&mut self, start: u32, count: u32, local: &mut Node) -> Result<()>;
+}
 
 /// The transport surface used by the coordinator, also implemented by test
 /// peers so adversarial replies exercise the production scheduler.
@@ -61,13 +68,19 @@ pub struct PeerPool<S> {
     // twice within a height job, even when the driver repeats a tip probe.
     completed: BTreeMap<(u32, Hash), Option<Record>>,
     refreshed: Instant,
+    body_requests: u64,
+    body_retries: u64,
 }
 #[derive(Default)]
 pub struct Window {
     pub start: u32,
+    pub target: u32,
     pub heights: Vec<Vec<Record>>,
     pub hash_time: Duration,
     pub body_time: Duration,
+    pub body_requests: u64,
+    pub body_retries: u64,
+    pub archive_time: Duration,
 }
 struct Fetch {
     height: u32,
@@ -98,6 +111,8 @@ impl<S: PeerSource> PeerPool<S> {
             timeout: FETCH_TIMEOUT,
             completed: BTreeMap::new(),
             refreshed: Instant::now() - Duration::from_secs(10),
+            body_requests: 0,
+            body_retries: 0,
         }
     }
     pub fn len(&self) -> usize {
@@ -140,7 +155,20 @@ impl<S: PeerSource> PeerPool<S> {
                     .map(|peer| {
                         scope.spawn(move || match peer.source.synced_height() {
                             Ok(Some(height)) => peer.height = height,
-                            _ => peer.active = false,
+                            Ok(None) => {
+                                eprintln!(
+                                    "Sync peer {}: no longer synced",
+                                    vnx::util::to_hex_string(&peer.id[..8], true, false)
+                                );
+                                peer.active = false;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Sync peer {}: status query failed: {e}",
+                                    vnx::util::to_hex_string(&peer.id[..8], true, false)
+                                );
+                                peer.active = false;
+                            }
                         })
                     })
                     .collect();
@@ -186,7 +214,20 @@ impl<S: PeerSource> PeerPool<S> {
                         let requested = Instant::now();
                         match peer.source.hashes(start, count) {
                             Ok(values) if values.len() == count as usize => Some((index, values)),
-                            _ => {
+                            Ok(values) => {
+                                eprintln!(
+                                    "Sync peer {}: returned {} hash replies for {count} heights",
+                                    vnx::util::to_hex_string(&peer.id[..8], true, false),
+                                    values.len()
+                                );
+                                peer.active = false;
+                                None
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Sync peer {}: hash query failed: {e}",
+                                    vnx::util::to_hex_string(&peer.id[..8], true, false)
+                                );
                                 peer.active = false;
                                 None
                             }
@@ -241,12 +282,53 @@ impl<S: PeerSource> PeerPool<S> {
             .map_err(|_| error("node lock poisoned"))?
             .sync_pending
             .extend(start..start + count);
-        let result = self.window_inner(start, count, node, stop);
+        self.prepared_window(start, count, node, stop)
+    }
+    fn prepared_window(
+        &mut self,
+        start: u32,
+        count: u32,
+        node: &Arc<Mutex<Node>>,
+        stop: &AtomicBool,
+    ) -> Result<Window> {
+        let initial_requests = self.body_requests;
+        let initial_retries = self.body_retries;
+        let mut result = if stop.load(Ordering::Relaxed) {
+            Err(error("sync cancelled"))
+        } else {
+            self.refresh().and_then(|target| {
+                self.window_inner(start, count, node, stop)
+                    .map(|mut window| {
+                        window.target = target;
+                        window.body_requests = self.body_requests - initial_requests;
+                        window.body_retries = self.body_retries - initial_retries;
+                        window
+                    })
+            })
+        };
         let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
+        // Retain completed bodies even if the consumer is cancelled before it
+        // receives this window. The active view still ends at sync_pos, so this
+        // write-ahead archive cannot select prefetched future blocks.
+        let params = local.chain.selected().params();
+        let ready: Vec<_> = self.completed.range((start, [0; 32])..(start + count, [0; 32]))
+            .filter_map(|(_, block)| block.as_ref())
+            .filter(|block| number(block, "height").is_ok_and(|height| height > 0))
+            .filter(|block| matches!(block.field("time_stamp"), Ok(Value::Int(stamp))
+                if mmx_execution::chain::sync::allows_timestamp(*stamp, vnx::util::get_wall_time_millis(), params.block_interval_ms, 100)))
+            .cloned().collect();
+        let archive_started = Instant::now();
+        let retained = local.chain.admit_blocks(&ready);
+        if let Ok(window) = &mut result {
+            window.archive_time = archive_started.elapsed();
+        }
         for height in start..start + count {
             local.sync_pending.remove(&height);
         }
         local.sync_peers = self.len();
+        local.sync_body_requests = self.body_requests;
+        local.sync_body_retries = self.body_retries;
+        retained?;
         result
     }
     fn window_inner(
@@ -264,11 +346,11 @@ impl<S: PeerSource> PeerPool<S> {
         self.completed.retain(|_, block| block.is_some());
         let hash_started = Instant::now();
         let observations = self.observations(start, count);
+        let hash_time = hash_started.elapsed();
         node.lock()
             .map_err(|_| error("node lock poisoned"))?
             .sync_peers = self.len();
         let observations = observations?;
-        let hash_time = hash_started.elapsed();
         let mut jobs: BTreeMap<(u32, Hash), Fetch> = BTreeMap::new();
         for (peer, hashes) in observations {
             for (offset, candidate) in hashes.into_iter().enumerate() {
@@ -336,9 +418,13 @@ impl<S: PeerSource> PeerPool<S> {
             .clone();
         let mut output = Window {
             start,
+            target: 0,
             heights: Vec::new(),
             hash_time,
             body_time: Duration::ZERO,
+            body_requests: 0,
+            body_retries: 0,
+            archive_time: Duration::ZERO,
         };
         let body_started = Instant::now();
         let mut bytes = 0usize;
@@ -387,6 +473,8 @@ impl<S: PeerSource> PeerPool<S> {
                         // slow claimants merely because its slots are occupied.
                         if assigned[peer].len() < 4 {
                             job.tried.insert(peer);
+                            self.body_requests += 1;
+                            self.body_retries += u64::from(job.tried.len() > 1);
                             job.retry_at = Some(now + self.timeout);
                             assigned[peer].push((*key, block_id));
                         }
@@ -413,7 +501,11 @@ impl<S: PeerSource> PeerPool<S> {
                             scope.spawn(move || {
                                 let requested = Instant::now();
                                 let result = peer.source.fetch(&ids);
-                                if result.is_err() {
+                                if let Err(e) = &result {
+                                    eprintln!(
+                                        "Sync peer {}: block request failed: {e}",
+                                        vnx::util::to_hex_string(&peer.id[..8], true, false)
+                                    );
                                     peer.active = false;
                                 }
                                 (peer_index, keys, requested, result)
@@ -532,15 +624,17 @@ pub fn synchronize_peers<S: PeerSource>(
     stop: &AtomicBool,
     mut report: impl FnMut(&Progress),
 ) -> Result<Progress> {
-    let result = synchronize_inner(pool, node, stop, &mut report);
+    let result = prefetch::with_pool(pool, node, stop, |source| {
+        synchronize_inner(source, node, stop, &mut report)
+    });
     node.lock()
         .map_err(|_| error("node lock poisoned"))?
         .sync_pending
         .clear();
     result
 }
-fn synchronize_inner<S: PeerSource>(
-    pool: &mut PeerPool<S>,
+fn synchronize_inner(
+    pool: &mut impl WindowSource,
     node: &Arc<Mutex<Node>>,
     stop: &AtomicBool,
     mut report: impl FnMut(&Progress),
@@ -570,7 +664,6 @@ fn synchronize_inner<S: PeerSource>(
         if stop.load(Ordering::Relaxed) {
             return Err(error("sync cancelled"));
         }
-        progress.target = pool.refresh()?;
         let limit = {
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
             local
@@ -583,8 +676,9 @@ fn synchronize_inner<S: PeerSource>(
         }
         let count = BATCH_BLOCKS.min(limit - next + 1).min(u32::MAX - next);
         let download = Instant::now();
-        let window = pool.window(next, count.max(1), node, stop)?;
+        let window = pool.window(next, count.max(1))?;
         progress.download_time += download.elapsed();
+        progress.target = window.target;
         let end = next
             .checked_add(window.heights.len() as u32)
             .ok_or_else(|| error("sync height overflow"))?;
@@ -593,20 +687,34 @@ fn synchronize_inner<S: PeerSource>(
             .iter()
             .position(Vec::is_empty)
             .map(|offset| next + offset as u32);
-        let mut missing = publish(window, node, &mut progress)?;
+        let mut missing = publish_with(window, node, &mut progress, |local, missing| {
+            let limit = local
+                .root
+                .saturating_add(local.chain.selected().params().commit_delay)
+                .saturating_add(1000);
+            if empty.is_none() && missing.is_empty() && end <= limit && end < u32::MAX {
+                pool.prefetch(
+                    end,
+                    BATCH_BLOCKS.min(limit - end + 1).min(u32::MAX - end),
+                    local,
+                )?;
+            }
+            Ok(())
+        })?;
+        let walked_back = !missing.is_empty();
         // Fetch backwards in bounded ranges, including all peers' candidates.
         let mut back = next;
         while !missing.is_empty() && back > 1 {
             let count = BATCH_BLOCKS.min(back - 1);
             let download = Instant::now();
-            let window = pool.window(back - count, count, node, stop)?;
+            let window = pool.window(back - count, count)?;
             progress.download_time += download.elapsed();
             let reached = window.start + window.heights.len() as u32;
             if reached != back {
                 // Large early blocks exhausted the byte target.
                 // Work backwards one height at a time when a forward range is
                 // truncated, rather than skipping any missing ancestors.
-                let last = pool.window(back - 1, 1, node, stop)?;
+                let last = pool.window(back - 1, 1)?;
                 publish(last, node, &mut progress)?;
                 back -= 1;
             } else {
@@ -622,10 +730,14 @@ fn synchronize_inner<S: PeerSource>(
                 .flatten()
                 .collect();
         }
-        node.lock()
-            .map_err(|_| error("node lock poisoned"))?
-            .sync_pending
-            .clear();
+        // Backwards jobs never prefetch forward work. Do not erase the next
+        // producer window's pending heights during ordinary forward replay.
+        if walked_back {
+            node.lock()
+                .map_err(|_| error("node lock poisoned"))?
+                .sync_pending
+                .clear();
+        }
         progress.elapsed = started.elapsed();
         report(&progress);
         if let Some(peak) = empty {
@@ -646,7 +758,7 @@ fn synchronize_inner<S: PeerSource>(
                 // Re-query all peers after publication, rather than trusting a
                 // stale advertised height or requiring a majority hash. New
                 // content is fetched once; completed content is reused.
-                let probe = pool.window(selected_height, 2, node, stop)?;
+                let probe = pool.window(selected_height, 2)?;
                 if probe.heights[0]
                     .iter()
                     .any(|b| hash(b, "hash").ok() == Some(selected_hash))
@@ -681,8 +793,19 @@ fn publish(
     node: &Arc<Mutex<Node>>,
     progress: &mut Progress,
 ) -> Result<BTreeSet<Hash>> {
+    publish_with(window, node, progress, |_, _| Ok(()))
+}
+fn publish_with(
+    window: Window,
+    node: &Arc<Mutex<Node>>,
+    progress: &mut Progress,
+    before_update: impl FnOnce(&mut Node, &BTreeSet<Hash>) -> Result<()>,
+) -> Result<BTreeSet<Hash>> {
     progress.hash_time += window.hash_time;
     progress.body_time += window.body_time;
+    progress.body_requests += window.body_requests;
+    progress.body_retries += window.body_retries;
+    progress.archive_time += window.archive_time;
     let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
     let params = local.chain.selected().params();
     let mut blocks = Vec::new();
@@ -723,6 +846,7 @@ fn publish(
         .take_while(|values| !values.is_empty())
         .count() as u32;
     local.sync_pos = local.sync_pos.max(window.start.saturating_add(supplied));
+    before_update(&mut local, &missing)?;
     let update = Instant::now();
     let result = local.update()?;
     progress.update_time += update.elapsed();
@@ -818,7 +942,10 @@ pub fn run(
                 match result {
                     Ok((id, height, client, discovered)) => {
                         if pool.add(id, client) {
-                            println!("Sync peer {address}: authenticated, synced height {height}");
+                            println!(
+                                "Sync peer {address}: authenticated {}, synced height {height}",
+                                vnx::util::to_hex_string(&id[..8], true, false)
+                            );
                             connected.insert(id, address);
                         }
                         for address in discovered {
@@ -863,9 +990,9 @@ pub fn run(
                 .is_synced()
             {
                 synchronize_peers(&mut pool, node, stop, |p| {
-                    println!("Sync: {} / {}, candidates {} since root {}, {:.1} candidates/s; download {:.3}s (hashes {:.3}s bodies {:.3}s) archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
+                    println!("Sync: {} / {}, candidates {} since root {}, {:.1} candidates/s; download wait {:.3}s (hashes {:.3}s bodies {:.3}s, {} body requests, {} retries) archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
                         p.selected, p.target, p.downloaded, p.common,
-                        f64::from(p.downloaded) / p.elapsed.as_secs_f64(), p.download_time.as_secs_f64(), p.hash_time.as_secs_f64(), p.body_time.as_secs_f64(),
+                        f64::from(p.downloaded) / p.elapsed.as_secs_f64(), p.download_time.as_secs_f64(), p.hash_time.as_secs_f64(), p.body_time.as_secs_f64(), p.body_requests, p.body_retries,
                         p.archive_time.as_secs_f64(), p.update_time.as_secs_f64(), p.verification_time.as_secs_f64(), p.replay_time.as_secs_f64());
                 })?;
                 if once

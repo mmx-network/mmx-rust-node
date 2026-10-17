@@ -34,6 +34,38 @@ def snapshot(source, destination):
             src.backup(dst)
 
 
+def starting_prefix(data, height):
+    """Trim an isolated benchmark snapshot to a complete validated prefix.
+
+    This uses the current Rust SQLite layout and never alters the source.
+    Production rollback retains its entire archive.
+    """
+    with sqlite3.connect(data / "chain" / "selected" / "state.sqlite") as conn:
+        conn.execute("DELETE FROM history WHERE v>=?", (height + 1,))
+        conn.execute("UPDATE meta SET version=?,generation=generation+1 WHERE id=0",
+                     (height + 1,))
+    with sqlite3.connect(data / "chain" / "archive" / "state.sqlite") as conn:
+        conn.execute("CREATE TEMP TABLE discarded(hash BLOB PRIMARY KEY) WITHOUT ROWID")
+        conn.execute("INSERT OR IGNORE INTO discarded SELECT value FROM history "
+                     "WHERE t='fork_order' AND substr(k,1,4)>? AND value IS NOT NULL",
+                     (height.to_bytes(4, "big"),))
+        conn.execute("DELETE FROM history WHERE t IN "
+                     "('fork_blocks','fork_headers','fork_work','fork_invalid') "
+                     "AND k IN (SELECT hash FROM discarded)")
+        conn.execute("DELETE FROM history WHERE t='fork_order' AND substr(k,1,4)>?",
+                     (height.to_bytes(4, "big"),))
+        conn.execute("UPDATE meta SET generation=generation+1 WHERE id=0")
+
+
+def compact(data):
+    # Compact the offline base once; all five isolated copies then contain
+    # only the benchmark range, rather than copying freed mainnet pages.
+    for name in ("selected", "archive"):
+        with contextlib.closing(sqlite3.connect(data / "chain" / name / "state.sqlite")) as conn:
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
 @contextlib.contextmanager
 def launch(binary, root, data, log, *extra):
     with log.open("w") as output:
@@ -109,12 +141,16 @@ def main():
         mirror_binary = (args.mirror_binary or args.candidate.parent / "examples" / "serve_snapshot").resolve()
         if not mirror_binary.is_file():
             parser.error("build the snapshot peer: cargo build --release -p mmx-node --example serve_snapshot")
+        base = directory / "base"
+        snapshot(args.source_dir.resolve(), base)
+        starting_prefix(base, args.to_height)
+        compact(base)
         with contextlib.ExitStack() as stack:
             peers = []
             expected = None
             for index in range(3):
                 mirror = directory / f"mirror-{index}"
-                snapshot(args.source_dir.resolve(), mirror)
+                snapshot(base, mirror)
                 mirror_log = args.output / f"mirror-{index}.log"
                 serving = stack.enter_context(launch(
                     mirror_binary, args.mmx_root.resolve(), mirror, mirror_log,
@@ -130,6 +166,7 @@ def main():
             for name, binary in (("baseline", args.baseline), ("candidate", args.candidate)):
                 receiving = directory / name
                 snapshot(mirror, receiving)
+                starting_prefix(receiving, args.from_height)
                 log = args.output / (name + ".log")
                 started = time.monotonic()
                 latencies = []
@@ -153,6 +190,12 @@ def main():
                         raise RuntimeError(log.read_text())
                 elapsed = time.monotonic() - started
                 assert selected_hash(receiving) == expected["hash"]
+                requests = re.findall(r"(\d+) body requests, (\d+) retries", log.read_text())
+                if requests:
+                    # No archive suffix is available to mask a missing network
+                    # fetch, and all three mirrors advertise identical content.
+                    downloads, retries = map(int, requests[-1])
+                    assert downloads == args.to_height - args.from_height + retries, (downloads, retries)
                 latencies.sort()
                 result = dict(
                     binary=name, seconds=round(elapsed, 3),
@@ -161,6 +204,8 @@ def main():
                     rpc_p95_seconds=round(latencies[int((len(latencies) - 1) * .95)], 3)
                     if latencies else None,
                     hash=expected["hash"],
+                    body_requests=int(requests[-1][0]) if requests else None,
+                    timeout_retries=int(requests[-1][1]) if requests else None,
                 )
                 results.append(result)
                 print(json.dumps(result), flush=True)

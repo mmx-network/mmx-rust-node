@@ -69,6 +69,8 @@ pub struct Progress {
     pub download_time: Duration,
     pub hash_time: Duration,
     pub body_time: Duration,
+    pub body_requests: u64,
+    pub body_retries: u64,
     pub archive_time: Duration,
     pub update_time: Duration,
     pub verification_time: Duration,
