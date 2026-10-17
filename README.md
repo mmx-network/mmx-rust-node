@@ -48,6 +48,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
+| `mmx-consensus` | Native hash serialization, transaction IDs/content hashes, contract/operation/solution/result hashes, static validity and transaction cost accounting. |
 | `mmx-execution` | VNX contract loading, dependency locks, constructors, cross-contract calls and metadata reads, native boundary copies, and deferred atomic publication across contracts, balances and deployments. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
@@ -137,9 +138,35 @@ costs are clamped on failure as in `Node::execute`.
 
 This layer expects transaction authentication, static contract/dependency validity,
 and deposit funding checks to have succeeded. Transaction signatures, consensus
-hashing, full fee/input/output validation, implicit deposits and block settlement
-remain node-layer work; `Receipt::total_cost` includes the supplied initial cost,
+hash integration, full fee/input/output validation, implicit deposits and block
+settlement remain node-layer work; `Receipt::total_cost` includes the supplied initial cost,
 contract reads, and execution, before the node's execution-input/output costs.
+
+`mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
+conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
+transactions select their own hash version, and solution/result hashes retain
+the native version-0 rules. `hash_serialize()` exposes the exact transaction
+preimage. Transaction IDs omit solution indices and input flags; content hashes
+include them, signatures, static cost and execution results. Execution-result
+input flags/solution indices remain excluded even from content hashes.
+
+`is_valid(&ValidationParams)` and `calc_cost()` port the native static checks,
+including version-1 duplicate/unused solution rejection, memo/message limits,
+JSON metadata restrictions, contract/method flags and wrapped cost arithmetic.
+Contract validity is exposed separately: native `Transaction::is_valid()` does
+not validate the deployment itself. These checks do not authenticate signatures,
+enforce the active transaction version at a height, check balances or authorize
+execution. The next transaction layer must combine them with those checks.
+
+The consensus reader currently accepts the checked-in schema versions only;
+older schema conversion/default insertion and exotic VNX dynamic forms are
+explicit errors. Hashing supports MMX JSON values plus the covered native
+opaque/typed scalar arrays; typed composite Variant array elements are not yet
+supported. Strings retain raw bytes, signed and unsigned dynamic integers retain
+their tags, and non-native Variant types retain their original payload.
+`Record::from_generated()` is convenient for generated declarations, but their
+JSON-backed Variant fields cannot represent every native distinction. Use
+original bytes for consensus inputs.
 
 The disk backend uses a **new Rust journal format**, not the C++ database files.
 Use a separate data directory. It retains all history in memory and replays the
@@ -175,7 +202,8 @@ execution.
 VNX provides serialization, reflection, runtime, RPC and transport. MMX's `var_t`
 and symbol-compressed `instr_t` formats remain application-specific in `mmx-vm`.
 Generated declarations do not implement native MMX validation, transaction
-hashing, consensus, or node services. VNX wire serialization must not be used as
+hashing, consensus, or node services; `mmx-consensus` supplies the static MMX
+behavior separately. VNX wire serialization must not be used as
 a substitute for MMX's consensus hash serialization. Fixed byte arrays retain
 their declared wire layout; address presentation, amount arithmetic and crypto
 operations belong to the MMX port.
@@ -229,6 +257,14 @@ with matching costs and persisted state. Normal Rust tests need no native tools.
 Additional tests cover reopen/forks, deferred commit/abort, atomic multi-table
 validation, and dependency depth/width limits.
 
+The consensus layer adds **824 native C++ cases** comparing transaction preimage
+bytes, both hash versions and full-hash modes, static validity, costs, contract
+sizes and overflow failures. They cover all concrete contracts/operations/
+solutions, execution results, signed integers, non-UTF-8 strings, alternate byte
+order, opaque floats/tuples, JSON/copy recursion boundaries, memo limits and
+500 deterministic transaction combinations. Further tests reject truncated or
+forged schemas and verify the different coverage of IDs and content hashes.
+
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
 transactions/contracts, and call a generated MMX client through the VNX runtime.
@@ -242,6 +278,7 @@ To regenerate fixtures from an existing CMake build of the reference node:
 
 ```sh
 python3 tools/generate_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_consensus_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 

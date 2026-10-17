@@ -1,0 +1,13 @@
+[package]
+name = "mmx-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MMX native consensus hashing and static transaction validation"
+
+[dependencies]
+mmx-types.workspace = true
+vnx.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

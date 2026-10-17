@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution"]
+members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus"]
 exclude = ["vendor/vnx-rust"]
 resolver = "2"
 
@@ -12,6 +12,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 mmx-db = { path = "crates/mmx-db" }
 mmx-types = { path = "crates/mmx-types" }
+mmx-consensus = { path = "crates/mmx-consensus" }
 mmx-vm = { path = "crates/mmx-vm" }
 vnx = { path = "vendor/vnx-rust/crates/vnx" }
 vnx-codegen = { path = "vendor/vnx-rust/crates/vnx-codegen" }
