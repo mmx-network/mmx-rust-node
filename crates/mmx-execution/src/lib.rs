@@ -2,8 +2,8 @@
 //! The invocation API accepts authenticated, funded calls. The `transaction`
 //! module combines native hashing, authorization, balances, fees and execution.
 //! The `block` module adds header authentication, reservations, shared VM state,
-//! ordering and economics. Proof work/chain transitions and chain selection
-//! remain outside this crate.
+//! ordering and economics. Its proof-aware API also verifies CPU space work and
+//! header transitions. VDF work and chain selection remain separate stages.
 pub mod block;
 mod contracts;
 mod overlay;

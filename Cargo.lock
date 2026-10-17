@@ -519,6 +519,7 @@ dependencies = [
  "mmx-crypto",
  "mmx-types",
  "mmx-vm",
+ "primitive-types",
  "sha2",
  "thiserror",
  "vnx",

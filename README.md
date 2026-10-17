@@ -48,7 +48,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
-| `mmx-consensus` | Native transaction/contract/result hashes and costs, PubKey/MultiSig authorization, header hashing/static validity/farmer authentication, OG/NFT proof-record hashes and plot identity checks. |
+| `mmx-consensus` | Native hashes/costs and authorization, header authentication, CPU proof-of-space verification, difficulty/challenge/weight transitions and ancestor lookup. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
 | `mmx-execution` | Contract loading/calls and constructors; transaction validation plus block-body commitments, reservations, shared execution, fee ordering, rewards/supply and deferred atomic settlement. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
@@ -206,10 +206,10 @@ The body API checks reward activation, fee buffers, project address continuity,
 reward votes/adjustments, reward amounts and VDF payout cadence. Public
 `block::economics` helpers preserve native rounding/wrapping and select the VDF
 winner from authenticated ancestors, including tie-breaking with the oldest
-visited ancestor's proof hash. Proof-of-space/VDF work, challenge/difficulty
-transitions, weight verification, NFT reward-target resolution, archival indexes,
-genesis initialization and chain selection remain to be ported. A successful body
-validation is not a complete block acceptance decision.
+visited ancestor's proof hash. VDF work/output linkage, NFT reward-target
+resolution, archival indexes, genesis initialization and chain selection remain
+to be ported. A successful body validation is not a complete block acceptance
+decision.
 
 `mmx_consensus::header` exposes exact header hash serialization, hash/content-hash
 calculation, static validity, farmer authentication and contextual scalar checks.
@@ -217,8 +217,8 @@ The hash preimage retains the actual wire type identity: native `Block` and
 `BlockHeader` hash differently even with identical fields. Slicing a signed Block
 to a BlockHeader preserves the stored hash while changing its preimage. The
 preimage includes `proof_chain` starting at hardfork 2, signed reward fields and
-raw 128-bit weights. Static
-validity and `authenticate()` remain separate, as in C++; authentication verifies
+raw 128-bit weights. Static validity and `authenticate()` remain separate, as in
+C++; authentication verifies
 the supplied hash using the first proof's farmer key and the shared crypto cache.
 
 OG/NFT proof records support `Record::calc_hash()` and `proof::is_valid()`.
@@ -227,6 +227,32 @@ coordinates, and `calc_plot_id()`/`validate_plot_id()` implement the native OG/N
 identity domains. Header static validity checks proof shape and does not call
 plot identity validation or verify proof work. The chain layer must perform
 those separate stages before block acceptance.
+
+`proof::verify()` implements native OG/NFT space-proof verification in its
+original order: shape, expected challenge/difficulty, plot identity, plot filter,
+ksize limits, CPU recomputation, quality threshold and proof score. `pos` ports
+the 4 KiB memory hash, SHA-512 leaf generation, eight matching tables, full
+metadata deduplication and canonical proof backtrace. It enforces the Y window,
+the original X ordering, and hardfork-1 post filtering/quality selection. Proofs
+contain 256 uncompressed X values; compressed plotting/proving and GPU/remote
+compute remain separate work.
+
+`transitions::verify_header()` checks proof ordering/uniqueness, proof-chain
+commitments, VDF height and expected iteration totals, bounded time-difficulty
+changes, challenge infusion (including hardfork-2 forced infusion), space
+difficulty/fork counters, weight and cumulative weight, then every space proof.
+`ProofContext::resolve()` derives its expected challenge, difficulty and infusion
+iteration counts through an authenticated `history::HeaderSource`. The lookup
+rules retain native challenge delay, skipped VDF heights, pre-genesis challenges
+and commit-delay clamping; missing non-genesis ancestors cause an error.
+
+`block::prepare_with_proofs()` combines these checks with header authentication
+and prepared body settlement, requiring the same trusted parent in both contexts.
+Header hashes and the farmer signature are checked before CPU space work. The
+lower-level `block::prepare()` continues to expect separately verified space
+proofs/transitions. Both APIs still require VDF work/output linkage and NFT
+reward-target verification before accepting a block; the iteration-count check
+alone does not establish VDF work.
 
 `mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
 conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
@@ -421,6 +447,16 @@ Proof cases check coordinate endianness, size limits, plot IDs and identity
 corruption. Integration tests prove header tampering and invalid farmer
 signatures publish no block state.
 
+Space work adds **612 native comparisons** covering memory/leaf vectors at k8,
+k16, k29 and k32; accepted/rejected CPU space proofs; OG/NFT verification;
+production plot/post-filter settings; transition mutations; difficulty and
+quality arithmetic boundaries; ancestor lookup and complete context resolution.
+Integration cases run authenticated, proof-aware block preparation and reject
+signature/weight tampering without publishing state. Accepted witnesses use
+small k8 plots with overridden minimum ksize so fixture generation stays cheap;
+production k29/k32 leaf arithmetic is compared separately. The oracle calls the
+original native CPU verifier and copied Node verification/ancestor methods.
+
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
 transactions/contracts, and call a generated MMX client through the VNX runtime.
@@ -439,6 +475,7 @@ python3 tools/generate_consensus_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_transaction_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_block_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_header_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_work_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -448,8 +485,8 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Proof-of-space/VDF work and challenge/difficulty/weight transitions, NFT reward
-   targets, genesis, archival indexes and durable chain-state application/reorgs,
+1. VDF work/output linkage, NFT reward targets, genesis, archival indexes and
+   durable chain-state application/reorgs,
    building on block-body validation and atomic settlement.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,

@@ -5,13 +5,16 @@
 //! `Record::from_generated`, but their JSON-backed Variant fields cannot express
 //! every native value. The `authorization` module supplies native signature
 //! checks. The `header` and `proof` modules supply native header authentication,
-//! proof-record hashes and plot identity checks. Proof work and ledger validation
-//! remain separate stages.
+//! proof-record hashes and plot identity checks. `pos` and `transitions` implement
+//! CPU space work and history-dependent header checks. VDF work and ledger
+//! validation remain separate stages.
 pub mod authorization;
 mod encode;
 mod hash;
 pub mod header;
+pub mod pos;
 pub mod proof;
+pub mod transitions;
 mod validation;
 mod wire;
 

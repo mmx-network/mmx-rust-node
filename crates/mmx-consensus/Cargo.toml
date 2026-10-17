@@ -12,6 +12,7 @@ mmx-crypto.workspace = true
 vnx.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+primitive-types.workspace = true
 
 [dev-dependencies]
 mmx-vm.workspace = true

@@ -1,7 +1,8 @@
 //! Block-body validation against a fixed chain snapshot, shared VM execution,
 //! and atomic settlement. Header hashes, static validity, farmer authentication
-//! and contextual scalar checks are enforced here. The caller must also verify
-//! space/VDF work, challenge/difficulty transitions, weights and reward targets.
+//! and contextual scalar checks are enforced here. `prepare_with_proofs` also
+//! verifies CPU space work and header transitions against trusted chain context.
+//! The caller must still verify VDF work/output linkage and reward targets.
 //! This API does not select a chain or advance the database version.
 pub mod economics;
 
@@ -127,6 +128,33 @@ pub fn execute<S: BlockStorage>(
     block: &Record,
 ) -> Result<Receipt, Rejected> {
     prepare(storage, context, block)?.commit()
+}
+/// Verify native space work and header transitions before preparing the body.
+/// VDF work/output linkage and reward target resolution remain prerequisites.
+pub fn prepare_with_proofs<'a, S: BlockStorage>(
+    storage: &'a mut S,
+    context: &BlockContext,
+    block: &Record,
+    proof_context: &mmx_consensus::transitions::ProofContext,
+) -> Result<PreparedBlock<'a, S>, Rejected> {
+    let verification = (|| {
+        if proof_context.parent != context.previous {
+            return Err(invalid("proof context parent mismatch"));
+        }
+        if !mmx_consensus::header::is_valid(block, &context.params)? {
+            return Err(invalid("static header validation failed"));
+        }
+        mmx_consensus::header::authenticate(block)?;
+        mmx_consensus::transitions::verify_header(block, &context.params, proof_context)?;
+        Ok::<_, ValidationError>(())
+    })();
+    verification.map_err(|error| Rejected {
+        transaction: None,
+        error: Box::new(error),
+        info: ErrorInfo::default(),
+        total_cost: 0,
+    })?;
+    prepare(storage, context, block)
 }
 fn invalid(s: &str) -> ValidationError {
     ValidationError::Dynamic(s.into())
