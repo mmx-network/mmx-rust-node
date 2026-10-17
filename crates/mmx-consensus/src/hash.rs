@@ -265,6 +265,9 @@ pub(crate) fn transaction(record: &Record, full: bool) -> Result<Vec<u8>> {
     Ok(out.bytes)
 }
 pub(crate) fn calc_hash(record: &Record, full: bool, version: u32) -> Result<Hash> {
+    if matches!(record.name.as_str(), "mmx.ProofOfTime" | "mmx.VDF_Point") {
+        return Ok(Sha256::digest(vdf(record)?).into());
+    }
     if record.name == "mmx.TransactionBase" {
         return record
             .field("id")?
@@ -392,6 +395,41 @@ pub(crate) fn calc_hash(record: &Record, full: bool, version: u32) -> Result<Has
         _ => return Err(Error::Unsupported(record.name.clone())),
     }
     Ok(Sha256::digest(out.bytes).into())
+}
+
+pub(crate) fn vdf(record: &Record) -> Result<Vec<u8>> {
+    let mut out = Writer::new(0);
+    out.type_hash(record)?;
+    match record.name.as_str() {
+        "mmx.ProofOfTime" => out.fields(
+            record,
+            &[
+                "version",
+                "vdf_height",
+                "start",
+                "num_iters",
+                "segment_size",
+                "input",
+                "prev",
+                "reward_addr",
+                "segments",
+            ],
+        )?,
+        "mmx.VDF_Point" => out.fields(
+            record,
+            &[
+                "vdf_height",
+                "start",
+                "num_iters",
+                "input",
+                "output",
+                "prev",
+                "reward_addr",
+            ],
+        )?,
+        _ => return Err(input("expected VDF proof or point")),
+    }
+    Ok(out.bytes)
 }
 
 pub(crate) fn header(record: &Record, hardfork2_height: u32) -> Result<Vec<u8>> {

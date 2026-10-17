@@ -40,6 +40,8 @@ pub enum ValidationError {
     #[error(transparent)]
     Proof(#[from] mmx_consensus::proof::ProofError),
     #[error(transparent)]
+    Vdf(#[from] mmx_consensus::vdf::VdfError),
+    #[error(transparent)]
     Storage(#[from] storage::Error),
     #[error(transparent)]
     Execution(#[from] mmx_vm::Error),
@@ -54,6 +56,7 @@ impl ValidationError {
                 | Self::Consensus(_)
                 | Self::Header(_)
                 | Self::Proof(_)
+                | Self::Vdf(_)
                 | Self::Storage(_)
                 | Self::Mismatch(_)
         ) || matches!(self,Self::Authorization(e) if e.is_static_failure())

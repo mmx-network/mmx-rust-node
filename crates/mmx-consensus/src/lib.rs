@@ -6,8 +6,8 @@
 //! every native value. The `authorization` module supplies native signature
 //! checks. The `header` and `proof` modules supply native header authentication,
 //! proof-record hashes and plot identity checks. `pos` and `transitions` implement
-//! CPU space work and history-dependent header checks. VDF work and ledger
-//! validation remain separate stages.
+//! CPU space work and history-dependent header checks. `vdf` verifies timelord
+//! work and links verified outputs to headers. Ledger validation is separate.
 pub mod authorization;
 mod encode;
 mod hash;
@@ -16,6 +16,7 @@ pub mod pos;
 pub mod proof;
 pub mod transitions;
 mod validation;
+pub mod vdf;
 mod wire;
 
 use std::collections::BTreeMap;

@@ -2,7 +2,8 @@
 //! and atomic settlement. Header hashes, static validity, farmer authentication
 //! and contextual scalar checks are enforced here. `prepare_with_proofs` also
 //! verifies CPU space work and header transitions against trusted chain context.
-//! The caller must still verify VDF work/output linkage and reward targets.
+//! `prepare_with_vdf` additionally links verified timelord work using history.
+//! The caller must still resolve NFT reward targets and the VDF payout winner.
 //! This API does not select a chain or advance the database version.
 pub mod economics;
 
@@ -137,23 +138,64 @@ pub fn prepare_with_proofs<'a, S: BlockStorage>(
     block: &Record,
     proof_context: &mmx_consensus::transitions::ProofContext,
 ) -> Result<PreparedBlock<'a, S>, Rejected> {
-    let verification = (|| {
-        if proof_context.parent != context.previous {
-            return Err(invalid("proof context parent mismatch"));
-        }
-        if !mmx_consensus::header::is_valid(block, &context.params)? {
-            return Err(invalid("static header validation failed"));
-        }
-        mmx_consensus::header::authenticate(block)?;
-        mmx_consensus::transitions::verify_header(block, &context.params, proof_context)?;
-        Ok::<_, ValidationError>(())
-    })();
-    verification.map_err(|error| Rejected {
+    check_proofs(context, block, proof_context).map_err(proof_rejection)?;
+    prepare(storage, context, block)
+}
+fn check_proofs(
+    context: &BlockContext,
+    block: &Record,
+    proof_context: &mmx_consensus::transitions::ProofContext,
+) -> Result<(), ValidationError> {
+    if proof_context.parent != context.previous {
+        return Err(invalid("proof context parent mismatch"));
+    }
+    if !mmx_consensus::header::is_valid(block, &context.params)? {
+        return Err(invalid("static header validation failed"));
+    }
+    mmx_consensus::header::authenticate(block)?;
+    mmx_consensus::transitions::verify_header(block, &context.params, proof_context)?;
+    Ok(())
+}
+fn proof_rejection(error: ValidationError) -> Rejected {
+    Rejected {
         transaction: None,
         error: Box::new(error),
         info: ErrorInfo::default(),
         total_cost: 0,
-    })?;
+    }
+}
+/// Authenticate the header, resolve proof transitions from trusted history and
+/// link its output to CPU-verified VDF points before preparing atomic settlement.
+/// Points must have been admitted with the same chain parameters. Reward-target
+/// resolution and the trusted parent's correspondence to the ledger remain the
+/// caller's responsibility; this function does not select or publish a chain.
+pub fn prepare_with_vdf<'a, S, H>(
+    storage: &'a mut S,
+    context: &BlockContext,
+    block: &Record,
+    history: &H,
+    points: &[mmx_consensus::vdf::VerifiedPoint],
+) -> Result<PreparedBlock<'a, S>, Rejected>
+where
+    S: BlockStorage,
+    H: mmx_consensus::transitions::history::HeaderSource,
+{
+    let verification = (|| {
+        // Reject unauthenticated headers before history resolution or CPU work.
+        if !mmx_consensus::header::is_valid(block, &context.params)? {
+            return Err(invalid("static header validation failed"));
+        }
+        mmx_consensus::header::authenticate(block)?;
+        let proofs =
+            mmx_consensus::transitions::ProofContext::resolve(block, &context.params, history)?;
+        if proofs.parent != context.previous {
+            return Err(invalid("proof context parent mismatch"));
+        }
+        mmx_consensus::vdf::link_block(block, &context.params, history, points)?;
+        mmx_consensus::transitions::verify_header(block, &context.params, &proofs)?;
+        Ok::<_, ValidationError>(())
+    })();
+    verification.map_err(proof_rejection)?;
     prepare(storage, context, block)
 }
 fn invalid(s: &str) -> ValidationError {

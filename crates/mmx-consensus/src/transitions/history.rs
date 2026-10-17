@@ -92,6 +92,19 @@ pub fn infusion<S: HeaderSource>(
         }
     }
     let hash = block.hash.0;
+    Ok(Infusion {
+        hash,
+        num_iters: block_iters(source, params, &block)?,
+    })
+}
+/// Native get_time_diff/get_block_iters, including genesis clamping and u64
+/// multiplication. `infused` must be an authenticated ancestor.
+pub fn block_iters<S: HeaderSource>(
+    source: &S,
+    params: &mmx::ChainParams,
+    infused: &mmx::BlockHeader,
+) -> ProofResult<u64> {
+    let mut block = infused.clone();
     for _ in 0..params.commit_delay {
         if block.height == 0 {
             break;
@@ -103,11 +116,7 @@ pub fn infusion<S: HeaderSource>(
     if params.time_diff_divider == 0 {
         return Err(invalid("zero time difficulty divider"));
     }
-    Ok(Infusion {
-        hash,
-        num_iters: (block.time_diff / params.time_diff_divider)
-            .wrapping_mul(params.time_diff_constant),
-    })
+    Ok((block.time_diff / params.time_diff_divider).wrapping_mul(params.time_diff_constant))
 }
 impl ProofContext {
     /// Resolve exactly the Node::get_challenge/get_infusion inputs from a trusted
