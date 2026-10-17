@@ -197,7 +197,7 @@ fn matching_claims_download_once_and_restart_reuses_exact_archived_content() {
         })
         .collect();
     assert_eq!(voters.len(), 3);
-    publish(window, &node, &mut Progress::default()).unwrap();
+    publish_with(window, &node, &mut Progress::default(), |_, _| Ok(())).unwrap();
     let mut fresh = peers(&blocks, &events);
     let reused = fresh.window(1, 2, &node, &stop).unwrap();
     assert_eq!((reused.body_requests, reused.body_retries), (0, 0));
@@ -449,6 +449,96 @@ fn missing_ancestors_are_fetched_backwards_without_lowering_the_existing_root() 
         .iter()
         .any(|e| matches!(e, Event::Hash(_, 1, 2))));
     assert!(counts(&events).values().all(|&n| n == 1));
+}
+
+#[test]
+fn a_peer_reorg_inside_the_hash_window_recovers_the_missing_parent_without_duplicate_bodies() {
+    struct Reorg {
+        source: Fake,
+        previous: Record,
+        first: bool,
+        node: Arc<Mutex<Node>>,
+    }
+    impl PeerSource for Reorg {
+        fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+            let mut replies = self.source.hashes(start, count)?;
+            if self.first && start == 1 {
+                self.first = false;
+                replies[0] = Some(BlockHash {
+                    block: hash(&self.previous, "hash")?,
+                    content: hash(&self.previous, "content_hash")?,
+                });
+            }
+            Ok(replies)
+        }
+        fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
+            let parent = hash(&self.source.blocks[&1], "hash")?;
+            if hashes.contains(&parent) {
+                assert_eq!(self.node.lock().unwrap().root, 0);
+            }
+            Ok(self
+                .source
+                .fetch(hashes)?
+                .into_iter()
+                .zip(hashes)
+                .map(|(record, id)| {
+                    record.or_else(|| {
+                        (*id == hash(&self.previous, "hash").unwrap())
+                            .then(|| self.previous.clone())
+                    })
+                })
+                .collect())
+        }
+        fn synced_height(&mut self) -> Result<Option<u32>> {
+            self.source.synced_height()
+        }
+    }
+    let (network, node, blocks) = fixture();
+    let rows: Vec<Json> = include_str!("../../../../mmx-execution/tests/fixtures/chain.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let deep = rows.iter().find(|r| r["kind"] == "deep_fork").unwrap();
+    let previous = decode(&deep["steps"][0]["block"]);
+    // The stale first-height reply is a valid competing block. Its child was
+    // replaced by the new canonical branch before the second-height reply.
+    let mut old = ForkChain::memory(network.params.clone());
+    old.initialize(&network.assets).unwrap();
+    old.admit_blocks(std::slice::from_ref(&previous)).unwrap();
+    old.update_sync_at(hash(&blocks[0], "hash").unwrap(), None, 0)
+        .unwrap();
+    assert_eq!(
+        old.selected().tip().unwrap().unwrap().hash.0,
+        hash(&previous, "hash").unwrap()
+    );
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = PeerPool::new(
+        (1..=3)
+            .map(|id| {
+                (
+                    [id; 32],
+                    Reorg {
+                        source: Fake::new(id, &blocks, &events),
+                        previous: previous.clone(),
+                        first: true,
+                        node: node.clone(),
+                    },
+                )
+            })
+            .collect(),
+    );
+    let progress = synchronize_peers(&mut pool, &node, &AtomicBool::new(false), |_| {}).unwrap();
+    let local = node.lock().unwrap();
+    assert_eq!(progress.selected, 2);
+    assert!(local.is_synced());
+    assert_eq!(
+        local.chain.selected().tip().unwrap().unwrap().hash.0,
+        hash(&blocks[2], "hash").unwrap()
+    );
+    assert!(local.sync_pending.is_empty());
+    let downloaded = counts(&events);
+    assert_eq!(downloaded.len(), 3);
+    assert!(downloaded.values().all(|&n| n == 1));
 }
 
 #[test]

@@ -22,6 +22,7 @@ use std::{
 pub const MIN_PEERS: usize = 3;
 pub const MAX_PEERS: usize = 8;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+type Missing = BTreeSet<(u32, Hash)>;
 mod prefetch;
 
 trait WindowSource {
@@ -730,8 +731,14 @@ fn synchronize_inner(
             Ok(())
         })?;
         let walked_back = !missing.is_empty();
-        // Fetch backwards in bounded ranges, including all peers' candidates.
-        let mut back = next;
+        // A peer can reorganize between replies inside one hash window. Begin
+        // at the missing parent's height, including when it is in that window,
+        // then walk backwards without lowering the selected root.
+        let mut back = missing
+            .iter()
+            .map(|(height, _)| height.saturating_add(1))
+            .max()
+            .unwrap_or(next);
         while !missing.is_empty() && back > 1 {
             let count = BATCH_BLOCKS.min(back - 1);
             let download = Instant::now();
@@ -742,17 +749,29 @@ fn synchronize_inner(
                 // Large early blocks exhausted the byte target.
                 // Work backwards one height at a time when a forward range is
                 // truncated, rather than skipping any missing ancestors.
+                let download = Instant::now();
                 let last = pool.window(back - 1, 1)?;
-                publish(last, node, &mut progress)?;
+                progress.download_time += download.elapsed();
+                missing.extend(publish_with(
+                    last,
+                    node,
+                    &mut progress,
+                    |local, discovered| hold_missing(local, missing.iter().chain(discovered)),
+                )?);
                 back -= 1;
             } else {
                 back -= count;
             }
-            missing.extend(publish(window, node, &mut progress)?);
+            missing.extend(publish_with(
+                window,
+                node,
+                &mut progress,
+                |local, discovered| hold_missing(local, missing.iter().chain(discovered)),
+            )?);
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
             missing = missing
                 .into_iter()
-                .map(|parent| Ok(local.chain.block(&parent)?.is_none().then_some(parent)))
+                .map(|parent| Ok(local.chain.block(&parent.1)?.is_none().then_some(parent)))
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .flatten()
@@ -816,19 +835,12 @@ fn synchronize_inner(
         next = end;
     }
 }
-fn publish(
-    window: Window,
-    node: &Arc<Mutex<Node>>,
-    progress: &mut Progress,
-) -> Result<BTreeSet<Hash>> {
-    publish_with(window, node, progress, |_, _| Ok(()))
-}
 fn publish_with(
     window: Window,
     node: &Arc<Mutex<Node>>,
     progress: &mut Progress,
-    before_update: impl FnOnce(&mut Node, &BTreeSet<Hash>) -> Result<()>,
-) -> Result<BTreeSet<Hash>> {
+    before_update: impl FnOnce(&mut Node, &Missing) -> Result<()>,
+) -> Result<Missing> {
     progress.hash_time += window.hash_time;
     progress.body_time += window.body_time;
     progress.body_requests += window.body_requests;
@@ -860,12 +872,13 @@ fn publish_with(
     for block in &blocks {
         let prev = hash(block, "prev")?;
         if local.chain.block(&prev)?.is_none() {
-            missing.insert(prev);
+            let height = number(block, "height")?
+                .checked_sub(1)
+                .ok_or_else(|| error("unexpected genesis in sync window"))?;
+            missing.insert((height, prev));
         }
     }
-    if !missing.is_empty() && window.start > 1 {
-        local.sync_pending.insert(window.start - 1);
-    }
+    hold_missing(&mut local, &missing)?;
     // Empty replies do not authorize replay of retained future orphans. Keep
     // the active view at the contiguous prefix actually supplied by peers,
     // including when resuming an explicit rewind with a larger archive.
@@ -889,6 +902,18 @@ fn publish_with(
         .ok_or_else(|| error("missing selected tip"))?
         .height;
     Ok(missing)
+}
+
+fn hold_missing<'a>(
+    local: &mut Node,
+    missing: impl IntoIterator<Item = &'a (u32, Hash)>,
+) -> Result<()> {
+    for (height, parent) in missing {
+        if *height > 0 && local.chain.block(parent)?.is_none() {
+            local.sync_pending.insert(*height);
+        }
+    }
+    Ok(())
 }
 
 /// Keep a random pool of authenticated native peers. One coordinator owns all

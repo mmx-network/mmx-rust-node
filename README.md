@@ -90,9 +90,11 @@ This ports the height-job approach in native `Router::process()` and
 two in `modules/Router.vni` and configures five in `config/default/Router.json`.
 All candidates reach native fork choice, CPU proof checks and ledger
 validation; a rejected candidate does not discard another peer's valid block.
-Unknown parents trigger bounded backwards discovery above genesis. Download
-never lowers the fork-choice root to force acceptance of a peer branch. Native lookahead and
-strict future-timestamp bounds also apply. The active view includes the selected
+Unknown parents trigger bounded backwards discovery above genesis, including
+peer reorganizations inside a hash window. Their expected heights guard the
+fork-choice root while ancestors are published; recovery never lowers the root
+to force acceptance of a peer branch. Native lookahead and strict future-timestamp
+bounds also apply. The active view includes the selected
 tip and downloaded prefix; retained future orphans are not automatically selected
 after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
