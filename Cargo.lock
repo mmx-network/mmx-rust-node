@@ -515,7 +515,20 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "mmx-consensus"
 version = "0.1.0"
 dependencies = [
+ "k256",
+ "mmx-crypto",
  "mmx-types",
+ "mmx-vm",
+ "sha2",
+ "thiserror",
+ "vnx",
+]
+
+[[package]]
+name = "mmx-crypto"
+version = "0.1.0"
+dependencies = [
+ "k256",
  "sha2",
  "thiserror",
  "vnx",
@@ -553,6 +566,7 @@ name = "mmx-vm"
 version = "0.1.0"
 dependencies = [
  "k256",
+ "mmx-crypto",
  "mmx-db",
  "mmx-types",
  "primitive-types",

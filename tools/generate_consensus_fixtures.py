@@ -9,6 +9,7 @@ import tempfile
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=pathlib.Path, default=pathlib.Path.home() / 'workspace/mmx-node')
 parser.add_argument('--build', type=pathlib.Path)
+parser.add_argument('--suite', choices=['all', 'hashes', 'authorization'], default='all')
 args = parser.parse_args()
 root = pathlib.Path(__file__).resolve().parent.parent
 build = (args.build or args.source / 'build').resolve()
@@ -20,17 +21,26 @@ for line in (target / 'flags.make').read_text().splitlines():
         flags[key] = shlex.split(value)
 link = shlex.split((target / 'link.txt').read_text())
 with tempfile.TemporaryDirectory(prefix='mmx-consensus-') as directory:
-    binary = pathlib.Path(directory) / 'reference_consensus'
-    command = [link[0], '-std=c++17', '-O0', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], str(root / 'tools/reference_consensus.cpp')]
-    i = 1
-    while i < len(link):
-        arg = link[i]
-        if arg == '-o':
-            i += 2
-            continue
-        if not arg.endswith('engine_tests.cpp.o'):
-            command.append(arg)
-        i += 1
-    command.extend(['-o', str(binary)])
-    subprocess.run(command, cwd=build / 'test', check=True)
-    subprocess.run([str(binary), str(root / 'crates/mmx-consensus/tests/fixtures/native.tsv')], check=True)
+    def compile_oracle(source):
+        binary = pathlib.Path(directory) / source.removesuffix('.cpp')
+        command = [link[0], '-std=c++17', '-O0', *flags['CXX_DEFINES'], *flags['CXX_INCLUDES'], str(root / 'tools' / source)]
+        i = 1
+        while i < len(link):
+            arg = link[i]
+            if arg == '-o':
+                i += 2
+                continue
+            if not arg.endswith('engine_tests.cpp.o'):
+                command.append(arg)
+            i += 1
+        command.extend(['-o', str(binary)])
+        subprocess.run(command, cwd=build / 'test', check=True)
+        return binary
+
+    if args.suite in ('all', 'hashes'):
+        binary = compile_oracle('reference_consensus.cpp')
+        subprocess.run([str(binary), str(root / 'crates/mmx-consensus/tests/fixtures/native.tsv')], check=True)
+    if args.suite in ('all', 'authorization'):
+        binary = compile_oracle('reference_authorization.cpp')
+        subprocess.run([str(binary), str(root / 'crates/mmx-crypto/tests/fixtures/native.tsv'),
+                        str(root / 'crates/mmx-consensus/tests/fixtures/authorization.tsv')], check=True)

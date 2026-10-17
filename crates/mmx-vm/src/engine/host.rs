@@ -1,34 +1,4 @@
 use super::*;
-use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
-use std::sync::{LazyLock, Mutex};
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SignatureEntry {
-    message: [u8; 32],
-    key: [u8; 33],
-    signature: [u8; 64],
-}
-static SIGNATURE_CACHE: LazyLock<Mutex<Vec<SignatureEntry>>> = LazyLock::new(|| {
-    Mutex::new(vec![
-        SignatureEntry {
-            message: [0; 32],
-            key: [0; 33],
-            signature: [0; 64]
-        };
-        16384
-    ])
-});
-
-fn signature_slot(signature: &[u8; 64]) -> usize {
-    let mut hash = vnx::Crc64::new();
-    hash.update(vnx::hash64(signature).to_le_bytes());
-    // For fixed-length CRC inputs, replacing the native random salt by zero
-    // XOR-permutes all slot indices. Collisions and cache behavior are identical,
-    // including eviction of the initially zero entry; no RNG is required.
-    hash.update([0; 8]);
-    hash.as_u64() as usize % 16384
-}
-
 /// Staged transaction output. Memos are bytes because native VM strings need
 /// not be UTF-8. A transaction executor publishes outputs only on success.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,37 +108,8 @@ impl<S: Storage> Engine<'_, S> {
             .binary(pubkey)?
             .try_into()
             .map_err(|_| Error::Signature)?;
-        let entry = SignatureEntry {
-            message: msg,
-            key: pubkey,
-            signature,
-        };
-        let slot = signature_slot(&signature);
-        // Native signature_t checks its zero-initialized cache before parsing.
-        let verified = if SIGNATURE_CACHE.lock().unwrap()[slot] == entry {
-            true
-        } else {
-            const ORDER: [u8; 32] = [
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c,
-                0xd0, 0x36, 0x41, 0x41,
-            ];
-            if signature[..32] >= ORDER[..] || signature[32..] >= ORDER[..] {
-                return Err(Error::Signature);
-            }
-            let key = VerifyingKey::from_sec1_bytes(&pubkey).map_err(|_| Error::Signature)?;
-            // libsecp256k1 parses zero scalars, then verification returns false.
-            match Signature::from_slice(&signature) {
-                Ok(sig) => {
-                    let verified = key.verify_prehash(&msg, &sig).is_ok();
-                    if verified {
-                        SIGNATURE_CACHE.lock().unwrap()[slot] = entry;
-                    }
-                    verified
-                }
-                Err(_) => false,
-            }
-        };
+        let verified =
+            mmx_crypto::verify(&msg, &pubkey, &signature).map_err(|_| Error::Signature)?;
         self.write_value(dst, Value::Bool(verified), false)
     }
 

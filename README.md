@@ -48,7 +48,8 @@ counter. It does not require the C++ repository or a running MMX node.
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
-| `mmx-consensus` | Native hash serialization, transaction IDs/content hashes, contract/operation/solution/result hashes, static validity and transaction cost accounting. |
+| `mmx-consensus` | Native hash serialization, transaction IDs/content hashes, contract/operation/solution/result hashes, static validity, costs, PubKey/MultiSig authentication and transaction signature selection. |
+| `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
 | `mmx-execution` | VNX contract loading, dependency locks, constructors, cross-contract calls and metadata reads, native boundary copies, and deferred atomic publication across contracts, balances and deployments. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
@@ -137,9 +138,9 @@ Child gas is added only after successful execution and return copying; outer VM
 costs are clamped on failure as in `Node::execute`.
 
 This layer expects transaction authentication, static contract/dependency validity,
-and deposit funding checks to have succeeded. Transaction signatures, consensus
-hash integration, full fee/input/output validation, implicit deposits and block
-settlement remain node-layer work; `Receipt::total_cost` includes the supplied initial cost,
+and deposit funding checks to have succeeded. Combining authentication and consensus
+hashing with full fee/input/output validation, implicit deposits and block
+settlement remains node-layer work; `Receipt::total_cost` includes the supplied initial cost,
 contract reads, and execution, before the node's execution-input/output costs.
 
 `mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
@@ -157,6 +158,30 @@ Contract validity is exposed separately: native `Transaction::is_valid()` does
 not validate the deployment itself. These checks do not authenticate signatures,
 enforce the active transaction version at a height, check balances or authorize
 execution. The next transaction layer must combine them with those checks.
+
+`mmx_consensus::authorization` ports `Contract::validate()` and the sender,
+input and operation-user signature selection rules. `authorize_sender()` always
+uses solution 0 and a PubKey at the sender address. `authorize_input()` performs
+a contract lookup only when `IS_EXEC` is set. `authorize_operation_user()` reads
+the user's contract and falls back to PubKey when it is absent; anonymous calls
+perform no lookup. Execute and Deposit use the same user authentication rules.
+
+Run these steps at their native positions after static validation: sender
+authentication precedes fee debiting, input authentication follows its balance
+check, and user authentication follows the target-executable check. The lookup
+callback must use chain contract records and charge the native read cost at the
+appropriate transaction/engine gas meter. Eagerly authenticating all operations
+would change failure order and gas. These functions do not check balances or
+fees, run bytecode, or publish state; `mmx-execution::prepare()` still expects
+authenticated, funded invocations until the full transaction layer connects them.
+
+Version 0 multisig validation ignores the declared threshold, non-owner entries
+and non-PubKey owner solutions. Version 1 requires the declared threshold to
+match, rejects non-owners and rejects non-PubKey owner solutions. Every relevant
+signature is checked even after the required count has been reached. Typed errors
+preserve native static-failure versus ordinary execution-failure classification;
+all sender authentication errors reject the transaction. Signature/public-key
+parsing failures remain distinct from a signature that verifies false.
 
 The consensus reader currently accepts the checked-in schema versions only;
 older schema conversion/default insertion and exotic VNX dynamic forms are
@@ -265,6 +290,15 @@ order, opaque floats/tuples, JSON/copy recursion boundaries, memo limits and
 500 deterministic transaction combinations. Further tests reject truncated or
 forged schemas and verify the different coverage of IDs and content hashes.
 
+Authentication adds **1,232 native C++ cases** covering all contract validation
+paths, both multisig versions, signature selection, missing/invalid solutions,
+failure reasons/classes, lookup order and injected read-cost boundaries. A further
+**418 native crypto cases** compare addresses, verification, scalar/key parsing,
+high-S rejection, wrong messages/signatures and zero-cache eviction. Separate
+integration binaries prove cache sharing in both directions between authorization
+and VM `VERIFY`; signed PubKey and multisig transactions also pass static and
+signature checks together.
+
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
 transactions/contracts, and call a generated MMX client through the VNX runtime.
@@ -279,6 +313,7 @@ To regenerate fixtures from an existing CMake build of the reference node:
 ```sh
 python3 tools/generate_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_consensus_fixtures.py --source ~/workspace/mmx-node
+# Optional: --suite hashes or --suite authorization
 # Optional: --build /path/to/mmx-node/build
 ```
 

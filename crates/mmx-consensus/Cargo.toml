@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "MMX native consensus hashing and static transaction validation"
+description = "MMX native consensus hashing, static validation and signature authorization"
 
 [dependencies]
 mmx-types.workspace = true
+mmx-crypto.workspace = true
 vnx.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+mmx-vm.workspace = true
+k256.workspace = true

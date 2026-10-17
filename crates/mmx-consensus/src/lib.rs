@@ -3,7 +3,9 @@
 //! Decode original VNX bytes to preserve integer signs, byte strings, dynamic
 //! types and opaque Variant payloads. Generated types are also accepted through
 //! `Record::from_generated`, but their JSON-backed Variant fields cannot express
-//! every native value. Static validity is not signature or ledger validation.
+//! every native value. The `authorization` module supplies native signature
+//! checks; static validity and authorization remain separate from ledger validation.
+pub mod authorization;
 mod hash;
 mod validation;
 mod wire;
