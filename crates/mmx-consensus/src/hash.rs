@@ -287,6 +287,10 @@ pub(crate) fn calc_hash(record: &Record, full: bool, version: u32) -> Result<Has
     );
     out.type_hash(record)?;
     match record.name.as_str() {
+        "mmx.ProofResponse" => {
+            out.field(record, "vdf_height")?;
+            out.hash_field(record, "proof", false, 0)?;
+        }
         "mmx.contract.TokenBase" => out.fields(
             record,
             &["version", "name", "symbol", "decimals", "meta_data"],

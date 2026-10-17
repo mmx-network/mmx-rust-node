@@ -42,6 +42,8 @@ pub struct ForkChain {
     // Native proof flags survive the transition out of historical sync, but
     // reset on restart/explicit rewind. Never promote a new live block here.
     sync_verified: BTreeSet<Hash>,
+    verified: BTreeMap<Hash, Vec<vdf::VerifiedPoint>>,
+    verified_work: BTreeMap<Hash, vdf::VerifiedPoint>,
 }
 impl ForkChain {
     pub fn memory(params: mmx::ChainParams) -> Self {
@@ -50,6 +52,8 @@ impl ForkChain {
             archive: Database::memory(),
             voting: voting::Voting::default(),
             sync_verified: BTreeSet::new(),
+            verified: BTreeMap::new(),
+            verified_work: BTreeMap::new(),
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
@@ -58,6 +62,8 @@ impl ForkChain {
             archive: Database::open(path.as_ref().join("archive"))?,
             voting: voting::Voting::default(),
             sync_verified: BTreeSet::new(),
+            verified: BTreeMap::new(),
+            verified_work: BTreeMap::new(),
         };
         if chain.archive.version() != 0
             && chain.archive.get("fork_meta", b"params", None)
@@ -100,6 +106,8 @@ impl ForkChain {
             self.chain.revert(height + 1)?;
             self.voting.reset();
             self.sync_verified.clear();
+            self.verified.clear();
+            self.verified_work.clear();
         }
         Ok(())
     }
@@ -122,6 +130,18 @@ impl ForkChain {
     /// already counted votes remain counted. Response admission belongs to Node.
     pub fn observe_proof(&mut self, proof: &mmx_consensus::proof::VerifiedProof) {
         self.voting.observe_proof(proof);
+    }
+    /// Reuse CPU evidence while rebinding shape/authentication/history to this
+    /// chain's parameters. Callers cannot manufacture VerifiedPoint from wire.
+    pub fn cache_verified_work(&mut self, points: &[vdf::VerifiedPoint]) -> ChainResult<()> {
+        let mut cache = BTreeMap::new();
+        for point in points {
+            let record = Record::from_generated(point.proof())?;
+            vdf::validate(&record, self.chain.params(), self)?;
+            cache.insert(bytes::<32>(record.field("content_hash")?)?, point.clone());
+        }
+        self.verified_work = cache;
+        Ok(())
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
         self.archive
@@ -198,6 +218,11 @@ impl ForkChain {
             let key = [height.to_be_bytes(), self.archive.version().to_be_bytes()].concat();
             writes.push(Write::put("fork_order", key, hash));
             writes.push(Write::put("fork_blocks", hash, block.encode()?));
+            writes.push(Write::put(
+                "fork_headers",
+                hash,
+                header(block)?.encode(&mmx_types::vnx_registry()?)?,
+            ));
         }
         self.commit_archive(writes)
     }
@@ -223,9 +248,18 @@ impl ForkChain {
         };
         unpack(data)
     }
-    fn entries(&self) -> ChainResult<Vec<Entry>> {
+    fn entries(&self, root_height: u32) -> ChainResult<Vec<Entry>> {
         self.archive
-            .scan("fork_order", &[], None)
+            .scan_range(
+                "fork_order",
+                &[
+                    root_height.saturating_add(1).to_be_bytes(),
+                    0u32.to_be_bytes(),
+                ]
+                .concat(),
+                None,
+                None,
+            )
             .into_iter()
             .map(|row| {
                 let hash: Hash = row
@@ -288,12 +322,16 @@ impl ForkChain {
             return Err(invalid("root is not selected"));
         }
         self.voting.root(root_header.height, root_header.vdf_height);
-        let entries = self.entries()?;
+        let entries = self.entries(root_header.height)?;
         let headers: BTreeMap<_, _> = entries
             .iter()
             .map(|e| (e.header.hash.0, e.header.clone()))
             .collect();
-        let history = History(&headers);
+        let history = History {
+            headers: &headers,
+            archive: &self.archive,
+        };
+        self.verified.retain(|hash, _| headers.contains_key(hash));
         let mut out = Update::default();
         let mut candidates = Vec::new();
         let mut points = BTreeMap::new();
@@ -304,12 +342,20 @@ impl ForkChain {
             }
             let mut verified = false;
             let mut bad = entry.invalid;
-            {
-                if let Some(parent) = headers.get(&h.prev.0) {
+            if let Some(work) = self.verified.get(&h.hash.0) {
+                verified = true;
+                points.insert(h.hash.0, work.clone());
+            } else {
+                if let Some(parent) = history.get_header(&h.prev.0)? {
                     let work: Vec<_> = entry
                         .proofs
                         .iter()
-                        .filter_map(|p| vdf::verify(p, self.chain.params(), &history).ok())
+                        .filter_map(|p| {
+                            self.verified_work
+                                .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
+                                .cloned()
+                                .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
+                        })
                         .collect();
                     if mode == ValidationMode::HistoricalSync
                         || self.sync_verified.contains(&h.hash.0)
@@ -321,7 +367,7 @@ impl ForkChain {
                             self.chain.params(),
                             &history,
                         ) {
-                            if context.parent != *parent
+                            if context.parent != parent
                                 || transitions::verify_header(
                                     &entry.block,
                                     self.chain.params(),
@@ -335,17 +381,16 @@ impl ForkChain {
                                 if mode == ValidationMode::HistoricalSync {
                                     self.sync_verified.insert(h.hash.0);
                                 }
-                                self.voting.register(
-                                    &entry.block,
-                                    h,
-                                    self.chain.params(),
-                                    &history,
-                                )?;
                                 points.insert(h.hash.0, work);
                             }
                         }
                     }
                 }
+            }
+            if verified {
+                self.voting
+                    .register(&entry.block, h, self.chain.params(), &history)?;
+                self.verified.insert(h.hash.0, points[&h.hash.0].clone());
             }
             if bad {
                 out.invalid.insert(h.hash.0);
@@ -360,7 +405,7 @@ impl ForkChain {
                 votes: self.voting.count(&h.hash.0),
                 proof_verified: verified,
                 invalid: bad,
-                anchor: headers.get(&h.prev.0).map(|p| Anchor {
+                anchor: history.get_header(&h.prev.0)?.map(|p| Anchor {
                     hash: p.hash.0,
                     total_weight: u128::from_le_bytes(p.total_weight.0),
                 }),
@@ -388,6 +433,10 @@ impl ForkChain {
             let mut branch = Vec::new();
             let mut missing_work = false;
             for block in line {
+                let history = History {
+                    headers: &headers,
+                    archive: &self.archive,
+                };
                 let hash = bytes::<32>(block.field("hash")?)?;
                 // Deep forks can include archived blocks at/below the root;
                 // their work is reverified and their complete bodies replayed.
@@ -396,7 +445,12 @@ impl ForkChain {
                 } else {
                     self.work(&hash)?
                         .iter()
-                        .filter_map(|p| vdf::verify(p, self.chain.params(), &history).ok())
+                        .filter_map(|p| {
+                            self.verified_work
+                                .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
+                                .cloned()
+                                .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
+                        })
                         .collect()
                 };
                 let validation = if self.sync_verified.contains(&hash) {
@@ -492,18 +546,31 @@ fn consensus_rejection(error: &ValidationError) -> bool {
             | ValidationError::Execution(mmx_vm::Error::Storage(_))
     )
 }
-struct History<'a>(&'a BTreeMap<Hash, mmx::BlockHeader>);
+struct History<'a> {
+    headers: &'a BTreeMap<Hash, mmx::BlockHeader>,
+    archive: &'a Database,
+}
 impl HeaderSource for History<'_> {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
-        Ok(self.0.get(hash).cloned())
+        if let Some(header) = self.headers.get(hash) {
+            return Ok(Some(header.clone()));
+        }
+        archive_header(self.archive, hash).map_err(|e| ProofError::Invalid(e.to_string()))
     }
 }
 impl HeaderSource for ForkChain {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
-        self.block(hash)
-            .and_then(|b| b.map(|b| header(&b)).transpose())
-            .map_err(|e| ProofError::Invalid(e.to_string()))
+        archive_header(&self.archive, hash).map_err(|e| ProofError::Invalid(e.to_string()))
     }
+}
+fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::BlockHeader>> {
+    if let Some(wire) = archive.get("fork_headers", hash, None) {
+        return Ok(Some(mmx::BlockHeader::decode(wire)?));
+    }
+    archive
+        .get("fork_blocks", hash, None)
+        .map(|wire| header(&Record::decode(wire)?))
+        .transpose()
 }
 fn header(block: &Record) -> ChainResult<mmx::BlockHeader> {
     let mut header = block.clone();

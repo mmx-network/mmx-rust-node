@@ -299,3 +299,57 @@ fn continuing_native_stream_reuses_type_codes_and_preserves_tuple_bytes() {
         value
     );
 }
+
+#[test]
+fn farmer_response_waits_for_verified_future_vdf_then_live_block_uses_the_same_evidence() {
+    let (network, g, steps, _) = fixture();
+    let n = node(&network);
+    let row: Value = include_str!("../../mmx-consensus/tests/fixtures/responses.jsonl")
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|r| r["name"] == "extensions1_0")
+        .unwrap();
+    let response = wire(&row["wire"]);
+    n.lock().unwrap().receive(&response).unwrap();
+    assert_eq!(n.lock().unwrap().pending_proofs(), 1);
+    let mut bad = response.clone();
+    bad.fields
+        .insert("content_hash".into(), V::Bytes(vec![0; 32]));
+    assert!(n.lock().unwrap().receive(&bad).is_err());
+    assert_eq!(n.lock().unwrap().pending_proofs(), 1);
+    // An unsigned metadata point never establishes work or releases the queue.
+    let metadata = Record::from_generated(&mmx::VDF_Point::default()).unwrap();
+    n.lock().unwrap().receive(&metadata).unwrap();
+    assert_eq!(n.lock().unwrap().pending_proofs(), 1);
+    n.lock().unwrap().receive(&wire(&steps[0]["vdf"])).unwrap();
+    assert_eq!(n.lock().unwrap().pending_proofs(), 0);
+    check(&n, &g);
+    let height = n
+        .lock()
+        .unwrap()
+        .call(&record("mmx.Node.get_vdf_height", []))
+        .unwrap();
+    assert_eq!(height.field("_ret_0").unwrap(), &V::Uint(1));
+    let peak = n
+        .lock()
+        .unwrap()
+        .call(&record("mmx.Node.get_vdf_peak", []))
+        .unwrap();
+    assert_eq!(
+        peak.field("_ret_0").unwrap(),
+        wire(&steps[0]["block"]).field("vdf_output").unwrap()
+    );
+    // Complete an empty historical round to transition to live mode. The new
+    // block still needs and uses the independently verified PoT, not metadata.
+    let mut source = MemorySource {
+        blocks: vec![wire(&g["block"])],
+        wrong: false,
+    };
+    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    assert!(n.lock().unwrap().is_synced());
+    n.lock()
+        .unwrap()
+        .receive(&wire(&steps[0]["block"]))
+        .unwrap();
+    check(&n, &steps[0]);
+}

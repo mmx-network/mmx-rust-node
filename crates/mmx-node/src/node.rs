@@ -23,6 +23,8 @@ pub struct Node {
     key: SigningKey,
     work: VecDeque<Record>,
     pending: BTreeMap<Hash, Record>,
+    verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
+    responses: Vec<(Record, i64)>,
 }
 pub fn record(name: &str, fields: impl IntoIterator<Item = (String, Value)>) -> Record {
     Record {
@@ -98,6 +100,8 @@ impl Node {
             key,
             work: VecDeque::new(),
             pending: BTreeMap::new(),
+            verified_work: BTreeMap::new(),
+            responses: vec![],
         })
     }
     pub fn chain(&self) -> &ForkChain {
@@ -105,6 +109,9 @@ impl Node {
     }
     pub fn is_synced(&self) -> bool {
         self.synced
+    }
+    pub fn pending_proofs(&self) -> usize {
+        self.responses.len()
     }
     pub fn begin_resync(&mut self) {
         self.synced = false;
@@ -119,9 +126,24 @@ impl Node {
         self.sync_pos = height.saturating_add(1);
         self.work.clear();
         self.pending.clear();
+        self.verified_work.clear();
+        self.responses.clear();
         Ok(())
     }
     pub(crate) fn update(&mut self) -> Result<Update> {
+        for work in &self.work {
+            let id = hash(work, "content_hash")?;
+            if !self.verified_work.contains_key(&id) {
+                if let Ok(point) =
+                    mmx_consensus::vdf::verify(work, self.chain.selected().params(), &self.chain)
+                {
+                    self.verified_work.insert(id, point);
+                }
+            }
+        }
+        self.chain
+            .cache_verified_work(&self.verified_work.values().cloned().collect::<Vec<_>>())?;
+        self.process_responses()?;
         let root = self
             .chain
             .selected()
@@ -185,6 +207,76 @@ impl Node {
             .retain(|_, b| number(b, "height").is_ok_and(|h| h > self.root));
         Ok(out)
     }
+    fn vdf_peak(&self) -> Result<(u32, Hash)> {
+        let tip = self
+            .chain
+            .selected()
+            .tip()?
+            .ok_or_else(|| error("missing tip"))?;
+        let points: Vec<_> = self
+            .work
+            .iter()
+            .filter_map(|w| {
+                hash(w, "content_hash")
+                    .ok()
+                    .and_then(|h| self.verified_work.get(&h).cloned())
+            })
+            .collect();
+        let next = mmx_consensus::vdf::next_points(
+            &self.chain,
+            self.chain.selected().params(),
+            &tip,
+            &points,
+        )?;
+        Ok((
+            tip.vdf_height.wrapping_add(next.len() as u32),
+            next.last().map_or(tip.vdf_output.0, |p| p.point().output.0),
+        ))
+    }
+    fn process_responses(&mut self) -> Result<()> {
+        let tip = self
+            .chain
+            .selected()
+            .tip()?
+            .ok_or_else(|| error("missing tip"))?;
+        let root = self
+            .chain
+            .selected()
+            .header(
+                &self
+                    .chain
+                    .selected()
+                    .hash_at(self.root)?
+                    .ok_or_else(|| error("missing root"))?,
+            )?
+            .ok_or_else(|| error("missing root header"))?;
+        let params = self.chain.selected().params().clone();
+        let now = vnx::util::get_wall_time_millis();
+        let height = self.vdf_peak()?.0;
+        let mut pending = Vec::new();
+        for (record, received) in std::mem::take(&mut self.responses) {
+            if now.wrapping_sub(received) > params.block_interval_ms.wrapping_mul(10) {
+                continue;
+            }
+            if number(&record, "vdf_height")? >= height.wrapping_add(params.challenge_delay) {
+                pending.push((record, received));
+                continue;
+            }
+            match mmx_consensus::response::verify(
+                &record,
+                &params,
+                &self.chain,
+                &tip,
+                root.vdf_height,
+                1000,
+            ) {
+                Ok(proof) => self.chain.observe_proof(&proof),
+                Err(e) => eprintln!("Rejected farmer proof: {e}"),
+            }
+        }
+        self.responses = pending;
+        Ok(())
+    }
     pub fn receive(&mut self, message: &Record) -> Result<()> {
         match message.name.as_str() {
             "mmx.Block" => {
@@ -200,7 +292,9 @@ impl Node {
                 mmx_consensus::vdf::authenticate(message)?;
                 self.work.push_back(message.clone());
                 while self.work.len() > 32 {
-                    self.work.pop_front();
+                    if let Some(old) = self.work.pop_front() {
+                        self.verified_work.remove(&hash(&old, "content_hash")?);
+                    }
                 }
                 let work: Vec<_> = self.work.iter().cloned().collect();
                 for block in self.pending.values() {
@@ -211,6 +305,14 @@ impl Node {
             "mmx.ValidatorVote" => {
                 self.chain
                     .admit_vote(message, vnx::util::get_wall_time_millis())?;
+                self.update()?;
+            }
+            "mmx.ProofResponse" => {
+                if !mmx_consensus::response::is_valid(message)? {
+                    return Err(error("invalid proof response"));
+                }
+                self.responses
+                    .push((message.clone(), vnx::util::get_wall_time_millis()));
                 self.update()?;
             }
             // Other broadcasts are not ledger admissions. Transaction submission
@@ -242,14 +344,15 @@ impl Node {
         let value = match request.name.as_str() {
             "mmx.Node.get_params" => Value::Record(Record::from_generated(selected.params())?),
             "mmx.Node.get_height" => Value::Uint(tip.height.into()),
-            "mmx.Node.get_vdf_height" => Value::Uint(tip.vdf_height.into()),
+            "mmx.Node.get_vdf_height" => Value::Uint(self.vdf_peak()?.0.into()),
             "mmx.Node.get_synced_height" => {
                 optional(self.synced.then_some(Value::Uint(tip.height.into())))
             }
-            "mmx.Node.get_synced_vdf_height" => {
-                optional(self.synced.then_some(Value::Uint(tip.vdf_height.into())))
-            }
-            "mmx.Node.get_vdf_peak" => bytes(tip.vdf_output.0),
+            "mmx.Node.get_synced_vdf_height" => optional(
+                self.synced
+                    .then_some(Value::Uint(self.vdf_peak()?.0.into())),
+            ),
+            "mmx.Node.get_vdf_peak" => bytes(self.vdf_peak()?.1),
             "mmx.Node.get_genesis_hash" => bytes(
                 selected
                     .hash_at(0)?

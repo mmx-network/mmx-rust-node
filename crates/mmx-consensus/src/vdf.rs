@@ -232,3 +232,122 @@ pub fn link_block<'a, S: HeaderSource>(
     out.reverse();
     Ok(out)
 }
+
+/// Native find_next_vdf_points. Points must be CPU verified; signed metadata
+/// alone cannot extend a peak. Input order breaks equal receive-time ties.
+pub fn next_points<'a, S: HeaderSource>(
+    source: &S,
+    params: &mmx::ChainParams,
+    peak: &mmx::BlockHeader,
+    points: &'a [VerifiedPoint],
+) -> VdfResult<Vec<&'a VerifiedPoint>> {
+    use std::collections::BTreeMap;
+    let mut paths = BTreeMap::from([(peak.vdf_output.0, None)]);
+    let mut peaks = Vec::new();
+    let mut iters = peak.vdf_iters;
+    for offset in 0..params.max_vdf_count {
+        let infusion = history::infusion(source, params, peak, offset)?;
+        iters = iters.wrapping_add(infusion.num_iters);
+        let mut next = Vec::new();
+        for (i, p) in points.iter().enumerate() {
+            let p = p.point();
+            if p.start.wrapping_add(p.num_iters) == iters
+                && paths.contains_key(&p.input.0)
+                && p.prev.0 == infusion.hash
+                && p.num_iters == infusion.num_iters
+            {
+                paths.insert(p.output.0, Some(i));
+                next.push(i);
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        peaks = next;
+    }
+    let Some(mut current) = peaks
+        .into_iter()
+        .min_by_key(|&i| (points[i].point().recv_time, i))
+        .map(Some)
+    else {
+        return Ok(vec![]);
+    };
+    let mut out = Vec::new();
+    while let Some(i) = current {
+        if out.len() >= points.len() {
+            return Err(invalid("cyclic VDF points"));
+        }
+        out.push(&points[i]);
+        current = *paths
+            .get(&points[i].point().input.0)
+            .ok_or_else(|| invalid("missing VDF point input"))?;
+    }
+    out.reverse();
+    Ok(out)
+}
+
+#[cfg(test)]
+mod next_tests {
+    use super::*;
+    use vnx::serde_json::{self, Value};
+    fn hash(n: u64) -> Hash {
+        let mut h = [0; 32];
+        h[..8].copy_from_slice(&n.to_le_bytes());
+        h
+    }
+    #[test]
+    fn native_next_vdf_paths_infusions_iteration_indexes_and_arrival_order() {
+        let mut count = 0;
+        for text in include_str!("../tests/fixtures/next_vdf.jsonl").lines() {
+            let r: Value = serde_json::from_str(text).unwrap();
+            let params = mmx::ChainParams {
+                commit_delay: 0,
+                infuse_delay: 0,
+                max_vdf_count: r["maximum"].as_u64().unwrap() as u32,
+                time_diff_divider: 1,
+                time_diff_constant: 1,
+                ..Default::default()
+            };
+            let peak = mmx::BlockHeader {
+                hash: hash(41).into(),
+                time_diff: r["num"].as_u64().unwrap(),
+                vdf_iters: r["iters"].as_str().unwrap().parse().unwrap(),
+                ..Default::default()
+            };
+            // Synthetic already-verified points exercise the native selection policy;
+            // public callers can only create this capability via CPU verification.
+            let points: Vec<_> = r["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| VerifiedPoint {
+                    point: mmx::VDF_Point {
+                        start: p["start"].as_str().unwrap().parse().unwrap(),
+                        num_iters: p["num"].as_u64().unwrap(),
+                        input: hash(p["input"].as_u64().unwrap()).into(),
+                        output: hash(p["output"].as_u64().unwrap()).into(),
+                        prev: hash(p["prev"].as_u64().unwrap()).into(),
+                        recv_time: p["recv_time"].as_i64().unwrap(),
+                        ..Default::default()
+                    },
+                    proof: Default::default(),
+                })
+                .collect();
+            let source = std::collections::BTreeMap::<Hash, mmx::BlockHeader>::new();
+            let actual: Vec<_> = next_points(&source, &params, &peak, &points)
+                .unwrap()
+                .into_iter()
+                .map(|p| vnx::util::to_hex_string(&p.point().output.0, false, false).to_uppercase())
+                .collect();
+            let expected: Vec<_> = r["outputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_uppercase())
+                .collect();
+            assert_eq!(actual, expected, "{}", r["name"]);
+            count += 1;
+        }
+        assert_eq!(count, 240);
+    }
+}

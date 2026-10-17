@@ -254,6 +254,49 @@ impl Database {
             })
             .collect()
     }
+    /// Stable range snapshot in the native size-first order, [start, end).
+    pub fn scan_range(
+        &self,
+        table: &str,
+        start: &[u8],
+        end: Option<&[u8]>,
+        max_version: Option<u32>,
+    ) -> Vec<Row> {
+        use std::ops::Bound;
+        let start = Key(start.to_vec());
+        let end = end.map(|v| Key(v.to_vec()));
+        if end.as_ref().is_some_and(|end| *end <= start) {
+            return vec![];
+        }
+        let mut keys = BTreeSet::new();
+        if let Some(rows) = self.tables.get(table) {
+            keys.extend(
+                rows.range((
+                    Bound::Included(&start),
+                    end.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
+                ))
+                .map(|(k, _)| k.clone()),
+            );
+        }
+        keys.extend(
+            self.pending
+                .keys()
+                .filter(|(name, key)| {
+                    name == table && key >= &start && end.as_ref().is_none_or(|end| key < end)
+                })
+                .map(|(_, key)| key.clone()),
+        );
+        keys.into_iter()
+            .filter_map(|key| {
+                let (version, value) = self.row(table, &key, max_version)?;
+                Some(Row {
+                    key: key.0,
+                    value: value.clone()?,
+                    version,
+                })
+            })
+            .collect()
+    }
 
     pub fn commit(&mut self, next_version: u32) -> Result<()> {
         self.commit_batch(next_version, [])

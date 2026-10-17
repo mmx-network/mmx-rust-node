@@ -45,6 +45,8 @@ pub enum ChainError {
     Vdf(#[from] mmx_consensus::vdf::VdfError),
     #[error(transparent)]
     Vote(#[from] mmx_consensus::vote::VoteError),
+    #[error(transparent)]
+    Proof(#[from] mmx_consensus::proof::ProofError),
 }
 pub type ChainResult<T> = Result<T, ChainError>;
 /// Native Node skips VDF verification only while fetching historical blocks.

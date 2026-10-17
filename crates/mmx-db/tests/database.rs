@@ -415,3 +415,28 @@ fn corrupted_record_length_is_not_mistaken_for_a_torn_tail() {
         Err(Error::Corrupt("journal frame length guard"))
     ));
 }
+
+#[test]
+fn range_snapshots_preserve_size_first_order_pending_tombstones_and_history() {
+    let mut db = Database::memory();
+    for key in [b"z".as_slice(), b"aa", b"az", b"bba"] {
+        db.insert("t", key, key).unwrap();
+    }
+    db.commit(1).unwrap();
+    db.remove("t", b"az").unwrap();
+    db.insert("t", b"ab", b"new").unwrap();
+    let keys = |rows: Vec<mmx_db::Row>| rows.into_iter().map(|r| r.key).collect::<Vec<_>>();
+    assert_eq!(
+        keys(db.scan_range("t", b"aa", Some(b"bba"), None)),
+        vec![b"aa".to_vec(), b"ab".to_vec()]
+    );
+    assert_eq!(
+        keys(db.scan_range("t", b"aa", Some(b"bba"), Some(0))),
+        vec![b"aa".to_vec(), b"az".to_vec()]
+    );
+    assert_eq!(
+        keys(db.scan_range("t", b"z", Some(b"aa"), None)),
+        vec![b"z".to_vec()]
+    );
+    assert!(db.scan_range("t", b"aa", Some(b"z"), None).is_empty());
+}

@@ -94,7 +94,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
 | `mmx-node` | Executable, native Zstd peer protocol, historical download with ancestor discovery and native fork choice, live block/VDF/vote admission, durable rewind/restart, VNX public reads and HTTP JSON-RPC. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
-| `mmx-consensus` | Native hashes/costs and authorization, header/vote authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
+| `mmx-consensus` | Native hashes/costs and authorization, header/vote/farmer-response authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
 | `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native network bootstrap, durable selected-chain state, orphan archives, native fork-choice policy and atomic branch replacement. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
@@ -455,6 +455,17 @@ an irreversible state cutoff. Reopen and subsequent fork selection can replay
 the retained branches. Sync orchestration,
 archive pruning, specialized wallet/trading indexes and node-service caches remain to be ported.
 
+The live node admits signed farmer `ProofResponse` envelopes only after native
+hash, plot identity, signature, selected-history challenge/difficulty and CPU space
+work checks. Pending responses wait for VDF progress and expire after ten block
+intervals. Harvester identity, lookup time and farmer routing metadata are excluded
+from hashing as in C++. VDF peak reads extend the block tip only through verified
+CPU evidence with matching infusion, iterations and input paths; raw metadata
+cannot extend it. Additional oracles cover 80 response mutations and 240 native
+next-VDF graphs. Active fork proofs and CPU work are cached transiently, rebound
+to the configured chain before use and reset on restart. Fork updates read the
+active archive range and lazily resolve older headers; retained history is intact.
+
 Historical block download uses explicit `append_sync()` / `update_sync_at()`
 entry points. As in native `!is_synced`, only VDF linkage is omitted; space work,
 signatures, header transitions and complete ledger execution still apply.
@@ -741,6 +752,8 @@ python3 tools/generate_network_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_fork_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_vote_fixtures.py --source ~/workspace/mmx-node
 python3 tools/generate_sync_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_response_fixtures.py --source ~/workspace/mmx-node
+python3 tools/generate_next_vdf_fixtures.py --source ~/workspace/mmx-node
 # Optional: --build /path/to/mmx-node/build
 ```
 
@@ -750,7 +763,7 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Sync throughput, peer scheduling/relay, farmer response admission and specialized
+1. Sync throughput, peer scheduling/relay and specialized
    history indexes, building on the executable node and durable fork selection.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,

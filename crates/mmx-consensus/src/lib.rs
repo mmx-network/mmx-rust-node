@@ -14,6 +14,7 @@ mod hash;
 pub mod header;
 pub mod pos;
 pub mod proof;
+pub mod response;
 pub mod transitions;
 mod validation;
 pub mod vdf;
