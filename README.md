@@ -115,9 +115,9 @@ deadline. Trickling bytes cannot extend either deadline; failed frames close the
 connection.
 Download windows retain up to 128
 heights and target 8 MiB, including competing candidates, in an atomic archive
-transaction. A connection still has at most 64 metadata requests outstanding;
-larger height windows span multiple request rounds. Progress logs separate hash
-queries, bodies, archive publication,
+transaction. A connection has at most 128 metadata requests outstanding, so a
+full height window can be sent before waiting for replies. Progress logs separate
+hash queries, bodies, archive publication,
 proofs and ledger replay. A final multi-peer tip probe runs after publication;
 a changing valid tip keeps the node in historical mode. Heights containing only
 consensus-rejected candidates do not extend the sync peak. Any queued successor

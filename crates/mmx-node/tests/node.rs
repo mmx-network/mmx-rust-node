@@ -800,7 +800,7 @@ fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_th
 }
 
 #[test]
-fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_the_next_batch() {
+fn native_metadata_backpressure_preserves_other_replies_and_restores_the_full_next_batch() {
     let (network, _, _, _) = fixture();
     let n = node(&network);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -837,7 +837,7 @@ fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_t
             .unwrap();
         };
         let mut requests = Vec::new();
-        for _ in 0..64 {
+        for _ in 0..128 {
             requests.push(c.receive(Duration::from_secs(2)).unwrap().unwrap());
         }
         let mut rejected = std::collections::BTreeSet::new();
@@ -853,7 +853,7 @@ fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_t
             }
             reply(&mut c, request, overflow);
         }
-        for _ in 0..4 {
+        for _ in 0..8 {
             let request = c.receive(Duration::from_secs(2)).unwrap().unwrap();
             let height = mmx_node::node::number(
                 request.field("method").unwrap().record().unwrap(),
@@ -870,7 +870,7 @@ fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_t
         // A transient blocked socket must not force all subsequent windows into
         // a small, slow, round-trip-limited request batch.
         requests.clear();
-        for _ in 0..64 {
+        for _ in 0..128 {
             requests.push(c.receive(Duration::from_secs(2)).unwrap().unwrap());
         }
         for request in requests.iter().rev() {
@@ -879,7 +879,7 @@ fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_t
     });
     let mut client = peer::Client::connect(&address.to_string(), n).unwrap();
     for start in [100, 200] {
-        let values = client.hash_pairs(start, 64).unwrap();
+        let values = client.hash_pairs(start, 128).unwrap();
         for (index, value) in values.into_iter().enumerate() {
             let h = start + index as u32;
             assert_eq!(
@@ -891,50 +891,48 @@ fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_t
             );
         }
     }
-    assert_eq!(client.backpressure_retries(), 4);
+    assert_eq!(client.backpressure_retries(), 8);
     server.join().unwrap();
 }
 
 #[test]
-fn hash_windows_can_span_two_request_rounds_without_exceeding_sixty_four_in_flight() {
+fn full_hash_windows_pipeline_before_replies_and_correlate_reordered_returns() {
     let (network, _, _, _) = fixture();
     let n = node(&network);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
-        for _ in 0..2 {
-            let requests: Vec<_> = (0..64)
-                .map(|_| c.receive(Duration::from_secs(2)).unwrap().unwrap())
-                .collect();
-            assert!(c.receive(Duration::from_millis(10)).unwrap().is_none());
-            for request in requests.into_iter().rev() {
-                let height = mmx_node::node::number(
-                    request.field("method").unwrap().record().unwrap(),
-                    "height",
-                )
-                .unwrap();
-                c.send(&record(
-                    "mmx.Return",
-                    [
-                        ("id".into(), request.field("id").unwrap().clone()),
-                        (
-                            "result".into(),
-                            V::Record(record(
-                                "mmx.Node.get_block_hash_ex.return",
-                                [(
-                                    "_ret_0".into(),
-                                    V::Optional(Some(Box::new(V::Sequence(vec![
-                                        V::Bytes(vec![height as u8; 32]),
-                                        V::Bytes(vec![(height ^ 128) as u8; 32]),
-                                    ])))),
-                                )],
-                            )),
-                        ),
-                    ],
-                ))
-                .unwrap();
-            }
+        let requests: Vec<_> = (0..128)
+            .map(|_| c.receive(Duration::from_secs(2)).unwrap().unwrap())
+            .collect();
+        assert!(c.receive(Duration::from_millis(10)).unwrap().is_none());
+        for request in requests.into_iter().rev() {
+            let height = mmx_node::node::number(
+                request.field("method").unwrap().record().unwrap(),
+                "height",
+            )
+            .unwrap();
+            c.send(&record(
+                "mmx.Return",
+                [
+                    ("id".into(), request.field("id").unwrap().clone()),
+                    (
+                        "result".into(),
+                        V::Record(record(
+                            "mmx.Node.get_block_hash_ex.return",
+                            [(
+                                "_ret_0".into(),
+                                V::Optional(Some(Box::new(V::Sequence(vec![
+                                    V::Bytes(vec![height as u8; 32]),
+                                    V::Bytes(vec![(height ^ 128) as u8; 32]),
+                                ])))),
+                            )],
+                        )),
+                    ),
+                ],
+            ))
+            .unwrap();
         }
     });
     let mut client = peer::Client::connect(&address.to_string(), n).unwrap();

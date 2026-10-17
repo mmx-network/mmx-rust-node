@@ -24,6 +24,7 @@ const MAGIC: u32 = 0x4B277B06;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// Bound native block lookups pipelined on a single peer connection.
 pub const MAX_BODY_REQUESTS: usize = 8;
+const MAX_RPC_REQUESTS: usize = 128;
 
 /// Native get_block_hash_ex: the chain ID and the complete content commitment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,7 +282,7 @@ impl Client {
         let mut queued: std::collections::VecDeque<_> = (0..methods.len()).collect();
         let end = Instant::now() + Duration::from_secs(15);
         let mut send_after = Instant::now();
-        let mut request_window = methods.len().clamp(1, 64);
+        let mut request_window = methods.len().clamp(1, MAX_RPC_REQUESTS);
         let mut draining = false;
         while (!pending.is_empty() || !queued.is_empty()) && Instant::now() < end {
             if Instant::now() >= send_after && (!draining || pending.is_empty()) {
