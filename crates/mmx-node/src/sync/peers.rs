@@ -36,6 +36,9 @@ pub trait PeerSource: Send {
     fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>>;
     fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>>;
     fn synced_height(&mut self) -> Result<Option<u32>>;
+    fn backpressure_retries(&self) -> u64 {
+        0
+    }
     fn poll(&mut self) -> Result<()> {
         Ok(())
     }
@@ -49,6 +52,9 @@ impl PeerSource for Client {
     }
     fn synced_height(&mut self) -> Result<Option<u32>> {
         Client::synced_height(self)
+    }
+    fn backpressure_retries(&self) -> u64 {
+        Client::backpressure_retries(self)
     }
     fn poll(&mut self) -> Result<()> {
         Client::poll(self)
@@ -70,6 +76,7 @@ pub struct PeerPool<S> {
     refreshed: Instant,
     body_requests: u64,
     body_retries: u64,
+    retired_backpressure: u64,
 }
 #[derive(Default)]
 pub struct Window {
@@ -81,6 +88,7 @@ pub struct Window {
     pub body_requests: u64,
     pub body_retries: u64,
     pub archive_time: Duration,
+    pub backpressure_retries: u64,
 }
 struct Fetch {
     height: u32,
@@ -113,6 +121,7 @@ impl<S: PeerSource> PeerPool<S> {
             refreshed: Instant::now() - Duration::from_secs(10),
             body_requests: 0,
             body_retries: 0,
+            retired_backpressure: 0,
         }
     }
     pub fn len(&self) -> usize {
@@ -129,7 +138,21 @@ impl<S: PeerSource> PeerPool<S> {
             .collect()
     }
     pub fn remove_failed(&mut self) {
+        self.retired_backpressure += self
+            .peers
+            .iter()
+            .filter(|p| !p.active)
+            .map(|p| p.source.backpressure_retries())
+            .sum::<u64>();
         self.peers.retain(|p| p.active);
+    }
+    fn backpressure_retries(&self) -> u64 {
+        self.retired_backpressure
+            + self
+                .peers
+                .iter()
+                .map(|p| p.source.backpressure_retries())
+                .sum::<u64>()
     }
     pub fn add(&mut self, id: Hash, source: S) -> bool {
         if self.peers.len() >= MAX_PEERS || self.peers.iter().any(|p| p.id == id) {
@@ -293,6 +316,7 @@ impl<S: PeerSource> PeerPool<S> {
     ) -> Result<Window> {
         let initial_requests = self.body_requests;
         let initial_retries = self.body_retries;
+        let initial_backpressure = self.backpressure_retries();
         let mut result = if stop.load(Ordering::Relaxed) {
             Err(error("sync cancelled"))
         } else {
@@ -302,6 +326,8 @@ impl<S: PeerSource> PeerPool<S> {
                         window.target = target;
                         window.body_requests = self.body_requests - initial_requests;
                         window.body_retries = self.body_retries - initial_retries;
+                        window.backpressure_retries =
+                            self.backpressure_retries() - initial_backpressure;
                         window
                     })
             })
@@ -328,6 +354,7 @@ impl<S: PeerSource> PeerPool<S> {
         local.sync_peers = self.len();
         local.sync_body_requests = self.body_requests;
         local.sync_body_retries = self.body_retries;
+        local.sync_backpressure_retries = self.backpressure_retries();
         retained?;
         result
     }
@@ -425,6 +452,7 @@ impl<S: PeerSource> PeerPool<S> {
             body_requests: 0,
             body_retries: 0,
             archive_time: Duration::ZERO,
+            backpressure_retries: 0,
         };
         let body_started = Instant::now();
         let mut bytes = 0usize;
@@ -806,6 +834,7 @@ fn publish_with(
     progress.body_requests += window.body_requests;
     progress.body_retries += window.body_retries;
     progress.archive_time += window.archive_time;
+    progress.backpressure_retries += window.backpressure_retries;
     let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
     let params = local.chain.selected().params();
     let mut blocks = Vec::new();
@@ -990,9 +1019,9 @@ pub fn run(
                 .is_synced()
             {
                 synchronize_peers(&mut pool, node, stop, |p| {
-                    println!("Sync: {} / {}, candidates {} since root {}, {:.1} candidates/s; download wait {:.3}s (hashes {:.3}s bodies {:.3}s, {} body requests, {} retries) archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
+                    println!("Sync: {} / {}, candidates {} since root {}, {:.1} candidates/s; download wait {:.3}s (hashes {:.3}s bodies {:.3}s, {} body requests, {} retries, {} busy retries) archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
                         p.selected, p.target, p.downloaded, p.common,
-                        f64::from(p.downloaded) / p.elapsed.as_secs_f64(), p.download_time.as_secs_f64(), p.hash_time.as_secs_f64(), p.body_time.as_secs_f64(), p.body_requests, p.body_retries,
+                        f64::from(p.downloaded) / p.elapsed.as_secs_f64(), p.download_time.as_secs_f64(), p.hash_time.as_secs_f64(), p.body_time.as_secs_f64(), p.body_requests, p.body_retries, p.backpressure_retries,
                         p.archive_time.as_secs_f64(), p.update_time.as_secs_f64(), p.verification_time.as_secs_f64(), p.replay_time.as_secs_f64());
                 })?;
                 if once

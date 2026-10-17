@@ -110,6 +110,15 @@ remaining download wait after overlap.
 Completed prefetched bodies are retained before the producer replies, including
 on cancellation. Reopening the node reuses those bodies after fresh peer hash
 queries; their presence alone does not advance the selected chain.
+Native `OverflowException` replies indicate that a request was rejected before
+dispatch. The client drains successful replies, backs off and resends only the
+rejected requests with fresh IDs, reducing the affected batch's request window.
+These busy retries have a separate status counter; they do not fetch successful
+bodies again or discard an otherwise healthy peer.
+Peer identity, published height/sync status, genesis and unavailable future-height
+queries do not take the ledger mutex. A height/status pair is published atomically
+after validation and reset on rewind, so slow disk publication cannot hold up
+native peer heartbeats or identity challenges.
 The single-source pipelined helper remains available for fixtures and local
 snapshot tooling; the production executable always uses the peer coordinator.
 

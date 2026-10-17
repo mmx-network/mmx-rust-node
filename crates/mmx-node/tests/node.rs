@@ -690,3 +690,381 @@ fn offline_rewinds_stay_at_the_requested_height_across_ticks_and_restarts() {
     sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     check(&n, &steps[1]);
 }
+
+#[test]
+fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_the_connection() {
+    let (network, _, steps, _) = fixture();
+    let n = node(&network);
+    let expected: Vec<_> = steps[..2].iter().map(|s| Some(wire(&s["block"]))).collect();
+    let replies = expected.clone();
+    let ids: Vec<_> = replies
+        .iter()
+        .map(|b| hash(b.as_ref().unwrap(), "hash").unwrap())
+        .collect();
+    let wanted = ids.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        let first = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+        let second = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+        let send = |c: &mut peer::Connection, id: V, result: Record| {
+            c.send(&record(
+                "mmx.Return",
+                [("id".into(), id), ("result".into(), V::Record(result))],
+            ))
+            .unwrap();
+        };
+        send(
+            &mut c,
+            second.field("id").unwrap().clone(),
+            Record::from_generated(&mmx_types::vnx::OverflowException::default()).unwrap(),
+        );
+        c.send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(99)),
+                ("method".into(), V::Record(record("mmx.Router.get_id", []))),
+            ],
+        ))
+        .unwrap();
+        send(
+            &mut c,
+            first.field("id").unwrap().clone(),
+            record(
+                "mmx.Node.get_block.return",
+                [("_ret_0".into(), V::Record(replies[0].clone().unwrap()))],
+            ),
+        );
+        let mut answered = false;
+        loop {
+            let request = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+            if request.name == "mmx.Return" {
+                assert_eq!(mmx_node::node::number(&request, "id").unwrap(), 99);
+                answered = true;
+                continue;
+            }
+            let method = request.field("method").unwrap().record().unwrap();
+            assert_eq!(method.name, "mmx.Node.get_block");
+            assert_eq!(
+                hash(method, "hash").unwrap(),
+                wanted[1],
+                "successful block must not be requested twice"
+            );
+            assert_ne!(request.field("id").unwrap(), second.field("id").unwrap());
+            send(
+                &mut c,
+                request.field("id").unwrap().clone(),
+                record(
+                    "mmx.Node.get_block.return",
+                    [("_ret_0".into(), V::Record(replies[1].clone().unwrap()))],
+                ),
+            );
+            break;
+        }
+        assert!(answered);
+        let height = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(
+            height.field("method").unwrap().record().unwrap().name,
+            "mmx.Node.get_height"
+        );
+        send(
+            &mut c,
+            height.field("id").unwrap().clone(),
+            record(
+                "mmx.Node.get_height.return",
+                [("_ret_0".into(), V::Uint(2))],
+            ),
+        );
+    });
+    let mut client = peer::Client::connect(&address.to_string(), n).unwrap();
+    assert_eq!(client.blocks_by_hash(&ids).unwrap(), expected);
+    assert_eq!(client.backpressure_retries(), 1);
+    assert_eq!(client.height().unwrap(), 2);
+    server.join().unwrap();
+}
+
+#[test]
+fn native_metadata_backpressure_preserves_the_other_sixty_replies_and_restores_the_next_batch() {
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        let reply = |c: &mut peer::Connection, request: &Record, overflow: bool| {
+            let result = if overflow {
+                Record::from_generated(&mmx_types::vnx::OverflowException::default()).unwrap()
+            } else {
+                let h = mmx_node::node::number(
+                    request.field("method").unwrap().record().unwrap(),
+                    "height",
+                )
+                .unwrap();
+                record(
+                    "mmx.Node.get_block_hash_ex.return",
+                    [(
+                        "_ret_0".into(),
+                        V::Optional(Some(Box::new(V::Sequence(vec![
+                            V::Bytes(vec![h as u8; 32]),
+                            V::Bytes(vec![(h ^ 128) as u8; 32]),
+                        ])))),
+                    )],
+                )
+            };
+            c.send(&record(
+                "mmx.Return",
+                [
+                    ("id".into(), request.field("id").unwrap().clone()),
+                    ("result".into(), V::Record(result)),
+                ],
+            ))
+            .unwrap();
+        };
+        let mut requests = Vec::new();
+        for _ in 0..64 {
+            requests.push(c.receive(Duration::from_secs(2)).unwrap().unwrap());
+        }
+        let mut rejected = std::collections::BTreeSet::new();
+        for request in requests.iter().rev() {
+            let height = mmx_node::node::number(
+                request.field("method").unwrap().record().unwrap(),
+                "height",
+            )
+            .unwrap();
+            let overflow = height % 16 == 4;
+            if overflow {
+                rejected.insert(height);
+            }
+            reply(&mut c, request, overflow);
+        }
+        for _ in 0..4 {
+            let request = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+            let height = mmx_node::node::number(
+                request.field("method").unwrap().record().unwrap(),
+                "height",
+            )
+            .unwrap();
+            assert!(
+                rejected.remove(&height),
+                "only rejected metadata requests may be resent"
+            );
+            reply(&mut c, &request, false);
+        }
+        assert!(rejected.is_empty());
+        // A transient blocked socket must not force all subsequent windows into
+        // a small, slow, round-trip-limited request batch.
+        requests.clear();
+        for _ in 0..64 {
+            requests.push(c.receive(Duration::from_secs(2)).unwrap().unwrap());
+        }
+        for request in requests.iter().rev() {
+            reply(&mut c, request, false);
+        }
+    });
+    let mut client = peer::Client::connect(&address.to_string(), n).unwrap();
+    for start in [100, 200] {
+        let values = client.hash_pairs(start, 64).unwrap();
+        for (index, value) in values.into_iter().enumerate() {
+            let h = start + index as u32;
+            assert_eq!(
+                value,
+                Some(peer::BlockHash {
+                    block: [h as u8; 32],
+                    content: [(h ^ 128) as u8; 32]
+                })
+            );
+        }
+    }
+    assert_eq!(client.backpressure_retries(), 4);
+    server.join().unwrap();
+}
+
+#[test]
+fn peer_identity_and_published_height_replies_do_not_wait_for_the_ledger_and_follow_rewind() {
+    let (network, g, steps, _) = fixture();
+    let n = node(&network);
+    let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
+    let mut c = peer::Connection::new(TcpStream::connect(server.address()).unwrap()).unwrap();
+    let query = |c: &mut peer::Connection, method: Record| {
+        c.send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(77)),
+                ("method".into(), V::Record(method)),
+            ],
+        ))
+        .unwrap();
+        let response = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(mmx_node::node::number(&response, "id").unwrap(), 77);
+        response
+            .field("result")
+            .unwrap()
+            .record()
+            .unwrap()
+            .field("_ret_0")
+            .unwrap()
+            .clone()
+    };
+    {
+        let _ledger = n.lock().unwrap();
+        assert_eq!(
+            query(&mut c, record("mmx.Node.get_height", []))
+                .uint()
+                .unwrap(),
+            0
+        );
+        assert!(query(&mut c, record("mmx.Node.get_synced_height", []))
+            .optional()
+            .unwrap()
+            .is_none());
+        let id = query(&mut c, record("mmx.Router.get_id", []));
+        let info = query(&mut c, record("mmx.Router.get_info", []));
+        assert_eq!(info.record().unwrap().field("id").unwrap(), &id);
+        let signed = query(
+            &mut c,
+            record(
+                "mmx.Router.sign_msg",
+                [("msg".into(), V::Bytes(vec![8; 32]))],
+            ),
+        );
+        let pair = signed.seq().unwrap();
+        assert!(mmx_crypto::verify(
+            &[8; 32],
+            pair[0].bytes().unwrap().try_into().unwrap(),
+            pair[1].bytes().unwrap().try_into().unwrap()
+        )
+        .unwrap());
+        assert_eq!(
+            mmx_crypto::public_key_address(pair[0].bytes().unwrap().try_into().unwrap()).as_slice(),
+            id.bytes().unwrap()
+        );
+        let genesis = query(
+            &mut c,
+            record("mmx.Node.get_block_hash", [("height".into(), V::Uint(0))]),
+        );
+        assert_eq!(
+            genesis.optional().unwrap().unwrap().bytes().unwrap(),
+            hash(&wire(&g["block"]), "hash").unwrap()
+        );
+        for method in ["mmx.Node.get_block_hash", "mmx.Node.get_block_hash_ex"] {
+            assert!(query(
+                &mut c,
+                record(method, [("height".into(), V::Uint(1_000_000))])
+            )
+            .optional()
+            .unwrap()
+            .is_none());
+        }
+        for method in ["mmx.Node.get_block_at", "mmx.Node.get_header_at"] {
+            assert_eq!(
+                query(
+                    &mut c,
+                    record(method, [("height".into(), V::Uint(1_000_000))])
+                ),
+                V::Null
+            );
+        }
+    }
+    let mut source = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&steps[0]["block"]),
+            wire(&steps[1]["block"]),
+        ],
+        wrong: false,
+    };
+    sync::synchronize(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    {
+        let mut ledger = n.lock().unwrap();
+        assert_eq!(
+            query(&mut c, record("mmx.Node.get_height", []))
+                .uint()
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            query(&mut c, record("mmx.Node.get_synced_height", []))
+                .optional()
+                .unwrap()
+                .unwrap()
+                .uint()
+                .unwrap(),
+            2
+        );
+        ledger.begin_resync();
+        assert!(query(&mut c, record("mmx.Node.get_synced_height", []))
+            .optional()
+            .unwrap()
+            .is_none());
+        ledger.rollback_to(0).unwrap();
+        assert_eq!(
+            query(&mut c, record("mmx.Node.get_height", []))
+                .uint()
+                .unwrap(),
+            0
+        );
+        assert!(query(&mut c, record("mmx.Node.get_synced_height", []))
+            .optional()
+            .unwrap()
+            .is_none());
+        assert!(query(
+            &mut c,
+            record(
+                "mmx.Node.get_block_hash_ex",
+                [("height".into(), V::Uint(2))]
+            )
+        )
+        .optional()
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            query(
+                &mut c,
+                record("mmx.Node.get_block_at", [("height".into(), V::Uint(2))])
+            ),
+            V::Null
+        );
+    }
+    drop(c);
+    server.shutdown();
+}
+
+#[test]
+fn outgoing_peer_can_answer_height_and_identity_queries_while_the_ledger_is_locked() {
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        for method in [
+            "mmx.Node.get_height",
+            "mmx.Node.get_synced_height",
+            "mmx.Router.get_id",
+            "mmx.Router.get_info",
+        ] {
+            c.send(&record(
+                "mmx.Request",
+                [
+                    ("id".into(), V::Uint(9)),
+                    ("method".into(), V::Record(record(method, []))),
+                ],
+            ))
+            .unwrap();
+            let response = c.receive(Duration::from_secs(2)).unwrap().unwrap();
+            assert_eq!(
+                response.field("result").unwrap().record().unwrap().name,
+                format!("{method}.return")
+            );
+        }
+    });
+    let mut client = peer::Client::connect(&address.to_string(), n.clone()).unwrap();
+    {
+        let _ledger = n.lock().unwrap();
+        for _ in 0..4 {
+            client.poll().unwrap();
+        }
+        server.join().unwrap();
+    }
+}

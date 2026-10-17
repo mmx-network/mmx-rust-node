@@ -5,6 +5,7 @@ use crate::{
     error,
     inbox::Inbox,
     node::{number, record},
+    peer_state::PeerState,
     Node, Result,
 };
 use mmx_consensus::{Hash, Record, Value};
@@ -164,13 +165,29 @@ pub fn respond(
     connection: &mut Connection,
     request: &Record,
 ) -> Result<()> {
-    let id = number(request, "id")?;
-    let method = request.field("method")?.record()?;
-    let result = match node
+    let state = node
         .lock()
         .map_err(|_| error("node lock poisoned"))?
-        .call(method)
-    {
+        .peer_state();
+    respond_with(node, &state, connection, request)
+}
+fn respond_with(
+    node: &Arc<Mutex<Node>>,
+    state: &PeerState,
+    connection: &mut Connection,
+    request: &Record,
+) -> Result<()> {
+    let id = number(request, "id")?;
+    let method = request.field("method")?.record()?;
+    let call = || -> Result<Record> {
+        if let Some(reply) = state.call(method)? {
+            return Ok(reply);
+        }
+        node.lock()
+            .map_err(|_| error("node lock poisoned"))?
+            .call(method)
+    };
+    let result = match call() {
         Ok(value) => value,
         Err(e) => record(
             "vnx.Exception",
@@ -190,18 +207,22 @@ pub struct Client {
     node: Arc<Mutex<Node>>,
     next_id: u32,
     inbox: Inbox,
+    backpressure_retries: u64,
+    peer_state: PeerState,
 }
 impl Client {
     pub fn connect(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
-        let inbox = node
-            .lock()
-            .map_err(|_| error("node lock poisoned"))?
-            .inbox();
+        let (inbox, peer_state) = {
+            let local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            (local.inbox(), local.peer_state())
+        };
         Ok(Self {
             connection: Connection::connect(address)?,
             node,
             next_id: 1,
             inbox,
+            backpressure_retries: 0,
+            peer_state,
         })
     }
     pub fn call(&mut self, method: Record) -> Result<Value> {
@@ -212,21 +233,41 @@ impl Client {
     fn call_many(&mut self, methods: Vec<Record>) -> Result<Vec<Value>> {
         let mut pending = std::collections::BTreeMap::new();
         let mut results = vec![None; methods.len()];
-        for (index, method) in methods.into_iter().enumerate() {
-            let id = self.next_id;
-            self.next_id = self.next_id.wrapping_add(1);
-            pending.insert(id, (index, format!("{}.return", method.name)));
-            self.connection.send(&record(
-                "mmx.Request",
-                [
-                    ("id".into(), Value::Uint(id.into())),
-                    ("method".into(), Value::Record(method)),
-                ],
-            ))?;
-        }
+        let mut queued: std::collections::VecDeque<_> = (0..methods.len()).collect();
         let end = Instant::now() + Duration::from_secs(15);
-        while !pending.is_empty() && Instant::now() < end {
-            let Some(message) = self.connection.receive(Duration::from_millis(500))? else {
+        let mut send_after = Instant::now();
+        let mut request_window = methods.len().clamp(1, 64);
+        let mut draining = false;
+        while (!pending.is_empty() || !queued.is_empty()) && Instant::now() < end {
+            if Instant::now() >= send_after && (!draining || pending.is_empty()) {
+                draining = false;
+                while pending.len() < request_window {
+                    let Some(index) = queued.pop_front() else {
+                        break;
+                    };
+                    let method = &methods[index];
+                    let id = self.next_id;
+                    self.next_id = self.next_id.wrapping_add(1);
+                    pending.insert(id, (index, format!("{}.return", method.name)));
+                    self.connection.send(&record(
+                        "mmx.Request",
+                        [
+                            ("id".into(), Value::Uint(id.into())),
+                            ("method".into(), Value::Record(method.clone())),
+                        ],
+                    ))?;
+                }
+            }
+            let mut idle = end
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(500));
+            if !queued.is_empty() && Instant::now() < send_after {
+                idle = idle.min(send_after.saturating_duration_since(Instant::now()));
+            }
+            let Some(message) = self
+                .connection
+                .receive(idle.max(Duration::from_millis(1)))?
+            else {
                 continue;
             };
             if message.name == "mmx.Return" {
@@ -234,6 +275,19 @@ impl Client {
                     continue;
                 };
                 let result = message.field("result")?.record()?;
+                if result.name == "vnx.OverflowException" {
+                    // Native Router rejects this request before dispatch when
+                    // its socket send queue is blocked. Keep other replies and
+                    // retry only this explicitly unexecuted request.
+                    queued.push_back(index);
+                    self.backpressure_retries += 1;
+                    if !draining {
+                        request_window = (request_window / 2).clamp(1, 16);
+                    }
+                    draining = true;
+                    send_after = Instant::now() + Duration::from_millis(50);
+                    continue;
+                }
                 if result.name != expected {
                     return Err(error(format!("unexpected peer result: {}", result.name)));
                 }
@@ -251,6 +305,9 @@ impl Client {
                 })
             })
             .collect()
+    }
+    pub fn backpressure_retries(&self) -> u64 {
+        self.backpressure_retries
     }
     /// Authenticate the native node ID, reject aliases/self-connections, and
     /// qualify only synced full nodes on our genesis before using sync data.
@@ -387,7 +444,7 @@ impl Client {
     }
     fn handle(&mut self, message: Record) -> Result<()> {
         if message.name == "mmx.Request" {
-            respond(&self.node, &mut self.connection, &message)
+            respond_with(&self.node, &self.peer_state, &mut self.connection, &message)
         } else {
             // Invalid unsolicited broadcasts do not abort an outstanding sync
             // request; the same validation gates apply as to inbound peers.
@@ -438,10 +495,10 @@ pub struct Server {
 }
 impl Server {
     pub fn bind(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
-        let inbox = node
-            .lock()
-            .map_err(|_| error("node lock poisoned"))?
-            .inbox();
+        let (inbox, peer_state) = {
+            let local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            (local.inbox(), local.peer_state())
+        };
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
@@ -462,6 +519,7 @@ impl Server {
                     Ok((stream, _)) if workers.len() < 32 => {
                         let node = node.clone();
                         let inbox = inbox.clone();
+                        let peer_state = peer_state.clone();
                         let stop = running.clone();
                         workers.push(thread::spawn(move || {
                             let run = || -> Result<()> {
@@ -471,7 +529,12 @@ impl Server {
                                         connection.receive(Duration::from_millis(200))?
                                     {
                                         if msg.name == "mmx.Request" {
-                                            respond(&node, &mut connection, &msg)?;
+                                            respond_with(
+                                                &node,
+                                                &peer_state,
+                                                &mut connection,
+                                                &msg,
+                                            )?;
                                         } else {
                                             inbox.submit(msg, connection.last_size)?;
                                         }

@@ -3,6 +3,7 @@
 mod inbox;
 pub mod node;
 pub mod peer;
+mod peer_state;
 pub mod rpc;
 pub mod sync;
 

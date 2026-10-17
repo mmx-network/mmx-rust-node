@@ -71,6 +71,7 @@ pub struct Progress {
     pub body_time: Duration,
     pub body_requests: u64,
     pub body_retries: u64,
+    pub backpressure_retries: u64,
     pub archive_time: Duration,
     pub update_time: Duration,
     pub verification_time: Duration,

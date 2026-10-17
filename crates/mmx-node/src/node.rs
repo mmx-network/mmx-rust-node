@@ -1,5 +1,6 @@
+use crate::peer_state::PeerState;
 use crate::{error, inbox::Inbox, Result};
-use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+use k256::ecdsa::SigningKey;
 use mmx_consensus::{Hash, Record, Value};
 use mmx_execution::chain::{
     forks::{ForkChain, Update},
@@ -23,12 +24,13 @@ pub struct Node {
     pub(crate) sync_pending: BTreeSet<u32>,
     pub(crate) sync_body_requests: u64,
     pub(crate) sync_body_retries: u64,
-    key: SigningKey,
+    pub(crate) sync_backpressure_retries: u64,
     work: VecDeque<Record>,
     pending: BTreeMap<Hash, Record>,
     verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
     responses: Vec<(Record, i64)>,
     inbox: Inbox,
+    peer_state: PeerState,
 }
 pub fn record(name: &str, fields: impl IntoIterator<Item = (String, Value)>) -> Record {
     Record {
@@ -92,6 +94,14 @@ impl Node {
         let root = tip
             .height
             .saturating_sub(chain.selected().params().commit_delay);
+        let peer_state = PeerState::new(
+            &key,
+            chain
+                .selected()
+                .hash_at(0)?
+                .ok_or_else(|| error("missing genesis"))?,
+            tip.height,
+        )?;
         Ok(Self {
             chain,
             root,
@@ -101,12 +111,13 @@ impl Node {
             sync_pending: BTreeSet::new(),
             sync_body_requests: 0,
             sync_body_retries: 0,
-            key,
+            sync_backpressure_retries: 0,
             work: VecDeque::new(),
             pending: BTreeMap::new(),
             verified_work: BTreeMap::new(),
             responses: vec![],
             inbox: Inbox::default(),
+            peer_state,
         })
     }
     pub fn chain(&self) -> &ForkChain {
@@ -114,6 +125,9 @@ impl Node {
     }
     pub(crate) fn inbox(&self) -> Inbox {
         self.inbox.clone()
+    }
+    pub(crate) fn peer_state(&self) -> PeerState {
+        self.peer_state.clone()
     }
     pub fn is_synced(&self) -> bool {
         self.synced
@@ -123,6 +137,7 @@ impl Node {
     }
     pub fn begin_resync(&mut self) {
         self.synced = false;
+        self.peer_state.begin_resync();
     }
     /// Drain peer broadcasts and coalesce work in the native periodic update.
     /// Embedded callers must drive this tick even while a peer is polling.
@@ -136,6 +151,7 @@ impl Node {
         self.chain.rollback_to(height)?;
         self.root = height.saturating_sub(self.chain.selected().params().commit_delay);
         self.synced = false;
+        self.peer_state.publish(height, false);
         self.sync_pos = height.saturating_add(1);
         self.sync_peers = 0;
         self.sync_pending.clear();
@@ -278,6 +294,7 @@ impl Node {
         }
         self.pending
             .retain(|_, b| number(b, "height").is_ok_and(|h| h > self.root));
+        self.peer_state.publish(tip.height, self.synced);
         Ok(out)
     }
     fn vdf_peak(&self) -> Result<(u32, Hash)> {
@@ -397,8 +414,10 @@ impl Node {
     /// Native method/result records, shared by peer requests and VNX/HTTP reads.
     /// Unsupported methods return an explicit error instead of placeholder data.
     pub fn call(&self, request: &Record) -> Result<Record> {
+        if let Some(reply) = self.peer_state.call(request)? {
+            return Ok(reply);
+        }
         let selected = self.chain.selected();
-        let tip = selected.tip()?.ok_or_else(|| error("missing node tip"))?;
         let optional = |v: Option<Value>| Value::Optional(v.map(Box::new));
         let block_value = |v: Option<Record>| v.map(Value::Record).unwrap_or(Value::Null);
         let block_at = |height| -> Result<Option<Record>> {
@@ -416,21 +435,12 @@ impl Node {
         };
         let value = match request.name.as_str() {
             "mmx.Node.get_params" => Value::Record(Record::from_generated(selected.params())?),
-            "mmx.Node.get_height" => Value::Uint(tip.height.into()),
             "mmx.Node.get_vdf_height" => Value::Uint(self.vdf_peak()?.0.into()),
-            "mmx.Node.get_synced_height" => {
-                optional(self.synced.then_some(Value::Uint(tip.height.into())))
-            }
             "mmx.Node.get_synced_vdf_height" => optional(
                 self.synced
                     .then_some(Value::Uint(self.vdf_peak()?.0.into())),
             ),
             "mmx.Node.get_vdf_peak" => bytes(self.vdf_peak()?.1),
-            "mmx.Node.get_genesis_hash" => bytes(
-                selected
-                    .hash_at(0)?
-                    .ok_or_else(|| error("missing genesis"))?,
-            ),
             "mmx.Node.get_block" => block_value(self.chain.block(&hash(request, "hash")?)?),
             "mmx.Node.get_block_at" => block_value(block_at(number(request, "height")?)?),
             "mmx.Node.get_header" => header_value(self.chain.block(&hash(request, "hash")?)?),
@@ -500,35 +510,6 @@ impl Node {
                     .unwrap_or(0)
                     .to_le_bytes(),
             ),
-            "mmx.Router.get_id" => bytes(mmx_crypto::public_key_address(
-                self.key
-                    .verifying_key()
-                    .to_encoded_point(true)
-                    .as_bytes()
-                    .try_into()?,
-            )),
-            "mmx.Router.get_info" => {
-                let id = mmx_crypto::public_key_address(
-                    self.key
-                        .verifying_key()
-                        .to_encoded_point(true)
-                        .as_bytes()
-                        .try_into()?,
-                );
-                Value::Record(Record::from_generated(&mmx::node_info_t {
-                    id: mmx::hash_t::from(id),
-                    version: 103,
-                    r#type: mmx::node_type_e::FULL_NODE,
-                })?)
-            }
-            "mmx.Router.sign_msg" => {
-                let sig: Signature = self.key.sign_prehash(&hash(request, "msg")?)?;
-                Value::Sequence(vec![
-                    bytes(self.key.verifying_key().to_encoded_point(true).as_bytes()),
-                    bytes(sig.to_bytes().to_vec()),
-                ])
-            }
-            "mmx.Router.get_peers" => Value::Sequence(vec![]),
             _ => return Err(error(format!("unsupported read method: {}", request.name))),
         };
         Ok(record(
