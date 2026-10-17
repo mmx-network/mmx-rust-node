@@ -521,6 +521,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmx-execution"
+version = "0.1.0"
+dependencies = [
+ "mmx-types",
+ "mmx-vm",
+ "tempfile",
+ "vnx",
+]
+
+[[package]]
 name = "mmx-types"
 version = "0.1.0"
 dependencies = [

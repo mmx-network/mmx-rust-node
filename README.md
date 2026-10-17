@@ -48,6 +48,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | --- | --- |
 | `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a durable journal with exclusive writer locking, CRC32 checks, guarded record lengths, and torn-tail recovery. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
+| `mmx-execution` | VNX contract loading, dependency locks, constructors, cross-contract calls and metadata reads, native boundary copies, and deferred atomic publication across contracts, balances and deployments. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
 The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
@@ -74,9 +75,9 @@ changing that upstream quirk requires an agreed consensus change.
 
 `SEND`, `MINT`, and `BALANCE` use a private per-currency balance cache and stage
 transaction outputs with raw byte memos. `StorageDb` supports versioned balance
-snapshots. VM execution does not publish ledger debits or outputs; the transaction
-executor must apply them together with contract state. `Engine::outputs()` exposes
-staged transfers only after successful execution, and refuses them after failure.
+snapshots. The VM stages debits and outputs; `mmx-execution` applies contract
+balance debits together with state and returns outputs for the node's settlement
+layer. `Engine::outputs()` exposes staged transfers only after successful execution, and refuses them after failure.
 
 `Engine::run_with_host()` supplies `LOG`, `EVENT`, `RCALL`, and `CREAD` through the
 `Host` trait. Callbacks can read VM values, charge gas, execute child bytecode, and
@@ -84,8 +85,8 @@ write return values. Remote calls enforce frame, argument, and recursion limits,
 then clean up arguments while preserving the return slot. With no host, logs and
 events skip their values, while remote calls and contract reads fail as in C++.
 Hosts must stage their own effects and discard them on transaction failure. The
-node's contract loader, dependency resolver, and transaction-wide execution overlay
-are still to be ported; these services are not implemented by the hook interface.
+`mmx-execution` crate supplies contract loading, dependency resolution, and a
+shared transaction overlay behind these hooks.
 
 New heap objects are reclaimed when their last reference is released. Objects
 loaded from storage stay pinned, matching C++; copying stored maps and erasing
@@ -111,6 +112,35 @@ changes durable. This split allows a future transaction/block executor to decide
 when state becomes durable. For now, use a fresh engine per invocation and let the
 caller serialize access to the storage backend.
 
+`mmx_execution::prepare()` runs a batch of already authenticated and funded
+invocations against a disposable overlay. It loads native VNX contract records,
+checks public/constructor methods and dependency locks, sets transaction/caller
+externals, handles deposits, and copies nested arguments and return values between
+engines. Setup timing follows the configured hardfork-2 height. Contract read
+costs come from the chain index, independently of repository caching or disk I/O.
+Raw metadata strings, method names, and dependency names retain non-UTF-8 bytes.
+
+A `PreparedExecution` holds exclusive backend access while the node checks dynamic
+fees and execution inputs/outputs. `batch_mut()` lets it add settlement and fee
+writes; `commit()` publishes the entire batch atomically. Dropping the prepared
+execution discards it. `execute()` is a convenience that prepares and commits
+immediately. A later operation's failure discards earlier child commits, balance
+changes, and deployments while preserving pre-existing pending database writes.
+The caller still advances the database version separately.
+
+Outputs follow native child-before-parent ordering and are not credited as
+deposits for later invocations in the same transaction. Native const methods skip
+their own storage commit; they do not force child engines into read-only mode.
+Non-const commits clear their return slot, matching the reference executor.
+Child gas is added only after successful execution and return copying; outer VM
+costs are clamped on failure as in `Node::execute`.
+
+This layer expects transaction authentication, static contract/dependency validity,
+and deposit funding checks to have succeeded. Transaction signatures, consensus
+hashing, full fee/input/output validation, implicit deposits and block settlement
+remain node-layer work; `Receipt::total_cost` includes the supplied initial cost,
+contract reads, and execution, before the node's execution-input/output costs.
+
 The disk backend uses a **new Rust journal format**, not the C++ database files.
 Use a separate data directory. It retains all history in memory and replays the
 journal on open; scalable indexing, compaction, and flush scheduling are later
@@ -128,7 +158,10 @@ address. Address presentation uses the consensus Bech32m codec in `mmx_vm::addre
 
 [VNX Rust](https://github.com/mmx-network/vnx-rust) is included as the pinned
 [`vendor/vnx-rust`](vendor/vnx-rust) Git submodule. Workspace path dependencies
-use its `vnx` runtime and `vnx-codegen` generator. Update the gitlink deliberately
+use its `vnx` runtime and `vnx-codegen` generator. The contract loader retains
+original wire bytes; the runtime's opt-in byte-string view is used only for stream
+inspection, so non-UTF-8 data never passes through a lossy execution value.
+Update the gitlink deliberately
 and run the compatibility tests when adopting a new revision.
 
 `mmx-types` compiles the declarations in [`schema`](schema) at build time and
@@ -185,6 +218,17 @@ are ported. Storage implementation changes must preserve the
 same logical reads, state updates, and VM gas independently of physical I/O or
 cache behavior.
 
+The execution layer adds **3,710 native C++ execution traces**, comparing complete
+state writes, balances, output ordering, spend maps, gas, operation/PC/error codes,
+and line information. They cover both sides of hardfork 2, constructors, child
+failures, multi-operation rollback, visibility/locks, stored-map copy rejection,
+copy recursion, non-UTF-8 names/arguments, metadata conversion, and gas boundaries.
+The original `engine_tests.js` and `compiler_tests.js` suites are compiled by the
+native compiler during fixture regeneration and then run successfully in Rust,
+with matching costs and persisted state. Normal Rust tests need no native tools.
+Additional tests cover reopen/forks, deferred commit/abort, atomic multi-table
+validation, and dependency depth/width limits.
+
 The generated bindings also check **638 native C++ type/code hash pairs** and
 **644 registry descriptors**, decode public native wire fixtures, round-trip
 transactions/contracts, and call a generated MMX client through the VNX runtime.
@@ -207,11 +251,10 @@ alongside any semantic changes to the port.
 
 ## Next port stages
 
-1. Executable contract loading, the JavaScript-subset compiler, and the original
-   contract tests.
-2. Transaction-scoped storage overlays, dependency resolution, and cross-contract
-   execution services behind the VM hooks, including atomic ledger/output
-   publication and failure/gas differential tests.
+1. The Rust JavaScript-subset compiler and the remaining original contract suites.
+2. Full transaction validation: authentication, deployment validity and consensus
+   hashing, fee/input/output checks, implicit deposits and settlement, using the
+   prepared execution batch for atomic publication.
 3. Scalable database indexing, compaction and flush scheduling, and benchmarks,
    using an independent disk format while preserving logical state semantics.
 4. Transactions, chain state, consensus, networking, RPC, and node services using

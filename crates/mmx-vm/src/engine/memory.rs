@@ -71,7 +71,7 @@ impl<S: Storage> Engine<'_, S> {
         Ok(var)
     }
 
-    fn read_var(&mut self, address: u64) -> Result<Option<Var>> {
+    pub(super) fn read_var(&mut self, address: u64) -> Result<Option<Var>> {
         if let Some(var) = self.memory.get(&address) {
             return Ok((var.flags & FLAG_DELETED == 0).then(|| var.clone()));
         }

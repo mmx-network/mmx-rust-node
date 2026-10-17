@@ -24,9 +24,11 @@ pub const MAX_ERASE_RECURSION: usize = 100;
 
 mod conversion;
 mod host;
+mod interface;
 mod memory;
 pub use conversion::Conversion;
 pub use host::{Host, NoHost, Output};
+pub use interface::{copy_between, InputValue, MAX_COPY_RECURSION};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -46,6 +48,14 @@ pub enum Error {
     Conversion,
     #[error("invalid signature or public key encoding")]
     Signature,
+    #[error("copy recursion overflow")]
+    CopyRecursion,
+    #[error("invalid contract input")]
+    Input,
+    #[error("contract execution: {0}")]
+    Contract(String),
+    #[error(transparent)]
+    Codec(#[from] crate::CodecError),
     #[error("host service unavailable: {0}")]
     HostUnavailable(&'static str),
     #[error("invalid transfer: {0}")]

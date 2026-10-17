@@ -26,9 +26,40 @@ pub struct StorageWrite {
     pub var: Var,
 }
 
+/// Self-describing VNX contract bytes and the chain index's variable read cost.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractData {
+    pub bytes: Vec<u8>,
+    pub read_cost: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct BalanceWrite {
+    pub contract: Address,
+    pub currency: Address,
+    pub amount: u128,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TransactionBatch {
+    pub writes: Vec<(Address, StorageWrite)>,
+    pub balances: Vec<BalanceWrite>,
+    pub contracts: Vec<(Address, ContractData)>,
+}
+
+pub trait AtomicStorage: Storage {
+    /// All contracts and balances publish together, or none of them do.
+    fn apply_transaction(&mut self, batch: &TransactionBatch) -> Result<()>;
+}
+
 pub trait Storage {
     fn read(&self, contract: &Address, address: u64, key: Option<u64>) -> Result<Option<Var>>;
     fn lookup(&self, contract: &Address, value: &Value) -> Result<Option<u64>>;
+    fn get_contract(&self, _address: &Address) -> Result<Option<ContractData>> {
+        Err(Error::Invalid(
+            "contract queries unsupported by this backend",
+        ))
+    }
     /// Ledger snapshot supplied by the transaction executor. VM SEND debits
     /// its private cache; publishing transfers belongs to that executor.
     fn get_balance(&self, _contract: &Address, _currency: &Address) -> Result<Option<u128>> {
@@ -171,8 +202,36 @@ impl Storage for StorageDb {
     }
 
     fn apply(&mut self, contract: &Address, writes: &[StorageWrite]) -> Result<()> {
+        self.apply_transaction(&TransactionBatch {
+            writes: writes
+                .iter()
+                .cloned()
+                .map(|write| (*contract, write))
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    fn get_contract(&self, address: &Address) -> Result<Option<ContractData>> {
+        self.database
+            .get("contracts", address, None)
+            .map(|bytes| {
+                if bytes.len() < 8 {
+                    return Err(Error::Invalid("contract record length"));
+                }
+                Ok(ContractData {
+                    read_cost: u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+                    bytes: bytes[8..].to_vec(),
+                })
+            })
+            .transpose()
+    }
+}
+
+impl AtomicStorage for StorageDb {
+    fn apply_transaction(&mut self, transaction: &TransactionBatch) -> Result<()> {
         let mut batch = Vec::new();
-        for write in writes {
+        for (contract, write) in &transaction.writes {
             let var = &write.var;
             if let Value::Ref(address) = &var.value {
                 if *address < MEM_STATIC {
@@ -199,6 +258,18 @@ impl Storage for StorageDb {
                 ));
             }
             batch.push(Write::put(table, key, var.encode(false, true)?));
+        }
+        for balance in &transaction.balances {
+            batch.push(Write::put(
+                "balances",
+                balance_key(&balance.contract, &balance.currency),
+                balance.amount.to_le_bytes(),
+            ));
+        }
+        for (address, contract) in &transaction.contracts {
+            let mut bytes = contract.read_cost.to_le_bytes().to_vec();
+            bytes.extend(&contract.bytes);
+            batch.push(Write::put("contracts", address, bytes));
         }
         self.database.apply(batch)?;
         Ok(())

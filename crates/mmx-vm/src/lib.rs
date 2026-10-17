@@ -6,7 +6,7 @@ pub mod instruction;
 pub mod storage;
 pub mod value;
 
-pub use engine::{Engine, Error, Host, NoHost, Output, Result};
+pub use engine::{copy_between, Engine, Error, Host, InputValue, NoHost, Output, Result};
 pub use instruction::{Instruction, Opcode};
 pub use primitive_types::U256;
 pub use storage::{Storage, StorageDb};
@@ -24,6 +24,13 @@ pub const MEM_STATIC: u64 = MEM_STACK + STACK_SIZE;
 pub const MEM_HEAP: u64 = 1 << 32;
 pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
 pub const MAX_KEY_BYTES: usize = 4096;
+
+pub const EXTERN_HEIGHT: u64 = 0;
+pub const EXTERN_TXID: u64 = 1;
+pub const EXTERN_USER: u64 = 2;
+pub const EXTERN_DEPOSIT: u64 = 4;
+pub const EXTERN_ADDRESS: u64 = 5;
+pub const EXTERN_NETWORK: u64 = 6;
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum CodecError {

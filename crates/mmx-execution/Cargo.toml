@@ -1,0 +1,15 @@
+[package]
+name = "mmx-execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MMX contract loading and atomic cross-contract execution"
+
+[dependencies]
+mmx-vm.workspace = true
+mmx-types.workspace = true
+vnx.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

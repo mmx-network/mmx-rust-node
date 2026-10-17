@@ -85,3 +85,8 @@ with tempfile.TemporaryDirectory(prefix="mmx-reference-") as directory:
     run_cases([('signature_cache_zero_entry_evicted', commands)], boundary_fixture, pathlib.Path(directory) / 'collision-db')
     with fixture.open('a') as out:
         out.write(boundary_fixture.read_text())
+
+    execution = root / 'crates/mmx-execution/tests/fixtures'
+    execution.mkdir(parents=True, exist_ok=True)
+    binary = compile_oracle('reference_execution.cpp')
+    subprocess.run([str(binary), str(execution), str(args.source.resolve())], check=True)

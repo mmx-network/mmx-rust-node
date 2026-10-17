@@ -183,3 +183,37 @@ fn balance_snapshots_survive_reopen_and_rollback_with_full_address_isolation() {
         Some(u128::MAX)
     );
 }
+
+#[test]
+fn transaction_batch_validates_every_contract_before_publishing_any_table() {
+    use mmx_vm::storage::{AtomicStorage, BalanceWrite, ContractData, TransactionBatch};
+    let mut db = StorageDb::memory();
+    db.apply(&[9; 32], &[write(MEM_STATIC, None, 73u64)])
+        .unwrap();
+    let batch = TransactionBatch {
+        writes: vec![
+            ([1; 32], write(MEM_STATIC, None, 42u64)),
+            ([2; 32], write(MEM_STATIC, None, Value::Ref(1))),
+        ],
+        balances: vec![BalanceWrite {
+            contract: [1; 32],
+            currency: [3; 32],
+            amount: 99,
+        }],
+        contracts: vec![(
+            [4; 32],
+            ContractData {
+                read_cost: 100,
+                bytes: vec![1, 2, 3],
+            },
+        )],
+    };
+    assert!(db.apply_transaction(&batch).is_err());
+    assert!(db.read(&[1; 32], MEM_STATIC, None).unwrap().is_none());
+    assert_eq!(db.get_balance(&[1; 32], &[3; 32]).unwrap(), None);
+    assert_eq!(db.get_contract(&[4; 32]).unwrap(), None);
+    assert_eq!(
+        db.read(&[9; 32], MEM_STATIC, None).unwrap().unwrap().value,
+        Value::from(73u64)
+    );
+}
