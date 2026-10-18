@@ -131,6 +131,33 @@ fn rejects_extra_missing_changed_and_deleted_rows_including_unbounded_edges() {
 }
 
 #[test]
+fn detects_old_value_and_write_version_corruption_when_current_state_still_matches() {
+    for mutation in [
+        "UPDATE history SET value=x'626164' WHERE t='other' AND k=x'6b6579' AND v=2",
+        "DELETE FROM history WHERE t='other' AND k=x'6b6579' AND v=2",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), false);
+        let source = root.path().join("source");
+        let native = root.path().join("native");
+        let conn = rusqlite::Connection::open(source.join("state.sqlite")).unwrap();
+        assert_eq!(conn.execute(mutation, []).unwrap(), 1);
+        drop(conn);
+        let audit = audit::Verifier::open(&source, &native).unwrap();
+        assert!(
+            audit
+                .table("other", 6, options(), |_| Ok(()))
+                .unwrap()
+                .finished
+        );
+        assert!(matches!(
+            audit.table("other", 3, options(), |_| Ok(())),
+            Err(Error::Corrupt(_))
+        ));
+    }
+}
+
+#[test]
 fn refuses_live_writers_and_can_cancel_a_comparison() {
     let root = tempfile::tempdir().unwrap();
     fixture(root.path(), false);
