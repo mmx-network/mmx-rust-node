@@ -981,7 +981,23 @@ complete native manifest appears only after EOF; the source is retained. Selecte
 and archive databases must come from the same stopped node before switching the
 node's data directories.
 
-The `Binaries` GitHub workflow builds the node and import tool on Ubuntu 24.04,
+Before switching, compare requested complete tables against the frozen source:
+
+```sh
+cargo run --release -p mmx-db --example audit_import -- \
+  OLD_DB_DIR NEW_NATIVE_DB_DIR balances
+# Check a rollback view: the exclusive DB version is block height + 1.
+cargo run --release -p mmx-db --example audit_import -- \
+  OLD_DB_DIR NEW_NATIVE_DB_DIR balances 1 1000001
+```
+
+The verifier checks values, write versions, tombstones and extra destination keys
+in bounded key ranges, paced at 2 MiB/s of logical key/value reads. Both writers
+are locked during comparison. Historical checks revert RAM snapshots, retaining
+the on-disk tip and all history. Only the named table and versions are checked;
+repeat for the ledger tables and desired archive/history coverage.
+
+The `Binaries` GitHub workflow builds the node, import and audit tools on Ubuntu 24.04,
 checks `mmx-node --help`, and uploads a Linux x86-64 archive with its source commit
 and SHA-256 checksum. It runs manually or when the `node-build` branch advances,
 so deployment does not require compiling on the node's machine.

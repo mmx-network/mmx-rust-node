@@ -1,6 +1,7 @@
 //! Versioned append-only storage. Values stay in commit log segments; immutable
 //! sorted files contain only references. Forks share those files and keep their
 //! speculative suffix in RAM. A manifest checkpoints a bounded journal tail.
+pub mod audit;
 pub mod import;
 mod manifest;
 use crate::{

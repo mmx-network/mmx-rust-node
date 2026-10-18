@@ -18,6 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --locked -p mmx-node
       - run: cargo build --release --locked -p mmx-db --example import_indexed
+      - run: cargo build --release --locked -p mmx-db --example audit_import
       - name: Package binaries and source revision
         shell: bash
         run: |
@@ -25,6 +26,7 @@ jobs:
           mkdir -p dist/bin
           cp target/release/mmx-node dist/bin/
           cp target/release/examples/import_indexed dist/bin/
+          cp target/release/examples/audit_import dist/bin/
           printf '%s\n' "$GITHUB_SHA" > dist/COMMIT
           tar -C dist -czf "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz" COMMIT bin
           sha256sum "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz" > "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz.sha256"
