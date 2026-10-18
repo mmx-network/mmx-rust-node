@@ -17,3 +17,4 @@ vnx.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+k256.workspace = true

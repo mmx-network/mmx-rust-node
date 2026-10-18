@@ -790,6 +790,7 @@ dependencies = [
 name = "mmx-execution"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "mmx-consensus",
  "mmx-db",
  "mmx-types",

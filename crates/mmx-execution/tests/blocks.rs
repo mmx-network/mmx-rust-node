@@ -451,3 +451,131 @@ fn native_vdf_reward_winners_counts_ties_oldest_salt_and_short_history() {
     }
     assert_eq!(count, 80);
 }
+
+#[test]
+fn assembled_candidates_pass_independent_block_validation_across_cpp_cases() {
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+    use mmx_consensus::{header, Value as N};
+    use std::time::{Duration, Instant};
+    let mut scalar = [0; 32];
+    scalar[31] = 1;
+    let key = SigningKey::from_slice(&scalar).unwrap();
+    let mut checked = 0;
+    for line in include_str!("fixtures/blocks.jsonl").lines() {
+        let trace: Value = serde_json::from_str(line).unwrap();
+        let name = trace["name"].as_str().unwrap();
+        if !trace["accepted"].as_bool().unwrap() && !name.starts_with("input_reservation_1100000_")
+        {
+            continue;
+        }
+        let mut candidate = record(&trace["block"]);
+        let ctx = context(&trace);
+        let mut db = StorageDb::memory();
+        setup(&mut db, &trace);
+        let pending: Vec<Record> = candidate
+            .field("tx_list")
+            .unwrap()
+            .seq()
+            .unwrap()
+            .iter()
+            .map(|v| v.record().unwrap().clone())
+            .collect();
+        let selected = block::assemble::transactions(
+            &db,
+            &ctx.params,
+            ctx.previous.height + 1,
+            &pending,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            !db.database().has_pending(),
+            "{name}: assembly changed ledger"
+        );
+        if name.starts_with("input_reservation_1100000_") {
+            assert_eq!(
+                selected.len(),
+                1,
+                "must reject a conflicting aggregate spend"
+            );
+        }
+        let mut static_cost = 0;
+        let mut total_cost = 0;
+        let mut fees = 0;
+        let mut hashes = vec![];
+        for tx in &selected {
+            static_cost += tx.field("static_cost").unwrap().uint().unwrap();
+            let result = tx
+                .field("exec_result")
+                .unwrap()
+                .optional()
+                .unwrap()
+                .unwrap()
+                .record()
+                .unwrap();
+            total_cost += result.field("total_cost").unwrap().uint().unwrap();
+            fees += result.field("total_fee").unwrap().uint().unwrap();
+            hashes.push(
+                tx.field("content_hash")
+                    .unwrap()
+                    .bytes()
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            );
+        }
+        let reward = if candidate
+            .field("reward_addr")
+            .unwrap()
+            .optional()
+            .unwrap()
+            .is_some()
+        {
+            block::economics::block_reward(
+                &ctx.params,
+                &ctx.previous,
+                ctx.previous.height + 1,
+                !candidate.field("proof").unwrap().seq().unwrap().is_empty(),
+                fees,
+            )
+            .unwrap()
+        } else {
+            0
+        };
+        for (field, n) in [
+            ("tx_count", selected.len() as u64),
+            ("static_cost", static_cost),
+            ("total_cost", total_cost),
+            ("tx_fees", fees),
+            ("reward_amount", reward),
+        ] {
+            candidate.fields.insert(field.into(), N::Uint(n));
+        }
+        candidate.fields.insert(
+            "tx_list".into(),
+            N::Sequence(selected.into_iter().map(N::Record).collect()),
+        );
+        candidate.fields.insert(
+            "tx_hash".into(),
+            N::Bytes(block::transaction_root(&hashes).to_vec()),
+        );
+        let hash = header::calc_hash(&candidate, &ctx.params).unwrap();
+        let sig: Signature = key.sign_prehash(&hash).unwrap();
+        candidate
+            .fields
+            .insert("hash".into(), N::Bytes(hash.to_vec()));
+        candidate.fields.insert(
+            "farmer_sig".into(),
+            N::Optional(Some(Box::new(N::Bytes(sig.to_bytes().to_vec())))),
+        );
+        candidate.fields.insert(
+            "content_hash".into(),
+            N::Bytes(header::calc_content_hash(&candidate).unwrap().to_vec()),
+        );
+        block::prepare(&mut db, &ctx, &candidate)
+            .unwrap_or_else(|e| panic!("{name}: produced invalid candidate: {e}"));
+        assert!(!db.database().has_pending());
+        checked += 1;
+    }
+    assert!(checked >= 40);
+}

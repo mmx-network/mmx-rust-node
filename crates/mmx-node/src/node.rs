@@ -247,6 +247,7 @@ impl Node {
         let tip = selected
             .tip()?
             .ok_or_else(|| error("missing selected tip"))?;
+        let previous_tip = tip.clone();
         self.chain.set_tip_limit(Some(if self.synced {
             tip.height.saturating_add(1000)
         } else {
@@ -398,6 +399,20 @@ impl Node {
         self.pending
             .retain(|_, b| number(b, "height").is_ok_and(|h| h > self.root));
         self.prune_transactions()?;
+        if self.synced {
+            if let Some(common) = out.common_ancestor.filter(|h| *h != previous_tip.hash.0) {
+                let mut old = previous_tip.hash.0;
+                while old != common {
+                    let Some(block) = self.chain.block(&old)? else {
+                        break;
+                    };
+                    for tx in block.field("tx_list")?.seq()? {
+                        let _ = self.add_transaction(tx.record()?, false);
+                    }
+                    old = hash(&block, "prev")?;
+                }
+            }
+        }
         self.peer_state.publish(tip.height, self.synced);
         if out.applied.len() >= 64 && std::env::var_os("MMX_PROFILE_REPLAY").is_some() {
             eprintln!("Node update: blocks={} prepare_ms={:.3} fork_ms={:.3} load_ms={:.3} proofs_ms={:.3} choice_ms={:.3} lineage_ms={:.3} replay_ms={:.3} policy_ms={:.3}",
