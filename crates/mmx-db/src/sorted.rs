@@ -475,6 +475,14 @@ impl Run {
     /// Missing key and a committed deletion remain distinguishable to a merger.
     pub fn get(&self, table: &str, key: &[u8], max: u32) -> Result<Option<Entry>> {
         let index = self.lower_bound(table, key)?;
+        self.visible_at(index, max, Some((table, key)))
+    }
+    fn visible_at(
+        &self,
+        index: usize,
+        max: u32,
+        expected: Option<(&str, &[u8])>,
+    ) -> Result<Option<Entry>> {
         let Some(offset) = self.0.offsets.get(index) else {
             return Ok(None);
         };
@@ -488,7 +496,7 @@ impl Run {
         section.end = end;
         while section.position < end {
             let record = read_key(&mut section)?;
-            if record.table != table || record.key != key {
+            if expected.is_some_and(|(table, key)| record.table != table || record.key != key) {
                 return Ok(None);
             }
             if record.version <= max {
@@ -509,6 +517,19 @@ impl Run {
             section.position += skip;
         }
         Ok(None)
+    }
+    /// One newest eligible entry per key, including tombstones. The resident
+    /// offset index jumps over older versions after finding the visible entry.
+    /// Historical views skip only versions newer than their inclusive limit.
+    pub fn visible_entries_from(
+        &self,
+        table: &str,
+        key: &[u8],
+        max: u32,
+    ) -> Result<impl Iterator<Item = Result<Entry>> + '_> {
+        let index = self.lower_bound(table, key)?;
+        Ok((index..self.0.offsets.len())
+            .filter_map(move |index| self.visible_at(index, max, None).transpose()))
     }
     pub fn entries(&self) -> Cursor {
         self.cursor(HEADER)

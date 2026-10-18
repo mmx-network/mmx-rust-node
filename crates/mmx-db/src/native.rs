@@ -258,7 +258,11 @@ impl State {
             }
         };
         for view in &self.runs {
-            for entry in view.file.run.entries_from(table, start)? {
+            if view.cutoff == 0 {
+                continue;
+            }
+            let limit = max.min(view.cutoff - 1);
+            for entry in view.file.run.visible_entries_from(table, start, limit)? {
                 let entry = entry?;
                 if entry.write.table != table
                     || end_key

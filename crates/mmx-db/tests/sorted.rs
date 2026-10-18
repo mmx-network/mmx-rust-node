@@ -4,6 +4,88 @@ use mmx_db::{
 };
 use std::{fs, path::Path};
 
+#[test]
+fn visible_cursors_match_full_history_for_tombstones_ranges_and_historical_limits() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("visible.sst");
+    fixture(&path);
+    let run = Run::open(&path).unwrap();
+    for max in [0, 1, 3, 4, 8, 9, u32::MAX] {
+        for (table, start) in [
+            ("a", b"".as_slice()),
+            ("a", b"aa"),
+            ("b", b"\xff"),
+            ("z", b""),
+        ] {
+            let mut seen = std::collections::BTreeSet::new();
+            let expected = run
+                .entries_from(table, start)
+                .unwrap()
+                .map(|e| e.unwrap())
+                .filter(|e| {
+                    e.version <= max && seen.insert((e.write.table.clone(), e.write.key.clone()))
+                })
+                .collect::<Vec<_>>();
+            let visible = run
+                .visible_entries_from(table, start, max)
+                .unwrap()
+                .collect::<mmx_db::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(visible, expected);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn latest_visible_scan_does_not_read_thirty_thousand_old_versions() {
+    fn bytes_read() -> u64 {
+        fs::read_to_string("/proc/thread-self/io")
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("rchar: ")
+                    .map(|v| v.trim().parse().unwrap())
+            })
+            .unwrap()
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut builder = Builder::new(directory.path(), 0).unwrap();
+    for version in (0..30000).rev() {
+        builder
+            .push(&Entry {
+                version,
+                write: Write::put("state", b"a", [0; 24]),
+            })
+            .unwrap();
+    }
+    builder
+        .push(&Entry {
+            version: 0,
+            write: Write::put("state", b"z", []),
+        })
+        .unwrap();
+    let run = builder
+        .finish(&directory.path().join("hot-key.sst"))
+        .unwrap();
+    assert!(run.metadata().data_bytes > 1024 * 1024);
+    let before = bytes_read();
+    let visible = run
+        .visible_entries_from("state", b"", u32::MAX)
+        .unwrap()
+        .collect::<mmx_db::Result<Vec<_>>>()
+        .unwrap();
+    let bytes = bytes_read() - before;
+    assert_eq!(
+        visible.iter().map(|e| e.version).collect::<Vec<_>>(),
+        [29999, 0]
+    );
+    assert!(
+        bytes < 32768,
+        "current scan read {bytes} bytes of old history"
+    );
+}
+
 fn fixture(path: &Path) -> Vec<Entry> {
     let mut entries = Vec::new();
     for table in ["a", "b"] {
