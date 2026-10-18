@@ -968,6 +968,20 @@ syscalls fell from 5,570,560 bytes to zero; publication read syscalls fell from
 both versions. These measure a synthetic replay, not total mainnet I/O. The
 append-log and sorted-run primary backend is still to be ported from C++.
 
+The new `mmx_db::sorted` foundation writes immutable sorted files sequentially,
+with one resident 64-bit offset per distinct table/key. Versions descend within
+each key. Reopen reads the header and offset index; snapshots and independent
+cursors share the immutable file. Header, index, key metadata and values have
+checksums, and a complete file is synced before atomic publication. The builder
+reuses its index directly rather than reading the new file back. This is not yet
+the node's primary backend.
+
+The primary backend port will include optional history purging. A durable
+retention floor must preserve the state and private consensus context at the
+boundary, reject earlier rollbacks, and hide earlier blocks and transactions
+from every RPC lookup, including hashes and batches. RPC will report the earliest
+retained height. Purging is opt-in; the current node retains all history.
+
 C++ `Node::write_block()` appends full bodies to a block file and stores their
 offsets in a separate index. Its `Table` implementation uses a write log and
 sorted runs with offset indexes. Rust currently stores block payloads in its

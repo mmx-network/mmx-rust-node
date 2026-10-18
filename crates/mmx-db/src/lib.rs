@@ -11,6 +11,7 @@ use std::path::Path;
 
 use thiserror::Error;
 mod indexed;
+pub mod sorted;
 pub mod store;
 pub use store::Store;
 
