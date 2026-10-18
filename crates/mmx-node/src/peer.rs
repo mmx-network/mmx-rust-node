@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn compressed_zero_width_values_cannot_bypass_decoded_allocation_limits() {
-        let mut raw = Record::from_generated(&mmx::contract::Data::default())
+        let mut raw = Record::from_generated(&mmx_types::mmx::contract::Data::default())
             .unwrap()
             .encode()
             .unwrap();

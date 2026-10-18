@@ -194,8 +194,9 @@ bytes and dropping oldest entries when full. Each update takes at most 256
 consensus messages and four transactions. HTTP status exposes queued messages,
 bytes and the dropped-message count. Lossless decoding charges allocations before
 expanding containers, including zero-width elements and nested fixed arrays;
-each record has a decoded allocation budget of 96 times its wire length plus
-4 KiB, capped at 64 MiB.
+each record has a 128 MiB decoded allocation budget. Compact values within that
+budget retain their native byte representation and cost regardless of expansion
+ratio.
 
 Unsolicited live blocks wait in RAM, limited to 256 blocks / 32 MiB, within
 1,000 heights of the selected tip and for at most ten block intervals. They enter

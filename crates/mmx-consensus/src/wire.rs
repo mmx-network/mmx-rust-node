@@ -10,12 +10,7 @@ struct Parser<'a> {
 }
 // Transport/storage resource limits, not a replacement for consensus gas/size
 // validation. Encoded bytes alone cannot bound arrays of zero-width elements.
-fn allocation_budget(bytes: usize) -> usize {
-    bytes
-        .saturating_mul(96)
-        .saturating_add(4096)
-        .min(64 * 1024 * 1024)
-}
+const MAX_ALLOCATION: usize = 128 * 1024 * 1024;
 impl<'a> Parser<'a> {
     fn allocate(&mut self, count: usize, size: usize) -> Result<()> {
         let bytes = count
@@ -267,9 +262,9 @@ impl<'a> Parser<'a> {
                 V::Map(out)
             }
             Code::Object => {
-                let mut out = Vec::new();
                 let count = self.count(big)?;
                 self.allocate(count, std::mem::size_of::<V>() + 32)?;
+                let mut out = Vec::with_capacity(count);
                 for _ in 0..count {
                     let n = self.count(big)?;
                     self.allocate(n, 1)?;
@@ -315,13 +310,30 @@ impl<'a> Parser<'a> {
             self.allocate(n, 1)?;
             return Ok(V::String(self.take(n)?.to_vec()));
         }
+        if n.saturating_mul(minimum_value_heap(code)) > self.allocation_left {
+            return Err(input("decoded allocation limit"));
+        }
         self.allocate(n, std::mem::size_of::<V>())?;
-        Ok(V::Sequence(
-            (0..n)
-                .map(|_| self.value(code, owner, depth + 1))
-                .collect::<Result<_>>()?,
-        ))
+        let mut values = Vec::with_capacity(n);
+        for _ in 0..n {
+            values.push(self.value(code, owner, depth + 1)?);
+        }
+        Ok(V::Sequence(values))
     }
+}
+// Lower bound including inline Value slots. Preflight nested fixed arrays so a
+// zero-width payload cannot force a partial expansion up to the whole budget.
+fn minimum_value_heap(code: &Code) -> usize {
+    let extra = match code {
+        Code::Alt(c) => return minimum_value_heap(c),
+        Code::Array(n, c) if matches!(base(c), Code::U8) => *n,
+        Code::Array(n, c) => n.saturating_mul(minimum_value_heap(c)),
+        Code::Tuple(codes) => codes
+            .iter()
+            .fold(0usize, |n, c| n.saturating_add(minimum_value_heap(c))),
+        _ => 0,
+    };
+    std::mem::size_of::<V>().saturating_add(extra)
 }
 fn cast(value: &mut V, family: &str) {
     let valid = match value {
@@ -420,7 +432,7 @@ pub(crate) fn decode_with_registry(bytes: &[u8], registry: &mut Registry) -> Res
         input: bytes,
         registry: registry.clone(),
         trusted_fallback: false,
-        allocation_left: allocation_budget(bytes.len()),
+        allocation_left: MAX_ALLOCATION,
     };
     let record = parse_record(&mut parser)?;
     *registry = parser.registry;
@@ -431,7 +443,7 @@ pub(crate) fn compact(bytes: &[u8]) -> Result<Record> {
         input: bytes,
         registry: Registry::new(),
         trusted_fallback: true,
-        allocation_left: allocation_budget(bytes.len()),
+        allocation_left: MAX_ALLOCATION,
     })
 }
 fn parse_record(parser: &mut Parser<'_>) -> Result<Record> {
@@ -449,7 +461,7 @@ pub(crate) fn variant(bytes: &[u8]) -> Result<Variant> {
         input: bytes,
         registry: Registry::new(),
         trusted_fallback: false,
-        allocation_left: allocation_budget(bytes.len()),
+        allocation_left: MAX_ALLOCATION,
     };
     let value = parser.value(&Code::Dynamic, None, 0)?;
     if !parser.input.is_empty() {
