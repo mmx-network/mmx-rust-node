@@ -718,6 +718,7 @@ dependencies = [
  "mmx-types",
  "mmx-vm",
  "rand",
+ "rusqlite",
  "tempfile",
  "thiserror",
  "tiny_http",

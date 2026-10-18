@@ -711,6 +711,25 @@ an irreversible state cutoff. Reopen and subsequent fork selection can replay
 the retained branches. Specialized wallet/trading indexes, archive compaction
 and remaining node services are separate port stages.
 
+`audit_native_storage` pins a read-only SQLite view and compares VM cell and
+container-entry values with a running C++ node's historical storage API. It
+checks the canonical genesis and selected-tip hashes, then reads each sampled
+key at the pinned tip and immediately before/at its latest write. Native RPC
+omits VM flags and reference counts; this comparison checks the serialized
+values. It does not compare balance tables or every older write to each key.
+The default is 128 keys per table; a larger sample limit can cover every key.
+
+```sh
+cargo run -p mmx-node --example audit_native_storage -- \
+  --source-dir ./mmx-data --native-rpc 127.0.0.1:11330 --samples 100000
+```
+
+All 990 VM keys across 161 contracts matched C++ at height 1,124,592, including
+2,970 historical reads. A separate pinned view of the running node at height
+2,151,672 matched all 1,010 keys across 166 contracts in 3,030 reads. The C++ CLI
+also returned identical contract output for all nine genesis binaries through
+the native and Rust VNX RPC servers.
+
 The live node admits signed farmer `ProofResponse` envelopes only after native
 hash, plot identity, signature, selected-history challenge/difficulty and CPU space
 work checks. Pending responses wait for VDF progress and expire after ten block

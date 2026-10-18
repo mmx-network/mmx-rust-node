@@ -20,3 +20,6 @@ tiny_http = "0.12"
 ctrlc = "3"
 tempfile.workspace = true
 rand = "0.8"
+
+[dev-dependencies]
+rusqlite = { version = "0.39", features = ["backup"] }
