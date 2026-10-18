@@ -30,7 +30,7 @@ struct Options {
     configs: Vec<PathBuf>,
     no_services: bool,
     farmer: Option<String>,
-    reward_vote: i8,
+    reward_vote: Option<i8>,
     root: PathBuf,
     network: String,
     data: PathBuf,
@@ -48,8 +48,12 @@ fn options() -> Result<Option<Options>> {
         configs: vec![],
         no_services: false,
         farmer: None,
-        reward_vote: 0,
-        root: "../mmx-node".into(),
+        reward_vote: None,
+        root: if std::path::Path::new("config").is_dir() && std::path::Path::new("data").is_dir() {
+            ".".into()
+        } else {
+            "../mmx-node".into()
+        },
         network: "mainnet".into(),
         data: "mmx-data".into(),
         peers: vec![],
@@ -84,7 +88,7 @@ fn options() -> Result<Option<Options>> {
                         }
                     }
                     "--farmer" => o.farmer = Some(value),
-                    "--reward-vote" => o.reward_vote = value.parse()?,
+                    "--reward-vote" => o.reward_vote = Some(value.parse()?),
                     "--network" => o.network = value,
                     "--data-dir" => o.data = value.into(),
                     "--peer" => o.peers.push(value),
@@ -113,8 +117,12 @@ fn main() -> Result<()> {
         return Ok(());
     };
     let config = vnx::config::Config::new();
-    config.load_tree(options.root.join("config").join(&options.network))?;
-    for path in &options.configs {
+    let config_paths = if options.configs.is_empty() {
+        vec![options.root.join("config").join(&options.network)]
+    } else {
+        options.configs.clone()
+    };
+    for path in &config_paths {
         config.load_tree(path)?;
     }
     let network = Network::from_config(&config, options.root.join("data"))?;
@@ -134,7 +142,9 @@ fn main() -> Result<()> {
                     }
                 }),
         );
-        options.reward_vote = config.read("Node.reward_vote")?.unwrap_or(0);
+        if options.reward_vote.is_none() {
+            options.reward_vote = config.read("Node.reward_vote")?;
+        }
     }
     if options.peers.is_empty() && !options.offline {
         if let Some(peers) = config.get("Router.seed_peers")? {
@@ -216,7 +226,7 @@ fn main() -> Result<()> {
                     node.clone(),
                     endpoint.parse()?,
                     stop.clone(),
-                    options.reward_vote,
+                    options.reward_vote.unwrap_or(0),
                 )
             })
             .transpose()?
