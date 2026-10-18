@@ -27,7 +27,12 @@ fn report(
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let mut db = Store::open_indexed(directory.path())?;
+    let backend = std::env::args().nth(1).unwrap_or_else(|| "sqlite".into());
+    let mut db = match backend.as_str() {
+        "native" => Store::open_native(directory.path())?,
+        "sqlite" => Store::open_indexed(directory.path())?,
+        _ => return Err("usage: bench_delta [sqlite|native]".into()),
+    };
     db.commit_batch(1, [Write::put("base", b"key", b"retained")])?;
     let before = counters();
     let start = Instant::now();
@@ -44,11 +49,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report("stage", start, &before, &after);
     println!(
         "{{\"staging_files\":{}}}",
-        fs::read_dir(directory.path().join("staging"))?.count()
+        fs::read_dir(directory.path().join("staging")).map_or(0, |entries| entries.count())
     );
     let before = counters();
     let start = Instant::now();
     db.replace_suffix(1, &branch)?;
+    if backend == "native" {
+        db.checkpoint()?;
+    }
     let after = counters();
     report("publish", start, &before, &after);
     drop(branch);

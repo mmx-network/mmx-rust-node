@@ -979,14 +979,12 @@ fn cold_header_reads_preserve_legacy_unhashed_fields_and_invalidate_replaced_suf
         mmx_consensus::header::calc_hash(&changed, &params(&g)).unwrap(),
         hash
     );
-    for indexed in [false, true] {
+    for backend in ["journal", "sqlite", "native"] {
         let directory = tempfile::tempdir().unwrap();
-        let open = || {
-            if indexed {
-                ChainState::open_indexed(directory.path(), params(&g)).unwrap()
-            } else {
-                ChainState::open(directory.path(), params(&g)).unwrap()
-            }
+        let open = || match backend {
+            "native" => ChainState::open_native(directory.path(), params(&g)).unwrap(),
+            "sqlite" => ChainState::open_indexed(directory.path(), params(&g)).unwrap(),
+            _ => ChainState::open(directory.path(), params(&g)).unwrap(),
         };
         let mut chain = open();
         chain.initialize(&assets(&g)).unwrap();

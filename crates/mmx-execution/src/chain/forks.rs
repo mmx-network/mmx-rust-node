@@ -94,6 +94,12 @@ impl ForkChain {
             Database::open_indexed(path.as_ref().join("archive"))?,
         )
     }
+    pub fn open_native(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
+        Self::with_storage(
+            ChainState::open_native(path.as_ref().join("selected"), params)?,
+            Database::open_native(path.as_ref().join("archive"))?,
+        )
+    }
     fn with_storage(selected: ChainState, archive: Database) -> ChainResult<Self> {
         let chain = Self {
             chain: selected,

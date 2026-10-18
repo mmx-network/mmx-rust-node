@@ -12,6 +12,7 @@ use std::path::Path;
 use thiserror::Error;
 mod indexed;
 pub mod journal;
+pub mod native;
 pub mod sorted;
 pub mod store;
 pub use store::Store;
@@ -36,6 +37,8 @@ pub enum Error {
     Poisoned,
     #[error("replacement snapshot does not share the retained history")]
     SnapshotMismatch,
+    #[error("history before database version {floor} was purged (requested {requested})")]
+    Pruned { floor: u32, requested: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -126,6 +129,11 @@ impl Database {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = std::path::absolute(path)?;
+        if path.join("native.manifest").exists() {
+            return Err(Error::Corrupt(
+                "native database requires Store::open_native",
+            ));
+        }
         if path.join("state.sqlite").exists() {
             return Err(Error::Corrupt(
                 "indexed database requires Store::open_indexed",

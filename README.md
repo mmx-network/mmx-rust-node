@@ -950,12 +950,15 @@ within the value. `StreamEncoder` retains declarations across continuing peer
 frames. Standalone encoding is used to persist deployments without a JSON
 round trip. It remains distinct from hash serialization.
 
-The node defaults to `Store::open_indexed()` / `ForkChain::open_indexed()`, using
-SQLite WAL with full synchronous commits and indexed versioned rows. Point reads,
-size-first ranges, prefix scans and inclusive historical reads share the journal's
-logical behavior. Storage adapters use fallible owned reads so disk failures are
-reported. `Store::open()` and `Database::open()` retain the original journal
-backend for existing library callers and reference tests.
+Fresh node directories use `Store::open_native()` / `ForkChain::open_native()`:
+append-only value segments, immutable sorted reference indexes, and a checksummed
+atomic manifest. Existing SQLite/journal node directories are detected and
+reopened with their previous backend; they are not copied or rewritten at startup.
+Point reads, size-first ranges, prefix scans, inclusive historical reads, detached
+forks, and atomic suffix replacement share the reference model's semantics.
+`Store::open_indexed()` also recognizes a native manifest. `Store::open()` and
+`Database::open()` retain the original journal for library callers/reference tests.
+Explicit native opens reject legacy data until an import is requested.
 
 Indexed forks pin a read snapshot of the original database and keep speculative
 changes in memory, following the native table's memory index. They create no
@@ -972,16 +975,21 @@ using Linux process I/O counters, then verifies every historical value, reopen,
 and rollback through genesis. Compared with commit `2aa59d7`, staging write
 syscalls fell from 5,570,560 bytes to zero; publication read syscalls fell from
 4,300,985 to 4,217 bytes. Publication write syscalls remained 4,828,640 bytes in
-both versions. These measure a synthetic replay, not total mainnet I/O. The
-append-log and sorted-run primary backend is still to be ported from C++.
+both versions. With `-- native`, the same workload including reference-index
+checkpointing wrote 4,277,069 bytes during publication, read 124 bytes, and made
+zero staging writes. All three variants produced history CRC32 `1702825889`,
+verified every stored version, reopened, and rolled back to genesis. These are
+small synthetic I/O measurements, not a mainnet throughput comparison.
 
 The new `mmx_db::sorted` foundation writes immutable sorted files sequentially,
 with one resident 64-bit offset per distinct table/key. Versions descend within
 each key. Reopen reads the header and offset index; snapshots and independent
 cursors share the immutable file. Header, index, key metadata and values have
 checksums, and a complete file is synced before atomic publication. The builder
-reuses its index directly rather than reading the new file back. This is not yet
-the node's primary backend.
+reuses its index directly rather than reading the new file back. Native defaults
+use a 4 MiB reference memtable, 64 MiB value segments, merge factor four, and a
+64-reader descriptor cache. Rollback caps a run's readable versions instead of
+rewriting that file. Retired indexes stay pinned by existing snapshots.
 
 Sorted-file merging streams one record per input file, honors rollback cutoffs
 without first rewriting those files, and resolves equal-version entries in favor
@@ -998,7 +1006,12 @@ a sealed file without replaying its values. Recovery starts at a supplied
 checkpoint, verifies checksums and commit seals, and truncates only a physically
 incomplete final frame. Failed I/O/recovery requires reopening the writer.
 Generation, version, and retention-floor transitions are included in each frame.
-These primitives are not yet wired into `Store` or the running node.
+`Store` combines these primitives with atomic manifest checkpoints and recovery
+of only the uncheckpointed active tail. Process-death tests cover speculative,
+published, and checkpointed suffixes followed by rollback/reopen. Fault-injected
+checkpoint failure preserves durable values, poisons the writer, and cleans its
+unpublished index at reopen. New-directory socket tests also exercise native
+storage through sync, fork switches, rollback, reopen, VNX, and HTTP RPC.
 
 The primary backend port will include optional history purging. A durable
 retention floor must preserve the state and private consensus context at the
@@ -1016,10 +1029,10 @@ embedded nodes retain synchronous admission unless background work is enabled.
 
 C++ `Node::write_block()` appends full bodies to a block file and stores their
 offsets in a separate index. Its `Table` implementation uses a write log and
-sorted runs with offset indexes. Rust currently stores block payloads in its
-versioned SQLite tables. New indexed tables use ordinary rowid storage so large
-payloads stay outside the composite primary-key index. Existing `WITHOUT ROWID`
-databases remain readable and are not rewritten automatically.
+sorted runs with offset indexes. The Rust native backend likewise keeps payloads
+in append-only segments and compacts references. Legacy SQLite tables use rowid
+storage so large payloads stay outside the composite primary-key index. Existing
+`WITHOUT ROWID` databases remain readable and are not rewritten automatically.
 
 To rewrite an existing node's physical layout, stop it, take a database backup,
 and run the offline utility. The exclusive writer lock prevents rewriting an

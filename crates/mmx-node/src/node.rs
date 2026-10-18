@@ -56,8 +56,16 @@ fn bytes(v: impl Into<Vec<u8>>) -> Value {
 
 impl Node {
     pub fn open(path: impl AsRef<Path>, network: &Network) -> Result<Self> {
-        let mut chain =
-            ForkChain::open_indexed(path.as_ref().join("chain"), network.params.clone())?;
+        let chain_path = path.as_ref().join("chain");
+        let legacy = ["selected", "archive"].iter().any(|database| {
+            let directory = chain_path.join(database);
+            directory.join("state.sqlite").exists() || directory.join("journal.mmx").exists()
+        });
+        let mut chain = if legacy {
+            ForkChain::open_indexed(&chain_path, network.params.clone())?
+        } else {
+            ForkChain::open_native(&chain_path, network.params.clone())?
+        };
         if chain.selected().tip()?.is_none() {
             chain.initialize(&network.assets)?;
         }

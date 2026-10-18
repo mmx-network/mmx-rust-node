@@ -114,6 +114,9 @@ impl StorageDb {
     pub fn open_indexed(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::new(Store::open_indexed(path)?))
     }
+    pub fn open_native(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::new(Store::open_native(path)?))
+    }
     pub fn database(&self) -> &Store {
         &self.database
     }
