@@ -3,9 +3,10 @@
 A Rust port of [`mmx-node`](https://github.com/madMAx43v3r/mmx-node), starting
 with the smart contract engine and versioned database. The workspace now includes
 a node executable with native peer sync, durable fork handling, native VNX read
-RPC and HTTP JSON-RPC, a compatible wallet CLI, and initial wallet, farmer and
-harvester VNX services. Production block assembly and full farming integration
-remain in progress.
+RPC and HTTP JSON-RPC, compatible wallet tools, wallet/farmer/harvester VNX
+services, native block production and validator scheduling. Local and remote
+solo harvesting are connected end to end; pool partials and virtual farming
+remain to be ported.
 
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
 `ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
@@ -1218,7 +1219,35 @@ and files and takes secrets through interactive prompts or `--input-stdin`.
 
 Build the tools with `cargo build --locked -p mmx-tools -p mmxwallet`. CI release
 archives include `mmx`, `mmx-wallet`, `mmxwallet`, `mmx-farmer`, `mmx-harvester`
-and `mmx-node` from the same source revision.
+and `mmx-node` from the same source revision, with `mmx_node`, `mmx_farmer` and
+`mmx_harvester` executable aliases.
+
+On Linux, the node can start its sibling wallet, farmer and harvester binaries
+from existing VNX configuration layers, including parent inheritance and local
+overrides. Run from the existing installation directory, with the Rust release
+binaries on `PATH`:
+
+```sh
+mmx-node -c config/mainnet config/node "${MMX_HOME}config/local" \
+  --data-dir /path/to/rust-ledger
+```
+
+`Wallet.key_files`, `Wallet.num_addresses`, `Farmer.reward_addr`, and
+`Harvester.plot_dirs`, `num_threads`, `my_name`, `reload_interval`,
+`recursive_search`, `max_recursion` and `dir_blacklist` use the native config
+names. Relative wallet filenames use `MMX_HOME` (or the current directory).
+Explicit CLI flags take priority over config. The native `wallet`, `farmer` and
+`harvester` switches control startup. Dependencies become ready before their
+consumers start; shutdown proceeds in reverse order and checks each child
+process's executable, directory, arguments and start time before signaling it.
+`--no-services` leaves startup to an external supervisor. `--farmer ENDPOINT`
+connects block production to an independently running private signer. Offline
+and sync-once modes do not start farming services.
+
+Use a separate Rust data directory: the ledger format differs from C++.
+Existing wallet key files and plot files can be read directly. The example
+starts the implemented solo farming path; it does not replace every C++ service
+or its HTTP REST API.
 
 ```sh
 # The same wallet CLI is available under mmx wallet.
@@ -1240,6 +1269,31 @@ mmx harvester get_farm_info
 mmx wallet-rpc get_address --args '{"index":0,"offset":0}'
 # Secret RPC arguments can be supplied through stdin using --args -.
 ```
+
+For remote harvesters, enable native `allow_remote=true` on the farmer host.
+The restricted harvester listener defaults to `0.0.0.0:11333` (or the configured
+`endpoint` IP), while private signing moves to `127.0.0.1:11332`. Override them
+with `Farmer.harvester_endpoint` and `Farmer.private_endpoint`, or explicitly:
+
+```sh
+# Farmer host: wallet and node endpoints stay private.
+mmx-farmer --wallet 127.0.0.1:11335 --node 127.0.0.1:11331 \
+  --listen 127.0.0.1:11332 --harvester-listen 0.0.0.0:11333
+# Harvester host: a hostname without a port defaults to 11333.
+mmx-harvester -c config/mainnet config/farmer "${MMX_HOME}config/local" \
+  --node FARMER_HOST
+```
+
+The remote listener exports chain parameters, farmer public metadata and live
+challenges, and accepts harvester reports/proofs. It cannot sign blocks or
+votes, access wallet secrets, or publish signed farmer responses. Its native
+`REMOTE` permissions remain restricted even after a privileged login.
+Configured VNX users can authenticate with `--username USER --password-file
+PATH`, or `Proxy.username` / `Proxy.password`. `--require-harvester-login` on
+the farmer requires a valid login before remote access. Connections use the
+native VNX transport; use a trusted network or tunnel when crossing an untrusted
+network. Temporary disconnections preserve loaded plot metadata and reconnect
+subscriptions; old challenges are never replayed for new disk work.
 
 The wallet service loads one or more compatible key files, exposes account and
 address queries, lock/unlock, message signing, recovery/export and farmer-key
@@ -1279,7 +1333,18 @@ RAM storage (4,096 transactions / 64 MiB); the current admission/relay policy ca
 individual transactions at 256 KiB. This operational cap does not change block
 consensus validation. Peer transaction queues are separate from block/VDF/proof
 queues. Confirmed/expired entries are pruned when the selected tip changes, and
-manual rollback clears the pool. Block assembly is still separate work.
+manual rollback clears the pool. Automatic fork selection requeues orphaned
+transactions for validation against the new selected state.
+
+While synced, the producer combines CPU-verified VDF work and authenticated
+proof responses, assembles transactions against a pinned parent snapshot,
+computes rewards and difficulty, asks the private farmer to sign, and performs
+the complete consensus/ledger checks before admission and peer publication.
+Candidate construction and validation do not write the database. Execution and
+signing run outside the live node mutex; a result is discarded if the selected
+tip or best proof changes. Eligible validator votes use the same private signer
+and bounded peer relay. `Node.reward_vote` or `--reward-vote -1|0|1` selects the
+local reward vote.
 
 Farmer keys use the C++ passphrase-independent KDF. The farmer signs native proof
 responses, headers (including reward targets and content hashes) and domain
@@ -1300,17 +1365,18 @@ do not discard proofs from other plots. The node publishes its C++ challenge
 window only while synced, and accepts signed farmer responses through its bounded
 inbox for the existing consensus checks.
 
-These service checkpoints do not yet provide production farming.
-Remaining work includes node block assembly/production and validator-vote
-scheduling, reverse farmer RPC routing for the C++ node, pool/NFT partial
-submission and virtual plots, persistent service configuration and wallet pending
-history, contract withdrawal owner resolution, and offer/swap convenience RPCs. Production plot files and an
-actual farm have not been exercised. Existing C++ witnesses, tiny native park
-files, permission tests and the complete standalone wallet CLI suite cover the
-implemented paths. Tests also launch the actual wallet, farmer, harvester and
-`mmx` binaries and deliver a signed C++ plot proof over VNX sockets. Farmer and
-harvester parameters come from node RPC, without C++ data files. Mainnet sync
-continues in its existing process.
+Remaining work includes reverse farmer RPC routing for a C++ node, pool/NFT
+partial submission and virtual plots, wallet pending history, contract withdrawal
+owner resolution, offer/swap convenience RPCs and the C++ REST API. Production
+plot files and an actual farm have not been exercised. Existing C++ witnesses,
+tiny native park files, permission tests and the complete standalone wallet CLI
+suite cover the implemented paths. Tests launch the actual wallet, farmer,
+harvester, node and `mmx` binaries from native configuration; an end-to-end test
+reads a native plot through a remote harvester connection and produces a fully
+validated block. Separate tests relay a locally produced block to another node,
+compare candidate fields and execution with C++ fixtures, reject stale signer
+results and check that candidate assembly causes no disk writes. Farmer and
+harvester parameters come from node RPC, without C++ data files.
 
 ## Next port stages
 
@@ -1319,8 +1385,8 @@ continues in its existing process.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Database compaction, cache/flush tuning and benchmarks,
    using an independent disk format while preserving logical state semantics.
-4. Production block assembly, validator scheduling, pool/NFT partials and virtual
-   farming, reverse farmer RPC, persistent service settings, advanced wallet RPCs
+4. Pool/NFT partials and virtual farming, reverse farmer RPC,
+   advanced wallet RPCs, durable wallet pending history
    and the remaining public node methods. Carry over the original tests as each
    component becomes executable.
 
