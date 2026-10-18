@@ -50,6 +50,39 @@ impl Store {
             _ => 0,
         }
     }
+    pub fn purge_before(&mut self, version: u32) -> Result<crate::native::PurgeReport> {
+        match &mut self.0 {
+            Backend::Native(d) => d.purge_before(version),
+            _ => Err(Error::SnapshotMismatch),
+        }
+    }
+    pub fn collection_tag(&self) -> Option<u64> {
+        match &self.0 {
+            Backend::Native(d) => d.collection_tag(),
+            _ => None,
+        }
+    }
+    pub fn purge_before_with_tag(
+        &mut self,
+        version: u32,
+        tag: u64,
+        keep: impl FnMut(&str, &[u8]) -> Result<bool>,
+    ) -> Result<crate::native::PurgeReport> {
+        match &mut self.0 {
+            Backend::Native(d) => d.purge_before_with_tag(version, tag, keep),
+            _ => Err(Error::SnapshotMismatch),
+        }
+    }
+    pub fn purge_before_with(
+        &mut self,
+        version: u32,
+        keep: impl FnMut(&str, &[u8]) -> Result<bool>,
+    ) -> Result<crate::native::PurgeReport> {
+        match &mut self.0 {
+            Backend::Native(d) => d.purge_before_with(version, keep),
+            _ => Err(Error::SnapshotMismatch),
+        }
+    }
     pub fn checkpoint(&mut self) -> Result<()> {
         match &mut self.0 {
             Backend::Native(d) => d.checkpoint(),

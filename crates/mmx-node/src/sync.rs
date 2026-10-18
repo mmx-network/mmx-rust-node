@@ -90,11 +90,18 @@ pub fn synchronize(
     let genesis = chain.hash_at(0)?.ok_or_else(|| error("missing genesis"))?;
     let tip = chain.tip()?.ok_or_else(|| error("missing tip"))?;
     let interval = chain.params().block_interval_ms;
+    let earliest = local.earliest_height();
+    let boundary = chain
+        .hash_at(earliest)?
+        .ok_or_else(|| error("missing retained boundary"))?;
     drop(local);
     if source.hash_at(0)? != Some(genesis) {
         return Err(error("peer genesis mismatch"));
     }
-    let mut low = 0;
+    if target < earliest || (earliest > 0 && source.hash_at(earliest)? != Some(boundary)) {
+        return Err(error("peer fork requires history before the purge height"));
+    }
+    let mut low = earliest;
     let mut high = target.min(tip.height);
     while low < high {
         if stop.load(Ordering::Relaxed) {

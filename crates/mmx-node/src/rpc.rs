@@ -118,7 +118,7 @@ fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
                 .ok_or_else(|| error("missing node tip"))?;
             let inbox = n.inbox().stats()?;
             Ok(
-                json!({"height":tip.height,"vdf_height":tip.vdf_height,"root_height":n.root,
+                json!({"height":tip.height,"vdf_height":tip.vdf_height,"root_height":n.root,"earliest_height":n.earliest_height(),
                 "synced":n.synced,"sync_peers":n.sync_peers,"network":n.chain.selected().params().network,
                 "sync_body_requests":n.sync_body_requests,"sync_body_retries":n.sync_body_retries,
                 "sync_backpressure_retries":n.sync_backpressure_retries,

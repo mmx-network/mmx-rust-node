@@ -640,6 +640,7 @@ fn synchronize_inner(
     let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
     local.begin_resync();
     let common = local.root;
+    let earliest = local.earliest_height();
     let selected = local
         .chain
         .selected()
@@ -719,8 +720,8 @@ fn synchronize_inner(
             .map(|(height, _)| height.saturating_add(1))
             .max()
             .unwrap_or(next);
-        while !missing.is_empty() && back > 1 {
-            let count = BATCH_BLOCKS.min(back - 1);
+        while !missing.is_empty() && back > earliest.max(1) {
+            let count = BATCH_BLOCKS.min(back - earliest.max(1));
             let download = Instant::now();
             let window = pool.window(back - count, count)?;
             progress.download_time += download.elapsed();
@@ -756,6 +757,9 @@ fn synchronize_inner(
                 .into_iter()
                 .flatten()
                 .collect();
+        }
+        if !missing.is_empty() && earliest > 0 {
+            return Err(error("peer fork requires history before the purge height"));
         }
         // Backwards jobs never prefetch forward work. Do not erase the next
         // producer window's pending heights during ordinary forward replay.

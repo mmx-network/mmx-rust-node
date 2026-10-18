@@ -103,7 +103,8 @@ impl Node {
             .ok_or_else(|| error("uninitialized node"))?;
         let root = tip
             .height
-            .saturating_sub(chain.selected().params().commit_delay);
+            .saturating_sub(chain.selected().params().commit_delay)
+            .max(chain.earliest_height());
         let peer_state = PeerState::new(
             &key,
             chain
@@ -112,6 +113,7 @@ impl Node {
                 .ok_or_else(|| error("missing genesis"))?,
             tip.height,
         )?;
+        peer_state.set_earliest_height(chain.earliest_height());
         Ok(Self {
             chain,
             root,
@@ -166,9 +168,24 @@ impl Node {
     pub fn root_height(&self) -> u32 {
         self.root
     }
+    pub fn earliest_height(&self) -> u32 {
+        self.chain.earliest_height()
+    }
+    /// Optional startup maintenance. Retain `height` and every later block;
+    /// the resulting rollback/RPC boundary survives restart.
+    pub fn purge_before(&mut self, height: u32) -> Result<()> {
+        let result = self.chain.purge_before_height(height);
+        let earliest = self.chain.earliest_height();
+        self.peer_state.set_earliest_height(earliest);
+        self.root = self.root.max(earliest);
+        result?;
+        Ok(())
+    }
     pub fn rollback_to(&mut self, height: u32) -> Result<()> {
         self.chain.rollback_to(height)?;
-        self.root = height.saturating_sub(self.chain.selected().params().commit_delay);
+        self.root = height
+            .saturating_sub(self.chain.selected().params().commit_delay)
+            .max(self.earliest_height());
         self.synced = false;
         self.peer_state.publish(height, false);
         self.sync_pos = height.saturating_add(1);
@@ -481,10 +498,31 @@ impl Node {
         let optional = |v: Option<Value>| Value::Optional(v.map(Box::new));
         let block_value = |v: Option<Record>| v.map(Value::Record).unwrap_or(Value::Null);
         let block_at = |height| -> Result<Option<Record>> {
+            if height < self.earliest_height() {
+                return Ok(None);
+            }
             match selected.hash_at(height)? {
                 Some(h) => Ok(self.chain.block(&h)?),
                 None => Ok(None),
             }
+        };
+        let visible_block = |hash: &Hash| -> Result<Option<Record>> {
+            Ok(self
+                .chain
+                .block(hash)?
+                .filter(|b| number(b, "height").is_ok_and(|h| h >= self.earliest_height())))
+        };
+        let visible_index = |id: &Hash| -> Result<_> {
+            Ok(selected
+                .storage()
+                .get_transaction_index(id)?
+                .filter(|i| i.height >= self.earliest_height()))
+        };
+        let visible_transaction = |id: &Hash| -> Result<Option<Record>> {
+            if visible_index(id)?.is_none() {
+                return Ok(None);
+            }
+            Ok(selected.transaction(id)?)
         };
         let header_value = |b: Option<Record>| {
             block_value(b.map(|mut b| {
@@ -501,12 +539,17 @@ impl Node {
                     .then_some(Value::Uint(self.vdf_peak()?.0.into())),
             ),
             "mmx.Node.get_vdf_peak" => bytes(self.vdf_peak()?.1),
-            "mmx.Node.get_block" => block_value(self.chain.block(&hash(request, "hash")?)?),
+            "mmx.Node.get_block" => block_value(visible_block(&hash(request, "hash")?)?),
             "mmx.Node.get_block_at" => block_value(block_at(number(request, "height")?)?),
-            "mmx.Node.get_header" => header_value(self.chain.block(&hash(request, "hash")?)?),
+            "mmx.Node.get_header" => header_value(visible_block(&hash(request, "hash")?)?),
             "mmx.Node.get_header_at" => header_value(block_at(number(request, "height")?)?),
             "mmx.Node.get_block_hash" => {
-                optional(selected.hash_at(number(request, "height")?)?.map(bytes))
+                let height = number(request, "height")?;
+                optional(if height < self.earliest_height() {
+                    None
+                } else {
+                    selected.hash_at(height)?.map(bytes)
+                })
             }
             "mmx.Node.get_block_hash_ex" => optional(
                 block_at(number(request, "height")?)?
@@ -518,7 +561,7 @@ impl Node {
                     })
                     .transpose()?,
             ),
-            "mmx.Node.get_transaction" => block_value(selected.transaction(&hash(request, "id")?)?),
+            "mmx.Node.get_transaction" => block_value(visible_transaction(&hash(request, "id")?)?),
             "mmx.Node.get_transactions" => Value::Sequence(
                 request
                     .field("ids")?
@@ -526,15 +569,12 @@ impl Node {
                     .iter()
                     .map(|v| {
                         let id: Hash = v.bytes()?.try_into()?;
-                        Ok(block_value(selected.transaction(&id)?))
+                        Ok(block_value(visible_transaction(&id)?))
                     })
                     .collect::<Result<_>>()?,
             ),
             "mmx.Node.get_tx_height" => optional(
-                selected
-                    .storage()
-                    .get_transaction_index(&hash(request, "id")?)?
-                    .map(|i| Value::Uint(i.height.into())),
+                visible_index(&hash(request, "id")?)?.map(|i| Value::Uint(i.height.into())),
             ),
             "mmx.Node.get_tx_ids_at" => Value::Sequence(
                 block_at(number(request, "height")?)?

@@ -50,6 +50,9 @@ impl Default for Voting {
     }
 }
 impl Voting {
+    pub fn history_limit(&self) -> u32 {
+        self.max_history
+    }
     pub fn set_history_limit(&mut self, max_history: u32) {
         self.max_history = max_history;
     }

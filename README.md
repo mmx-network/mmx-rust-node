@@ -968,7 +968,7 @@ larger than 64 MiB. Branch memory grows with the speculative suffix; node replay
 batches remain limited to 128 blocks and 8 MiB of block bodies, plus ledger writes.
 Snapshot identity/generation checks reject stale or foreign replacements. Failed
 writes poison the handle until reopen; uncommitted publication recovers the old
-state and committed publication recovers the new state. No history is pruned.
+state and committed publication recovers the new state. History is retained by default.
 
 `cargo run -p mmx-db --example bench_delta --locked` measures a small 4 MiB replay
 using Linux process I/O counters, then verifies every historical value, reopen,
@@ -994,8 +994,8 @@ rewriting that file. Retired indexes stay pinned by existing snapshots.
 Sorted-file merging streams one record per input file, honors rollback cutoffs
 without first rewriting those files, and resolves equal-version entries in favor
 of the newer input. Its optional retention boundary keeps every newer version
-and the latest preceding value or tombstone per key. Database-wide retention
-metadata and RPC enforcement are still required before retiring history.
+and the latest preceding value or tombstone per key. Native database collection
+uses this same streaming iterator with a durable retention floor.
 
 `mmx_db::journal` streams atomic replacement frames and returns 24-byte value
 references containing a file ID, offset, size, and checksum. Values are appended
@@ -1008,16 +1008,40 @@ incomplete final frame. Failed I/O/recovery requires reopening the writer.
 Generation, version, and retention-floor transitions are included in each frame.
 `Store` combines these primitives with atomic manifest checkpoints and recovery
 of only the uncheckpointed active tail. Process-death tests cover speculative,
-published, and checkpointed suffixes followed by rollback/reopen. Fault-injected
+published, checkpointed, and purged suffixes followed by rollback/reopen. Fault-injected
 checkpoint failure preserves durable values, poisons the writer, and cleans its
 unpublished index at reopen. New-directory socket tests also exercise native
 storage through sync, fork switches, rollback, reopen, VNX, and HTTP RPC.
 
-The primary backend port will include optional history purging. A durable
-retention floor must preserve the state and private consensus context at the
-boundary, reject earlier rollbacks, and hide earlier blocks and transactions
-from every RPC lookup, including hashes and batches. RPC will report the earliest
-retained height. Purging is opt-in; the current node retains all history.
+Native databases support optional startup maintenance with `--purge-before HEIGHT`.
+The block and ledger state at HEIGHT remain available; earlier rollback targets
+are rejected, including after restart. The default retains all history. Legacy
+SQLite/journal databases must first be migrated; this option does not silently
+rewrite them. For example, start a native database with:
+
+```sh
+cargo run --release -p mmx-node -- --mmx-root ../mmx-node --data-dir ./mmx-data \
+  --purge-before 5000000
+```
+
+Purging publishes the retention floor before collection, streams retained values
+into bounded append-only segments, and atomically installs their reference index.
+Expired values are skipped without reading their payloads. Old files are unlinked
+after existing snapshots release them; cached readers are closed too. Interrupted
+collection preserves the durable floor and can be retried after reopening. The
+completion marker prevents repeated startup purges at the same height from
+copying retained data again, including when recovery must finish only one of the
+selected/archive databases. The operation temporarily needs space for retained values while the old files are
+still in use, and runs before RPC/peer listeners start.
+
+Block/header reads by height or hash, block hashes/content pairs, transaction
+lookups and batches, transaction heights, and per-block transaction lists hide
+everything before HEIGHT on HTTP, VNX, and peer RPC. JSON-RPC `get_status` reports
+`earliest_height`. Current balances, contracts, VM state, and transaction duplicate
+protection remain intact. A private bounded ancestry window remains for challenge,
+infusion, time difficulty, and validator membership checks at the boundary. The
+genesis identity hash remains available for network authentication. Forks whose
+common ancestor precedes HEIGHT require an unpurged database.
 
 The runtime verifies VDF CPU work outside the ledger mutex. One active proof
 and one queued proof bound the worker; independent segments use the shared Rayon

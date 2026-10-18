@@ -8,7 +8,7 @@ use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use mmx_consensus::{Hash, Record, Value};
 use mmx_types::mmx;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
     Arc,
 };
 
@@ -19,6 +19,7 @@ pub(crate) struct PeerState {
     info: Arc<Record>,
     genesis: Hash,
     height: Arc<AtomicU64>,
+    earliest: Arc<AtomicU32>,
 }
 const SYNCED: u64 = 1 << 32;
 impl PeerState {
@@ -39,6 +40,7 @@ impl PeerState {
                 r#type: mmx::node_type_e::FULL_NODE,
             })?),
             height: Arc::new(AtomicU64::new(height.into())),
+            earliest: Arc::new(AtomicU32::new(0)),
         })
     }
     pub fn publish(&self, height: u32, synced: bool) {
@@ -49,6 +51,9 @@ impl PeerState {
     }
     pub fn begin_resync(&self) {
         self.height.fetch_and(!SYNCED, Ordering::Release);
+    }
+    pub fn set_earliest_height(&self, height: u32) {
+        self.earliest.store(height, Ordering::Release);
     }
     pub fn call(&self, request: &Record) -> Result<Option<Record>> {
         let value = match request.name.as_str() {
@@ -78,6 +83,16 @@ impl PeerState {
                 )
             }
             "mmx.Node.get_genesis_hash" => Value::Bytes(self.genesis.to_vec()),
+            "mmx.Node.get_block_hash" | "mmx.Node.get_block_hash_ex"
+                if number(request, "height")? < self.earliest.load(Ordering::Acquire) =>
+            {
+                Value::Optional(None)
+            }
+            "mmx.Node.get_block_at" | "mmx.Node.get_header_at"
+                if number(request, "height")? < self.earliest.load(Ordering::Acquire) =>
+            {
+                Value::Null
+            }
             "mmx.Node.get_block_hash" if number(request, "height")? == 0 => {
                 Value::Optional(Some(Box::new(Value::Bytes(self.genesis.to_vec()))))
             }

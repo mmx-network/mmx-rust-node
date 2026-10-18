@@ -134,6 +134,138 @@ impl ForkChain {
     pub fn selected(&self) -> &ChainState {
         &self.chain
     }
+    /// Earliest public block height and lowest permitted rollback target.
+    pub fn earliest_height(&self) -> u32 {
+        self.chain
+            .storage
+            .database()
+            .retention_floor()
+            .saturating_sub(1)
+    }
+    /// Reclaim history before `height`, preserving the ledger at that height and
+    /// its consensus ancestry. The ancestry is private; RPC applies the public
+    /// boundary independently, including after an interrupted collection.
+    pub fn purge_before_height(&mut self, height: u32) -> ChainResult<()> {
+        let tip = self
+            .chain
+            .tip()?
+            .ok_or_else(|| invalid("chain is not initialized"))?;
+        if height < self.earliest_height() || height > tip.height {
+            return Err(invalid("purge height outside retained selected chain"));
+        }
+        // Each database publishes this policy marker with its collected files.
+        // It also distinguishes a crash between selected/archive collection.
+        let tag = 0x4D4D_5801_0000_0000 | u64::from(height);
+        let selected_done = self.chain.storage.database().collection_tag() == Some(tag);
+        let archive_done = self.archive.collection_tag() == Some(tag);
+        if selected_done && archive_done {
+            return Ok(());
+        }
+        let params = self.chain.params();
+        // Challenge walks at most challenge_delay blocks. Infusion walks at
+        // most infuse_delay blocks, then block_iters walks commit_delay more.
+        let lookback = params
+            .challenge_delay
+            .max(params.infuse_delay.saturating_add(params.commit_delay))
+            .max(
+                params
+                    .commit_delay
+                    .saturating_add(self.voting.history_limit().max(1000)),
+            );
+        let context = height.saturating_sub(lookback);
+        let genesis = self
+            .chain
+            .hash_at(0)?
+            .ok_or_else(|| invalid("missing genesis"))?;
+        let mut selected_hashes = BTreeSet::from([genesis]);
+        for row in self.chain.storage.database().scan_range(
+            "chain_height",
+            &context.to_be_bytes(),
+            None,
+            None,
+        )? {
+            selected_hashes.insert(
+                row.value
+                    .try_into()
+                    .map_err(|_| invalid("height hash length"))?,
+            );
+        }
+        let mut transactions = BTreeSet::new();
+        for row in self
+            .chain
+            .storage
+            .database()
+            .scan("transactions", &[], None)?
+        {
+            if row.value.len() != 12 {
+                return Err(invalid("transaction index length"));
+            }
+            if u32::from_le_bytes(row.value[..4].try_into().unwrap()) >= height {
+                transactions.insert(row.key);
+            }
+        }
+        let mut archive_hashes = BTreeSet::from([genesis]);
+        for row in self.archive.scan_range(
+            "fork_order",
+            &[context.to_be_bytes(), 0u32.to_be_bytes()].concat(),
+            None,
+            None,
+        )? {
+            archive_hashes.insert(
+                row.value
+                    .try_into()
+                    .map_err(|_| invalid("fork order hash length"))?,
+            );
+        }
+        // Publish the selected floor first. If archive collection fails, a
+        // reopened node still cannot expose or roll back into expired history.
+        if !selected_done {
+            self.chain.storage.database_mut().purge_before_with_tag(
+                height + 1,
+                tag,
+                |table, key| {
+                    Ok(match table {
+                        "chain_blocks" | "chain_headers" => selected_hashes.contains(key),
+                        "chain_height" => {
+                            let h = u32::from_be_bytes(
+                                key.try_into()
+                                    .map_err(|_| mmx_db::Error::Corrupt("height key length"))?,
+                            );
+                            h == 0 || h >= context
+                        }
+                        "chain_transactions" => transactions.contains(key),
+                        _ => true,
+                    })
+                },
+            )?;
+        }
+        if !archive_done {
+            self.archive
+                .purge_before_with_tag(self.archive.version(), tag, |table, key| {
+                    Ok(match table {
+                        "fork_blocks" | "fork_headers" | "fork_work" | "fork_invalid" => {
+                            archive_hashes.contains(key)
+                        }
+                        "fork_order" => {
+                            if key.len() != 8 {
+                                return Err(mmx_db::Error::Corrupt("fork order key length"));
+                            }
+                            let h = u32::from_be_bytes(key[..4].try_into().unwrap());
+                            h == 0 || h >= context
+                        }
+                        _ => true,
+                    })
+                })?;
+        }
+        self.chain.headers.clear();
+        self.headers.clear();
+        self.voting.reset();
+        self.sync_verified.retain(|h| archive_hashes.contains(h));
+        self.verified.retain(|h, _| archive_hashes.contains(h));
+        self.evidence.retain(|h, _| archive_hashes.contains(h));
+        self.connected.retain(|h| archive_hashes.contains(h));
+        Ok(())
+    }
     /// Keep the selected block at `height` and rewind every later ledger/index
     /// version. Orphans and original genesis stay archived at every height.
     pub fn rollback_to(&mut self, height: u32) -> ChainResult<()> {
@@ -143,6 +275,9 @@ impl ForkChain {
             .ok_or_else(|| invalid("chain is not initialized"))?;
         if height > tip.height {
             return Err(invalid("rollback height exceeds selected tip"));
+        }
+        if height < self.earliest_height() {
+            return Err(invalid("rollback height was purged"));
         }
         if height < tip.height {
             self.chain.revert(height + 1)?;
@@ -180,8 +315,14 @@ impl ForkChain {
             })
             .collect()
     }
-    pub fn set_vote_history_limit(&mut self, max_history: u32) {
+    pub fn set_vote_history_limit(&mut self, max_history: u32) -> ChainResult<()> {
+        // Enlarging the validator lookback after collection would require
+        // ancestry that may no longer exist. Runtime nodes use the default.
+        if self.earliest_height() > 0 && max_history > self.voting.history_limit() {
+            return Err(invalid("validator history cannot grow after purging"));
+        }
         self.voting.set_history_limit(max_history);
+        Ok(())
     }
     pub fn admit_vote(&mut self, vote: &Record, now_ms: i64) -> ChainResult<voting::Report> {
         Ok(self
@@ -245,6 +386,9 @@ impl ForkChain {
         if uint(block, "height")? == 0 {
             return Err(invalid("cannot admit another genesis"));
         }
+        if uint(block, "height")? < u64::from(self.earliest_height()) {
+            return Err(invalid("block height was purged"));
+        }
         block::prevalidate(block, self.chain.params())?;
         for proof in proofs {
             if !vdf::is_valid(proof)? {
@@ -268,6 +412,9 @@ impl ForkChain {
             let height = uint(block, "height")? as u32;
             if height == 0 {
                 return Err(invalid("cannot admit another genesis"));
+            }
+            if height < self.earliest_height() {
+                return Err(invalid("block height was purged"));
             }
             block::prevalidate(block, self.chain.params())?;
             let hash = bytes::<32>(block.field("hash")?)?;
@@ -430,6 +577,9 @@ impl ForkChain {
         if self.chain.hash_at(root_header.height)? != Some(root) {
             return Err(invalid("root is not selected"));
         }
+        if root_header.height < self.earliest_height() {
+            return Err(invalid("fork root was purged"));
+        }
         self.voting.root(root_header.height, root_header.vdf_height);
         let entries = self.entries(root_header.height)?;
         let headers: BTreeMap<_, _> = entries
@@ -584,7 +734,12 @@ impl ForkChain {
                 out.lineage_time += lineage_started.elapsed();
                 return Ok(out);
             }
-            let (common, line) = self.line(best)?;
+            let Some((common, line)) = self.line(best)? else {
+                // This node no longer has the ledger needed for this branch.
+                // Do not persist a consensus-invalid marker for a local limit.
+                candidates.retain(|candidate| candidate.hash != best);
+                continue;
+            };
             out.lineage_time += lineage_started.elapsed();
             let archive = &self.archive;
             let sync_verified = &self.sync_verified;
@@ -642,7 +797,7 @@ impl ForkChain {
         }
         Ok(())
     }
-    fn line(&self, hash: Hash) -> ChainResult<(mmx::BlockHeader, Vec<Hash>)> {
+    fn line(&self, hash: Hash) -> ChainResult<Option<(mmx::BlockHeader, Vec<Hash>)>> {
         let mut current = hash;
         let mut line = Vec::new();
         let mut expected = None;
@@ -654,7 +809,10 @@ impl ForkChain {
             }
             if self.chain.hash_at(h.height)? == Some(current) {
                 line.reverse();
-                return Ok((h, line));
+                return Ok(Some((h, line)));
+            }
+            if h.height <= self.earliest_height() {
+                return Ok(None);
             }
             expected = Some(
                 h.height

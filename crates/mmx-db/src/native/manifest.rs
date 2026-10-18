@@ -4,11 +4,14 @@ use std::{
     io::{Read, Write},
     path::Path,
 };
-const MAGIC: &[u8; 8] = b"MMXNDB\x01\n";
+const MAGIC: &[u8; 8] = b"MMXNDB\x02\n";
+const PREVIOUS: &[u8; 8] = b"MMXNDB\x01\n";
 pub(super) struct Manifest {
     pub version: u32,
     pub generation: u64,
     pub floor: u32,
+    pub collected_floor: u32,
+    pub collection_tag: u64,
     pub next_id: u64,
     pub active: u64,
     pub cursor: u64,
@@ -23,7 +26,7 @@ impl Manifest {
             return Err(Error::Corrupt("native manifest size"));
         }
         file.take(64 * 1024 * 1024).read_to_end(&mut bytes)?;
-        if bytes.len() < 12 || &bytes[..8] != MAGIC {
+        if bytes.len() < 12 || (&bytes[..8] != MAGIC && &bytes[..8] != PREVIOUS) {
             return Err(Error::Corrupt("native manifest header"));
         }
         let end = bytes.len() - 4;
@@ -35,6 +38,16 @@ impl Manifest {
             version: input.u32()?,
             generation: input.u64()?,
             floor: input.u32()?,
+            collected_floor: if &bytes[..8] == MAGIC {
+                input.u32()?
+            } else {
+                0
+            },
+            collection_tag: if &bytes[..8] == MAGIC {
+                input.u64()?
+            } else {
+                0
+            },
             next_id: input.u64()?,
             active: input.u64()?,
             cursor: input.u64()?,
@@ -58,6 +71,7 @@ impl Manifest {
         if !input.0.is_empty()
             || out.version == u32::MAX
             || out.floor > out.version
+            || out.collected_floor > out.floor
             || out.cursor < 8
             || out.files.binary_search(&out.active).is_err()
             || out.files.windows(2).any(|pair| pair[0] >= pair[1])
@@ -83,6 +97,8 @@ impl Manifest {
         bytes.extend(self.version.to_le_bytes());
         bytes.extend(self.generation.to_le_bytes());
         bytes.extend(self.floor.to_le_bytes());
+        bytes.extend(self.collected_floor.to_le_bytes());
+        bytes.extend(self.collection_tag.to_le_bytes());
         bytes.extend(self.next_id.to_le_bytes());
         bytes.extend(self.active.to_le_bytes());
         bytes.extend(self.cursor.to_le_bytes());

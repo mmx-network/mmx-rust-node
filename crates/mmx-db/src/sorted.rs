@@ -67,44 +67,91 @@ pub fn merge(
     retained_from: Option<u32>,
 ) -> Result<Option<Run>> {
     let mut builder = Builder::new(crate::parent_dir(path), level)?;
-    let mut cursors = views
-        .iter()
-        .map(|view| view.run.entries())
-        .collect::<Vec<_>>();
-    let mut heap = BTreeMap::new();
-    for (index, cursor) in cursors.iter_mut().enumerate() {
-        if let Some(entry) = cursor.next().transpose()? {
-            heap.insert((entry.order_key(), Reverse(index)), entry);
-        }
-    }
-    let mut previous = None;
-    let mut key = None;
-    let mut baseline = false;
     let mut count = 0;
-    while let Some(((order, Reverse(index)), entry)) = heap.pop_first() {
-        if entry.version < views[index].cutoff && previous.as_ref() != Some(&order) {
-            if key.as_ref() != Some(&(order.0.clone(), order.1.clone())) {
-                key = Some((order.0.clone(), order.1.clone()));
-                baseline = false;
-            }
-            let old = retained_from.is_some_and(|floor| entry.version < floor);
-            if !old || !baseline {
-                builder.push(&entry)?;
-                count += 1;
-            }
-            if old {
-                baseline = true;
-            }
-            previous = Some(order);
-        }
-        if let Some(entry) = cursors[index].next().transpose()? {
-            heap.insert((entry.order_key(), Reverse(index)), entry);
-        }
+    for entry in Merged::new(views, retained_from)? {
+        builder.push(&entry?)?;
+        count += 1;
     }
     if count == 0 {
         return Ok(None);
     }
     Ok(Some(builder.finish(path)?))
+}
+
+/// A streaming merge for compaction, import, and value reclamation. Holds one
+/// current record per input file, irrespective of the complete history size.
+pub struct Merged {
+    cursors: Vec<Cursor>,
+    cutoffs: Vec<u32>,
+    heap: BTreeMap<(OrderKey, Reverse<usize>), Entry>,
+    previous: Option<OrderKey>,
+    key: Option<(String, Key)>,
+    baseline: bool,
+    retained_from: Option<u32>,
+    failed: bool,
+}
+impl Merged {
+    pub fn new(views: &[View<'_>], retained_from: Option<u32>) -> Result<Self> {
+        let mut cursors = views
+            .iter()
+            .map(|view| view.run.entries())
+            .collect::<Vec<_>>();
+        let mut heap = BTreeMap::new();
+        for (index, cursor) in cursors.iter_mut().enumerate() {
+            if let Some(entry) = cursor.next().transpose()? {
+                heap.insert((entry.order_key(), Reverse(index)), entry);
+            }
+        }
+        Ok(Self {
+            cursors,
+            cutoffs: views.iter().map(|v| v.cutoff).collect(),
+            heap,
+            previous: None,
+            key: None,
+            baseline: false,
+            retained_from,
+            failed: false,
+        })
+    }
+}
+impl Iterator for Merged {
+    type Item = Result<Entry>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        while let Some(((order, Reverse(index)), entry)) = self.heap.pop_first() {
+            match self.cursors[index].next().transpose() {
+                Ok(Some(next)) => {
+                    self.heap.insert((next.order_key(), Reverse(index)), next);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+            }
+            if entry.version >= self.cutoffs[index] || self.previous.as_ref() == Some(&order) {
+                continue;
+            }
+            if self.key.as_ref() != Some(&(order.0.clone(), order.1.clone())) {
+                self.key = Some((order.0.clone(), order.1.clone()));
+                self.baseline = false;
+            }
+            let old = self
+                .retained_from
+                .is_some_and(|floor| entry.version < floor);
+            let keep = !old || !self.baseline;
+            if old {
+                self.baseline = true;
+            }
+            self.previous = Some(order);
+            if keep {
+                return Some(Ok(entry));
+            }
+        }
+        None
+    }
 }
 
 /// An unpublished file is removed on drop. Publication is an atomic rename

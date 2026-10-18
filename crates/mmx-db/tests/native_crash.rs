@@ -34,6 +34,9 @@ fn native_crash_child() {
     if stage == "checkpointed" {
         db.checkpoint().unwrap();
     }
+    if stage == "purged" {
+        db.purge_before(8).unwrap();
+    }
     println!("READY");
     std::io::stdout().flush().unwrap();
     // The parent kills its own child while handles/snapshots remain live.
@@ -44,7 +47,7 @@ fn native_crash_child() {
 #[test]
 fn process_death_before_or_after_publication_recovers_an_atomic_suffix_and_reopens_after_rollback()
 {
-    for stage in ["staged", "published", "checkpointed"] {
+    for stage in ["staged", "published", "checkpointed", "purged"] {
         let directory = tempfile::tempdir().unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "native_crash_child", "--ignored", "--nocapture"])
@@ -82,6 +85,12 @@ fn process_death_before_or_after_publication_recovers_an_atomic_suffix_and_reope
         } else {
             assert_eq!(db.version(), 13);
             for height in 1..=12u32 {
+                if stage == "purged" && height < 8 {
+                    assert!(db
+                        .get("tail", &height.to_be_bytes(), Some(height - 1))
+                        .is_err());
+                    continue;
+                }
                 assert!(db
                     .get("tail", &height.to_be_bytes(), Some(height - 1))
                     .unwrap()
@@ -92,11 +101,24 @@ fn process_death_before_or_after_publication_recovers_an_atomic_suffix_and_reope
                 );
             }
         }
-        db.revert(0).unwrap();
+        let floor = if stage == "purged" { 8 } else { 0 };
+        if stage == "purged" {
+            assert_eq!(db.retention_floor(), 8);
+            assert!(db.revert(7).is_err());
+            assert!(db.fork(7).is_err());
+        }
+        db.revert(floor).unwrap();
         drop(db);
         let db = Store::open_native(directory.path()).unwrap();
-        assert_eq!(db.version(), 0);
-        assert!(db.scan("base", &[], None).unwrap().is_empty());
-        assert!(db.scan("tail", &[], None).unwrap().is_empty());
+        assert_eq!(db.version(), floor);
+        assert_eq!(db.retention_floor(), floor);
+        assert_eq!(
+            db.scan("base", &[], None).unwrap().len(),
+            usize::from(floor > 0)
+        );
+        assert_eq!(
+            db.scan("tail", &[], None).unwrap().len(),
+            floor.saturating_sub(1) as usize
+        );
     }
 }

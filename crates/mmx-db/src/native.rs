@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
 };
 type OrderKey = (String, Key, Reverse<u32>);
@@ -46,7 +46,7 @@ struct Cache {
 struct Context {
     path: PathBuf,
     _lock: File,
-    cache: Mutex<Cache>,
+    cache: Arc<Mutex<Cache>>,
     active: Mutex<(u64, Reader)>,
     cache_limit: usize,
 }
@@ -54,10 +54,16 @@ struct DataFile {
     path: PathBuf,
     id: u64,
     retired: AtomicBool,
+    cache: Weak<Mutex<Cache>>,
 }
 impl Drop for DataFile {
     fn drop(&mut self) {
         if self.retired.load(Ordering::Relaxed) {
+            if let Some(cache) = self.cache.upgrade() {
+                if let Ok(mut cache) = cache.lock() {
+                    cache.readers.remove(&self.id);
+                }
+            }
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -97,6 +103,8 @@ pub struct Native {
     next_id: u64,
     active: u64,
     checkpoint_generation: u64,
+    collected_floor: u32,
+    collection_tag: u64,
     pending: Pending,
     poisoned: bool,
     options: Options,
@@ -360,6 +368,8 @@ impl Native {
                 version: 0,
                 generation: 0,
                 floor: 0,
+                collected_floor: 0,
+                collection_tag: 0,
                 next_id: 1,
                 active: 0,
                 cursor: 8,
@@ -393,6 +403,10 @@ impl Native {
             }
             drop(Journal::open(&data_path(&path, 0), 0)?);
         }
+        let cache = Arc::new(Mutex::new(Cache {
+            clock: 0,
+            readers: BTreeMap::new(),
+        }));
         let mut files = BTreeMap::new();
         for id in &manifest.files {
             let file = data_path(&path, *id);
@@ -405,6 +419,7 @@ impl Native {
                     path: file,
                     id: *id,
                     retired: AtomicBool::new(false),
+                    cache: Arc::downgrade(&cache),
                 }),
             );
         }
@@ -427,10 +442,7 @@ impl Native {
         let context = Arc::new(Context {
             path: path.clone(),
             _lock: lock,
-            cache: Mutex::new(Cache {
-                clock: 0,
-                readers: BTreeMap::new(),
-            }),
+            cache,
             active: Mutex::new((manifest.active, journal.reader())),
             cache_limit: options.reader_cache,
         });
@@ -453,6 +465,8 @@ impl Native {
             next_id: manifest.next_id,
             active: manifest.active,
             checkpoint_generation: manifest.generation,
+            collected_floor: manifest.collected_floor,
+            collection_tag: manifest.collection_tag,
             pending: Pending::new(),
             poisoned: false,
             options,
@@ -506,6 +520,11 @@ impl Native {
     }
     pub fn retention_floor(&self) -> u32 {
         self.state.floor
+    }
+    /// Caller-defined retention policy completed at the current durable floor.
+    /// A floor published before an interrupted collection has no current tag.
+    pub fn collection_tag(&self) -> Option<u64> {
+        (self.collected_floor == self.state.floor).then_some(self.collection_tag)
     }
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
@@ -679,6 +698,218 @@ impl Native {
             .collect::<Vec<_>>();
         self.publish(version, branch.local.version, self.state.floor, &changes)
     }
+    /// Discard older history, preserving state at version-1 and all later
+    /// versions. Existing snapshots pin old files until they are released.
+    pub fn purge_before(&mut self, version: u32) -> Result<PurgeReport> {
+        self.readable()?;
+        self.state.check_revert(version)?;
+        if self.has_pending() {
+            return Err(Error::SnapshotMismatch);
+        }
+        if version == self.state.floor && version == self.collected_floor {
+            let bytes = value_bytes(&self.state)?;
+            return Ok(PurgeReport {
+                floor: version,
+                old_value_bytes: bytes,
+                new_value_bytes: bytes,
+                retired_files: 0,
+                retained_records: self
+                    .state
+                    .runs
+                    .iter()
+                    .map(|r| r.file.run.metadata().records)
+                    .sum::<u64>()
+                    + self.state.mem.len() as u64,
+            });
+        }
+        self.purge_before_with(version, |_, _| Ok(true))
+    }
+    /// A caller can additionally retire complete immutable key spaces, such as
+    /// old block bodies. The caller must keep its private consensus context and
+    /// independently enforce the RPC boundary. The predicate runs once per key.
+    pub fn purge_before_with(
+        &mut self,
+        version: u32,
+        keep: impl FnMut(&str, &[u8]) -> Result<bool>,
+    ) -> Result<PurgeReport> {
+        self.purge_before_with_tag(version, 0, keep)
+    }
+    /// Record a caller's policy only after the collected files are durable.
+    /// Unlike `purge_before`, predicates may change at the same version, so the
+    /// caller checks `collection_tag()` when it wants to avoid a repeated copy.
+    pub fn purge_before_with_tag(
+        &mut self,
+        version: u32,
+        tag: u64,
+        mut keep: impl FnMut(&str, &[u8]) -> Result<bool>,
+    ) -> Result<PurgeReport> {
+        self.readable()?;
+        self.state.check_revert(version)?;
+        if self.has_pending() {
+            return Err(Error::SnapshotMismatch);
+        }
+        let result = (|| {
+            self.checkpoint_inner(false)?;
+            if version > self.state.floor {
+                self.publish(self.state.version, self.state.version, version, &[])?;
+            }
+            self.collect_history(tag, &mut keep)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+    fn collect_history(
+        &mut self,
+        tag: u64,
+        keep: &mut impl FnMut(&str, &[u8]) -> Result<bool>,
+    ) -> Result<PurgeReport> {
+        let source = self.state.clone();
+        let old_value_bytes = value_bytes(&source)?;
+        let mut next_id = self.next_id;
+        let index_id = take_id(&mut next_id)?;
+        let index_path = run_path(&self.context.path, index_id);
+        let mut builder = Builder::new(&self.context.path, 0)?;
+        let views = source
+            .runs
+            .iter()
+            .map(|v| View {
+                run: &v.file.run,
+                cutoff: v.cutoff,
+            })
+            .collect::<Vec<_>>();
+        let mut files = BTreeMap::new();
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0;
+        let limit = self.options.segment_bytes.clamp(4096, 64 * 1024 * 1024) as usize;
+        let mut last_key = None;
+        let mut keep_key = true;
+        let mut count = 0;
+        for entry in sorted::Merged::new(&views, (source.floor > 0).then_some(source.floor))? {
+            let entry = entry?;
+            let key = (entry.write.table.clone(), Key(entry.write.key.clone()));
+            if last_key.as_ref() != Some(&key) {
+                keep_key = keep(&entry.write.table, &entry.write.key)?;
+                last_key = Some(key);
+            }
+            if !keep_key {
+                continue;
+            }
+            let value = entry
+                .write
+                .value
+                .as_ref()
+                .map(|encoded| {
+                    self.context
+                        .value(&source.files, ValueRef::decode(encoded)?)
+                })
+                .transpose()?;
+            let size = entry.write.table.len()
+                + entry.write.key.len()
+                + 32
+                + value.as_ref().map_or(0, Vec::len);
+            if !batch.is_empty() && (batch_bytes + size > limit || batch.len() >= 65536) {
+                write_gc_batch(
+                    &self.context,
+                    source.version,
+                    &mut next_id,
+                    &mut batch,
+                    &mut files,
+                    &mut builder,
+                )?;
+                batch_bytes = 0;
+            }
+            batch_bytes += size;
+            batch.push((entry, value));
+            count += 1;
+        }
+        if !batch.is_empty() {
+            write_gc_batch(
+                &self.context,
+                source.version,
+                &mut next_id,
+                &mut batch,
+                &mut files,
+                &mut builder,
+            )?;
+        }
+        let runs = if count == 0 {
+            drop(builder);
+            Vec::new()
+        } else {
+            let run = builder.finish(&index_path)?;
+            vec![RunView {
+                file: Arc::new(RunFile {
+                    id: index_id,
+                    path: index_path,
+                    run,
+                    retired: AtomicBool::new(false),
+                }),
+                cutoff: u32::MAX,
+            }]
+        };
+        let active = take_id(&mut next_id)?;
+        let path = data_path(&self.context.path, active);
+        let journal = Journal::open(&path, active)?;
+        files.insert(
+            active,
+            Arc::new(DataFile {
+                path,
+                id: active,
+                retired: AtomicBool::new(false),
+                cache: Arc::downgrade(&self.context.cache),
+            }),
+        );
+        let state = State {
+            version: source.version,
+            generation: source.generation,
+            floor: source.floor,
+            mem: Arc::new(Memtable::new()),
+            mem_bytes: 0,
+            runs,
+            files: Arc::new(files),
+        };
+        let manifest = Manifest {
+            version: state.version,
+            generation: state.generation,
+            floor: state.floor,
+            collected_floor: state.floor,
+            collection_tag: tag,
+            next_id,
+            active,
+            cursor: 8,
+            files: state.files.keys().copied().collect(),
+            runs: state.runs.iter().map(|v| (v.file.id, v.cutoff)).collect(),
+        };
+        manifest.save(&self.context.path.join("native.manifest"), false)?;
+        *self
+            .context
+            .active
+            .lock()
+            .map_err(|_| Error::Corrupt("native active reader"))? = (active, journal.reader());
+        self.journal = journal;
+        self.state = state;
+        self.next_id = next_id;
+        self.active = active;
+        self.checkpoint_generation = self.state.generation;
+        self.collected_floor = self.state.floor;
+        self.collection_tag = tag;
+        for file in source.runs.iter().map(|v| &v.file) {
+            file.retired.store(true, Ordering::Relaxed);
+        }
+        for file in source.files.values() {
+            file.retired.store(true, Ordering::Relaxed);
+        }
+        let new_value_bytes = value_bytes(&self.state)?;
+        Ok(PurgeReport {
+            floor: self.state.floor,
+            old_value_bytes,
+            new_value_bytes,
+            retired_files: source.files.len(),
+            retained_records: count,
+        })
+    }
     pub fn checkpoint(&mut self) -> Result<()> {
         self.readable()?;
         if self.has_pending() {
@@ -798,6 +1029,7 @@ impl Native {
                     path,
                     id: active,
                     retired: AtomicBool::new(false),
+                    cache: Arc::downgrade(&self.context.cache),
                 }),
             );
             replacement = Some(journal);
@@ -806,6 +1038,8 @@ impl Native {
             version: state.version,
             generation: state.generation,
             floor: state.floor,
+            collected_floor: self.collected_floor,
+            collection_tag: self.collection_tag,
             next_id,
             active,
             cursor,
@@ -1018,4 +1252,77 @@ impl Snapshot {
 
 fn manifest_temporary(name: &str) -> bool {
     name.starts_with("native-manifest-") && name.ends_with(".tmp")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PurgeReport {
+    pub floor: u32,
+    pub old_value_bytes: u64,
+    pub new_value_bytes: u64,
+    pub retired_files: usize,
+    pub retained_records: u64,
+}
+fn take_id(next: &mut u64) -> Result<u64> {
+    let id = *next;
+    *next = next.checked_add(1).ok_or(Error::InvalidEntry)?;
+    Ok(id)
+}
+fn value_bytes(state: &State) -> Result<u64> {
+    state.files.values().try_fold(0u64, |total, file| {
+        total
+            .checked_add(fs::metadata(&file.path)?.len())
+            .ok_or(Error::InvalidEntry)
+    })
+}
+fn write_gc_batch(
+    context: &Context,
+    version: u32,
+    next_id: &mut u64,
+    batch: &mut Vec<(Entry, Option<Vec<u8>>)>,
+    files: &mut BTreeMap<u64, Arc<DataFile>>,
+    builder: &mut Builder,
+) -> Result<()> {
+    let id = take_id(next_id)?;
+    let path = data_path(&context.path, id);
+    let mut journal = Journal::open(&path, id)?;
+    let changes = batch
+        .iter()
+        .map(|(entry, value)| Change {
+            version: entry.version,
+            table: &entry.write.table,
+            key: &entry.write.key,
+            value: value.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    let entries = journal.append(
+        Action {
+            generation: 1,
+            expected: 0,
+            cut: 0,
+            next: version,
+            floor: 0,
+        },
+        &changes,
+    )?;
+    for entry in entries {
+        builder.push(&Entry {
+            version: entry.version,
+            write: Write {
+                table: entry.table,
+                key: entry.key,
+                value: entry.value.map(|r| r.encode().to_vec()),
+            },
+        })?;
+    }
+    files.insert(
+        id,
+        Arc::new(DataFile {
+            path,
+            id,
+            retired: AtomicBool::new(false),
+            cache: Arc::downgrade(&context.cache),
+        }),
+    );
+    batch.clear();
+    Ok(())
 }

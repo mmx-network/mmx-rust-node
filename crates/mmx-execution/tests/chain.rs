@@ -519,6 +519,52 @@ fn invalid_branch_body_is_excluded_without_reverting_selected_state() {
 }
 
 #[test]
+fn purged_forks_allow_replacement_at_the_boundary_but_cannot_replace_the_boundary() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let deep = rows()
+        .into_iter()
+        .find(|r| r["kind"] == "deep_fork")
+        .unwrap()["steps"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let directory = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open_native(directory.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    let (winner, loser) = if block_hash(&steps[1]) < block_hash(&steps[2]) {
+        (&steps[1], &steps[2])
+    } else {
+        (&steps[2], &steps[1])
+    };
+    retain(&mut chain, &steps[0]);
+    retain(&mut chain, loser);
+    chain.update(block_hash(&g), None).unwrap();
+    verify_step(chain.selected(), loser);
+    chain.purge_before_height(1).unwrap();
+    assert_eq!(chain.earliest_height(), 1);
+    assert!(chain.rollback_to(0).is_err());
+    assert!(chain.update(block_hash(&g), None).is_err());
+    // Both alternate-root blocks are consensus-valid, but would require the
+    // deleted state at height zero. They must not stop the node or become
+    // permanently marked as consensus-invalid.
+    retain(&mut chain, &deep[0]);
+    retain(&mut chain, &deep[1]);
+    let update = chain.update(block_hash(&steps[0]), None).unwrap();
+    assert!(!update.invalid.contains(&block_hash(&deep[1])));
+    verify_step(chain.selected(), loser);
+    drop(chain);
+    let mut chain = ForkChain::open_native(directory.path(), params(&g)).unwrap();
+    retain(&mut chain, winner);
+    let update = chain.update(block_hash(&steps[0]), None).unwrap();
+    assert_eq!(update.common_ancestor, Some(block_hash(&steps[0])));
+    verify_step(chain.selected(), winner);
+    chain.rollback_to(1).unwrap();
+    verify_step(chain.selected(), &steps[0]);
+    assert!(chain.set_vote_history_limit(1001).is_err());
+}
+
+#[test]
 fn alternate_root_waits_for_live_work_and_backwards_sync_then_replays_without_old_pots() {
     use mmx_execution::chain::forks::ForkChain;
     let (g, steps) = synthetic();

@@ -105,6 +105,232 @@ impl Source for MemorySource {
     }
 }
 #[test]
+fn optional_purge_hides_expired_rpc_history_and_preserves_state_boundary_replay_and_restart() {
+    let (network, g, steps, deep) = fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let n = Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()));
+    let mut source = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&steps[0]["block"]),
+            wire(&steps[1]["block"]),
+        ],
+        wrong: false,
+    };
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    let genesis = hash(&source.blocks[0], "hash").unwrap();
+    let expired = hash(
+        source.blocks[0].field("tx_list").unwrap().seq().unwrap()[0]
+            .record()
+            .unwrap(),
+        "id",
+    )
+    .unwrap();
+    let retained = hash(
+        source.blocks[1].field("tx_list").unwrap().seq().unwrap()[0]
+            .record()
+            .unwrap(),
+        "id",
+    )
+    .unwrap();
+    let json_hash = |h: &Hash| json!(h);
+    let tables = [
+        "balances",
+        "contracts",
+        "storage",
+        "storage_entries",
+        "total_supply",
+        "transactions",
+    ];
+    let database_files = || {
+        ["selected", "archive"].map(|database| {
+            let mut files: Vec<_> =
+                std::fs::read_dir(directory.path().join("chain").join(database))
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect();
+            files.sort();
+            files
+        })
+    };
+    let before: Vec<_> = {
+        let node = n.lock().unwrap();
+        tables
+            .iter()
+            .map(|t| {
+                node.chain()
+                    .selected()
+                    .storage()
+                    .database()
+                    .scan(t, &[], None)
+                    .unwrap()
+            })
+            .collect()
+    };
+    // Existing workers must observe the newly published boundary, including
+    // the peer handler's lock-free genesis-height shortcut.
+    let mut peer_server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
+    let observer = node(&network);
+    let mut peer_client =
+        peer::Client::connect(&peer_server.address().to_string(), observer).unwrap();
+    let mut vnx = rpc::vnx_server("127.0.0.1:0".parse().unwrap(), n.clone()).unwrap();
+    let client = vnx::net::NetworkClient::connect(
+        vnx.endpoint(),
+        "Node",
+        mmx_types::vnx_registry().unwrap(),
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    {
+        let mut node = n.lock().unwrap();
+        assert_eq!(node.earliest_height(), 0);
+        node.purge_before(1).unwrap();
+        let files = database_files();
+        node.purge_before(1).unwrap();
+        assert_eq!(
+            files,
+            database_files(),
+            "a completed purge must not rewrite values"
+        );
+        assert_eq!(node.earliest_height(), 1);
+        assert!(node.rollback_to(0).is_err());
+        assert!(node.purge_before(0).is_err());
+        assert!(node.purge_before(3).is_err());
+        node.tick().unwrap();
+        for (table, expected) in tables.iter().zip(&before) {
+            assert_eq!(
+                &node
+                    .chain()
+                    .selected()
+                    .storage()
+                    .database()
+                    .scan(table, &[], None)
+                    .unwrap(),
+                expected
+            );
+        }
+        // Duplicate protection and deployed contracts remain ledger state;
+        // the expired full transaction payload is physically excluded.
+        assert!(node
+            .chain()
+            .selected()
+            .storage()
+            .get_transaction_index(&expired)
+            .unwrap()
+            .is_some());
+        assert!(node
+            .chain()
+            .selected()
+            .transaction(&expired)
+            .unwrap()
+            .is_none());
+    }
+    let request = |method: &str, params: Value| {
+        let result = rpc::json_request(
+            &n,
+            &serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(result.get("error").is_none(), "{method}: {result}");
+        result["result"].clone()
+    };
+    for (method, params) in [
+        ("get_block_at", json!({"height":0})),
+        ("get_header_at", json!({"height":0})),
+        ("get_block_hash", json!({"height":0})),
+        ("get_block_hash_ex", json!({"height":0})),
+        ("get_block", json!({"hash":json_hash(&genesis)})),
+        ("get_header", json!({"hash":json_hash(&genesis)})),
+        (
+            "get_transaction",
+            json!({"id":json_hash(&expired),"pending":false}),
+        ),
+        (
+            "get_transaction",
+            json!({"id":json_hash(&expired),"pending":true}),
+        ),
+        ("get_tx_height", json!({"id":json_hash(&expired)})),
+    ] {
+        assert!(request(method, params.clone()).is_null(), "{method}");
+        assert!(
+            client
+                .call_value(&format!("mmx.Node.{method}"), params)
+                .unwrap()["_ret_0"]
+                .is_null(),
+            "{method}"
+        );
+    }
+    assert_eq!(request("get_tx_ids_at", json!({"height":0})), json!([]));
+    let batch = request(
+        "get_transactions",
+        json!({"ids":[json_hash(&expired),json_hash(&retained),json_hash(&expired)]}),
+    );
+    assert!(batch[0].is_null() && !batch[1].is_null() && batch[2].is_null());
+    assert_eq!(
+        request("get_tx_height", json!({"id":json_hash(&retained)})),
+        1
+    );
+    assert!(!request("get_header_at", json!({"height":1})).is_null());
+    assert_eq!(request("get_status", json!({}))["earliest_height"], 1);
+    assert_eq!(request("get_genesis_hash", json!({})), json_hash(&genesis));
+    assert!(peer_client.hash_at(0).unwrap().is_none());
+    assert!(peer_client.block_at(0).unwrap().is_none());
+    assert_eq!(
+        peer_client.hash_at(1).unwrap(),
+        Some(hash(&source.blocks[1], "hash").unwrap())
+    );
+    drop(client);
+    vnx.shutdown();
+    drop(peer_client);
+    peer_server.shutdown();
+    // A fork below the floor is a local retention limit, not permission to
+    // truncate state or reinterpret it as a consensus-invalid block.
+    let mut older_fork = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&deep[0]["block"]),
+            wire(&deep[1]["block"]),
+        ],
+        wrong: false,
+    };
+    assert!(sync::synchronize(&mut older_fork, &n, &AtomicBool::new(false), |_| {}).is_err());
+    check(&n, &steps[1]);
+    drop(n);
+    let n = Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()));
+    {
+        let mut node = n.lock().unwrap();
+        assert_eq!(node.earliest_height(), 1);
+        let files = database_files();
+        node.purge_before(1).unwrap();
+        assert_eq!(
+            files,
+            database_files(),
+            "reopen must preserve the completion marker"
+        );
+        assert!(node.rollback_to(0).is_err());
+        node.rollback_to(1).unwrap();
+        node.tick().unwrap();
+    }
+    check(&n, &steps[0]);
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    check(&n, &steps[1]);
+    n.lock().unwrap().purge_before(2).unwrap();
+    drop(n);
+    let mut node = Node::open(directory.path(), &network).unwrap();
+    assert_eq!(node.earliest_height(), 2);
+    assert!(node.rollback_to(1).is_err());
+    node.rollback_to(2).unwrap();
+    node.tick().unwrap();
+    assert!(node
+        .chain()
+        .selected()
+        .transaction(&retained)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn socket_sync_deep_fork_rollback_restart_and_rpc_read_the_same_native_ledger() {
     let (network, g, steps, deep) = fixture();
     let serving = node(&network);

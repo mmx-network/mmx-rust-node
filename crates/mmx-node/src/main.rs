@@ -12,6 +12,7 @@ use std::{
 
 const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir PATH]
   [--peer HOST[:PORT]]... [--offline] [--sync-once] [--rollback-to HEIGHT]
+  [--purge-before HEIGHT]
   [--p2p-listen HOST:PORT] [--rpc-listen HOST:PORT] [--http-listen HOST:PORT]
 
 Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
@@ -20,7 +21,8 @@ Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
 Historical sync uses configured native seed peers unless --peer is supplied.
 --offline serves the stored ledger without contacting peers.
 --sync-once exits after coordinated sync. Sync requires 3–8 distinct synced peers. --rollback-to keeps that height.
-All heights remain available for rollback; databases retain every ledger version.";
+History is retained by default. --purge-before reclaims older history before serving,
+keeps HEIGHT available, and prevents RPC reads or rollback below HEIGHT (native databases).";
 struct Options {
     root: PathBuf,
     network: String,
@@ -29,6 +31,7 @@ struct Options {
     offline: bool,
     once: bool,
     rollback: Option<u32>,
+    purge: Option<u32>,
     p2p: Option<String>,
     rpc: String,
     http: String,
@@ -42,6 +45,7 @@ fn options() -> Result<Option<Options>> {
         offline: false,
         once: false,
         rollback: None,
+        purge: None,
         p2p: None,
         rpc: "127.0.0.1:11331".into(),
         http: "127.0.0.1:11380".into(),
@@ -65,6 +69,7 @@ fn options() -> Result<Option<Options>> {
                     "--data-dir" => o.data = value.into(),
                     "--peer" => o.peers.push(value),
                     "--rollback-to" => o.rollback = Some(value.parse()?),
+                    "--purge-before" => o.purge = Some(value.parse()?),
                     "--p2p-listen" => o.p2p = Some(value),
                     "--rpc-listen" => o.rpc = value,
                     "--http-listen" => o.http = value,
@@ -116,6 +121,10 @@ fn main() -> Result<()> {
     let mut state = Node::open(&options.data, &network)?;
     if let Some(height) = options.rollback {
         state.rollback_to(height)?;
+    }
+    if let Some(height) = options.purge {
+        state.purge_before(height)?;
+        println!("Purged history before height {height}");
     }
     state.enable_background_vdf()?;
     let tip = state.chain().selected().tip()?.ok_or("missing tip")?;
