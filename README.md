@@ -822,6 +822,17 @@ IDs, then rechecks each canonical hash. By default it checks genesis and a point
 transaction-bearing blocks. Mutable balances/contracts and live status require
 separate checks at matching tips.
 
+After catch-up, add `--state-from ./mmx-data --samples 128` to compare sampled
+balance keys and contract reads. A read-only pinned ledger supplies the balance
+expectations. Both RPC servers must report the same synced height and canonical
+hash as that view before and after the reads; a moving or unsynced tip rejects
+the mutable comparison and requires a retry. The default samples up to 128
+evenly spaced known keys per table. Balance checks include the full 128-bit
+amount and currency; contract checks compare both native contract lookup methods.
+Local TCP tests cover matching values, divergent servers, two servers agreeing
+on an incorrect balance, tombstones and tip movement. Full-mainnet mutable-state
+parity remains pending until the running nodes have caught up at matching tips.
+
 ```sh
 cargo run -p mmx-node --example audit_native_rpc -- \
   --native-rpc 127.0.0.1:11330 --rust-rpc 127.0.0.1:12331 \
