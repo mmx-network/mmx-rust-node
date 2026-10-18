@@ -79,7 +79,7 @@ fn main() -> Result<()> {
         ]
         .concat();
         let value = Variant::decode(&bytes)?;
-        let expanded = value.value().seq()?.len() * std::mem::size_of::<N>();
+        let expanded = std::mem::size_of_val(value.value().seq()?);
         let mut data = Record::from_generated(&mmx::contract::Data::default())?;
         data.fields.insert("value".into(), N::Variant(value));
         let wire = data.encode()?;
