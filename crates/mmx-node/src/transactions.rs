@@ -159,11 +159,21 @@ impl Node {
         if !self.synced {
             return Err(error("not synced"));
         }
-        let params = self.chain.selected().params();
-        let mut tx = tx.clone();
         if tx.name != "mmx.Transaction" {
             return Err(error("expected transaction"));
         }
+        let supplied_id = hash(tx, "id")?;
+        if !pre_validate
+            && self
+                .tx_pool
+                .entries
+                .get(&supplied_id)
+                .is_some_and(|e| e.record.as_ref() == tx)
+        {
+            return Ok(false);
+        }
+        let params = self.chain.selected().params();
+        let mut tx = tx.clone();
         if tx.field("exec_result")?.optional()?.is_some() {
             tx.fields
                 .insert("exec_result".into(), Value::Optional(None));
@@ -181,12 +191,12 @@ impl Node {
             return Err(error("transaction exceeds pool size limit"));
         }
         let id = hash(&tx, "id")?;
-        if self
+        let duplicate = self
             .tx_pool
             .entries
             .get(&id)
-            .is_some_and(|e| e.record.as_ref() == &tx)
-        {
+            .is_some_and(|e| e.record.as_ref() == &tx);
+        if duplicate && !pre_validate {
             return Ok(false);
         }
         let current = self
@@ -201,6 +211,9 @@ impl Node {
         let result = self.validate_transaction(&tx)?;
         if pre_validate && result.did_fail {
             return Err(error("transaction execution would fail"));
+        }
+        if duplicate {
+            return Ok(false);
         }
         let sender = tx
             .field("sender")?

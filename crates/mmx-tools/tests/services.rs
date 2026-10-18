@@ -491,6 +491,15 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
         .unwrap()
         .is_some());
     assert_eq!(node.lock().unwrap().pending_transactions(), 1);
+    let completed=call("complete",json!({"index":0,"tx":{"__type":"mmx.Transaction","outputs":[{"address":recipient,"amount":10_u128.to_le_bytes()}]},"options":{"gas_limit":100_000}})).unwrap();
+    assert!(completed["exec_result"].is_null());
+    let signed = call("sign_off", json!({"index":0,"tx":completed,"options":{}})).unwrap();
+    assert_eq!(signed, completed);
+    assert_eq!(
+        node.lock().unwrap().pending_transactions(),
+        1,
+        "complete must not submit"
+    );
     let execute=call("execute",json!({"index":0,"address":contract,"method":"run","args":[1],"user":0,"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
     assert!(!execute["exec_result"]["did_fail"].as_bool().unwrap());
     let deposit=call("deposit",json!({"index":0,"address":contract,"method":"run","args":[2],"amount":100_u128.to_le_bytes(),"currency":([0u8;32]),"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
