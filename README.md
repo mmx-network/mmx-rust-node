@@ -1226,7 +1226,8 @@ mmx wallet create --json
 mmx wallet address --json
 
 # Native VNX services; use disposable/test keys while testing this port.
-mmx-wallet --key-file /path/to/wallet.dat --listen 127.0.0.1:11335
+mmx-wallet --key-file /path/to/wallet.dat --listen 127.0.0.1:11335 \
+  --node 127.0.0.1:11331
 mmx-farmer --wallet 127.0.0.1:11335 --node 127.0.0.1:11331 \
   --reward-address mmx1... --listen 127.0.0.1:11333
 mmx-harvester --farmer 127.0.0.1:11333 --plot-dir /path/to/plots \
@@ -1248,6 +1249,36 @@ file becomes wallet index 0, 1, ...; `--account` selects the derivation account.
 Passphrase-protected accounts acquire their address list on their first unlock.
 The standalone `mmx wallet` command handles transfers via the C++ REST API.
 
+With `--node`, the native service also exposes `send`, `send_many`, `send_from`
+(for owned public-key source addresses), `deploy`, `execute`, `deposit`,
+`complete`, `sign_off`, `send_off`, balance queries and reservation methods.
+Use `mmx wallet-rpc METHOD --args -` for native VNX JSON arguments on stdin;
+addresses are 32-byte arrays and amounts are 16-byte little-endian arrays.
+`complete` returns a funded, signed transaction without submitting it;
+`sign_off` adds signatures for known owners and can leave foreign inputs unsigned.
+Spending methods default to validation and submission. Setting
+`options.auto_send=false` returns a preview with an execution receipt;
+`send_off` accepts that preview, removes its receipt and validates it again.
+`options.passphrase` temporarily unlocks a locked account and always relocks it,
+including on failure. Supply secret arguments on stdin instead of the command line.
+
+Balances come from fresh batched node reads checked against the canonical tip.
+The wallet holds pending debits and explicit reservations in RAM, including
+confirmed pending records until expiry so a fork can reactivate their reservations.
+These reservations currently last for the daemon process; durable wallet pending
+history/recovery is still pending. `release_all` releases explicit reservations,
+while pending transaction debits remain until confirmation or expiry. An ambiguous
+submission keeps its reservation; retry `send_off` with the same signed transaction
+instead of creating a new one. The node pool deduplicates that transaction.
+
+Node `validate` executes against a pinned native database snapshot and never
+commits ledger changes. Pending transactions and peer relay records share bounded
+RAM storage (4,096 transactions / 64 MiB); the current admission/relay policy caps
+individual transactions at 256 KiB. This operational cap does not change block
+consensus validation. Peer transaction queues are separate from block/VDF/proof
+queues. Confirmed/expired entries are pruned when the selected tip changes, and
+manual rollback clears the pool. Block assembly is still separate work.
+
 Farmer keys use the C++ passphrase-independent KDF. The farmer signs native proof
 responses, headers (including reward targets and content hashes) and domain
 separated validator votes. It aggregates live harvester reports and drops expired
@@ -1267,11 +1298,11 @@ do not discard proofs from other plots. The node publishes its C++ challenge
 window only while synced, and accepts signed farmer responses through its bounded
 inbox for the existing consensus checks.
 
-This is the first service checkpoint, **not production farming readiness**.
+These service checkpoints do not yet provide production farming.
 Remaining work includes node block assembly/production and validator-vote
 scheduling, reverse farmer RPC routing for the C++ node, pool/NFT partial
-submission and virtual plots, persistent service configuration, and the wallet
-service's transaction/contract/offer/swap methods. Production plot files and an
+submission and virtual plots, persistent service configuration and wallet pending
+history, contract withdrawal owner resolution, and offer/swap convenience RPCs. Production plot files and an
 actual farm have not been exercised. Existing C++ witnesses, tiny native park
 files, permission tests and the complete standalone wallet CLI suite cover the
 implemented paths. Tests also launch the actual wallet, farmer, harvester and

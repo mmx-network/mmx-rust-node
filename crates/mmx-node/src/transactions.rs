@@ -71,7 +71,8 @@ impl Relay {
             .map_err(|_| error("transaction relay poisoned"))?;
         let mut out = Vec::new();
         let mut bytes = 0;
-        let mut next = latest;
+        // Publish updates the sequence while holding this mutex.
+        let mut next = self.latest.load(Ordering::Acquire);
         for (seq, (_, record, size)) in state.entries.range((
             std::ops::Bound::Excluded(cursor),
             std::ops::Bound::Unbounded,

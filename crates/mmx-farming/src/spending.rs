@@ -509,7 +509,7 @@ mod tests {
             Ok(match method {
                 "get_height" => json!(*self.height.lock().unwrap()),
                 "get_block_hash" => json!(([42u8; 32])),
-                "get_all_balances" => json!([[[self.owner, [0; 32]], 1000_u128.to_le_bytes()]]),
+                "get_all_balances" => json!([[[self.owner, ([0u8; 32])], 1000_u128.to_le_bytes()]]),
                 "get_tx_height" => {
                     if *self.confirmed.lock().unwrap() {
                         json!(4)
