@@ -334,6 +334,20 @@ The node uses an indexed disk backend with every
 historical version retained. Sync throughput and remaining peer services are
 still being improved.
 
+`tools/watch_sync.py` continuously checks a Rust node against a native C++
+WebAPI, recording JSON lines with canonical hash parity, peer counts, RPC
+latency, throughput and mainnet hard-fork boundary checks. Its live check needs
+five minutes near the native tip and at least three newly selected blocks;
+a synced flag or frozen height alone cannot satisfy it. Three consecutive
+observation failures stop the monitor for inspection. For separate Rust/native
+listeners on the same machine:
+
+```sh
+python3 tools/watch_sync.py --rpc http://127.0.0.1:12380/rpc \
+  --native-wapi http://127.0.0.1:11380/wapi --output sync-watch.jsonl
+python3 -m unittest discover -s tools -p test_watch_sync.py -v
+```
+
 The example executes MMX instructions, charges gas, stages contract state, and
 commits it to disk. Running it again reopens the database and increments the same
 counter. It does not require the C++ repository or a running MMX node.
