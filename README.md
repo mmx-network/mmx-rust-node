@@ -950,13 +950,23 @@ logical behavior. Storage adapters use fallible owned reads so disk failures are
 reported. `Store::open()` and `Database::open()` retain the original journal
 backend for existing library callers and reference tests.
 
-Indexed forks keep a read snapshot of the original database and store speculative
-changes in private disk databases. They do not copy retained history or buffer an
-entire replacement in RAM. Publication copies the staged suffix and updates the
-tip/version in one SQLite transaction, including replacements larger than 64 MiB.
+Indexed forks pin a read snapshot of the original database and keep speculative
+changes in memory, following the native table's memory index. They create no
+temporary database or replay write log. Publication inserts the validated suffix
+and updates the tip/version in one SQLite transaction, including replacements
+larger than 64 MiB. Branch memory grows with the speculative suffix; node replay
+batches remain limited to 128 blocks and 8 MiB of block bodies, plus ledger writes.
 Snapshot identity/generation checks reject stale or foreign replacements. Failed
 writes poison the handle until reopen; uncommitted publication recovers the old
 state and committed publication recovers the new state. No history is pruned.
+
+`cargo run -p mmx-db --example bench_delta --locked` measures a small 4 MiB replay
+using Linux process I/O counters, then verifies every historical value, reopen,
+and rollback through genesis. Compared with commit `2aa59d7`, staging write
+syscalls fell from 5,570,560 bytes to zero; publication read syscalls fell from
+4,300,985 to 4,217 bytes. Publication write syscalls remained 4,828,640 bytes in
+both versions. These measure a synthetic replay, not total mainnet I/O. The
+append-log and sorted-run primary backend is still to be ported from C++.
 
 C++ `Node::write_block()` appends full bodies to a block file and stores their
 offsets in a separate index. Its `Table` implementation uses a write log and

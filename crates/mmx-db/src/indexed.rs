@@ -30,14 +30,12 @@ pub(crate) struct Disk {
     pub version: u32,
     pub pending: Pending,
     poisoned: bool,
-    _temporary: Option<tempfile::TempDir>,
-    staging_root: PathBuf,
     last_checkpoint: Cell<Instant>,
 }
 pub(crate) struct Snapshot {
     base: Arc<Base>,
     cutoff: u32,
-    pub local: Disk,
+    pub local: Database,
 }
 struct Base {
     conn: Mutex<Connection>,
@@ -151,8 +149,6 @@ impl Disk {
             version,
             pending: BTreeMap::new(),
             poisoned: false,
-            _temporary: None,
-            staging_root: staging,
             last_checkpoint: Cell::new(Instant::now()),
         })
     }
@@ -203,39 +199,6 @@ impl Disk {
         writes: impl IntoIterator<Item = Write>,
     ) -> Result<()> {
         self.commit(next, writes)
-    }
-    fn stage(&self, version: u32) -> Result<Disk> {
-        self.readable()?;
-        let directory = tempfile::Builder::new()
-            .prefix("branch-")
-            .tempdir_in(&self.staging_root)?;
-        let path = directory.path().to_owned();
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path.join("writer.lock"))?;
-        lock.try_lock().map_err(std::io::Error::from)?;
-        let conn = Connection::open(path.join("state.sqlite"))?;
-        // Speculative state has no durable reader until replace() copies it
-        // into the primary WAL transaction. Even initial schema construction
-        // can discard its writes after a crash, avoiding primary-open fsyncs.
-        conn.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;")?;
-        conn.execute_batch(SCHEMA)?;
-        conn.execute("UPDATE meta SET version=?1", [version])?;
-        Ok(Disk {
-            conn,
-            path,
-            lock: Arc::new(lock),
-            identity: Arc::new(()),
-            generation: 0,
-            version,
-            pending: BTreeMap::new(),
-            poisoned: false,
-            _temporary: Some(directory),
-            staging_root: self.staging_root.clone(),
-            last_checkpoint: Cell::new(Instant::now()),
-        })
     }
     pub fn get(&self, t: &str, k: &[u8], max: Option<u32>) -> Result<Option<Vec<u8>>> {
         self.readable()?;
@@ -369,7 +332,8 @@ impl Disk {
         if meta(&conn)? != (self.version, self.generation) {
             return Err(Error::SnapshotMismatch);
         }
-        let local = self.stage(version)?;
+        let mut local = Database::memory();
+        local.version = version;
         Ok(Snapshot {
             base: Arc::new(Base {
                 conn: Mutex::new(conn),
@@ -408,7 +372,7 @@ impl Disk {
     }
     pub fn replace(&mut self, version: u32, branch: &Snapshot) -> Result<()> {
         self.readable()?;
-        branch.local.readable()?;
+        branch.local.check_writable()?;
         if !self.pending.is_empty()
             || branch.local.has_pending()
             || branch.cutoff != version
@@ -420,24 +384,20 @@ impl Disk {
             return Err(Error::SnapshotMismatch);
         }
         let generation = self.generation.checked_add(1).ok_or(Error::InvalidEntry)?;
-        self.conn.execute(
-            "ATTACH DATABASE ?1 AS branch_delta",
-            [branch
-                .local
-                .path
-                .join("state.sqlite")
-                .to_str()
-                .ok_or(Error::InvalidEntry)?],
-        )?;
         let result = (|| -> Result<()> {
             let tx = self.conn.transaction()?;
             let began = Instant::now();
             tx.execute("DELETE FROM history WHERE v>=?1", [version])?;
             let deleted = Instant::now();
-            tx.execute(
-                "INSERT INTO history SELECT * FROM branch_delta.history ORDER BY t,n,k,v",
-                [],
-            )?;
+            let mut insert = tx.prepare_cached("INSERT INTO history VALUES(?1,?2,?3,?4,?5)")?;
+            for (table, rows) in &branch.local.tables {
+                for (key, versions) in rows {
+                    for (height, value) in versions {
+                        insert.execute(params![table, key.0.len(), &key.0, height, value])?;
+                    }
+                }
+            }
+            drop(insert);
             let copied = Instant::now();
             tx.execute(
                 "UPDATE meta SET version=?1,generation=?2 WHERE id=0",
@@ -454,11 +414,6 @@ impl Disk {
             }
             Ok(())
         })();
-        let detach = self.conn.execute("DETACH DATABASE branch_delta", []);
-        let result = result.and_then(|_| {
-            detach?;
-            Ok(())
-        });
         if result.is_err() {
             self.poisoned = true;
         }
@@ -470,14 +425,9 @@ impl Disk {
 }
 impl Snapshot {
     pub fn get(&self, t: &str, k: &[u8], max: Option<u32>) -> Result<Option<Vec<u8>>> {
-        self.local.readable()?;
-        if max.is_none_or(|v| v >= self.local.version) {
-            if let Some(value) = self.local.pending.get(&(t.to_owned(), Key(k.to_vec()))) {
-                return Ok(value.clone());
-            }
-        }
-        if let Some((_, value)) = get(&self.local.conn, t, k, max.unwrap_or(u32::MAX))? {
-            return Ok(value);
+        self.local.check_writable()?;
+        if let Some((_, value)) = self.local.row(t, &Key(k.to_vec()), max) {
+            return Ok(value.clone());
         }
         if self.cutoff == 0 {
             return Ok(None);
@@ -497,7 +447,7 @@ impl Snapshot {
         end: Option<&[u8]>,
         max: Option<u32>,
     ) -> Result<Vec<Row>> {
-        self.local.readable()?;
+        self.local.check_writable()?;
         let mut rows = if self.cutoff == 0 {
             BTreeMap::new()
         } else {
@@ -515,14 +465,7 @@ impl Snapshot {
                 max.unwrap_or(u32::MAX).min(self.cutoff - 1),
             )?
         };
-        let changes = scan(
-            &self.local.conn,
-            t,
-            prefix,
-            start,
-            end,
-            max.unwrap_or(u32::MAX),
-        )?;
+        let changes = memory_rows(&self.local, t, prefix, start, end, max);
         rows.extend(changes);
         overlay(
             &mut rows,
@@ -540,23 +483,7 @@ impl Snapshot {
         if self.local.has_pending() || version > self.local.version {
             return Err(Error::SnapshotMismatch);
         }
-        let local = self.local.stage(version)?;
-        if version >= self.cutoff {
-            local.conn.execute(
-                "ATTACH DATABASE ?1 AS parent_delta",
-                [self
-                    .local
-                    .path
-                    .join("state.sqlite")
-                    .to_str()
-                    .ok_or(Error::InvalidEntry)?],
-            )?;
-            local.conn.execute(
-                "INSERT INTO history SELECT * FROM parent_delta.history WHERE v<?1",
-                [version],
-            )?;
-            local.conn.execute("DETACH DATABASE parent_delta", [])?;
-        }
+        let local = self.local.fork(version)?;
         Ok(Self {
             base: self.base.clone(),
             cutoff: self.cutoff.min(version),
@@ -568,6 +495,34 @@ impl Snapshot {
         self.cutoff = self.cutoff.min(version);
         Ok(())
     }
+}
+fn memory_rows(
+    db: &Database,
+    table: &str,
+    prefix: Option<&[u8]>,
+    start: &[u8],
+    end: Option<&[u8]>,
+    max: Option<u32>,
+) -> Rows {
+    use std::ops::Bound;
+    let start = Key(start.to_vec());
+    let end = end.map(|key| Key(key.to_vec()));
+    if end.as_ref().is_some_and(|end| *end <= start) {
+        return Rows::new();
+    }
+    let Some(rows) = db.tables.get(table) else {
+        return Rows::new();
+    };
+    rows.range((
+        Bound::Included(&start),
+        end.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
+    ))
+    .filter(|(key, _)| prefix.is_none_or(|prefix| key.0.starts_with(prefix)))
+    .filter_map(|(key, versions)| {
+        let (height, value) = versions.range(..=max.unwrap_or(u32::MAX)).next_back()?;
+        Some((key.clone(), (*height, value.clone())))
+    })
+    .collect()
 }
 fn get(conn: &Connection, t: &str, k: &[u8], max: u32) -> Result<Option<(u32, Option<Vec<u8>>)>> {
     let mut query=conn.prepare_cached("SELECT v,value FROM history WHERE t=?1 AND n=?2 AND k=?3 AND v<=?4 ORDER BY v DESC LIMIT 1")?;

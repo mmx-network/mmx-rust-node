@@ -86,6 +86,7 @@ fn indexed_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomi
     db.commit_batch(2, [Write::put("t", b"later", b"one")])
         .unwrap();
     let mut branch = db.fork(1).unwrap();
+    assert_eq!(fs::read_dir(dir.path().join("staging")).unwrap().count(), 0);
     assert_eq!(
         branch.get("t", b"old", None).unwrap(),
         Some(b"zero".to_vec())
@@ -100,6 +101,7 @@ fn indexed_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomi
             ],
         )
         .unwrap();
+    assert_eq!(fs::read_dir(dir.path().join("staging")).unwrap().count(), 0);
     db.replace_suffix(1, &branch).unwrap();
     assert_eq!(db.get("t", b"old", None).unwrap(), None);
     assert_eq!(
@@ -126,6 +128,64 @@ fn indexed_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomi
     assert!(Store::open_indexed(dir.path()).is_err());
     drop(branch);
     assert!(Store::open_indexed(dir.path()).is_ok());
+}
+
+#[test]
+fn memory_replay_delta_preserves_pending_tombstones_ranges_and_pinned_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut disk = Store::open_indexed(dir.path()).unwrap();
+    let mut memory = Store::memory();
+    let changes = |height: u32| {
+        [b"".as_slice(), b"a", b"aa", b"zz", b"\xff", b"\xff\xff\x00"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let table = if index % 2 == 0 { "a" } else { "b" };
+                if (height + index as u32).is_multiple_of(3) {
+                    Write::delete(table, key)
+                } else {
+                    Write::put(table, key, [height as u8, index as u8])
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    for height in 0..18 {
+        disk.commit_batch(height + 1, changes(height)).unwrap();
+        memory.commit_batch(height + 1, changes(height)).unwrap();
+    }
+    let mut branch = disk.fork(7).unwrap();
+    let mut expected = memory.fork(7).unwrap();
+    for height in 7..13 {
+        branch.apply(changes(height + 18)).unwrap();
+        expected.apply(changes(height + 18)).unwrap();
+        compare(&expected, &branch);
+        branch.commit(height + 1).unwrap();
+        expected.commit(height + 1).unwrap();
+        compare(&expected, &branch);
+    }
+    let child = branch.fork(9).unwrap();
+    let mut expected_child = expected.fork(9).unwrap();
+    compare(&expected_child, &child);
+    disk.replace_suffix(7, &child).unwrap();
+    memory.replace_suffix(7, &expected_child).unwrap();
+    compare(&memory, &disk);
+    // Publication and a subsequent primary rollback cannot change pinned reads.
+    disk.revert(0).unwrap();
+    compare(&expected, &branch);
+    compare(&expected_child, &child);
+    drop(child);
+    branch.revert(1).unwrap();
+    expected.revert(1).unwrap();
+    branch.commit_batch(2, changes(30)).unwrap();
+    expected.commit_batch(2, changes(30)).unwrap();
+    compare(&expected, &branch);
+    let mut child = branch.fork(2).unwrap();
+    expected_child = expected.fork(2).unwrap();
+    drop(branch);
+    child.commit_batch(3, changes(31)).unwrap();
+    expected_child.commit_batch(3, changes(31)).unwrap();
+    compare(&expected_child, &child);
+    assert_eq!(fs::read_dir(dir.path().join("staging")).unwrap().count(), 0);
 }
 #[test]
 fn indexed_import_preserves_legacy_history_once_and_prevents_diverging_reopens() {

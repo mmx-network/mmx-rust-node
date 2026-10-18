@@ -28,14 +28,14 @@ impl Store {
     pub fn version(&self) -> u32 {
         match &self.0 {
             Backend::Journal(d) => d.version(),
-            Backend::Disk(d) => d.version,
+            Backend::Disk(d) => d.version(),
             Backend::Snapshot(s) => s.local.version(),
         }
     }
     pub fn has_pending(&self) -> bool {
         match &self.0 {
             Backend::Journal(d) => d.has_pending(),
-            Backend::Disk(d) => !d.pending.is_empty(),
+            Backend::Disk(d) => d.has_pending(),
             Backend::Snapshot(s) => s.local.has_pending(),
         }
     }
@@ -98,7 +98,7 @@ impl Store {
     ) -> Result<()> {
         match &mut self.0 {
             Backend::Journal(d) => d.commit_batch(next, writes),
-            Backend::Disk(d) => d.commit(next, writes),
+            Backend::Disk(d) => d.commit_batch(next, writes),
             Backend::Snapshot(s) => s.local.commit_batch(next, writes),
         }
     }
