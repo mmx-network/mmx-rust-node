@@ -1292,4 +1292,3 @@ continues in its existing process.
    component becomes executable.
 
 Licensed under Apache-2.0, following the original MMX project. See [LICENSE](LICENSE).
-
