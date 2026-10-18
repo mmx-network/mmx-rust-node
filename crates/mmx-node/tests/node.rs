@@ -132,7 +132,10 @@ fn transaction_validation_pool_rpc_and_confirmation_use_native_snapshots() {
             let response = node
                 .call(&record(
                     "mmx.Node.get_transaction",
-                    [("id", V::Bytes(id.to_vec())), ("pending", V::Bool(pending))],
+                    [
+                        ("id".into(), V::Bytes(id.to_vec())),
+                        ("pending".into(), V::Bool(pending)),
+                    ],
                 ))
                 .unwrap();
             assert_eq!(
@@ -149,8 +152,11 @@ fn transaction_validation_pool_rpc_and_confirmation_use_native_snapshots() {
             .call(&record(
                 "mmx.Node.get_total_balance",
                 [
-                    ("addresses", V::Sequence(vec![sender.clone(), sender])),
-                    ("currency", V::Bytes(vec![0; 32])),
+                    (
+                        "addresses".into(),
+                        V::Sequence(vec![sender.clone(), sender]),
+                    ),
+                    ("currency".into(), V::Bytes(vec![0; 32])),
                 ],
             ))
             .unwrap();

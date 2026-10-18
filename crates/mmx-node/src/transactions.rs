@@ -310,17 +310,7 @@ impl Node {
         let storage = self.chain.selected().storage();
         for owner in owners {
             if whitelist.is_empty() {
-                let scan_limit = if limit < 0 {
-                    10001
-                } else {
-                    (limit as usize).min(10001)
-                };
-                let rows = storage
-                    .database()
-                    .scan("balances", &owner, Some(scan_limit))?;
-                if rows.len() > 10000 {
-                    return Err(error("balance response exceeds 10000 rows"));
-                }
+                let rows = storage.database().scan("balances", &owner, None)?;
                 for row in rows.into_iter().take(if limit < 0 {
                     usize::MAX
                 } else {
@@ -399,7 +389,7 @@ mod tests {
         let relay = Relay::default();
         let tx = Arc::new(record(
             "mmx.Transaction",
-            [("content_hash", Value::Bytes(vec![1; 32]))],
+            [("content_hash".into(), Value::Bytes(vec![1; 32]))],
         ));
         relay.publish([2; 32], tx.clone(), 100).unwrap();
         assert!(Arc::ptr_eq(&relay.since(0).unwrap().1[0], &tx));

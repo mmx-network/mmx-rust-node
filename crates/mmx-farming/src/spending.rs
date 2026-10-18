@@ -65,6 +65,9 @@ fn anchor(node: &dyn WalletNode) -> Result<(u32, Value)> {
     Ok((height, hash))
 }
 fn fresh(a: &mut Account, node: &dyn WalletNode) -> Result<(u32, Balances, Balances)> {
+    if a.addresses().is_empty() {
+        return Err(error("unlock wallet once to derive its addresses"));
+    }
     // Retain confirmed pending records until expiry: a later fork can make them
     // pending again. No ledger values survive this function.
     for _ in 0..3 {
@@ -328,6 +331,20 @@ fn dispatch(
         tx = a
             .wallet()?
             .complete_native(&tx, &balances, &params, height, options)?;
+    }
+    if method == "complete" {
+        return to_json(&tx);
+    }
+    if method == "send_off" && tx.field("exec_result")?.optional()?.is_some() {
+        tx.fields.insert("exec_result".into(), N::Optional(None));
+        tx.fields.insert(
+            "static_cost".into(),
+            N::Uint(tx.calc_cost(&(&params).into())?),
+        );
+        tx.fields.insert(
+            "content_hash".into(),
+            N::Bytes(tx.calc_hash(true, 0)?.to_vec()),
+        );
     }
     let receipt = from_json(&node.call("validate", json!({"tx":to_json(&tx)?}))?)?;
     if receipt.field("did_fail")?.boolean()? {
