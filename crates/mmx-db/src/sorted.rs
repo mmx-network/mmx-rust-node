@@ -66,7 +66,7 @@ pub fn merge(
     views: &[View<'_>],
     retained_from: Option<u32>,
 ) -> Result<Option<Run>> {
-    let mut builder = Builder::new(path.parent().ok_or(Error::InvalidEntry)?, level)?;
+    let mut builder = Builder::new(crate::parent_dir(path), level)?;
     let mut cursors = views
         .iter()
         .map(|view| view.run.entries())
@@ -232,7 +232,7 @@ impl Builder {
             .temporary
             .persist_noclobber(path)
             .map_err(|error| error.error)?;
-        File::open(path.parent().ok_or(Error::InvalidEntry)?)?.sync_all()?;
+        File::open(crate::parent_dir(path))?.sync_all()?;
         // Reuse the index just written, avoiding an immediate read-back.
         Ok(Run(Arc::new(FileData {
             file,

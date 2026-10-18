@@ -370,7 +370,7 @@ peers and matching C++ canonical hashes. It crossed both hard forks at 1,000,000
 and 5,050,000, with no timeout body reassignments in the final sync/reopen runs.
 The initial Live transition exposed synchronous VDF work blocking RPC; bounded
 background verification fixed it. Live monitor RPC samples ranged from 2 ms to
-748 ms during the verified window.
+740 ms during the verified window.
 The C++ CLI also read heights, headers, full blocks and balances through the
 running node's native VNX RPC service.
 The node uses an indexed disk backend with every
@@ -988,6 +988,17 @@ without first rewriting those files, and resolves equal-version entries in favor
 of the newer input. Its optional retention boundary keeps every newer version
 and the latest preceding value or tombstone per key. Database-wide retention
 metadata and RPC enforcement are still required before retiring history.
+
+`mmx_db::journal` streams atomic replacement frames and returns 24-byte value
+references containing a file ID, offset, size, and checksum. Values are appended
+once; sorted runs and their compaction can move these references instead of
+rewriting block payloads. A cross-layer test keeps two 1 MiB values in their
+original log while both sorted indexes stay below 1 KiB. Reopen can lazily read
+a sealed file without replaying its values. Recovery starts at a supplied
+checkpoint, verifies checksums and commit seals, and truncates only a physically
+incomplete final frame. Failed I/O/recovery requires reopening the writer.
+Generation, version, and retention-floor transitions are included in each frame.
+These primitives are not yet wired into `Store` or the running node.
 
 The primary backend port will include optional history purging. A durable
 retention floor must preserve the state and private consensus context at the
