@@ -32,6 +32,7 @@ pub struct Spending {
     reserved: Balances,
     pending: BTreeMap<[u8; 32], Pending>,
 }
+#[derive(Clone)]
 struct Pending {
     expires: u32,
     debits: Balances,
@@ -141,6 +142,34 @@ fn remember(a: &mut Account, tx: &Record, fee: u32) -> Result<()> {
             debits,
         },
     );
+    Ok(())
+}
+// Node admission validates once. Reserving its static fee matches the native
+// wallet; the node pool separately checks aggregate actual execution fees.
+fn submit(a: &mut Account, node: &dyn WalletNode, tx: &Record) -> Result<()> {
+    let payload = to_json(tx)?;
+    let fee: u32 = (u128::from(tx.field("static_cost")?.uint()?)
+        * u128::from(tx.field("fee_ratio")?.uint()?)
+        / 1024)
+        .try_into()?;
+    let id: [u8; 32] = tx.field("id")?.bytes()?.try_into()?;
+    let previous = a.spending.pending.get(&id).cloned();
+    remember(a, tx, fee)?;
+    if let Err(e) = node.call("add_transaction", json!({"tx":payload,"pre_validate":true})) {
+        // An explicit rejection did not admit the transaction. A lost response
+        // is ambiguous, so retain the reservation until confirmation/expiry.
+        if matches!(
+            e.downcast_ref::<vnx::Error>(),
+            Some(vnx::Error::Remote(_) | vnx::Error::PermissionDenied(_))
+        ) {
+            if let Some(old) = previous {
+                a.spending.pending.insert(id, old);
+            } else {
+                a.spending.pending.remove(&id);
+            }
+        }
+        return Err(e);
+    }
     Ok(())
 }
 pub const METHODS: &[&str] = &[
@@ -350,6 +379,14 @@ fn dispatch(
             N::Bytes(tx.calc_hash(true, 0)?.to_vec()),
         );
     }
+    if method == "send_off" || options.auto_send {
+        submit(a, node, &tx)?;
+        return if method == "send_off" {
+            Ok(Value::Null)
+        } else {
+            to_json(&tx)
+        };
+    }
     let mut receipt = node.call("validate", json!({"tx":to_json(&tx)?}))?;
     // A struct nested in a typed return has no dynamic __type tag in JSON.
     receipt["__type"] = json!("mmx.exec_result_t");
@@ -357,28 +394,13 @@ fn dispatch(
     if receipt.field("did_fail")?.boolean()? {
         return Err(error("transaction execution would fail"));
     }
-    let fee: u32 = receipt.field("total_fee")?.uint()?.try_into()?;
-    let submit = method == "send_off" || (method != "complete" && options.auto_send);
-    if submit || options.mark_spent {
-        // Keep reservations even if the send reply is lost. An explicit retry
-        // of send_off with the same ID replaces, rather than adds, its debit.
-        remember(a, &tx, fee)?;
+    if options.mark_spent {
+        remember(a, &tx, receipt.field("total_fee")?.uint()?.try_into()?)?;
     }
-    if submit {
-        node.call(
-            "add_transaction",
-            json!({"tx":to_json(&tx)?,"pre_validate":true}),
-        )?;
-    }
-    if method == "send_off" {
-        return Ok(Value::Null);
-    }
-    if !submit && method != "complete" {
-        tx.fields.insert(
-            "exec_result".into(),
-            N::Optional(Some(Box::new(N::Record(receipt)))),
-        );
-    }
+    tx.fields.insert(
+        "exec_result".into(),
+        N::Optional(Some(Box::new(N::Record(receipt)))),
+    );
     to_json(&tx)
 }
 fn template(
@@ -528,6 +550,57 @@ mod tests {
             })
         }
     }
+    #[test]
+    fn rejected_submissions_release_only_new_debits_and_lost_replies_keep_them() {
+        struct Admission(u8);
+        impl WalletNode for Admission {
+            fn call(&self, method: &str, _: Value) -> Result<Value> {
+                assert_eq!(method, "add_transaction");
+                match self.0 {
+                    0 => Err(vnx::Error::Remote("rejected".into()).into()),
+                    1 => {
+                        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "lost reply").into())
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+        }
+        let mut a = Account::new(KeyFile::new([82; 32], None), 0, 1, "test".into()).unwrap();
+        let owner = a.addresses()[0];
+        let tx = Record::from_generated(&mmx::Transaction {
+            id: [1; 32].into(),
+            expires: 100,
+            sender: Some(owner.0.into()),
+            static_cost: 100,
+            inputs: vec![mmx::txin_t {
+                address: owner.0.into(),
+                amount: 20_u128.to_le_bytes().into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(submit(&mut a, &Admission(0), &tx).is_err());
+        assert!(a.spending.pending.is_empty());
+        assert!(submit(&mut a, &Admission(1), &tx).is_err());
+        assert_eq!(
+            a.spending.pending[&[1; 32]].debits[&(owner, Address::default())],
+            120
+        );
+        assert!(submit(&mut a, &Admission(0), &tx).is_err());
+        assert_eq!(
+            a.spending.pending.len(),
+            1,
+            "rejection of retry must preserve earlier ambiguous reservation"
+        );
+        submit(&mut a, &Admission(2), &tx).unwrap();
+        assert_eq!(
+            a.spending.pending.len(),
+            1,
+            "retry must not duplicate debits"
+        );
+    }
+
     #[test]
     fn fresh_reads_reapply_pending_reservations_after_a_fork_and_release_at_expiry() {
         let mut account = Account::new(KeyFile::new([81; 32], None), 0, 1, "test".into()).unwrap();

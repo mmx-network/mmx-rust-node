@@ -1256,7 +1256,9 @@ Use `mmx wallet-rpc METHOD --args -` for native VNX JSON arguments on stdin;
 addresses are 32-byte arrays and amounts are 16-byte little-endian arrays.
 `complete` returns a funded, signed transaction without submitting it;
 `sign_off` adds signatures for known owners and can leave foreign inputs unsigned.
-Spending methods default to validation and submission. Setting
+Automatic sends use a single node admission/validation RPC and reserve inputs
+plus the static fee, as in C++; node admission checks actual pending execution
+fees. Setting
 `options.auto_send=false` returns a preview with an execution receipt;
 `send_off` accepts that preview, removes its receipt and validates it again.
 `options.passphrase` temporarily unlocks a locked account and always relocks it,
@@ -1268,7 +1270,7 @@ confirmed pending records until expiry so a fork can reactivate their reservatio
 These reservations currently last for the daemon process; durable wallet pending
 history/recovery is still pending. `release_all` releases explicit reservations,
 while pending transaction debits remain until confirmation or expiry. An ambiguous
-submission keeps its reservation; retry `send_off` with the same signed transaction
+submission keeps its reservation; explicit rejections release it. Retry `send_off` with the same signed transaction
 instead of creating a new one. The node pool deduplicates that transaction.
 
 Node `validate` executes against a pinned native database snapshot and never
