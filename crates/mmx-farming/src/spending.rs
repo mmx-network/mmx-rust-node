@@ -350,7 +350,10 @@ fn dispatch(
             N::Bytes(tx.calc_hash(true, 0)?.to_vec()),
         );
     }
-    let receipt = from_json(&node.call("validate", json!({"tx":to_json(&tx)?}))?)?;
+    let mut receipt = node.call("validate", json!({"tx":to_json(&tx)?}))?;
+    // A struct nested in a typed return has no dynamic __type tag in JSON.
+    receipt["__type"] = json!("mmx.exec_result_t");
+    let receipt = from_json(&receipt)?;
     if receipt.field("did_fail")?.boolean()? {
         return Err(error("transaction execution would fail"));
     }

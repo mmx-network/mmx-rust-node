@@ -331,6 +331,7 @@ fn native_completion_matches_cpp_transfer_and_supports_both_transaction_versions
     ]);
     let mut params = mmx::ChainParams {
         hardfork2_height: 0,
+        network: ChainParams::default().network,
         ..Default::default()
     };
     let simple = w
