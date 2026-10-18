@@ -725,6 +725,35 @@ an irreversible state cutoff. Reopen and subsequent fork selection can replay
 the retained branches. Specialized wallet/trading indexes, archive compaction
 and remaining node services are separate port stages.
 
+`audit_rollback` exercises rewinds on isolated SQLite snapshots, leaving the
+source databases unchanged. It rewinds through genesis and any hard-fork
+boundaries covered by the source prefix, then checks every retained history row,
+including tombstones, and every visible key/value. Offline ticks must keep the
+requested height. Replay uses the retained archive to re-verify CPU space work,
+authentication, transitions and ledger execution from genesis and across the
+available hard forks. Ledger history, height/transaction indexes, reopened tips,
+and the unchanged archive are compared with the original snapshot.
+Stored record encodings and redundant legacy header rows are excluded from the
+replay ledger comparison because replay can upgrade their storage representation.
+
+```sh
+cargo run --release -p mmx-node --example audit_rollback -- \
+  --source-dir ./mmx-data --output /path/to/scratch-disk
+```
+
+The audit needs space for multiple full snapshots and temporary layout rewrites.
+Separate scratch storage reduces competition with a running node's disk I/O.
+Its JSON lines identify completed phases and the hard forks actually checked;
+it performs no network block downloads.
+
+The audit passed on a frozen mainnet prefix at height 1,124,592, with 5,683,605
+selected history rows. It checked nine rewind heights: 1,124,592, 1,124,591,
+1,000,002, 1,000,001, 1,000,000, 999,999, 128, 1 and genesis. Every retained row
+and visible value matched at each height, including after offline ticks.
+Replay from genesis through 128 and from 999,999 through 1,000,002 matched the
+original ledger/history and indexes. The retained archive and its publication
+metadata stayed unchanged. This prefix covers the first hard fork only.
+
 `audit_native_storage` pins a read-only SQLite view and compares VM cell and
 container-entry values with a running C++ node's historical storage API. It
 checks the canonical genesis and selected-tip hashes, then reads each sampled

@@ -22,4 +22,6 @@ tempfile.workspace = true
 rand = "0.8"
 
 [dev-dependencies]
+mmx-db.workspace = true
+sha2.workspace = true
 rusqlite = { version = "0.39", features = ["backup"] }
