@@ -1,7 +1,7 @@
 //! Offline, paced comparison of imported tables and their rollback views.
 use super::Native;
 use crate::{Error, Result, Row};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::{
     fs::{self, File, OpenOptions},
     path::Path,
@@ -98,16 +98,16 @@ impl Verifier {
         }
         let mut snapshot = self.native.fork(self.version())?;
         snapshot.revert(version)?;
-        // The covering primary-key index supplies bounded key groups. Fetch
-        // payloads only after discarding the next range's lookahead key.
+        // Seek past a key's entire version history instead of grouping it.
+        // The lookahead fetches only a key, never its payload twice.
         let mut query = self.source.prepare_cached(
-            "SELECT k,MAX(v) FROM history INDEXED BY sqlite_autoindex_history_1
-              WHERE t=?1 AND v<?2 AND (n,k)>=(?3,?4)
-              GROUP BY n,k ORDER BY n,k LIMIT ?5",
+            "SELECT k FROM history WHERE t=?1 AND (n,k,v)>=(?2,?3,?4)
+             ORDER BY n,k,v LIMIT 1",
         )?;
-        let mut value_query = self
-            .source
-            .prepare_cached("SELECT value FROM history WHERE t=?1 AND n=?2 AND k=?3 AND v=?4")?;
+        let mut value_query = self.source.prepare_cached(
+            "SELECT v,value FROM history WHERE t=?1 AND n=?2 AND k=?3 AND v<?4
+             ORDER BY v DESC LIMIT 1",
+        )?;
         let mut report = Report {
             version,
             ..Default::default()
@@ -118,31 +118,30 @@ impl Verifier {
             // that could cause a subsequent read burst.
             let started = Instant::now();
             let before = report.transfer_bytes;
-            let mut rows = query
-                .query_map(
-                    params![
-                        table,
-                        version,
-                        start.len(),
-                        start,
-                        options.keys_per_batch + 1
-                    ],
-                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u32>(1)?)),
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let end = if rows.len() > options.keys_per_batch {
-                Some(rows.pop().unwrap().0)
-            } else {
-                None
-            };
             let mut expected = Vec::new();
-            for (key, version) in rows {
-                let value: Option<Vec<u8>> =
-                    value_query.query_row(params![table, key.len(), key, version], |r| r.get(0))?;
+            let mut seek = start.clone();
+            let mut seek_version = 0u64;
+            let mut end = None;
+            for i in 0..=options.keys_per_batch {
+                let key: Option<Vec<u8>> = query
+                    .query_row(params![table, seek.len(), seek, seek_version], |r| r.get(0))
+                    .optional()?;
+                let Some(key) = key else { break };
+                if i == options.keys_per_batch {
+                    end = Some(key);
+                    break;
+                }
+                let row: Option<(u32, Option<Vec<u8>>)> = value_query
+                    .query_row(params![table, key.len(), key, version], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .optional()?;
                 report.keys += 1;
-                report.transfer_bytes +=
-                    key.len() as u64 + value.as_ref().map_or(0, |v| v.len() as u64);
-                if let Some(value) = value {
+                report.transfer_bytes += key.len() as u64;
+                seek = key.clone();
+                seek_version = u64::from(u32::MAX) + 1;
+                if let Some((version, Some(value))) = row {
+                    report.transfer_bytes += value.len() as u64;
                     expected.push(Row {
                         key,
                         value,
