@@ -26,6 +26,7 @@ struct Daemon {
     cwd: PathBuf,
     argv: Vec<u8>,
     start: String,
+    logs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 fn start_time(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -55,6 +56,7 @@ impl Daemon {
             .args(args)
             .current_dir(&cwd)
             .env("RAYON_NUM_THREADS", "1")
+            .env("MMX_HOME", &cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -62,10 +64,21 @@ impl Daemon {
         let start = start_time(child.id()).unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = logs.clone();
         thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
             let mut line = String::new();
-            let r = BufReader::new(stdout).read_line(&mut line);
-            let _ = tx.send((r, line));
+            let result = reader.read_line(&mut line);
+            captured.lock().unwrap().push(line.clone());
+            let _ = tx.send((result, line));
+            for line in reader.lines().map_while(std::result::Result::ok) {
+                let mut logs = captured.lock().unwrap();
+                if logs.len() >= 128 {
+                    logs.remove(0);
+                }
+                logs.push(line);
+            }
         });
         let daemon = Self {
             child,
@@ -73,12 +86,30 @@ impl Daemon {
             cwd,
             argv,
             start,
+            logs,
         };
         let (result, line) = rx
             .recv_timeout(Duration::from_secs(15))
             .expect("daemon startup timed out");
         assert!(result.unwrap() > 0, "daemon exited during startup");
         (daemon, line)
+    }
+    fn line(&self, prefix: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(line) = self
+                .logs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|s| s.starts_with(prefix))
+                .cloned()
+            {
+                return line;
+            }
+            assert!(Instant::now() < deadline, "missing startup line {prefix}");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
     fn owns(&self) -> bool {
         let p = format!("/proc/{}", self.child.id());
@@ -557,4 +588,352 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
 
 fn k256_for_test() -> k256::ecdsa::SigningKey {
     k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap()
+}
+
+fn synthetic_network() -> (mmx_execution::chain::network::Network, Value, Vec<Value>) {
+    use mmx_execution::chain::{genesis::Assets, network::Network};
+    let rows: Vec<Value> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let g = rows
+        .iter()
+        .find(|r| r["name"] == "synthetic")
+        .unwrap()
+        .clone();
+    let steps = rows.iter().find(|r| r["kind"] == "chain").unwrap()["steps"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let decode = |v: &Value| {
+        Record::decode(&vnx::util::from_hex_string(v.as_str().unwrap()).unwrap()).unwrap()
+    };
+    let network = Network {
+        params: mmx::ChainParams::decode(
+            &vnx::util::from_hex_string(g["params"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap(),
+        assets: Assets {
+            binaries: g["binaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(decode)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            testnet_rewards: None,
+            project_relay: None,
+        },
+    };
+    (network, g, steps)
+}
+fn synced_test_node(
+    network: &mmx_execution::chain::network::Network,
+    identity: u8,
+) -> std::sync::Arc<std::sync::Mutex<mmx_node::Node>> {
+    use mmx_execution::chain::forks::ForkChain;
+    use mmx_node::{
+        node::hash,
+        sync::{self, Source},
+        Node,
+    };
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+    let mut chain = ForkChain::memory(network.params.clone());
+    chain.initialize(&network.assets).unwrap();
+    let genesis = chain
+        .block(&chain.selected().hash_at(0).unwrap().unwrap())
+        .unwrap()
+        .unwrap();
+    struct Genesis(Record);
+    impl Source for Genesis {
+        fn height(&mut self) -> mmx_node::Result<u32> {
+            Ok(0)
+        }
+        fn hash_at(&mut self, h: u32) -> mmx_node::Result<Option<[u8; 32]>> {
+            Ok((h == 0).then(|| hash(&self.0, "hash").unwrap()))
+        }
+        fn block_at(&mut self, h: u32) -> mmx_node::Result<Option<Record>> {
+            Ok((h == 0).then(|| self.0.clone()))
+        }
+    }
+    let node = Arc::new(Mutex::new(
+        Node::from_chain(
+            chain,
+            k256::ecdsa::SigningKey::from_slice(&[identity; 32]).unwrap(),
+        )
+        .unwrap(),
+    ));
+    sync::synchronize_pipelined(
+        &mut Genesis(genesis),
+        &node,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    node
+}
+
+#[test]
+fn remote_plot_to_farmer_to_rust_node_produces_a_live_block() {
+    use mmx_node::{production::Worker, rpc};
+    use std::sync::{atomic::AtomicBool, Arc};
+    let (network, _, steps) = synthetic_network();
+    let state = synced_test_node(&network, 7);
+    let mut node = rpc::vnx_server("127.0.0.1:0".parse().unwrap(), state.clone()).unwrap();
+    let runtime = Runtime::new().unwrap();
+    let mut methods = Methods::new();
+    let mut scalar = [0; 32];
+    scalar[31] = 1;
+    let key = FarmerKey::from_bytes(&scalar).unwrap();
+    let public = key.public_key();
+    methods.add("mmx.Wallet.get_all_farmer_keys", None, move |_, _| {
+        Ok(json!([[scalar, public.as_slice()]]))
+    });
+    methods.add("mmx.Wallet.get_all_accounts", None, |_, _| {
+        Ok(json!([{"address":([7u8;32])}]))
+    });
+    runtime.register("Wallet", methods).unwrap();
+    let mut wallet = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        runtime,
+        mmx_types::vnx_registry().unwrap(),
+        ServerOptions {
+            services: ["Wallet".into()].into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let plots = dir.path().join("plots");
+    fs::create_dir(&plots).unwrap();
+    fs::write(
+        plots.join("native.plot"),
+        include_bytes!("../../mmx-farming/tests/native/native-0.plot"),
+    )
+    .unwrap();
+    let (farmer, line) = Daemon::start_line(
+        env!("CARGO_BIN_EXE_mmx-farmer"),
+        &[
+            "--wallet".into(),
+            wallet.endpoint().to_string().into(),
+            "--node".into(),
+            node.endpoint().to_string().into(),
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--harvester-listen".into(),
+            "0.0.0.0:0".into(),
+        ],
+        dir.path(),
+    );
+    let private = line.split_whitespace().last().unwrap();
+    let remote = line
+        .split_whitespace()
+        .nth(3)
+        .unwrap()
+        .replace("0.0.0.0:", "127.0.0.1:");
+    let (harvester, _) = Daemon::start(
+        env!("CARGO_BIN_EXE_mmx-harvester"),
+        &[
+            "--farmer".into(),
+            remote.into(),
+            "--plot-dir".into(),
+            plots.into_os_string(),
+            "--threads".into(),
+            "1".into(),
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+        ],
+        dir.path(),
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut worker = Worker::start(state.clone(), private.parse().unwrap(), stop, 0).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .receive(
+            &Record::decode(
+                &vnx::util::from_hex_string(steps[0]["vdf"].as_str().unwrap()).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while state
+        .lock()
+        .unwrap()
+        .chain()
+        .selected()
+        .tip()
+        .unwrap()
+        .unwrap()
+        .height
+        == 0
+    {
+        assert!(
+            Instant::now() < deadline,
+            "remote harvester did not produce a block"
+        );
+        state.lock().unwrap().tick().unwrap();
+        thread::sleep(Duration::from_millis(20));
+    }
+    let guard = state.lock().unwrap();
+    let tip = guard.chain().selected().tip().unwrap().unwrap();
+    let block = guard.chain().block(&tip.hash.0).unwrap().unwrap();
+    assert!(mmx_consensus::header::is_valid(&block, &network.params).unwrap());
+    mmx_consensus::header::authenticate(&block).unwrap();
+    assert_eq!(tip.height, 1);
+    drop(guard);
+    worker.shutdown();
+    drop(harvester);
+    drop(farmer);
+    wallet.shutdown();
+    node.shutdown();
+}
+
+#[test]
+fn node_starts_configured_wallet_farmer_and_remote_harvester_services() {
+    use mmx_execution::chain::network::BINARY_FILES;
+    let (network, _, _) = synthetic_network();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = root.join("config/base");
+    let local = root.join("config/local");
+    let data = root.join("data").join(&network.params.network);
+    for path in [&base, &local, &data] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::write(
+        base.join("chain.json"),
+        serde_json::to_vec(&json!({"params":network.params})).unwrap(),
+    )
+    .unwrap();
+    for (name, tx) in BINARY_FILES.iter().zip(&network.assets.binaries) {
+        fs::write(data.join(name), tx.encode().unwrap()).unwrap();
+    }
+    let mut peers = vec![];
+    for id in 8..11 {
+        peers.push(
+            mmx_node::peer::Server::bind("127.0.0.1:0", synced_test_node(&network, id)).unwrap(),
+        );
+    }
+    fs::write(
+        base.join("Router.json"),
+        serde_json::to_vec(
+            &json!({"seed_peers":peers.iter().map(|p|p.address().to_string()).collect::<Vec<_>>()}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let endpoint = |name: &str| format!("unix://{}", root.join(name).display());
+    let wallet = endpoint("wallet.sock");
+    let farmer = endpoint("farmer.sock");
+    let harvesters = endpoint("remote.sock");
+    let harvester = endpoint("harvester.sock");
+    fs::write(
+        root.join("wallet.dat"),
+        KeyFile::new([83; 32], None).encode(),
+    )
+    .unwrap();
+    fs::write(
+        local.join("Wallet.json"),
+        serde_json::to_vec(&json!({"key_files":["wallet.dat"],"num_addresses":2,"listen":wallet}))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        local.join("Farmer.json"),
+        serde_json::to_vec(&json!({"private_endpoint":farmer,"harvester_endpoint":harvesters}))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        local.join("Harvester.json"),
+        serde_json::to_vec(&json!({"plot_dirs":[],"num_threads":1,"listen":harvester})).unwrap(),
+    )
+    .unwrap();
+    fs::write(local.join("allow_remote"), b"true").unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_mmx"))
+        .parent()
+        .unwrap()
+        .join("mmx-node");
+    let (daemon, _) = Daemon::start_line(
+        binary.to_str().unwrap(),
+        &[
+            "--mmx-root".into(),
+            root.as_os_str().into(),
+            "-c".into(),
+            base.into_os_string(),
+            local.into_os_string(),
+            "--data-dir".into(),
+            root.join("rust-data").into_os_string(),
+            "--p2p-listen".into(),
+            "127.0.0.1:0".into(),
+            "--rpc-listen".into(),
+            "127.0.0.1:0".into(),
+            "--http-listen".into(),
+            "127.0.0.1:0".into(),
+        ],
+        root,
+    );
+    let line = daemon.line("P2P ");
+    let node_endpoint = line
+        .split_whitespace()
+        .nth(4)
+        .unwrap()
+        .trim_end_matches(',');
+    let node = client(node_endpoint, "Node");
+    let wallets = client(&wallet, "Wallet");
+    assert_eq!(
+        wallets
+            .call_value("mmx.Wallet.get_all_addresses", json!({"index":0}))
+            .unwrap()["_ret_0"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let remote = client(&harvesters, "Farmer");
+    assert_eq!(
+        remote
+            .call_value("mmx.Farmer.get_farmer_keys", json!({}))
+            .unwrap()["_ret_0"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(remote
+        .call_value(
+            "mmx.Farmer.sign_vote",
+            json!({"vote":{"__type":"mmx.ValidatorVote"}})
+        )
+        .is_err());
+    let control = client(&harvester, "Harvester");
+    assert_eq!(
+        control
+            .call_value("mmx.Harvester.get_total_bytes", json!({}))
+            .unwrap()["_ret_0"],
+        0
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while node
+        .call_value("mmx.Node.get_synced_height", json!({}))
+        .unwrap()["_ret_0"]
+        .is_null()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "node did not sync from its three configured peers"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    control.close();
+    remote.close();
+    wallets.close();
+    node.close();
+    drop(daemon);
+    for peer in &mut peers {
+        peer.shutdown();
+    }
 }

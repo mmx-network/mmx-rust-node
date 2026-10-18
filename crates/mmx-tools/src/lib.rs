@@ -358,7 +358,9 @@ pub fn farmer_main() -> Result<()> {
             match signed {
                 Ok(value) => {
                     runtime.publish("farmer.proof", value.clone(), false)?;
-                    node.publish("farmer.proof", value)?;
+                    if let Err(e) = node.publish("farmer.proof", value) {
+                        eprintln!("Node proof delivery: {e}");
+                    }
                 }
                 Err(e) => eprintln!("Rejected harvester proof: {e}"),
             }
@@ -531,7 +533,9 @@ pub fn harvester_main() -> Result<()> {
                 .lock()
                 .map_err(|_| err("harvester lock poisoned"))?
                 .farm_info()?;
-            farmer.publish("harvester.info", info.to_value()?)?;
+            if let Err(e) = farmer.publish("harvester.info", info.to_value()?) {
+                eprintln!("Farmer report delivery: {e}");
+            }
             reported = Instant::now();
         }
         if args.reload_interval > 0
@@ -576,7 +580,10 @@ pub fn harvester_main() -> Result<()> {
                             eprintln!("Discarding late proof");
                             break;
                         }
-                        farmer.publish("harvester.proof", service::to_json(&proof)?)?;
+                        if let Err(e) = farmer.publish("harvester.proof", service::to_json(&proof)?)
+                        {
+                            eprintln!("Farmer proof delivery: {e}");
+                        }
                     }
                 }
                 Err(e) => eprintln!("Plot lookup: {e}"),
