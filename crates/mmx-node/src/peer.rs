@@ -280,13 +280,11 @@ fn respond_with(
                 | "mmx.Node.get_header_at"
                 | "mmx.Node.get_tx_ids_at"
         ) {
-            return Ok(record(
-                "vnx.NoSuchMethod",
-                [(
-                    "what".into(),
-                    Value::String(b"method is not available to peers".to_vec()),
-                )],
-            ));
+            return Ok(Record::from_generated(&mmx_types::vnx::NoSuchMethod {
+                what: "method is not available to peers".into(),
+                method: method.name.clone(),
+                ..Default::default()
+            })?);
         }
         if let Some(reply) = state.call(method)? {
             return Ok(reply);

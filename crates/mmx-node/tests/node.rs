@@ -303,6 +303,7 @@ fn peer_socket_has_only_native_router_methods_and_never_executes_validation() {
         ),
         record("mmx.Node.get_params", []),
     ] {
+        let name = method.name.clone();
         connection
             .send(&record(
                 "mmx.Request",
@@ -313,10 +314,10 @@ fn peer_socket_has_only_native_router_methods_and_never_executes_validation() {
             ))
             .unwrap();
         let reply = connection.receive(Duration::from_secs(2)).unwrap().unwrap();
-        assert_eq!(
-            reply.field("result").unwrap().record().unwrap().name,
-            "vnx.NoSuchMethod"
-        );
+        let result = reply.field("result").unwrap().record().unwrap();
+        assert_eq!(result.name, "vnx.NoSuchMethod");
+        assert_eq!(result.field("dst_mac").unwrap().uint().unwrap(), 0);
+        assert_eq!(result.field("method").unwrap().text().unwrap(), name);
     }
     connection
         .send(&record(
