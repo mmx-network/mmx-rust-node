@@ -182,8 +182,20 @@ fn transaction_validation_pool_rpc_and_confirmation_use_native_snapshots() {
         before,
         "mempool and dry-run validation must not write database files"
     );
-    source.blocks.push(block);
-    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    // After the historical/live transition, new blocks arrive as broadcasts.
+    n.lock().unwrap().receive(&wire(&steps[0]["vdf"])).unwrap();
+    n.lock().unwrap().receive(&block).unwrap();
+    assert_eq!(
+        n.lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        1
+    );
     assert_eq!(n.lock().unwrap().pending_transactions(), 0);
 }
 fn check(node: &Arc<Mutex<Node>>, step: &Value) {
