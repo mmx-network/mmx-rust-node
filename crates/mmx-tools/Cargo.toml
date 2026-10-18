@@ -9,7 +9,6 @@ description = "MMX wallet, farmer, harvester and command line utility"
 [dependencies]
 mmx-types.workspace = true
 mmx-consensus.workspace = true
-mmx-execution.workspace = true
 mmx-farming.workspace = true
 mmx-wallet.workspace = true
 mmxwallet = { path = "../mmxwallet" }

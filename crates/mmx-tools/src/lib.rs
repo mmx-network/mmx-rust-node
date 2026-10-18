@@ -16,7 +16,7 @@ use std::{
 };
 use vnx::{
     net::NetworkClient,
-    runtime::{OverflowPolicy, Runtime},
+    runtime::{Methods, OverflowPolicy, Runtime},
     serde_json::{self, json, Value},
 };
 
@@ -45,8 +45,13 @@ fn key_file(path: &Path) -> Result<KeyFile> {
     File::open(path)?.take(65537).read_to_end(&mut bytes)?;
     Ok(KeyFile::decode(&bytes)?)
 }
-fn params(root: &Path, network: &str) -> Result<mmx::ChainParams> {
-    Ok(mmx_execution::chain::network::Network::load(root, network)?.params)
+fn params(node: &NetworkClient, expected: Option<&str>) -> Result<mmx::ChainParams> {
+    let params: mmx::ChainParams =
+        serde_json::from_value(call(node, "mmx.Node.get_params", json!({}))?)?;
+    if params.network.is_empty() || expected.is_some_and(|n| n != params.network) {
+        return Err(err("node network does not match requested network"));
+    }
+    Ok(params)
 }
 
 #[derive(Parser)]
@@ -119,10 +124,8 @@ pub struct FarmerArgs {
     listen: String,
     #[arg(long)]
     reward_address: Option<Address>,
-    #[arg(long, default_value = "../mmx-node")]
-    mmx_root: PathBuf,
-    #[arg(long, default_value = "mainnet")]
-    network: String,
+    #[arg(long)]
+    network: Option<String>,
 }
 fn farmer_keys(wallet: &NetworkClient) -> Result<Vec<FarmerKey>> {
     let value = call(wallet, "mmx.Wallet.get_all_farmer_keys", json!({}))?;
@@ -147,7 +150,8 @@ fn farmer_keys(wallet: &NetworkClient) -> Result<Vec<FarmerKey>> {
 }
 pub fn farmer_main() -> Result<()> {
     let args = FarmerArgs::parse();
-    let params = params(&args.mmx_root, &args.network)?;
+    let node = connect(&args.node, "Node")?;
+    let params = params(&node, args.network.as_deref())?;
     let wallet = connect(&args.wallet, "Wallet")?;
     let keys = farmer_keys(&wallet)?;
     if keys.is_empty() {
@@ -170,17 +174,24 @@ pub fn farmer_main() -> Result<()> {
     let farmer = Arc::new(Mutex::new(Farmer::new(keys, reward)));
     let runtime = Runtime::new()?;
     let mac = vnx::util::random_nonzero_u64()?;
+    let native_params = service::to_json(&mmx_consensus::Record::from_generated(&params)?)?;
+    let mut methods = Methods::new();
+    methods.add(
+        "mmx.Node.get_params",
+        Some("mmx.permission_e.REMOTE".into()),
+        move |_, _| Ok(native_params.clone()),
+    );
+    runtime.register("Node", methods)?;
     runtime.register(
         "Farmer",
         service::farmer_methods(farmer.clone(), params, mac),
     )?;
     let proofs = runtime.subscribe("harvester.proof", 64, OverflowPolicy::DropOldest, false)?;
     let reports = runtime.subscribe("harvester.info", 64, OverflowPolicy::DropOldest, false)?;
-    let node = connect(&args.node, "Node")?;
     // Do not request replay: an old challenge must never trigger fresh disk work.
     let challenges =
         node.subscribe("harvester.challenges", 8, OverflowPolicy::DropOldest, false)?;
-    let mut options = service::private_options(["Farmer".into()]);
+    let mut options = service::private_options(["Farmer".into(), "Node".into()]);
     options.publish_topics = ["harvester.proof".into(), "harvester.info".into()].into();
     options.export_topics = ["harvester.challenges".into(), "farmer.proof".into()].into();
     let mut server = service::bind_private(args.listen.parse()?, runtime.clone(), options)?;
@@ -264,10 +275,8 @@ pub struct HarvesterArgs {
     threads: usize,
     #[arg(long, default_value_t = 3600)]
     reload_interval: u64,
-    #[arg(long, default_value = "../mmx-node")]
-    mmx_root: PathBuf,
-    #[arg(long, default_value = "mainnet")]
-    network: String,
+    #[arg(long)]
+    network: Option<String>,
 }
 pub fn harvester_main() -> Result<()> {
     let args = HarvesterArgs::parse();
@@ -277,7 +286,9 @@ pub fn harvester_main() -> Result<()> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build_global()?;
-    let params = params(&args.mmx_root, &args.network)?;
+    let node = connect(&args.farmer, "Node")?;
+    let params = params(&node, args.network.as_deref())?;
+    node.close();
     let farmer = connect(&args.farmer, "Farmer")?;
     let keys: Vec<vnx::Fixed<u8, 33>> =
         serde_json::from_value(call(&farmer, "mmx.Farmer.get_farmer_keys", json!({}))?)?;
