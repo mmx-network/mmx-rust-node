@@ -575,6 +575,30 @@ fn get(conn: &Connection, t: &str, k: &[u8], max: u32) -> Result<Option<(u32, Op
         .query_row(params![t, k.len(), k, max], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?)
 }
+fn scan_sql(prefix: bool) -> String {
+    let source = if prefix {
+        "history INDEXED BY history_key"
+    } else {
+        "history INDEXED BY sqlite_autoindex_history_1"
+    };
+    let prefix_condition = if prefix {
+        "AND k>=?7 AND (?8 IS NULL OR k<?8)"
+    } else {
+        "AND ?7 IS NULL AND ?8 IS NULL"
+    };
+    // Keep the bounded key set on the outside of the join. Otherwise SQLite
+    // may scan every row of the table and probe a small automatic index on x.
+    // CROSS JOIN fixes the loop order; each selected version uses its full PK.
+    format!(
+        "SELECT h.k,h.v,h.value FROM
+        (SELECT n,k,MAX(v) v FROM {source} WHERE t=?1 AND v<=?2
+            AND (n,k)>=(?3,?4)
+            AND (?5 IS NULL OR (n,k)<(?5,?6))
+            {prefix_condition}
+            GROUP BY n,k) x CROSS JOIN history h
+        WHERE h.t=?1 AND h.n=x.n AND h.k=x.k AND h.v=x.v ORDER BY h.n,h.k"
+    )
+}
 fn scan(
     conn: &Connection,
     t: &str,
@@ -595,30 +619,72 @@ fn scan(
             upper = None;
         }
     }
-    let source = if prefix.is_some() {
-        "history INDEXED BY history_key"
-    } else {
-        "history INDEXED BY sqlite_autoindex_history_1"
-    };
-    let prefix_condition = if prefix.is_some() {
-        "AND k>=?7 AND (?8 IS NULL OR k<?8)"
-    } else {
-        "AND ?7 IS NULL AND ?8 IS NULL"
-    };
-    let sql = format!(
-        "SELECT h.k,h.v,h.value FROM history h JOIN
-        (SELECT n,k,MAX(v) v FROM {source} WHERE t=?1 AND v<=?2
-            AND (n,k)>=(?3,?4)
-            AND (?5 IS NULL OR (n,k)<(?5,?6))
-            {prefix_condition}
-            GROUP BY n,k) x ON h.t=?1 AND h.n=x.n AND h.k=x.k AND h.v=x.v ORDER BY h.n,h.k"
-    );
+    let sql = scan_sql(prefix.is_some());
     let mut query = conn.prepare_cached(&sql)?;
     let rows = query.query_map(
         params![t, max, start.len(), start, end_len, end, prefix, upper],
         |r| Ok((Key(r.get(0)?), (r.get(1)?, r.get(2)?))),
     )?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    #[test]
+    fn tail_scan_work_is_bounded_and_versions_and_tombstones_match_both_layouts() {
+        for without_rowid in [false, true] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            let schema = if without_rowid {
+                SCHEMA.replace(
+                    "PRIMARY KEY(t,n,k,v));",
+                    "PRIMARY KEY(t,n,k,v)) WITHOUT ROWID;",
+                )
+            } else {
+                SCHEMA.to_owned()
+            };
+            conn.execute_batch(&schema).unwrap();
+            let transaction = conn.transaction().unwrap();
+            {
+                let mut insert = transaction
+                    .prepare("INSERT INTO history VALUES('tail',4,?1,0,x'07')")
+                    .unwrap();
+                for key in 0..10_000u32 {
+                    insert.execute([key.to_be_bytes()]).unwrap();
+                }
+            }
+            transaction.commit().unwrap();
+            conn.execute(
+                "INSERT INTO history VALUES('tail',4,?1,1,NULL)",
+                [9997u32.to_be_bytes()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO history VALUES('tail',4,?1,1,x'09')",
+                [9998u32.to_be_bytes()],
+            )
+            .unwrap();
+            let start = 9996u32.to_be_bytes();
+            let current = visible(scan(&conn, "tail", None, &start, None, 1).unwrap());
+            let steps = conn
+                .prepare_cached(&scan_sql(false))
+                .unwrap()
+                .get_status(StatementStatus::VmStep);
+            assert!(steps < 1000, "narrow tail scanned unrelated history: {steps} VM steps, without_rowid={without_rowid}");
+            assert_eq!(current.len(), 3);
+            assert_eq!(current[0].key, start);
+            assert_eq!(current[1].key, 9998u32.to_be_bytes());
+            assert_eq!(current[1].value, [9]);
+            assert_eq!(current[1].version, 1);
+            let historical = visible(scan(&conn, "tail", None, &start, None, 0).unwrap());
+            assert_eq!(historical.len(), 4);
+            assert!(historical
+                .iter()
+                .all(|row| row.version == 0 && row.value == [7]));
+        }
+    }
 }
 fn matches(k: &[u8], prefix: Option<&[u8]>, start: &[u8], end: Option<&[u8]>) -> bool {
     let compare = |a: &[u8], b: &[u8]| a.len().cmp(&b.len()).then(a.cmp(b));

@@ -259,6 +259,27 @@ preparation, archive/header loading, proof checks, fork selection, ancestry
 lookup, replay and root-policy costs, so update overhead can be attributed
 before changing consensus or storage paths.
 
+Indexed range scans first find the requested keys and latest visible versions,
+then fetch those exact primary keys. SQLite's join order is fixed so a narrow
+tail lookup cannot become a scan of the entire named table. With SQLite 3.51.3
+on the running mainnet archive, a 152-row tail fell from 205–215 ms to about
+0.1 ms, with identical rows, versions and tombstones.
+
+Rewinding the Rust node from 2,566,112 to 2,564,088 and replaying the same 2,024
+archived blocks compared both binaries in both orders. Throughput rose from
+170.5/170.7 to 269.4/263.8 applied blocks/s. Every run re-fetched fresh hashes
+from at least three peers, reused the archived bodies, and reproduced all
+10,221 suffix history rows byte-for-byte. This isolates replay; normal sync also
+includes new body downloads. A VM-step regression guards narrow-tail work in
+both rowid and legacy layouts, alongside the historical/pending/snapshot tests.
+
+The read-only query-plan benchmark uses the same bundled SQLite:
+
+```sh
+cargo run --release -p mmx-node --example bench_archive_scan -- \
+  --database ./mmx-data/chain/archive/state.sqlite --tail 152 --rounds 3
+```
+
 `bench_layout` compares ordinary SQLite rowid tables with `WITHOUT ROWID` using
 the actual versioned writes from a validated selected-chain snapshot. Each run
 replays the last 2,000 blocks into disposable databases, compares every historical
