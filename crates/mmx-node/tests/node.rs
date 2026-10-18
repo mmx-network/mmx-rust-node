@@ -65,6 +65,235 @@ fn node(network: &Network) -> Arc<Mutex<Node>> {
     ))
 }
 #[test]
+fn unsolicited_orphans_do_not_write_disk_and_valid_live_blocks_still_apply() {
+    use mmx_farming::farmer::Farmer;
+    use mmx_wallet::Address;
+    let (network, g, steps, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let n = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
+    sync::synchronize_pipelined(
+        &mut MemorySource {
+            blocks: vec![wire(&g["block"])],
+            wrong: false,
+        },
+        &n,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    fn files(path: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(path).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                out.extend(files(&p));
+            } else {
+                out.push((p.clone(), std::fs::read(&p).unwrap()));
+            }
+        }
+        out.sort();
+        out
+    }
+    let before = files(dir.path());
+    let original = wire(&steps[0]["block"]);
+    let reward = original
+        .field("reward_addr")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let farmer = Farmer::new([farmer_scalar()], Some(Address(reward)));
+    let mut bad = original.clone();
+    bad.fields.insert("prev".into(), V::Bytes(vec![222; 32]));
+    let mut proof = bad.field("proof").unwrap().seq().unwrap()[0]
+        .record()
+        .unwrap()
+        .clone();
+    proof.fields.insert("proof_xs".into(), V::Sequence(vec![]));
+    bad.fields
+        .insert("proof".into(), V::Sequence(vec![V::Record(proof)]));
+    let mut ids = vec![];
+    for _ in 0..4 {
+        let block = farmer.sign_block(&bad, &network.params).unwrap();
+        ids.push(hash(&block, "hash").unwrap());
+        n.lock().unwrap().receive(&block).unwrap();
+    }
+    assert_eq!(n.lock().unwrap().pending_blocks(), 4);
+    assert_eq!(
+        files(dir.path()),
+        before,
+        "unknown-parent blocks stay in RAM"
+    );
+    for id in ids {
+        assert!(n.lock().unwrap().chain().block(&id).unwrap().is_none());
+    }
+    // A known parent and real VDF still cannot authorize an empty space proof.
+    bad.fields
+        .insert("prev".into(), original.field("prev").unwrap().clone());
+    let bad = farmer.sign_block(&bad, &network.params).unwrap();
+    n.lock().unwrap().receive(&bad).unwrap();
+    n.lock().unwrap().receive(&wire(&steps[0]["vdf"])).unwrap();
+    assert!(n
+        .lock()
+        .unwrap()
+        .chain()
+        .block(&hash(&bad, "hash").unwrap())
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        files(dir.path()),
+        before,
+        "invalid space work must never be archived"
+    );
+    n.lock().unwrap().receive(&original).unwrap();
+    assert_eq!(
+        n.lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        1
+    );
+}
+#[test]
+fn farmer_response_replays_and_unsigned_future_envelopes_cannot_grow_the_queue() {
+    let (network, _, steps, _) = fixture();
+    let n = node(&network);
+    let response = native_farming_response();
+    for _ in 0..32 {
+        n.lock().unwrap().receive(&response).unwrap();
+    }
+    assert_eq!(n.lock().unwrap().pending_proofs(), 1);
+    let mut bad = response.clone();
+    bad.fields
+        .insert("farmer_sig".into(), V::Bytes(vec![0; 64]));
+    bad.fields.insert(
+        "content_hash".into(),
+        V::Bytes(
+            mmx_consensus::response::content_hash(&bad)
+                .unwrap()
+                .to_vec(),
+        ),
+    );
+    for _ in 0..32 {
+        assert!(n.lock().unwrap().receive(&bad).is_err());
+    }
+    assert_eq!(n.lock().unwrap().pending_proofs(), 1);
+    n.lock().unwrap().receive(&wire(&steps[0]["vdf"])).unwrap();
+    assert_eq!(n.lock().unwrap().pending_proofs(), 0);
+}
+#[test]
+fn peer_socket_has_only_native_router_methods_and_never_executes_validation() {
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let mut server = peer::Server::bind("127.0.0.1:0", n).unwrap();
+    let mut connection = peer::Connection::connect(&server.address().to_string()).unwrap();
+    for name in [
+        "mmx.Node.validate",
+        "mmx.Node.get_all_balances",
+        "mmx.Node.get_params",
+    ] {
+        connection
+            .send(&record(
+                "mmx.Request",
+                [
+                    ("id".into(), V::Uint(1)),
+                    ("method".into(), V::Record(record(name, []))),
+                ],
+            ))
+            .unwrap();
+        let reply = connection.receive(Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(
+            reply.field("result").unwrap().record().unwrap().name,
+            "vnx.NoSuchMethod"
+        );
+    }
+    connection
+        .send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(2)),
+                (
+                    "method".into(),
+                    V::Record(record("mmx.Node.get_height", [])),
+                ),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(
+        connection
+            .receive(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .field("result")
+            .unwrap()
+            .record()
+            .unwrap()
+            .name,
+        "mmx.Node.get_height.return"
+    );
+    drop(connection);
+    server.shutdown();
+}
+#[test]
+fn http_deadlines_isolate_slow_clients_and_shutdown_cancels_reads() {
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let mut server =
+        rpc::HttpServer::bind_with_timeout("127.0.0.1:0", n.clone(), Duration::from_millis(300))
+            .unwrap();
+    let mut slow = TcpStream::connect(server.address()).unwrap();
+    slow.write_all(b"POST /rpc HTTP/1.1\r\nHost: slow\r\nContent-Length: 100\r\n\r\n{")
+        .unwrap();
+    fn post(address: &str, request: &[u8]) -> String {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream.write_all(request).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply
+    }
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#;
+    let request = format!(
+        "POST /rpc HTTP/1.1\r\nHost: test\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        std::str::from_utf8(body).unwrap()
+    );
+    assert!(post(server.address(), request.as_bytes()).starts_with("HTTP/1.1 200"));
+    slow.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        slow.read(&mut byte).unwrap(),
+        0,
+        "absolute deadline closes the incomplete body"
+    );
+    let chunked=format!("POST /rpc HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",body.len(),std::str::from_utf8(body).unwrap());
+    assert!(post(server.address(), chunked.as_bytes()).starts_with("HTTP/1.1 200"));
+    assert!(post(
+        server.address(),
+        b"POST /rpc HTTP/1.1\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n"
+    )
+    .starts_with("HTTP/1.1 400"));
+    server.shutdown();
+    let mut server =
+        rpc::HttpServer::bind_with_timeout("127.0.0.1:0", n, Duration::from_secs(30)).unwrap();
+    let mut slow = TcpStream::connect(server.address()).unwrap();
+    slow.write_all(b"POST /rpc HTTP/1.1\r\nHost: ").unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    let started = std::time::Instant::now();
+    server.shutdown();
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+#[test]
 fn transaction_validation_pool_rpc_and_confirmation_use_native_snapshots() {
     let (network, g, steps, _) = fixture();
     let dir = tempfile::tempdir().unwrap();

@@ -162,4 +162,17 @@ mod tests {
             ["mmx.ValidatorVote", "mmx.Block"]
         );
     }
+    #[test]
+    fn decoded_heap_is_charged_even_when_the_wire_size_is_tiny() {
+        let inbox = Inbox::default();
+        let mut block = record("mmx.Block", []);
+        block.fields.insert(
+            "test".into(),
+            mmx_consensus::Value::Sequence(vec![mmx_consensus::Value::Null; 1024]),
+        );
+        let size = block.memory_size();
+        inbox.submit(block, 10).unwrap();
+        assert_eq!(inbox.stats().unwrap().bytes, size);
+        assert!(size > 50_000);
+    }
 }

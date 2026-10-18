@@ -193,6 +193,9 @@ impl Node {
     pub fn pending_proofs(&self) -> usize {
         self.responses.len()
     }
+    pub fn pending_blocks(&self) -> usize {
+        self.pending.len()
+    }
     pub fn begin_resync(&mut self) {
         self.synced = false;
         self.peer_state.begin_resync();

@@ -1,5 +1,6 @@
 //! Runnable MMX ledger node. Consensus records never pass through JSON on the
 //! peer path; RPC presentation is separate from validation and persistence.
+mod http;
 mod inbox;
 pub mod node;
 pub mod peer;

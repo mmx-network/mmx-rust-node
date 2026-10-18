@@ -3,7 +3,7 @@
 use crate::{error, Node, Result};
 use mmx_consensus::Record;
 use std::{
-    io::{Cursor, Read},
+    io::Cursor,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -286,73 +286,4 @@ pub fn json_request(node: &Arc<Mutex<Node>>, body: &[u8]) -> Option<Value> {
         }
     }
 }
-pub struct HttpServer {
-    address: String,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-impl HttpServer {
-    pub fn bind(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
-        let server = tiny_http::Server::http(address)?;
-        let address = server.server_addr().to_string();
-        let stop = Arc::new(AtomicBool::new(false));
-        let running = stop.clone();
-        let thread = thread::spawn(move || {
-            while !running.load(Ordering::Relaxed) {
-                let mut req = match server.recv_timeout(Duration::from_millis(200)) {
-                    Ok(Some(r)) => r,
-                    Ok(None) => continue,
-                    Err(_) => break,
-                };
-                let response = if req.method() != &tiny_http::Method::Post {
-                    tiny_http::Response::from_string("POST JSON-RPC 2.0 requests to /rpc\n")
-                        .with_status_code(405)
-                } else if req.url() != "/rpc" && req.url() != "/" {
-                    tiny_http::Response::from_string("Not found").with_status_code(404)
-                } else {
-                    let mut body = Vec::new();
-                    let parsed = if req
-                        .as_reader()
-                        .take(1024 * 1024 + 1)
-                        .read_to_end(&mut body)
-                        .is_err()
-                        || body.len() > 1024 * 1024
-                    {
-                        Some(
-                            json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Request body exceeds 1 MiB or is truncated"}}),
-                        )
-                    } else {
-                        json_request(&node, &body)
-                    };
-                    match parsed {
-                        Some(v) => tiny_http::Response::from_string(v.to_string()),
-                        None => tiny_http::Response::from_string("").with_status_code(204),
-                    }
-                };
-                let response = response.with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                );
-                let _ = req.respond(response);
-            }
-        });
-        Ok(Self {
-            address,
-            stop,
-            thread: Some(thread),
-        })
-    }
-    pub fn address(&self) -> &str {
-        &self.address
-    }
-    pub fn shutdown(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-impl Drop for HttpServer {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
+pub use crate::http::HttpServer;
