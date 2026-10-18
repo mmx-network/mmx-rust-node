@@ -17,7 +17,7 @@ approximations.
 
 ## Build and run
 
-Requires Rust 1.89 or newer and a C toolchain for bundled SQLite/Zstd. The disk
+Requires Rust 1.89 or newer and a C toolchain for Zstd. The disk
 backend currently targets Unix filesystems with file locking, directory sync,
 and file sync support.
 
@@ -212,21 +212,13 @@ The reader also accepts earlier self-describing database rows. Peer decoding
 continues to require native stream descriptors; storage lookup is a separate API.
 The compact form round-trips all 824 native serialization fixtures.
 
-For repeatable performance comparisons, keep an earlier release binary and use
-an already downloaded range. The benchmark makes SQLite backups, downloads that
-same range over native sockets into isolated copies, verifies the final hash,
-and reports elapsed time plus RPC latency. The source database is left intact.
+Proof-validation benchmarks use native peer blocks and leave the source ledger unchanged:
 
 ```sh
 cargo run --release -p mmx-consensus --example bench_pos -- 100
-# Supply a self-describing native block to benchmark its first complete proof:
 cargo run --release -p mmx-consensus --example bench_pos -- 200 /tmp/block.vnx
 cargo run --release -p mmx-node --example bench_validation -- \
   --peer 127.0.0.1:12337 --blocks 128 --rounds 20
-cargo build --release -p mmx-node --example serve_snapshot
-python3 tools/bench_sync.py --source-dir ./mmx-data \
-  --baseline /tmp/mmx-node.before --candidate target/release/mmx-node \
-  --from-height 4000 --to-height 4500 --output ./tmp/sync-benchmark
 ```
 
 `bench_pos` accepts both native wire blocks and versioned `MMXR` archive records.
@@ -274,56 +266,6 @@ standalone native `TcpEndpoint` defaults to no-delay for outgoing connections,
 that is not the Router listener's default. This accounts for the observed Nagle
 buffering on responses from an unmodified native listener; Rust also enables
 `TCP_NODELAY` on its own peer sockets.
-
-Indexed range scans first find the requested keys and latest visible versions,
-then fetch those exact primary keys. SQLite's join order is fixed so a narrow
-tail lookup cannot become a scan of the entire named table. With SQLite 3.51.3
-on the running mainnet archive, a 152-row tail fell from 205–215 ms to about
-0.1 ms, with identical rows, versions and tombstones.
-
-Rewinding the Rust node from 2,566,112 to 2,564,088 and replaying the same 2,024
-archived blocks compared both binaries in both orders. Throughput rose from
-170.5/170.7 to 269.4/263.8 applied blocks/s. Every run re-fetched fresh hashes
-from at least three peers, reused the archived bodies, and reproduced all
-10,221 suffix history rows byte-for-byte. This isolates replay; normal sync also
-includes new body downloads. A VM-step regression guards narrow-tail work in
-both rowid and legacy layouts, alongside the historical/pending/snapshot tests.
-
-The read-only query-plan benchmark uses the same bundled SQLite:
-
-```sh
-cargo run --release -p mmx-node --example bench_archive_scan -- \
-  --database ./mmx-data/chain/archive/state.sqlite --tail 152 --rounds 3
-```
-
-`bench_layout` compares ordinary SQLite rowid tables with `WITHOUT ROWID` using
-the actual versioned writes from a validated selected-chain snapshot. Each run
-replays the last 2,000 blocks into disposable databases, compares every historical
-row and tombstone, and checks deep rewinds through genesis. It holds a read
-snapshot while running; the source node can continue syncing.
-
-```sh
-cargo run --release -p mmx-db --example bench_layout -- \
-  --source-dir ./mmx-data --blocks 2000 --output ./tmp/layout-benchmark
-```
-
-On a million-block mainnet prefix, the same 2,000-block suffix took 1.349 s to
-publish with `WITHOUT ROWID` and 0.201 s with ordinary rowid tables. Both layouts
-matched every historical row and passed the deep rewind checks. This measures
-database publication; proof validation and networking still contribute to sync
-time. An offline rewrite of the running sync database preserved identical
-fingerprints for all 9,067,149 retained selected/archive rows. After reopening,
-sync averaged 169 blocks/s over an 82-second observation, and 60 HTTP status
-requests had p95 latency 0.54 s. These timings depend on host and peer load.
-
-The sync benchmark starts three frozen snapshot peers with independent node
-identities, then uses the production coordinator. `serve_snapshot` is a local
-benchmark utility that serves a previously validated archive, without a
-single-peer exception in the node executable.
-The isolated receiver starts with only the requested prefix, so its missing
-suffix must be downloaded. The harness checks the final hash and, for binaries
-with request counters, exactly one body request per missing block plus timeout
-reassignments. Production rollback continues to retain every archived block.
 
 Two local mainnet replays of heights 4000–6000 compared 64-height and 128-height
 windows, reversing binary order for the second run. The 64-height binary reached
@@ -373,7 +315,7 @@ background verification fixed it. Live monitor RPC samples ranged from 2 ms to
 740 ms during the verified window.
 The C++ CLI also read heights, headers, full blocks and balances through the
 running node's native VNX RPC service.
-The node uses an indexed disk backend with every
+The node uses a native append-only backend with every
 historical version retained. Sync throughput and remaining peer services are
 still being improved.
 
@@ -399,7 +341,7 @@ counter. It does not require the C++ repository or a running MMX node.
 
 | Crate | Implemented |
 | --- | --- |
-| `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and both an indexed SQLite WAL backend and a durable journal backend. Exclusive writer locking and atomic rollback/replacement protect both. |
+| `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a native append-only backend plus an in-memory reference. Exclusive writer locking and atomic rollback/replacement protect persistent state. |
 | `mmx-node` | Executable, native Zstd peer protocol, historical download with ancestor discovery and native fork choice, live block/VDF/vote admission, durable rewind/restart, VNX public reads and HTTP JSON-RPC. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hashes/costs and authorization, header/vote/farmer-response authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
@@ -468,21 +410,17 @@ changes durable. The low-level APIs keep this split; `chain::ChainState` combine
 validated block effects, archives and tip updates into one durable commit. Use a
 fresh engine per invocation and serialize access to each storage backend.
 
-`Database::commit_batch(next_version, writes)` validates and commits additional
-writes with the original pending batch, without staging them before the journal
-succeeds. Invalid writes, invalid version transitions and journal failures leave
-the original visible/pending state unchanged. `StorageDb::commit_transaction()`
-uses it to combine VM/ledger effects with caller-owned metadata tables. After a
-journal I/O failure the handle rejects further writes; reopening resolves whether
-the complete frame reached disk.
+`Store::commit_batch(next_version, writes)` validates and commits additional
+writes with the original pending batch. Validation failures preserve pending and
+committed state. Failed persistent writes poison the writer until reopen, which
+resolves whether the complete sealed frame reached disk.
 
-`Database::fork(version)` creates a detached, committed snapshot before that
-version. `replace_suffix(version, &branch)` checks that retained history matches
-exactly, then replaces every later version in one journal frame. Historical
-reads, tombstones and version gaps survive replacement. A torn replacement
-recovers the complete old suffix; a complete frame recovers the complete new
-suffix. Both snapshots must have no pending writes. Snapshots currently copy
-the RAM index, and the complete replacement must fit the 64 MiB frame limit.
+`Store::fork(version)` creates a detached view before that version. Native views
+share immutable files and keep speculative writes in RAM; `replace_suffix()`
+publishes the validated suffix atomically. Identity and generation checks reject
+stale or foreign snapshots. Historical reads, tombstones, version gaps, and
+replacements larger than 64 MiB remain supported. `Database::memory()` supplies
+the in-memory reference and speculative branch implementation.
 
 `mmx_execution::prepare()` runs a batch of already authenticated and funded
 invocations against a disposable overlay. It loads native VNX contract records,
@@ -768,39 +706,10 @@ an irreversible state cutoff. Reopen and subsequent fork selection can replay
 the retained branches. Specialized wallet/trading indexes, archive compaction
 and remaining node services are separate port stages.
 
-`audit_rollback` exercises rewinds on isolated SQLite snapshots, leaving the
-source databases unchanged. It rewinds through genesis and any hard-fork
-boundaries covered by the source prefix, then checks every retained history row,
-including tombstones, and every visible key/value. Offline ticks must keep the
-requested height. Replay uses the retained archive to re-verify CPU space work,
-authentication, transitions and ledger execution from genesis and across the
-available hard forks. Ledger history, height/transaction indexes, reopened tips,
-and the unchanged archive are compared with the original snapshot.
-Stored record encodings and redundant legacy header rows are excluded from the
-replay ledger comparison because replay can upgrade their storage representation.
-
-```sh
-cargo run --release -p mmx-node --example audit_rollback -- \
-  --source-dir ./mmx-data --output /path/to/scratch-disk
-```
-
-The audit needs space for multiple full snapshots and temporary layout rewrites.
-Separate scratch storage reduces competition with a running node's disk I/O.
-Use `--restore-dir /other/disk/scratch` to keep the selected-state restore image
-in an automatically removed temporary directory on another disk.
-Its JSON lines identify completed phases and the hard forks actually checked;
-it performs no network block downloads.
-
-The audit passed on a frozen mainnet prefix at height 1,124,592, with 5,683,605
-selected history rows. It checked nine rewind heights: 1,124,592, 1,124,591,
-1,000,002, 1,000,001, 1,000,000, 999,999, 128, 1 and genesis. Every retained row
-and visible value matched at each height, including after offline ticks.
-Replay from genesis through 128 and from 999,999 through 1,000,002 matched the
-original ledger/history and indexes. The retained archive and its publication
-metadata stayed unchanged. This prefix covers the first hard fork only.
-
-`audit_native_storage` pins a read-only SQLite view and compares VM cell and
-container-entry values with a running C++ node's historical storage API. It
+`audit_native_storage` opens a native selected-state database and compares visible
+VM cell and container-entry values with a running C++ node's historical storage API.
+Stop the Rust writer before running it; the exclusive writer lock prevents a
+concurrent open. The auditor uses historical RAM views and leaves the tip intact. It
 checks the canonical genesis and selected-tip hashes, then reads each sampled
 key at the pinned tip and immediately before/at its latest write. Native RPC
 omits VM flags and reference counts; this comparison checks the serialized
@@ -829,18 +738,25 @@ IDs, then rechecks each canonical hash. By default it checks genesis and a point
 transaction-bearing blocks. Mutable balances/contracts and live status require
 separate checks at matching tips.
 
-After catch-up, add `--state-from ./mmx-data --samples 128` to compare sampled
-balance keys and contract reads. A read-only pinned ledger supplies the balance
-expectations. Both RPC servers must report the same synced height and canonical
-hash as that view before and after the reads; a moving or unsynced tip rejects
-the mutable comparison and requires a retry. The default samples up to 128
-evenly spaced known keys per table. Balance checks include the full 128-bit
-amount and currency; contract checks compare both native contract lookup methods.
-Key enumeration seeks between indexed keys instead of walking every historical
-balance version. A 10,000-version SQL-work regression also checks deleted keys,
-table separation and key widths.
+For mutable state, stop the Rust writer and export a small immutable sample from
+the native database, then restart it and compare both RPC servers at that sample's
+synced height and canonical hash:
+
+```sh
+cargo run -p mmx-node --example audit_native_rpc -- \
+  --export-state ./mmx-data --output ./tmp/state-audit.json --samples 128
+# Restart the node, then run while both nodes still match the exported height.
+cargo run -p mmx-node --example audit_native_rpc -- \
+  --state-from ./tmp/state-audit.json --samples 128
+```
+
+Both servers must match the exported tip before and after comparison. A moving or
+unsynced tip rejects the mutable check. Samples cover evenly spaced visible keys;
+balance checks include full 128-bit amounts and currency, and contracts use both
+native lookup methods. The export refuses an active writer. No database copies
+or additional storage backend are required.
 Local TCP tests cover matching values, divergent servers, two servers agreeing
-on an incorrect balance, tombstones and tip movement. At the matching stable
+on an incorrect balance, zero balances and tip movement. At the matching stable
 mainnet tip 5,518,783, 434 native comparisons passed, including 128 sampled
 balance keys, 128 contracts through both lookup methods, and immutable block/tx
 results. This is sampled balance/contract parity; every known VM storage key was
@@ -950,78 +866,23 @@ within the value. `StreamEncoder` retains declarations across continuing peer
 frames. Standalone encoding is used to persist deployments without a JSON
 round trip. It remains distinct from hash serialization.
 
-Fresh node directories use `Store::open_native()` / `ForkChain::open_native()`:
-append-only value segments, immutable sorted reference indexes, and a checksummed
-atomic manifest. Existing SQLite/journal node directories are detected and
-reopened with their previous backend; they are not copied or rewritten at startup.
+All persistent opens use `Store::open()` / `Store::open_native()` and
+`ForkChain::open()` / `ForkChain::open_native()`: append-only value segments,
+immutable sorted reference indexes, and a checksummed atomic manifest. The
+SQLite and original standalone journal backends, import utilities, and layout
+rewriters have been removed. Unsupported old directories are rejected; start a
+fresh native sync. No conversion or deletion of existing data occurs at startup.
 Point reads, size-first ranges, prefix scans, inclusive historical reads, detached
-forks, and atomic suffix replacement share the reference model's semantics.
-`Store::open_indexed()` also recognizes a native manifest. `Store::open()` and
-`Database::open()` retain the original journal for library callers/reference tests.
-Explicit native opens reject legacy data until an import is requested.
+forks, and atomic suffix replacement share the in-memory reference's semantics.
 
-Legacy SQLite databases can be converted offline without a second SQLite copy or
-a global sort of block payloads. Stop the source writer, then import each database
-into a new directory with:
+The `Binaries` GitHub workflow builds the node on Ubuntu 24.04, checks
+`mmx-node --help`, and uploads a Linux x86-64 archive with its source commit and
+SHA-256 checksum. It runs manually or when the `node-build` branch advances.
 
-```sh
-cargo run --release -p mmx-db --example import_indexed -- \
-  OLD_DB_DIR NEW_NATIVE_DB_DIR 4
-```
-
-The last argument limits approximate aggregate payload/key reads and writes to
-MiB/s (default 4; zero disables pacing). Input follows physical row order, while
-only references are sorted and compacted. Memory and open index files stay
-bounded; the source is opened read-only under its writer lock. Both ordinary and
-older `WITHOUT ROWID` tables retain every version, tombstone, and empty value.
-Interrupted imports resume at their durable source cursor, truncate unpublished
-tails, and reuse completed value segments. Partial targets refuse normal opens.
-Resume rejects a source whose version or publication generation changed. The
-complete native manifest appears only after EOF; the source is retained. Selected
-and archive databases must come from the same stopped node before switching the
-node's data directories.
-
-Before switching, compare requested complete tables against the frozen source:
-
-```sh
-cargo run --release -p mmx-db --example audit_import -- \
-  OLD_DB_DIR NEW_NATIVE_DB_DIR balances
-# Check a rollback view: the exclusive DB version is block height + 1.
-cargo run --release -p mmx-db --example audit_import -- \
-  OLD_DB_DIR NEW_NATIVE_DB_DIR balances 1 1000001
-```
-
-The verifier checks values, write versions, tombstones and extra destination keys
-in bounded key ranges, paced at 2 MiB/s of logical key/value reads. Both writers
-are locked during comparison. Historical checks revert RAM snapshots, retaining
-the on-disk tip and all history. Only the named table and versions are checked;
-repeat for the ledger tables and desired archive/history coverage.
-
-The `Binaries` GitHub workflow builds the node, import and audit tools on Ubuntu 24.04,
-checks `mmx-node --help`, and uploads a Linux x86-64 archive with its source commit
-and SHA-256 checksum. It runs manually or when the `node-build` branch advances,
-so deployment does not require compiling on the node's machine.
-
-Indexed forks pin a read snapshot of the original database and keep speculative
-changes in memory, following the native table's memory index. They create no
-temporary database or replay write log. Publication inserts the validated suffix
-and updates the tip/version in one SQLite transaction, including replacements
-larger than 64 MiB. Branch memory grows with the speculative suffix; node replay
-batches remain limited to 128 blocks and 8 MiB of block bodies, plus ledger writes.
-Snapshot identity/generation checks reject stale or foreign replacements. Failed
-writes poison the handle until reopen; uncommitted publication recovers the old
-state and committed publication recovers the new state. History is retained by default.
-
-`cargo run -p mmx-db --example bench_delta --locked` measures a small 4 MiB replay
-using Linux process I/O counters, then verifies every historical value, reopen,
-and rollback through genesis. Compared with commit `2aa59d7`, staging write
-syscalls fell from 5,570,560 bytes to zero; publication read syscalls fell from
-4,300,985 to 4,217 bytes. Publication write syscalls remained 4,828,640 bytes in
-both versions. With `-- native`, the same workload including reference-index
-checkpointing wrote 4,277,069 bytes during publication, read 124 bytes, and made
-zero staging writes. All three variants produced history CRC32 `1702825889`,
-verified every stored version, reopened, and rolled back to genesis. These are
-small synthetic I/O measurements, not a mainnet throughput comparison.
+`cargo run -p mmx-db --example bench_delta --locked` measures a small native
+4 MiB replay using Linux process I/O counters, then verifies every historical
+value, reopen, and rollback through genesis. Speculative staging uses RAM;
+persistent publication appends payloads and checkpoints reference indexes.
 
 The new `mmx_db::sorted` foundation writes immutable sorted files sequentially,
 with one resident 64-bit offset per distinct table/key. Versions descend within
@@ -1057,9 +918,7 @@ storage through sync, fork switches, rollback, reopen, VNX, and HTTP RPC.
 
 Native databases support optional startup maintenance with `--purge-before HEIGHT`.
 The block and ledger state at HEIGHT remain available; earlier rollback targets
-are rejected, including after restart. The default retains all history. Legacy
-SQLite/journal databases must first be migrated; this option does not silently
-rewrite them. For example, start a native database with:
+are rejected, including after restart. The default retains all history. For example:
 
 ```sh
 cargo run --release -p mmx-node -- --mmx-root ../mmx-node --data-dir ./mmx-data \
@@ -1096,51 +955,21 @@ embedded nodes retain synchronous admission unless background work is enabled.
 C++ `Node::write_block()` appends full bodies to a block file and stores their
 offsets in a separate index. Its `Table` implementation uses a write log and
 sorted runs with offset indexes. The Rust native backend likewise keeps payloads
-in append-only segments and compacts references. Legacy SQLite tables use rowid
-storage so large payloads stay outside the composite primary-key index. Existing
-`WITHOUT ROWID` databases remain readable and are not rewritten automatically.
+in append-only segments and compacts references.
 
-To rewrite an existing node's physical layout, stop it, take a database backup,
-and run the offline utility. The exclusive writer lock prevents rewriting an
-active node. Each database rewrite is one full synchronous transaction, retains
-all historical versions and tombstones, and leaves its version unchanged.
-The logical schema remains compatible with earlier Rust readers. Rewriting
-needs temporary space for another copy; released pages remain reusable afterward.
-
-```sh
-cargo run --release -p mmx-db --example optimize_layout -- \
-  ./mmx-data/chain/selected ./mmx-data/chain/archive
-```
-
-The writer attempts a passive WAL checkpoint before opening a new branch reader
-when the WAL is at least 64 MiB, at most once every five seconds. These reader
-gaps let SQLite recycle the WAL during continuous sync. Long-lived snapshots may
-delay recycling; checkpointing preserves their view and all rollback history.
-Commits retain full synchronous durability.
-
-Existing Rust journals import once on indexed open, retaining the source journal.
-Journal callers then reject that directory to prevent divergent writable copies.
 Bounded header caches avoid repeated historical decoding; selected-chain caches
 are cleared on rewind/replacement. The checked-in type registry is parsed once,
 with independent registries returned for each native stream. Historical sync
 ignores unrelated live block broadcasts, and a periodic update coalesces queued
 proof/vote processing as in C++.
 
-Node identity creation and initial schema/import use atomic file publication.
-Private branch initialization and writes omit fsyncs until publication into the
-primary database's fully synchronous WAL transaction. Unpublished staging
-directories are removed after restart. Tests compare the two backends across
-pending writes, deletes, ranges, historical reads, every rewind, nested snapshots,
-reopen, migration, injected write failures, abrupt process exit before/after
-publication, and a 65 MiB branch replacement.
-
-The journal backend uses a **new Rust journal format**, independent of C++ files.
-Use a separate data directory. This reference backend retains history in memory
-and replays the journal on open; the node uses the indexed backend above.
-Reproducing the C++ block/index file format is not a port requirement.
+Node identity creation and manifests use atomic file publication. Tests compare
+native storage with the RAM reference across pending writes, deletes, ranges,
+historical reads, every rewind, nested snapshots, reopen, injected write failures,
+abrupt process exit before/after publication, and a 65 MiB branch replacement.
 Uncommitted writes are discarded on reopen. Complete records with invalid
-checksums are reported as corruption; only an incomplete final record is removed
-during recovery.
+checksums are reported as corruption; only a physically incomplete final frame
+is truncated during recovery. The format is independent of C++ files.
 
 MMX-specific value and instruction encodings target the little-endian reference
 format. Contract storage preserves the original 20-byte contract prefix and

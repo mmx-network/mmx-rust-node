@@ -27,12 +27,7 @@ fn report(
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let backend = std::env::args().nth(1).unwrap_or_else(|| "sqlite".into());
-    let mut db = match backend.as_str() {
-        "native" => Store::open_native(directory.path())?,
-        "sqlite" => Store::open_indexed(directory.path())?,
-        _ => return Err("usage: bench_delta [sqlite|native]".into()),
-    };
+    let mut db = Store::open_native(directory.path())?;
     db.commit_batch(1, [Write::put("base", b"key", b"retained")])?;
     let before = counters();
     let start = Instant::now();
@@ -54,14 +49,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let before = counters();
     let start = Instant::now();
     db.replace_suffix(1, &branch)?;
-    if backend == "native" {
-        db.checkpoint()?;
-    }
+    db.checkpoint()?;
     let after = counters();
     report("publish", start, &before, &after);
     drop(branch);
     drop(db);
-    let mut db = Store::open_indexed(directory.path())?;
+    let mut db = Store::open_native(directory.path())?;
     let mut digest = crc32fast::Hasher::new();
     for height in 1..=16u32 {
         for key in 0..64u32 {
@@ -76,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(db.get("base", b"key", None)?, Some(b"retained".to_vec()));
     db.revert(0)?;
     drop(db);
-    assert_eq!(Store::open_indexed(directory.path())?.version(), 0);
+    assert_eq!(Store::open_native(directory.path())?.version(), 0);
     println!(
         "{{\"verified\":true,\"history_crc32\":{},\"network_downloads\":0}}",
         digest.finalize()

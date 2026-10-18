@@ -307,6 +307,17 @@ fn verified_blocks_vm_balances_archives_tip_reopen_and_replacement_branch_are_at
     verify_step(&chain, &g);
 }
 
+// Small, closed synthetic databases only; never copy a running node's data.
+fn copy_native(source: &std::path::Path, destination: &std::path::Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() && entry.file_name() != "writer.lock" {
+            fs::copy(entry.path(), destination.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
 #[test]
 fn torn_extension_recovers_ledger_tip_and_archives_together() {
     let (g, steps) = synthetic();
@@ -315,22 +326,29 @@ fn torn_extension_recovers_ledger_tip_and_archives_together() {
     let mut chain = ChainState::open(dir.path(), p.clone()).unwrap();
     chain.initialize(&assets(&g)).unwrap();
     append(&mut chain, &steps[0]);
-    let prefix = fs::metadata(dir.path().join("journal.mmx")).unwrap().len() as usize;
+    let prefix = fs::metadata(dir.path().join("native-data-0000000000000000.log"))
+        .unwrap()
+        .len() as usize;
     append(&mut chain, &steps[1]);
     drop(chain);
-    let data = fs::read(dir.path().join("journal.mmx")).unwrap();
+    let data = fs::read(dir.path().join("native-data-0000000000000000.log")).unwrap();
     for cut in [
         prefix,
         prefix + 1,
         prefix + 7,
-        prefix + 11,
-        prefix + 12,
+        prefix + 15,
+        prefix + 16,
         (prefix + data.len()) / 2,
         data.len() - 1,
         data.len(),
     ] {
         let copy = tempfile::tempdir().unwrap();
-        fs::write(copy.path().join("journal.mmx"), &data[..cut]).unwrap();
+        copy_native(dir.path(), copy.path());
+        fs::write(
+            copy.path().join("native-data-0000000000000000.log"),
+            &data[..cut],
+        )
+        .unwrap();
         let recovered = ChainState::open(copy.path(), p.clone()).unwrap();
         verify_step(&recovered, &steps[usize::from(cut == data.len())]);
     }
@@ -382,7 +400,7 @@ fn invalid_ledger_effects_cannot_stage_chain_metadata_or_lose_existing_pending_w
 }
 
 #[test]
-fn reopen_rejects_a_tip_that_does_not_match_the_journal_version() {
+fn reopen_rejects_a_tip_that_does_not_match_the_database_version() {
     let (g, _) = synthetic();
     let p = params(&g);
     let dir = tempfile::tempdir().unwrap();
@@ -737,12 +755,7 @@ fn archive_write_ahead_recovers_initialization_and_binds_exact_genesis() {
     original.initialize(&assets(&g)).unwrap();
     drop(original);
     let copy = tempfile::tempdir().unwrap();
-    fs::create_dir(copy.path().join("archive")).unwrap();
-    fs::copy(
-        dir.path().join("archive/journal.mmx"),
-        copy.path().join("archive/journal.mmx"),
-    )
-    .unwrap();
+    copy_native(&dir.path().join("archive"), &copy.path().join("archive"));
     let mut chain = ForkChain::open(copy.path(), params(&g)).unwrap();
     assert!(chain.selected().tip().unwrap().is_none());
     let mut different = assets(&g);
@@ -824,29 +837,32 @@ fn torn_branch_switch_keeps_orphans_and_recovers_old_or_new_ledger_together() {
     retain(&mut chain, &steps[0]);
     retain(&mut chain, loser);
     chain.update(root, None).unwrap();
-    let prefix = fs::metadata(dir.path().join("selected/journal.mmx"))
+    let prefix = fs::metadata(dir.path().join("selected/native-data-0000000000000000.log"))
         .unwrap()
         .len() as usize;
     retain(&mut chain, winner);
     chain.update(root, None).unwrap();
     drop(chain);
-    let data = fs::read(dir.path().join("selected/journal.mmx")).unwrap();
-    let archive = fs::read(dir.path().join("archive/journal.mmx")).unwrap();
+    let data = fs::read(dir.path().join("selected/native-data-0000000000000000.log")).unwrap();
     for cut in [
         prefix,
         prefix + 1,
         prefix + 7,
-        prefix + 11,
-        prefix + 12,
+        prefix + 15,
+        prefix + 16,
         (prefix + data.len()) / 2,
         data.len() - 1,
         data.len(),
     ] {
         let copy = tempfile::tempdir().unwrap();
-        fs::create_dir(copy.path().join("selected")).unwrap();
-        fs::create_dir(copy.path().join("archive")).unwrap();
-        fs::write(copy.path().join("selected/journal.mmx"), &data[..cut]).unwrap();
-        fs::write(copy.path().join("archive/journal.mmx"), &archive).unwrap();
+        copy_native(&dir.path().join("selected"), &copy.path().join("selected"));
+        copy_native(&dir.path().join("archive"), &copy.path().join("archive"));
+        fs::write(
+            copy.path()
+                .join("selected/native-data-0000000000000000.log"),
+            &data[..cut],
+        )
+        .unwrap();
         let mut recovered = ForkChain::open(copy.path(), params(&g)).unwrap();
         verify_step(
             recovered.selected(),
@@ -1043,7 +1059,7 @@ fn download_archive_batches_are_atomic_and_preserve_existing_work_and_first_reco
     use mmx_execution::chain::forks::ForkChain;
     let (g, steps) = synthetic();
     let dir = tempfile::tempdir().unwrap();
-    let mut chain = ForkChain::open_indexed(dir.path(), params(&g)).unwrap();
+    let mut chain = ForkChain::open_native(dir.path(), params(&g)).unwrap();
     chain.initialize(&assets(&g)).unwrap();
     let mut bad = record(&steps[1]["block"]);
     bad.fields.insert(
@@ -1069,7 +1085,7 @@ fn download_archive_batches_are_atomic_and_preserve_existing_work_and_first_reco
     chain.update_at(block_hash(&g), None, 1).unwrap();
     verify_step(chain.selected(), &steps[1]);
     drop(chain);
-    let mut chain = ForkChain::open_indexed(dir.path(), params(&g)).unwrap();
+    let mut chain = ForkChain::open_native(dir.path(), params(&g)).unwrap();
     verify_step(chain.selected(), &steps[1]);
     chain.rollback_to(0).unwrap();
     chain.update_sync_at(block_hash(&g), None, 2).unwrap();
@@ -1144,12 +1160,14 @@ fn cold_header_reads_preserve_legacy_unhashed_fields_and_invalidate_replaced_suf
         mmx_consensus::header::calc_hash(&changed, &params(&g)).unwrap(),
         hash
     );
-    for backend in ["journal", "sqlite", "native"] {
+    for explicit in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let open = || match backend {
-            "native" => ChainState::open_native(directory.path(), params(&g)).unwrap(),
-            "sqlite" => ChainState::open_indexed(directory.path(), params(&g)).unwrap(),
-            _ => ChainState::open(directory.path(), params(&g)).unwrap(),
+        let open = || {
+            if explicit {
+                ChainState::open_native(directory.path(), params(&g)).unwrap()
+            } else {
+                ChainState::open(directory.path(), params(&g)).unwrap()
+            }
         };
         let mut chain = open();
         chain.initialize(&assets(&g)).unwrap();

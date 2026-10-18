@@ -1,8 +1,6 @@
 //! Versioned append-only storage. Values stay in commit log segments; immutable
 //! sorted files contain only references. Forks share those files and keep their
 //! speculative suffix in RAM. A manifest checkpoints a bounded journal tail.
-pub mod audit;
-pub mod import;
 mod manifest;
 use crate::{
     journal::{Action, Change, Indexed, Journal, Reader, ValueRef},
@@ -353,13 +351,11 @@ impl Native {
         let path = std::path::absolute(path)?;
         if path.join("native.import").exists() {
             return Err(Error::Corrupt(
-                "native import must be completed before opening",
+                "incomplete database conversion is unsupported",
             ));
         }
         if path.join("state.sqlite").exists() || path.join("journal.mmx").exists() {
-            return Err(Error::Corrupt(
-                "native database requires explicit legacy import",
-            ));
+            return Err(Error::Corrupt("unsupported database format"));
         }
         let mut parents = Vec::new();
         for dir in path.ancestors().take_while(|p| !p.exists()) {

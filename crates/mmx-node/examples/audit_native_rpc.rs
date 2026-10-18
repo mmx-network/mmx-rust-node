@@ -1,7 +1,7 @@
 //! Compare public reads with a native C++ node. Immutable results work during
 //! sync; optional mutable-state checks require matching stable, synced tips.
+use mmx_db::Store;
 use mmx_node::Result;
-use rusqlite::{Connection, OpenFlags};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 use vnx::{
     net::NetworkClient,
@@ -47,20 +47,47 @@ fn require_state_tip(height: &Value, synced: &Value, expected: u32) -> Result<()
     Ok(())
 }
 
-// DISTINCT can walk every historical version before returning a handful of
-// balance keys. Seek past all versions of each key to keep the live audit short.
-const STATE_KEYS_SQL: &str = "WITH RECURSIVE keys(k) AS (
-    SELECT (SELECT k FROM history WHERE t=?1 AND n=?2 ORDER BY k LIMIT 1)
-    UNION ALL
-    SELECT (SELECT k FROM history WHERE t=?1 AND n=?2 AND k>keys.k ORDER BY k LIMIT 1)
-    FROM keys WHERE k IS NOT NULL)
-    SELECT k FROM keys WHERE k IS NOT NULL";
-fn state_keys(conn: &Connection, table: &str, size: usize) -> Result<Vec<Vec<u8>>> {
-    let mut statement = conn.prepare(STATE_KEYS_SQL)?;
-    let keys = statement
-        .query_map((table, size), |row| row.get::<_, Vec<u8>>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(keys)
+// Export while the Rust writer is stopped, then audit the immutable manifest
+// against both running servers at the same synced tip.
+fn export_state(source: &Path, output: &Path, samples: usize) -> Result<()> {
+    let store = Store::open_native(source.join("chain/selected"))?;
+    let height = store
+        .version()
+        .checked_sub(1)
+        .ok_or("empty selected database")?;
+    let hash = store
+        .get("chain_height", &height.to_be_bytes(), None)?
+        .ok_or("missing selected hash")?;
+    if hash.len() != 32 {
+        return Err("invalid selected hash".into());
+    }
+    let mut snapshot = json!({"format_version":1,"height":height,"hash":hash});
+    for (table, size) in [("balances", 64), ("contracts", 32)] {
+        let rows = store.scan(table, &[], None)?;
+        if rows.is_empty() {
+            return Err(format!("no {table} keys available for mutable state comparison").into());
+        }
+        let count = samples.min(rows.len());
+        let mut selected = Vec::new();
+        for i in 0..count {
+            let row = &rows[if count > 1 {
+                i * (rows.len() - 1) / (count - 1)
+            } else {
+                0
+            }];
+            if row.key.len() != size {
+                return Err(format!("invalid {table} key length").into());
+            }
+            selected.push(if table == "balances" {
+                json!({"key":row.key,"value":row.value})
+            } else {
+                json!(row.key)
+            });
+        }
+        snapshot[table] = json!(selected);
+    }
+    std::fs::write(output, vnx::serde_json::to_vec_pretty(&snapshot)?)?;
+    Ok(())
 }
 
 struct Audit {
@@ -141,18 +168,12 @@ impl Audit {
     }
 
     fn state(&mut self, source: &Path, samples: usize) -> Result<()> {
-        let conn = Connection::open_with_flags(
-            source.join("chain/selected/state.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        conn.busy_timeout(Duration::from_secs(30))?;
-        conn.execute_batch("BEGIN DEFERRED")?;
-        let height: u32 = conn.query_row("SELECT version-1 FROM meta", [], |row| row.get(0))?;
-        let expected: Vec<u8> = conn.query_row(
-            "SELECT value FROM history WHERE t='chain_height' AND k=?1 ORDER BY v DESC LIMIT 1",
-            [height.to_be_bytes()],
-            |row| row.get(0),
-        )?;
+        let snapshot: Value = vnx::serde_json::from_slice(&std::fs::read(source)?)?;
+        if snapshot["format_version"] != json!(1) {
+            return Err("unsupported state audit manifest".into());
+        }
+        let height = u32::try_from(snapshot["height"].as_u64().ok_or("invalid audit height")?)?;
+        let expected: Vec<u8> = vnx::serde_json::from_value(snapshot["hash"].clone())?;
         if expected.len() != 32 || self.state_tip(height)? != json!(expected) {
             return Err(
                 "mutable state audit source differs from the servers' canonical tip".into(),
@@ -162,30 +183,31 @@ impl Audit {
         let mut contract_count = 0;
         let checked = (|| -> Result<()> {
             for (table, size) in [("balances", 64), ("contracts", 32)] {
-                let keys = state_keys(&conn, table, size)?;
-                if keys.is_empty() {
+                let rows = snapshot[table]
+                    .as_array()
+                    .ok_or("invalid state audit table")?;
+                if rows.is_empty() {
                     return Err(
                         format!("no {table} keys available for mutable state comparison").into(),
                     );
                 }
-                let count = samples.min(keys.len());
-                for index in 0..count {
-                    let key = &keys[if count > 1 {
-                        index * (keys.len() - 1) / (count - 1)
+                let count = samples.min(rows.len());
+                for i in 0..count {
+                    let row = &rows[if count > 1 {
+                        i * (rows.len() - 1) / (count - 1)
                     } else {
                         0
                     }];
+                    let key: Vec<u8> = vnx::serde_json::from_value(if table == "balances" {
+                        row["key"].clone()
+                    } else {
+                        row.clone()
+                    })?;
                     if key.len() != size {
                         return Err(format!("invalid {table} key length").into());
                     }
                     if table == "balances" {
-                        let value: Option<Vec<u8>> = conn.query_row(
-                            "SELECT value FROM history WHERE t='balances' AND n=64 AND k=?1
-                             ORDER BY v DESC LIMIT 1",
-                            [key],
-                            |row| row.get(0),
-                        )?;
-                        let value = value.unwrap_or_else(|| vec![0; 16]);
+                        let value: Vec<u8> = vnx::serde_json::from_value(row["value"].clone())?;
                         if value.len() != 16 {
                             return Err("invalid stored balance length".into());
                         }
@@ -209,8 +231,6 @@ impl Audit {
             }
             Ok(())
         })();
-        // Do this even after a value mismatch: native balances have no historical
-        // height argument, so movement invalidates the comparison and needs retry.
         if self.state_tip(height)? != json!(expected) {
             return Err("canonical tip changed during mutable state comparison; retry".into());
         }
@@ -229,6 +249,8 @@ fn main() -> Result<()> {
     let mut rust = "127.0.0.1:12331".to_owned();
     let mut heights = BTreeSet::new();
     let mut state_source = None;
+    let mut export_source = None;
+    let mut output = None;
     let mut samples = 128usize;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -239,6 +261,8 @@ fn main() -> Result<()> {
             "--height" => {
                 heights.insert(value.parse::<u32>()?);
             }
+            "--export-state" => export_source = Some(std::path::PathBuf::from(value)),
+            "--output" => output = Some(std::path::PathBuf::from(value)),
             "--state-from" => state_source = Some(std::path::PathBuf::from(value)),
             "--samples" => samples = value.parse()?,
             _ => return Err(format!("unknown audit argument: {arg}").into()),
@@ -246,6 +270,12 @@ fn main() -> Result<()> {
     }
     if samples == 0 {
         return Err("samples must be positive".into());
+    }
+    if let Some(source) = export_source {
+        return export_state(&source, &output.ok_or("missing --output")?, samples);
+    }
+    if output.is_some() {
+        return Err("--output requires --export-state".into());
     }
     let connect = |endpoint: &str| -> Result<NetworkClient> {
         NetworkClient::connect(
@@ -342,62 +372,27 @@ mod tests {
     }
 
     #[test]
-    fn state_key_listing_skips_old_versions_and_preserves_deleted_keys_and_scope() -> Result<()> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch(
-            "CREATE TABLE history(t TEXT,n INTEGER,k BLOB,v INTEGER,value BLOB,
-            PRIMARY KEY(t,n,k,v));
-            WITH RECURSIVE seq(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM seq WHERE v<10000)
-            INSERT INTO history SELECT 'balances',2,x'6161',v,x'01' FROM seq;
-            INSERT INTO history VALUES('balances',2,x'6161',10001,NULL),
-            ('balances',2,x'617a',1,NULL),('balances',2,x'ffff',1,x'01'),
-            ('balances',1,x'61',1,x'01'),('contracts',2,x'6162',1,x'01');",
-        )?;
-        let expected = vec![b"aa".to_vec(), b"az".to_vec(), vec![255, 255]];
-        assert_eq!(state_keys(&conn, "balances", 2)?, expected);
-        assert!(state_keys(&conn, "missing", 2)?.is_empty());
-        let mut statement = conn.prepare(STATE_KEYS_SQL)?;
-        let rows = statement
-            .query_map(("balances", 2), |row| row.get::<_, Vec<u8>>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        assert_eq!(rows, expected);
-        assert!(
-            statement.get_status(rusqlite::StatementStatus::VmStep) < 1000,
-            "key listing must not walk all 10000 versions"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn mutable_network_audit_checks_the_pinned_ledger_and_rejects_tip_movement() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let selected = dir.path().join("chain/selected");
         std::fs::create_dir_all(&selected)?;
-        let conn = Connection::open(selected.join("state.sqlite"))?;
-        conn.execute_batch(
-            "CREATE TABLE meta(version INTEGER); INSERT INTO meta VALUES(8);
-            CREATE TABLE history(t TEXT,n INTEGER,k BLOB,v INTEGER,value BLOB,
-            PRIMARY KEY(t,n,k,v));",
+        let mut store = Store::open_native(&selected)?;
+        store.commit(7)?;
+        let mut zero = [1u8; 64];
+        zero[..32].fill(3);
+        store.commit_batch(
+            8,
+            [
+                mmx_db::Write::put("chain_height", 7u32.to_be_bytes(), [42u8; 32]),
+                mmx_db::Write::put("balances", [1u8; 64], 17u128.to_le_bytes()),
+                mmx_db::Write::put("balances", zero, 0u128.to_le_bytes()),
+                mmx_db::Write::put("contracts", [2u8; 32], [0]),
+            ],
         )?;
-        conn.execute(
-            "INSERT INTO history VALUES('chain_height',4,?1,7,?2)",
-            (7u32.to_be_bytes(), [42u8; 32]),
-        )?;
-        conn.execute(
-            "INSERT INTO history VALUES('balances',64,?1,7,?2)",
-            ([1u8; 64], 17u128.to_le_bytes()),
-        )?;
-        let mut deleted = [0u8; 64];
-        deleted[..32].fill(3);
-        conn.execute(
-            "INSERT INTO history VALUES('balances',64,?1,7,NULL)",
-            [deleted],
-        )?;
-        conn.execute(
-            "INSERT INTO history VALUES('contracts',32,?1,7,x'00')",
-            [[2u8; 32]],
-        )?;
-        drop(conn);
+        let snapshot = dir.path().join("state-audit.json");
+        assert!(export_state(dir.path(), &snapshot, 128).is_err());
+        drop(store);
+        export_state(dir.path(), &snapshot, 128)?;
         let tip = Arc::new(AtomicU32::new(7));
         let advance = Arc::new(AtomicBool::new(false));
         let amounts = [Arc::new(AtomicU64::new(17)), Arc::new(AtomicU64::new(17))];
@@ -465,16 +460,16 @@ mod tests {
             comparisons: 0,
             methods: BTreeSet::new(),
         };
-        audit.state(dir.path(), 128)?;
+        audit.state(&snapshot, 128)?;
         amounts[1].store(18, Ordering::SeqCst);
         assert!(audit
-            .state(dir.path(), 128)
+            .state(&snapshot, 128)
             .unwrap_err()
             .to_string()
             .contains("native RPC differs"));
         amounts[0].store(18, Ordering::SeqCst);
         assert!(audit
-            .state(dir.path(), 128)
+            .state(&snapshot, 128)
             .unwrap_err()
             .to_string()
             .contains("pinned ledger"));
@@ -483,7 +478,7 @@ mod tests {
         }
         advance.store(true, Ordering::SeqCst);
         assert!(audit
-            .state(dir.path(), 128)
+            .state(&snapshot, 128)
             .unwrap_err()
             .to_string()
             .contains("pinned height"));

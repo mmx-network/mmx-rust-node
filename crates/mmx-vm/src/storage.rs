@@ -109,10 +109,7 @@ impl StorageDb {
         Self::new(Database::memory())
     }
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self::new(Database::open(path)?))
-    }
-    pub fn open_indexed(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self::new(Store::open_indexed(path)?))
+        Self::open_native(path)
     }
     pub fn open_native(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::new(Store::open_native(path)?))

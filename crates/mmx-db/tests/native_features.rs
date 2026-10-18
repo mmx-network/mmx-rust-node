@@ -1,5 +1,46 @@
-use mmx_db::{Database, Error, Store, Write};
-use std::fs;
+use mmx_db::{Store, Write};
+
+#[test]
+fn invalid_commit_batches_preserve_pending_and_committed_state_in_both_backends() {
+    let directory = tempfile::tempdir().unwrap();
+    for mut db in [Store::memory(), Store::open(directory.path()).unwrap()] {
+        db.commit_batch(1, [Write::put("ledger", b"old", b"committed")])
+            .unwrap();
+        db.insert("ledger", b"pending", b"original").unwrap();
+        let writes = || {
+            [
+                Write::put("ledger", b"new", b"balance"),
+                Write::put("chain_meta", b"tip", b"new block"),
+            ]
+        };
+        assert!(db.commit_batch(1, writes()).is_err());
+        assert!(db
+            .commit_batch(
+                2,
+                writes()
+                    .into_iter()
+                    .chain([Write::put("invalid/table", b"key", b"value")])
+            )
+            .is_err());
+        assert_eq!(db.version(), 1);
+        assert_eq!(
+            db.get("ledger", b"pending", None).unwrap(),
+            Some(b"original".to_vec())
+        );
+        assert_eq!(
+            db.get("ledger", b"old", None).unwrap(),
+            Some(b"committed".to_vec())
+        );
+        assert!(db.get("ledger", b"new", None).unwrap().is_none());
+        assert!(db.get("chain_meta", b"tip", None).unwrap().is_none());
+        db.commit_batch(2, writes()).unwrap();
+        assert!(!db.has_pending());
+        assert_eq!(
+            db.get("ledger", b"new", None).unwrap(),
+            Some(b"balance".to_vec())
+        );
+    }
+}
 fn compare(memory: &Store, disk: &Store) {
     assert_eq!(memory.version(), disk.version());
     assert_eq!(memory.has_pending(), disk.has_pending());
@@ -35,9 +76,9 @@ fn compare(memory: &Store, disk: &Store) {
     }
 }
 #[test]
-fn indexed_mvcc_matches_journal_pending_tombstones_gaps_ranges_reopen_and_every_rollback() {
+fn native_mvcc_matches_memory_pending_tombstones_gaps_ranges_reopen_and_every_rollback() {
     let dir = tempfile::tempdir().unwrap();
-    let mut disk = Store::open_indexed(dir.path()).unwrap();
+    let mut disk = Store::open_native(dir.path()).unwrap();
     let mut memory = Store::memory();
     let keys = [b"".as_slice(), b"a", b"aa", b"zz", b"\xff", b"\xff\xff\x00"];
     for height in 0..18u32 {
@@ -64,7 +105,7 @@ fn indexed_mvcc_matches_journal_pending_tombstones_gaps_ranges_reopen_and_every_
         memory.commit(next).unwrap();
         if height % 5 == 0 {
             drop(disk);
-            disk = Store::open_indexed(dir.path()).unwrap();
+            disk = Store::open_native(dir.path()).unwrap();
             compare(&memory, &disk);
         }
     }
@@ -73,20 +114,20 @@ fn indexed_mvcc_matches_journal_pending_tombstones_gaps_ranges_reopen_and_every_
         memory.revert(height).unwrap();
         compare(&memory, &disk);
         drop(disk);
-        disk = Store::open_indexed(dir.path()).unwrap();
+        disk = Store::open_native(dir.path()).unwrap();
         compare(&memory, &disk);
     }
 }
 #[test]
-fn indexed_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomically() {
+fn native_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomically() {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = Store::open_indexed(dir.path()).unwrap();
+    let mut db = Store::open_native(dir.path()).unwrap();
     db.commit_batch(1, [Write::put("t", b"old", b"zero")])
         .unwrap();
     db.commit_batch(2, [Write::put("t", b"later", b"one")])
         .unwrap();
     let mut branch = db.fork(1).unwrap();
-    assert_eq!(fs::read_dir(dir.path().join("staging")).unwrap().count(), 0);
+    assert!(!dir.path().join("staging").exists());
     assert_eq!(
         branch.get("t", b"old", None).unwrap(),
         Some(b"zero".to_vec())
@@ -101,7 +142,7 @@ fn indexed_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomi
             ],
         )
         .unwrap();
-    assert_eq!(fs::read_dir(dir.path().join("staging")).unwrap().count(), 0);
+    assert!(!dir.path().join("staging").exists());
     db.replace_suffix(1, &branch).unwrap();
     assert_eq!(db.get("t", b"old", None).unwrap(), None);
     assert_eq!(
@@ -113,7 +154,7 @@ fn indexed_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomi
     assert!(db.replace_suffix(1, &branch).is_err()); // stale generation, even if the same bytes
     drop(branch);
     drop(db);
-    let mut db = Store::open_indexed(dir.path()).unwrap();
+    let mut db = Store::open_native(dir.path()).unwrap();
     let mut branch = db.fork(2).unwrap();
     db.revert(0).unwrap();
     assert_eq!(
@@ -125,15 +166,15 @@ fn indexed_snapshots_share_old_disk_history_isolate_reads_and_adopt_suffix_atomi
         .unwrap();
     assert!(db.replace_suffix(2, &branch).is_err());
     drop(db);
-    assert!(Store::open_indexed(dir.path()).is_err());
+    assert!(Store::open_native(dir.path()).is_err());
     drop(branch);
-    assert!(Store::open_indexed(dir.path()).is_ok());
+    assert!(Store::open_native(dir.path()).is_ok());
 }
 
 #[test]
 fn memory_replay_delta_preserves_pending_tombstones_ranges_and_pinned_history() {
     let dir = tempfile::tempdir().unwrap();
-    let mut disk = Store::open_indexed(dir.path()).unwrap();
+    let mut disk = Store::open_native(dir.path()).unwrap();
     let mut memory = Store::memory();
     let changes = |height: u32| {
         [b"".as_slice(), b"a", b"aa", b"zz", b"\xff", b"\xff\xff\x00"]
@@ -185,33 +226,12 @@ fn memory_replay_delta_preserves_pending_tombstones_ranges_and_pinned_history() 
     child.commit_batch(3, changes(31)).unwrap();
     expected_child.commit_batch(3, changes(31)).unwrap();
     compare(&expected_child, &child);
-    assert_eq!(fs::read_dir(dir.path().join("staging")).unwrap().count(), 0);
+    assert!(!dir.path().join("staging").exists());
 }
 #[test]
-fn indexed_import_preserves_legacy_history_once_and_prevents_diverging_reopens() {
+fn native_replacement_exceeds_single_frame_size_and_preserves_all_versions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut old = Database::open(dir.path()).unwrap();
-    old.commit_batch(1, [Write::put("t", b"x", b"old")])
-        .unwrap();
-    old.commit_batch(3, [Write::put("t", b"x", b"new")])
-        .unwrap();
-    drop(old);
-    let mut db = Store::open_indexed(dir.path()).unwrap();
-    assert_eq!(db.version(), 3);
-    assert_eq!(db.get("t", b"x", Some(0)).unwrap(), Some(b"old".to_vec()));
-    assert_eq!(db.get("t", b"x", Some(1)).unwrap(), Some(b"new".to_vec()));
-    assert!(Database::open(dir.path()).is_err());
-    db.revert(1).unwrap();
-    drop(db);
-    let db = Store::open_indexed(dir.path()).unwrap();
-    assert_eq!(db.version(), 1);
-    assert_eq!(db.get("t", b"x", None).unwrap(), Some(b"old".to_vec()));
-    assert!(fs::metadata(dir.path().join("journal.mmx")).unwrap().len() > 8);
-}
-#[test]
-fn indexed_replacement_exceeds_journal_frame_limit_and_preserves_all_versions() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut db = Store::open_indexed(dir.path()).unwrap();
+    let mut db = Store::open_native(dir.path()).unwrap();
     db.commit(1).unwrap();
     let mut branch = db.fork(1).unwrap();
     let mut value = vec![0; 1024 * 1024];
@@ -227,7 +247,7 @@ fn indexed_replacement_exceeds_journal_frame_limit_and_preserves_all_versions() 
     db.replace_suffix(1, &branch).unwrap();
     drop(branch);
     drop(db);
-    let mut db = Store::open_indexed(dir.path()).unwrap();
+    let mut db = Store::open_native(dir.path()).unwrap();
     assert_eq!(db.version(), 66);
     for height in 1..=65u32 {
         assert_eq!(
@@ -248,25 +268,9 @@ fn indexed_replacement_exceeds_journal_frame_limit_and_preserves_all_versions() 
         .is_some());
 }
 #[test]
-fn indexed_rejects_foreign_sqlite_and_other_writers_without_modifying_them() {
+fn native_nested_snapshots_survive_parent_drop_and_rewind_before_the_original_cutoff() {
     let dir = tempfile::tempdir().unwrap();
-    let db = Store::open_indexed(dir.path()).unwrap();
-    assert!(Store::open_indexed(dir.path()).is_err());
-    drop(db);
-    let file = dir.path().join("state.sqlite");
-    let conn = rusqlite::Connection::open(file).unwrap();
-    conn.pragma_update(None, "application_id", 123).unwrap();
-    drop(conn);
-    assert!(matches!(
-        Store::open_indexed(dir.path()),
-        Err(Error::Corrupt("foreign indexed database"))
-    ));
-}
-
-#[test]
-fn indexed_nested_snapshots_survive_parent_drop_and_rewind_before_the_original_cutoff() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut db = Store::open_indexed(dir.path()).unwrap();
+    let mut db = Store::open_native(dir.path()).unwrap();
     db.commit_batch(1, [Write::put("t", b"x", b"zero")])
         .unwrap();
     db.commit_batch(2, [Write::put("t", b"x", b"one")]).unwrap();
@@ -297,16 +301,8 @@ fn indexed_nested_snapshots_survive_parent_drop_and_rewind_before_the_original_c
     db.replace_suffix(0, &branch).unwrap();
     drop(branch);
     assert_eq!(db.get("t", b"x", None).unwrap(), Some(b"new-zero".to_vec()));
-    assert_eq!(fs::read_dir(dir.path().join("staging")).unwrap().count(), 0);
+    assert!(!dir.path().join("staging").exists());
     drop(db);
-    fs::create_dir(dir.path().join("staging/branch-interrupted")).unwrap();
-    fs::write(
-        dir.path().join("staging/branch-interrupted/delta"),
-        b"unpublished",
-    )
-    .unwrap();
-    fs::create_dir(dir.path().join("staging/keep-me")).unwrap();
-    let _db = Store::open_indexed(dir.path()).unwrap();
-    assert!(!dir.path().join("staging/branch-interrupted").exists());
-    assert!(dir.path().join("staging/keep-me").exists());
+    let db = Store::open_native(dir.path()).unwrap();
+    assert_eq!(db.get("t", b"x", None).unwrap(), Some(b"new-zero".to_vec()));
 }

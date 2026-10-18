@@ -1,4 +1,4 @@
-use mmx_db::{native::Options, Database, Error, Store, Write};
+use mmx_db::{native::Options, Error, Store, Write};
 use std::fs;
 fn options() -> Options {
     Options {
@@ -81,11 +81,11 @@ fn native_versions_pending_scans_compaction_recovery_and_every_rollback_match_me
         compare(&memory, &disk);
         disk.checkpoint().unwrap();
         drop(disk);
-        disk = Store::open_indexed(directory.path()).unwrap();
+        disk = Store::open(directory.path()).unwrap();
         compare(&memory, &disk);
     }
     assert!(!directory.path().join("state.sqlite").exists());
-    assert!(Database::open(directory.path()).is_err());
+    assert!(Store::open(directory.path()).is_err());
 }
 #[test]
 fn native_forks_pin_files_reject_stale_bases_and_publish_only_one_validated_suffix() {
@@ -163,14 +163,16 @@ fn native_nested_rewind_to_genesis_cannot_resurrect_a_masked_future() {
 #[test]
 fn legacy_foreign_and_corrupt_manifests_are_rejected_without_fallback_or_modification() {
     let directory = tempfile::tempdir().unwrap();
-    let old = Store::open_indexed(directory.path()).unwrap();
-    drop(old);
-    let before = fs::read(directory.path().join("state.sqlite")).unwrap();
-    assert!(Store::open_native(directory.path()).is_err());
-    assert_eq!(
-        fs::read(directory.path().join("state.sqlite")).unwrap(),
-        before
-    );
+    for marker in ["state.sqlite", "journal.mmx", "native.import"] {
+        let path = directory.path().join(marker);
+        fs::write(&path, b"unsupported format").unwrap();
+        assert!(matches!(
+            Store::open(directory.path()),
+            Err(Error::Corrupt(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"unsupported format");
+        fs::remove_file(path).unwrap();
+    }
     let other = tempfile::tempdir().unwrap();
     let mut native = Store::open_native(other.path()).unwrap();
     native.commit_batch(1, changes(0)).unwrap();
@@ -180,10 +182,7 @@ fn legacy_foreign_and_corrupt_manifests_are_rejected_without_fallback_or_modific
     let mut bytes = fs::read(&path).unwrap();
     bytes[10] ^= 1;
     fs::write(&path, &bytes).unwrap();
-    assert!(matches!(
-        Store::open_indexed(other.path()),
-        Err(Error::Corrupt(_))
-    ));
+    assert!(matches!(Store::open(other.path()), Err(Error::Corrupt(_))));
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
 

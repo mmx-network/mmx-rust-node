@@ -83,16 +83,7 @@ impl ForkChain {
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
-        Self::with_storage(
-            ChainState::open(path.as_ref().join("selected"), params)?,
-            Database::open(path.as_ref().join("archive"))?,
-        )
-    }
-    pub fn open_indexed(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
-        Self::with_storage(
-            ChainState::open_indexed(path.as_ref().join("selected"), params)?,
-            Database::open_indexed(path.as_ref().join("archive"))?,
-        )
+        Self::open_native(path, params)
     }
     pub fn open_native(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
         Self::with_storage(

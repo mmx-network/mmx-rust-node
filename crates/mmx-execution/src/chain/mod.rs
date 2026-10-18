@@ -79,9 +79,6 @@ impl ChainState {
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
         Self::with_storage(StorageDb::open(path)?, params)
     }
-    pub fn open_indexed(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
-        Self::with_storage(StorageDb::open_indexed(path)?, params)
-    }
     pub fn open_native(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
         Self::with_storage(StorageDb::open_native(path)?, params)
     }
