@@ -1,5 +1,5 @@
-//! Native VNX public reads plus a JSON-RPC 2.0 HTTP presentation of the same
-//! methods. Peer block transport uses lossless records in `peer`, independently.
+//! Native VNX reads and bounded farming topics, plus a JSON-RPC 2.0 HTTP
+//! presentation of the reads. Peer block transport retains lossless records.
 use crate::{error, Node, Result};
 use mmx_consensus::Record;
 use std::{

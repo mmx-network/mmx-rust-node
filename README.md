@@ -3,8 +3,9 @@
 A Rust port of [`mmx-node`](https://github.com/madMAx43v3r/mmx-node), starting
 with the smart contract engine and versioned database. The workspace now includes
 a node executable with native peer sync, durable fork handling, native VNX read
-RPC and HTTP JSON-RPC. Wallet and block-production services remain separate port
-stages.
+RPC and HTTP JSON-RPC, a compatible wallet CLI, and initial wallet, farmer and
+harvester VNX services. Production block assembly and full farming integration
+remain in progress.
 
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
 `ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
@@ -32,7 +33,7 @@ Normal builds use the checked-in VNI declarations and the Rust VNX submodule;
 they do not need the C++ checkout, CMake, or a C++ compiler.
 
 ```sh
-cargo test --workspace --locked
+cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all --check
 
@@ -347,6 +348,10 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-consensus` | Native hashes/costs and authorization, header/vote/farmer-response authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
 | `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native network bootstrap, durable selected-chain state, orphan archives, native fork-choice policy and atomic branch replacement. |
+| `mmx-wallet` | Compatible recovery words/key files, address and farmer-key derivation, message signing, exact amounts and signed transfers with a native consensus bridge. |
+| `mmxwallet` | Standalone HTTP(S) wallet CLI, private file storage, recovery/import/export, queries, prepared transfers, validation and explicit broadcast. |
+| `mmx-farming` | Wallet locking and native RPC, farmer response/header/vote signing, farm reports, native HDD/SSD/C1+ park reads, bounded CPU decompression and challenge scheduling. |
+| `mmx-tools` | `mmx`, `mmx-wallet`, `mmx-farmer` and `mmx-harvester` executables. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
 The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
@@ -1187,18 +1192,6 @@ The generator compiles a small oracle against that build's actual libraries. It
 does not modify the reference source or use its database. Review fixture changes
 alongside any semantic changes to the port.
 
-## Next port stages
-
-1. Sync throughput, peer scheduling/relay and specialized
-   history indexes, building on the executable node and durable fork selection.
-2. The Rust JavaScript-subset compiler and the remaining original contract suites.
-3. Database compaction, cache/flush tuning and benchmarks,
-   using an independent disk format while preserving logical state semantics.
-4. Remaining node RPCs, wallet and block-production services, carrying over the
-   relevant original tests as each component becomes executable.
-
-Licensed under Apache-2.0, following the original MMX project. See [LICENSE](LICENSE).
-
 ### Wallet
 
 The `mmx-wallet` library and `mmxwallet` CLI are ported from `mmx-node/rust`
@@ -1285,3 +1278,18 @@ implemented paths. Tests also launch the actual wallet, farmer, harvester and
 `mmx` binaries and deliver a signed C++ plot proof over VNX sockets. Farmer and
 harvester parameters come from node RPC, without C++ data files. Mainnet sync
 continues in its existing process.
+
+## Next port stages
+
+1. Sync throughput, peer scheduling/relay and specialized
+   history indexes, building on the executable node and durable fork selection.
+2. The Rust JavaScript-subset compiler and the remaining original contract suites.
+3. Database compaction, cache/flush tuning and benchmarks,
+   using an independent disk format while preserving logical state semantics.
+4. Production block assembly, validator scheduling, pool/NFT partials and virtual
+   farming, reverse farmer RPC, persistent service settings, advanced wallet RPCs
+   and the remaining public node methods. Carry over the original tests as each
+   component becomes executable.
+
+Licensed under Apache-2.0, following the original MMX project. See [LICENSE](LICENSE).
+
