@@ -364,10 +364,13 @@ reads only. Native compressed peer requests carry lossless block records.
 
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A mainnet run validated through height 1,727,608 using five to seven authenticated peers,
-with no timeout body reassignments. Its selected hash matched C++, including
-checks immediately before and after the first hard fork at height 1,000,000.
-HTTP RPC remains available during sync. A complete mainnet sync has not finished.
+A full mainnet run caught up and passed the sustained Live gate at height
+5,518,797: 314 seconds and 32 new blocks, with five to six authenticated sync
+peers and matching C++ canonical hashes. It crossed both hard forks at 1,000,000
+and 5,050,000, with no timeout body reassignments in the final sync/reopen runs.
+The initial Live transition exposed synchronous VDF work blocking RPC; bounded
+background verification fixed it. Live monitor RPC samples ranged from 2 ms to
+748 ms during the verified window.
 The C++ CLI also read heights, headers, full blocks and balances through the
 running node's native VNX RPC service.
 The node uses an indexed disk backend with every
@@ -815,7 +818,8 @@ All 990 VM keys across 161 contracts matched C++ at height 1,124,592, including
 also returned identical contract output for all nine genesis binaries through
 the native and Rust VNX RPC servers. After crossing the second hard fork,
 height 5,055,440 matched all 3,337 VM keys across 435 contracts in 10,011
-historical reads.
+historical reads. After full catch-up, height 5,518,783 matched all 3,349 keys
+across 438 contracts in 10,047 historical reads.
 
 `audit_native_rpc` compares complete immutable VNX RPC results with C++ at fixed
 heights: blocks, headers, both hash forms, transaction bodies and height/ID
@@ -836,8 +840,11 @@ Key enumeration seeks between indexed keys instead of walking every historical
 balance version. A 10,000-version SQL-work regression also checks deleted keys,
 table separation and key widths.
 Local TCP tests cover matching values, divergent servers, two servers agreeing
-on an incorrect balance, tombstones and tip movement. Full-mainnet mutable-state
-parity remains pending until the running nodes have caught up at matching tips.
+on an incorrect balance, tombstones and tip movement. At the matching stable
+mainnet tip 5,518,783, 434 native comparisons passed, including 128 sampled
+balance keys, 128 contracts through both lookup methods, and immutable block/tx
+results. This is sampled balance/contract parity; every known VM storage key was
+checked separately. Moving-tip attempts were rejected rather than counted.
 
 ```sh
 cargo run -p mmx-node --example audit_native_rpc -- \
