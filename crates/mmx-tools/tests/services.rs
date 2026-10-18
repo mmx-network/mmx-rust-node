@@ -304,3 +304,205 @@ fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof()
     wallet.shutdown();
     node.shutdown();
 }
+
+#[test]
+fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
+    use mmx_consensus::{Hash, Value as N};
+    use mmx_execution::chain::{forks::ForkChain, genesis::Assets, network::Network};
+    use mmx_node::{
+        node::hash,
+        rpc,
+        sync::{self, Source},
+        Node,
+    };
+    use mmx_vm::Storage;
+    use mmx_wallet::Wallet;
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let seed = [71; 32];
+    let keys = Wallet::derive(&seed, "protected", 0, 2).unwrap();
+    let sender = keys.addresses[0].0;
+    let recipient = keys.addresses[1].0;
+    let keyfile = dir.path().join("test-wallet.dat");
+    fs::write(&keyfile, KeyFile::new(seed, Some("protected")).encode()).unwrap();
+    let g: Value = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).unwrap())
+        .find(|r| r["name"] == "synthetic")
+        .unwrap();
+    let decode = |v: &Value| {
+        Record::decode(&vnx::util::from_hex_string(v.as_str().unwrap()).unwrap()).unwrap()
+    };
+    let mut bins: Vec<_> = g["binaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(decode)
+        .collect();
+    let tx = bins.last_mut().unwrap();
+    tx.fields.insert(
+        "outputs".into(),
+        N::Sequence(vec![N::Record(
+            Record::from_generated(&mmx::txout_t {
+                address: sender.into(),
+                amount: 30_000_000_u128.to_le_bytes().into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )]),
+    );
+    tx.fields.insert(
+        "id".into(),
+        N::Bytes(tx.calc_hash(false, 0).unwrap().to_vec()),
+    );
+    tx.fields.insert(
+        "content_hash".into(),
+        N::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
+    );
+    let params = mmx::ChainParams::decode(
+        &vnx::util::from_hex_string(g["params"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let network = Network {
+        params,
+        assets: Assets {
+            binaries: bins.try_into().unwrap(),
+            testnet_rewards: None,
+            project_relay: None,
+        },
+    };
+    let mut chain = ForkChain::memory(network.params.clone());
+    chain.initialize(&network.assets).unwrap();
+    let genesis = chain
+        .block(&chain.selected().hash_at(0).unwrap().unwrap())
+        .unwrap()
+        .unwrap();
+    let node = Arc::new(Mutex::new(
+        Node::from_chain(chain, k256_for_test()).unwrap(),
+    ));
+    struct Genesis(Record);
+    impl Source for Genesis {
+        fn height(&mut self) -> mmx_node::Result<u32> {
+            Ok(0)
+        }
+        fn hash_at(&mut self, h: u32) -> mmx_node::Result<Option<Hash>> {
+            Ok(if h == 0 {
+                Some(hash(&self.0, "hash")?)
+            } else {
+                None
+            })
+        }
+        fn block_at(&mut self, h: u32) -> mmx_node::Result<Option<Record>> {
+            Ok((h == 0).then(|| self.0.clone()))
+        }
+    }
+    sync::synchronize_pipelined(
+        &mut Genesis(genesis),
+        &node,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    let mut server = rpc::vnx_server("127.0.0.1:0".parse().unwrap(), node.clone()).unwrap();
+    let args = [
+        "--key-file".into(),
+        keyfile.into_os_string(),
+        "--listen".into(),
+        "127.0.0.1:0".into(),
+        "--num-addresses".into(),
+        "2".into(),
+        "--node".into(),
+        server.endpoint().to_string().into(),
+    ];
+    let (_daemon, endpoint) = Daemon::start(env!("CARGO_BIN_EXE_mmx-wallet"), &args, dir.path());
+    let wallet = client(&endpoint, "Wallet");
+    let call = |name: &str, args: Value| {
+        wallet
+            .call_value(&format!("mmx.Wallet.{name}"), args)
+            .map(|r| r["_ret_0"].clone())
+    };
+    let options = json!({"nonce":500,"passphrase":"protected","gas_limit":100_000});
+    let args = json!({"index":0,"amount":1000_u128.to_le_bytes(),"currency":[0;32],"dst_addr":recipient,"options":options});
+    let sent = service::from_json(&call("send", args.clone()).unwrap()).unwrap();
+    assert_eq!(
+        call("is_locked", json!({"index":0})).unwrap(),
+        true,
+        "temporary passphrase must re-lock"
+    );
+    assert_eq!(node.lock().unwrap().pending_transactions(), 1);
+    assert_eq!(
+        node.lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .storage()
+            .get_balance(&sender, &[0; 32])
+            .unwrap(),
+        Some(30_000_000)
+    );
+    let balance = call("get_balance", json!({"index":0,"currency":[0;32]})).unwrap();
+    let total: u128 = u128::from_le_bytes(
+        serde_json::from_value::<vnx::Fixed<u8, 16>>(balance["total"].clone())
+            .unwrap()
+            .0,
+    );
+    let available: u128 = u128::from_le_bytes(
+        serde_json::from_value::<vnx::Fixed<u8, 16>>(balance["spendable"].clone())
+            .unwrap()
+            .0,
+    );
+    assert_eq!(total, 30_000_000);
+    assert!(available < total - 1000);
+    let id = hash(&sent, "id").unwrap();
+    let n = client(&server.endpoint().to_string(), "Node");
+    assert!(!n
+        .call_value("mmx.Node.get_transaction", json!({"id":id,"pending":true}))
+        .unwrap()["_ret_0"]
+        .is_null());
+    assert!(n
+        .call_value("mmx.Node.get_transaction", json!({"id":id,"pending":false}))
+        .unwrap()["_ret_0"]
+        .is_null());
+    // Explicit repeat submission is idempotent in node and wallet reservations.
+    wallet
+        .call_value(
+            "mmx.Wallet.unlock",
+            json!({"index":0,"passphrase":"protected"}),
+        )
+        .unwrap();
+    call(
+        "send_off",
+        json!({"index":0,"tx":service::to_json(&sent).unwrap()}),
+    )
+    .unwrap();
+    assert_eq!(
+        call("get_balance", json!({"index":0,"currency":[0;32]})).unwrap(),
+        balance
+    );
+    let mut preview = args.clone();
+    preview["options"]["auto_send"] = json!(false);
+    preview["options"]["nonce"] = json!(501);
+    let preview = service::from_json(&call("send", preview).unwrap()).unwrap();
+    assert!(preview
+        .field("exec_result")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .is_some());
+    assert_eq!(node.lock().unwrap().pending_transactions(), 1);
+    // Existing source inputs must respect the same reservation-adjusted balance.
+    let too_much = json!({"index":0,"amount":30_000_000_u128.to_le_bytes(),"src_addr":sender,"dst_addr":recipient,"currency":[0;32],"options":options});
+    assert!(call("send_from", too_much).is_err());
+    call("lock", json!({"index":0})).unwrap();
+    let mut bad = args;
+    bad["options"]["passphrase"] = json!("wrong");
+    assert!(call("send", bad).is_err());
+    assert_eq!(call("is_locked", json!({"index":0})).unwrap(), true);
+    n.close();
+    wallet.close();
+    server.shutdown();
+}
+
+fn k256_for_test() -> k256::ecdsa::SigningKey {
+    k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap()
+}

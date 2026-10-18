@@ -274,6 +274,13 @@ impl Wallet {
             let value = spent.entry((owner, currency)).or_default();
             *value = value.checked_add(n).ok_or(invalid("input overflow"))?;
         }
+        for (&(owner, currency), &n) in &spent {
+            if self.addresses.contains(&owner)
+                && n > balances.get(&(owner, currency)).copied().unwrap_or(0)
+            {
+                return Err(Error::InsufficientFunds("existing transaction input"));
+            }
+        }
         for (currency, n) in required {
             let mut missing = n.saturating_sub(funded.get(&currency).copied().unwrap_or(0));
             let mut candidates: Vec<_> = balances
@@ -313,6 +320,7 @@ impl Wallet {
         tx.fields.insert("inputs".into(), V::Sequence(inputs));
         let payer = options
             .sender
+            .as_ref()
             .map(|a| Address(a.0))
             .or_else(|| {
                 balances

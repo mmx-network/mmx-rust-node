@@ -19,3 +19,7 @@ rayon = "1.11"
 
 [dev-dependencies]
 tempfile.workspace = true
+mmx-node = { path = "../mmx-node" }
+mmx-execution.workspace = true
+mmx-vm.workspace = true
+k256.workspace = true

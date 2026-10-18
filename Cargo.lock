@@ -843,9 +843,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "ctrlc",
+ "k256",
  "mmx-consensus",
+ "mmx-execution",
  "mmx-farming",
+ "mmx-node",
  "mmx-types",
+ "mmx-vm",
  "mmx-wallet",
  "mmxwallet",
  "rayon",

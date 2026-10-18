@@ -461,7 +461,7 @@ fn template(
                     .0,
             )
         } else {
-            options.user.map(|a| a.0)
+            options.user.as_ref().map(|a| a.0)
         };
         op.fields.insert(
             "user".into(),

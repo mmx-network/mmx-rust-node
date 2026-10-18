@@ -310,7 +310,17 @@ impl Node {
         let storage = self.chain.selected().storage();
         for owner in owners {
             if whitelist.is_empty() {
-                let rows = storage.database().scan("balances", &owner, None)?;
+                let scan_limit = if limit < 0 {
+                    10001
+                } else {
+                    (limit as usize).min(10001)
+                };
+                let rows = storage
+                    .database()
+                    .scan("balances", &owner, Some(scan_limit))?;
+                if rows.len() > 10000 {
+                    return Err(error("balance response exceeds 10000 rows"));
+                }
                 for row in rows.into_iter().take(if limit < 0 {
                     usize::MAX
                 } else {

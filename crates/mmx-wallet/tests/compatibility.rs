@@ -319,3 +319,137 @@ fn fee_counts_distinct_input_and_sender_signatures() {
         tx.verify(&params).unwrap();
     }
 }
+
+#[test]
+fn native_completion_matches_cpp_transfer_and_supports_both_transaction_versions() {
+    use mmx_consensus::{authorization, Record, Value as N};
+    use mmx_types::mmx;
+    let w = Wallet::derive(&seed(), "test 世界 🔑", 7, 3).unwrap();
+    let balances = BTreeMap::from([
+        ((w.addresses[0], Address::default()), 9_000_000),
+        ((w.addresses[1], Address::default()), 12_000_000),
+    ]);
+    let mut params = mmx::ChainParams {
+        hardfork2_height: 0,
+        ..Default::default()
+    };
+    let simple = w
+        .transfer(
+            &balances,
+            &ChainParams::default(),
+            5_050_000,
+            Output {
+                address: w.addresses[2],
+                contract: Address::default(),
+                amount: 15_000_000,
+                memo: Some("memo 世界".into()),
+            },
+            &TransferOptions {
+                nonce: Some(123456789),
+                fee_ratio: 1536,
+                expire_delta: 123,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut template = Record::from_generated(&mmx::Transaction::default()).unwrap();
+    template.fields.insert("note".into(), N::Uint(858544509));
+    template.fields.insert(
+        "outputs".into(),
+        N::Sequence(vec![N::Record(
+            Record::from_generated(&mmx::txout_t {
+                address: w.addresses[2].0.into(),
+                amount: 15_000_000_u128.to_le_bytes().into(),
+                memo: Some("memo 世界".into()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )]),
+    );
+    let options = mmx::spend_options_t {
+        nonce: Some(123456789),
+        fee_ratio: 1536,
+        expire_delta: Some(123),
+        ..Default::default()
+    };
+    let tx = w
+        .complete_native(&template, &balances, &params, 5_050_000, &options)
+        .unwrap();
+    assert_eq!(tx, simple.to_record().unwrap());
+    authorization::authorize_sender(&tx).unwrap();
+    params.hardfork2_height = u32::MAX;
+    let old = w
+        .complete_native(&template, &balances, &params, 5_050_000, &options)
+        .unwrap();
+    assert_eq!(old.field("version").unwrap().uint().unwrap(), 0);
+    assert!(old.is_valid(&(&params).into()).unwrap());
+    authorization::authorize_sender(&old).unwrap();
+}
+#[test]
+fn completion_accounts_for_deposits_shared_user_signatures_and_existing_inputs() {
+    use mmx_consensus::{authorization, Record, Value as N};
+    use mmx_types::mmx;
+    let w = Wallet::derive(&seed(), "", 0, 2).unwrap();
+    let params = mmx::ChainParams {
+        hardfork2_height: 0,
+        ..Default::default()
+    };
+    let balances = BTreeMap::from([((w.addresses[0], Address::default()), 10_000_000)]);
+    let mut tx = Record::from_generated(&mmx::Transaction::default()).unwrap();
+    tx.fields.insert(
+        "execute".into(),
+        N::Sequence(vec![N::Record(
+            Record::from_generated(&mmx::operation::Deposit {
+                address: [8; 32].into(),
+                method: "deposit".into(),
+                amount: 1000_u128.to_le_bytes().into(),
+                user: Some(w.addresses[0].0.into()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )]),
+    );
+    let signed = w
+        .complete_native(
+            &tx,
+            &balances,
+            &params,
+            1,
+            &mmx::spend_options_t {
+                gas_limit: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(signed.field("solutions").unwrap().seq().unwrap().len(), 1);
+    assert_eq!(signed.field("inputs").unwrap().seq().unwrap().len(), 1);
+    assert_eq!(
+        signed.field("max_fee_amount").unwrap(),
+        signed.field("static_cost").unwrap()
+    );
+    authorization::authorize_sender(&signed).unwrap();
+    let op = signed.field("execute").unwrap().seq().unwrap()[0]
+        .record()
+        .unwrap();
+    assert_eq!(op.field("solution").unwrap().uint().unwrap(), 0);
+    let mut insufficient = balances.clone();
+    insufficient.insert((w.addresses[0], Address::default()), 1);
+    assert!(w
+        .complete_native(&tx, &insufficient, &params, 1, &Default::default())
+        .is_err());
+    let mut existing = tx.clone();
+    existing.fields.insert(
+        "inputs".into(),
+        N::Sequence(vec![N::Record(
+            Record::from_generated(&mmx::txin_t {
+                address: w.addresses[0].0.into(),
+                amount: 20_000_000_u128.to_le_bytes().into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )]),
+    );
+    assert!(w
+        .complete_native(&existing, &balances, &params, 1, &Default::default())
+        .is_err());
+}
