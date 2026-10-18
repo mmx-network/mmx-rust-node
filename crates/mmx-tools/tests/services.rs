@@ -852,7 +852,8 @@ fn node_starts_configured_wallet_farmer_and_remote_harvester_services() {
         serde_json::to_vec(&json!({"plot_dirs":[],"num_threads":1,"listen":harvester})).unwrap(),
     )
     .unwrap();
-    fs::write(local.join("allow_remote"), b"true").unwrap();
+    // An explicit remote listener also enables the local harvester route,
+    // without requiring the global C++ allow_remote switch.
     let binary = Path::new(env!("CARGO_BIN_EXE_mmx"))
         .parent()
         .unwrap()

@@ -212,6 +212,21 @@ fn farmer_keys(wallet: &NetworkClient) -> Result<Vec<FarmerKey>> {
         })
         .collect()
 }
+fn wallet_reward(wallet: &NetworkClient) -> Result<Option<Address>> {
+    let all = call(wallet, "mmx.Wallet.get_all_accounts", json!({}))?;
+    for account in all
+        .as_array()
+        .ok_or_else(|| err("invalid wallet accounts"))?
+    {
+        if !account["address"].is_null() {
+            let address: vnx::Fixed<u8, 32> = serde_json::from_value(account["address"].clone())?;
+            if address.0 != [0; 32] {
+                return Ok(Some(Address(address.0)));
+            }
+        }
+    }
+    Ok(None)
+}
 pub fn farmer_main() -> Result<()> {
     let matches = FarmerArgs::command().get_matches();
     let mut args = FarmerArgs::from_arg_matches(&matches)?;
@@ -243,9 +258,12 @@ pub fn farmer_main() -> Result<()> {
                 .unwrap_or_else(|| "0.0.0.0".into()),
             11333,
         )?);
-        if matches.value_source("listen") != Some(clap::parser::ValueSource::CommandLine) {
-            args.listen = "127.0.0.1:11332".into();
-        }
+    }
+    if args.harvester_listen.is_some()
+        && matches.value_source("listen") != Some(clap::parser::ValueSource::CommandLine)
+        && cfg.read::<String>("Farmer.private_endpoint")?.is_none()
+    {
+        args.listen = "127.0.0.1:11332".into();
     }
     let node = connect(&args.node, "Node")?;
     let params = params(&node, args.network.as_deref())?;
@@ -254,19 +272,11 @@ pub fn farmer_main() -> Result<()> {
     if keys.is_empty() {
         return Err(err("wallet has no farmer identities"));
     }
-    let mut reward = args.reward_address;
+    let mut reward = args
+        .reward_address
+        .filter(|address| *address != Address::default());
     if reward.is_none() {
-        let all = call(&wallet, "mmx.Wallet.get_all_accounts", json!({}))?;
-        for a in all
-            .as_array()
-            .ok_or_else(|| err("invalid wallet accounts"))?
-        {
-            if !a["address"].is_null() {
-                let address: vnx::Fixed<u8, 32> = serde_json::from_value(a["address"].clone())?;
-                reward = Some(Address(address.0));
-                break;
-            }
-        }
+        reward = wallet_reward(&wallet)?;
     }
     let mut farmer = Farmer::new(keys, reward);
     if let Some(seconds) = cfg.read::<u64>("Farmer.harvester_timeout")? {
@@ -376,6 +386,24 @@ pub fn farmer_main() -> Result<()> {
                     }
                 }
                 Err(e) => eprintln!("Wallet key refresh: {e}"),
+            }
+            // Protected wallets learn their spending addresses on first unlock.
+            // Resolve the default then, without restarting the farmer.
+            if farmer
+                .lock()
+                .map_err(|_| err("farmer lock poisoned"))?
+                .reward_address
+                .is_none()
+            {
+                match wallet_reward(&wallet) {
+                    Ok(address) => {
+                        farmer
+                            .lock()
+                            .map_err(|_| err("farmer lock poisoned"))?
+                            .reward_address = address;
+                    }
+                    Err(e) => eprintln!("Wallet reward refresh: {e}"),
+                }
             }
             updated = Instant::now();
         }
@@ -524,6 +552,7 @@ pub fn harvester_main() -> Result<()> {
     println!("Harvester VNX RPC {}", server.endpoint());
     let stop = stopping()?;
     let (mut reported, mut reloaded) = (Instant::now() - Duration::from_secs(10), Instant::now());
+    let mut reload_retry = false;
     let mut queue = ChallengeQueue::new(Duration::from_secs(10));
     while !stop.load(Ordering::Relaxed) {
         if reported.elapsed() >= Duration::from_secs(10) {
@@ -537,17 +566,33 @@ pub fn harvester_main() -> Result<()> {
             reported = Instant::now();
         }
         if args.reload_interval > 0
-            && reloaded.elapsed() >= Duration::from_secs(args.reload_interval)
+            && reloaded.elapsed()
+                >= Duration::from_secs(if reload_retry {
+                    args.reload_interval.min(60)
+                } else {
+                    args.reload_interval
+                })
         {
-            let keys: Vec<vnx::Fixed<u8, 33>> =
-                serde_json::from_value(call(&farmer, "mmx.Farmer.get_farmer_keys", json!({}))?)?;
-            let mut h = harvester
-                .lock()
-                .map_err(|_| err("harvester lock poisoned"))?;
-            h.farmer_keys = keys.into_iter().map(|k| k.0).collect();
-            h.reload();
-            queue.clear();
-            reloaded = Instant::now();
+            let keys = call(&farmer, "mmx.Farmer.get_farmer_keys", json!({}))
+                .and_then(|value| Ok(serde_json::from_value::<Vec<vnx::Fixed<u8, 33>>>(value)?));
+            match keys {
+                Ok(keys) => {
+                    let mut h = harvester
+                        .lock()
+                        .map_err(|_| err("harvester lock poisoned"))?;
+                    h.farmer_keys = keys.into_iter().map(|k| k.0).collect();
+                    h.reload();
+                    queue.clear();
+                    reloaded = Instant::now();
+                    reload_retry = false;
+                }
+                Err(e) => {
+                    eprintln!("Farmer key refresh: {e}");
+                    // Keep the current plots during a temporary remote outage.
+                    reloaded = Instant::now();
+                    reload_retry = true;
+                }
+            }
         }
         while let Some(sample) = challenges.try_recv()? {
             if sample.replay {

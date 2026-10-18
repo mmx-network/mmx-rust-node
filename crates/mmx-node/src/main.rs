@@ -126,6 +126,10 @@ fn main() -> Result<()> {
         config.load_tree(path)?;
     }
     let network = Network::from_config(&config, options.root.join("data"))?;
+    let remote_harvesters = config.read::<bool>("allow_remote")?.unwrap_or(false)
+        || config
+            .read::<String>("Farmer.harvester_endpoint")?
+            .is_some();
     if !options.configs.is_empty()
         && config.read::<bool>("farmer")?.unwrap_or(true)
         && config.read::<bool>("wallet")?.unwrap_or(true)
@@ -135,16 +139,16 @@ fn main() -> Result<()> {
             config
                 .read::<String>("Farmer.private_endpoint")?
                 .unwrap_or_else(|| {
-                    if config.read::<bool>("allow_remote").ok().flatten() == Some(true) {
+                    if remote_harvesters {
                         "127.0.0.1:11332".into()
                     } else {
                         "127.0.0.1:11333".into()
                     }
                 }),
         );
-        if options.reward_vote.is_none() {
-            options.reward_vote = config.read("Node.reward_vote")?;
-        }
+    }
+    if options.reward_vote.is_none() {
+        options.reward_vote = config.read("Node.reward_vote")?;
     }
     if options.peers.is_empty() && !options.offline {
         if let Some(peers) = config.get("Router.seed_peers")? {

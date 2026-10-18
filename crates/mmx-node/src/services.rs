@@ -153,7 +153,10 @@ impl Services {
                 .push(Owned::spawn(&directory.join("mmx-farmer"), args)?);
             services.0.last_mut().unwrap().ready(farmer, "Farmer")?;
             if config.read::<bool>("harvester")?.unwrap_or(true) {
-                let remote = config.read::<bool>("allow_remote")?.unwrap_or(false);
+                let remote = config.read::<bool>("allow_remote")?.unwrap_or(false)
+                    || config
+                        .read::<String>("Farmer.harvester_endpoint")?
+                        .is_some();
                 let harvester_farmer = if remote {
                     config
                         .read::<String>("Farmer.harvester_endpoint")?
