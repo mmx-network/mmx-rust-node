@@ -519,6 +519,125 @@ fn invalid_branch_body_is_excluded_without_reverting_selected_state() {
 }
 
 #[test]
+fn purge_reclaims_old_bodies_and_keeps_the_full_private_consensus_lookback_after_reopen() {
+    use mmx_consensus::{transitions::history, vote, Hash};
+    use mmx_db::{Store, Write};
+    use mmx_execution::chain::forks::ForkChain;
+    use std::collections::BTreeMap;
+    let (g, steps) = synthetic();
+    let mut p = params(&g);
+    p.commit_delay = 16;
+    p.challenge_delay = 12;
+    p.infuse_delay = 8;
+    p.max_validators = 3;
+    p.time_diff_divider = 1;
+    p.time_diff_constant = 1;
+    let directory = tempfile::tempdir().unwrap();
+    let mut selected = Store::open_native(directory.path().join("selected")).unwrap();
+    let mut archive = Store::open_native(directory.path().join("archive")).unwrap();
+    let mut ledger = selected.fork(0).unwrap();
+    let mut bodies = archive.fork(0).unwrap();
+    let mut headers = BTreeMap::new();
+    let proof = mmx_consensus::header::to_typed(&record(&steps[0]["block"]))
+        .unwrap()
+        .proof;
+    let mut prev = [0; 32];
+    let params_wire = p.encode(&mmx_types::vnx_registry().unwrap()).unwrap();
+    // Synthetic stored ancestry isolates retention from CPU authentication,
+    // which is covered by the native chain fixtures. Publish each complete
+    // versioned suffix once, rather than fsyncing 1,203 tiny fixture blocks.
+    for height in 0..=1202u32 {
+        let mut id: Hash = [0; 32];
+        id[..4].copy_from_slice(&height.to_be_bytes());
+        id[31] = 1;
+        let mut block = mmx::Block {
+            height,
+            hash: id.into(),
+            prev: prev.into(),
+            vdf_height: height,
+            vdf_count: u32::from(height > 0),
+            challenge: id.into(),
+            time_diff: u64::from(height) + 1,
+            ..Default::default()
+        };
+        // Force validator lookup to traverse almost its entire 1,000-header
+        // window; a short infusion-only prefix would silently lose this key.
+        if height == 200 {
+            block.proof = proof.clone();
+        }
+        let record = Record::from_generated(&block).unwrap();
+        headers.insert(id, mmx_consensus::header::to_typed(&record).unwrap());
+        let wire = record.encode().unwrap();
+        let mut writes = vec![
+            Write::put("chain_blocks", id, &wire),
+            Write::put("chain_height", height.to_be_bytes(), id),
+            Write::put("chain_meta", b"tip", id),
+        ];
+        let mut archived = vec![
+            Write::put("fork_blocks", id, wire),
+            Write::put(
+                "fork_order",
+                [height.to_be_bytes(), height.to_be_bytes()].concat(),
+                id,
+            ),
+        ];
+        if height == 0 {
+            writes.push(Write::put("chain_meta", b"params", &params_wire));
+            archived.push(Write::put("fork_meta", b"params", &params_wire));
+            archived.push(Write::put("fork_meta", b"genesis", id));
+        }
+        ledger.commit_batch(height + 1, writes).unwrap();
+        bodies.commit_batch(height + 1, archived).unwrap();
+        prev = id;
+    }
+    selected.replace_suffix(0, &ledger).unwrap();
+    archive.replace_suffix(0, &bodies).unwrap();
+    drop((ledger, bodies, selected, archive));
+    let at = |height| {
+        headers
+            .values()
+            .find(|header| header.height == height)
+            .unwrap()
+    };
+    let candidate = at(1201);
+    let parent = at(1200);
+    let challenge = history::challenge(&headers, &p, candidate, 0).unwrap();
+    let infusion = history::infusion(&headers, &p, parent, 0).unwrap();
+    let validators = vote::validators(&headers, &p, candidate, 1000).unwrap();
+    assert!(!validators.is_empty());
+    assert_eq!(infusion.num_iters, 1177);
+    let mut chain = ForkChain::open_native(directory.path(), p.clone()).unwrap();
+    chain.purge_before_height(1200).unwrap();
+    drop(chain);
+    let mut chain = ForkChain::open_native(directory.path(), p.clone()).unwrap();
+    assert_eq!(chain.earliest_height(), 1200);
+    assert!(chain.block(&at(183).hash.0).unwrap().is_none());
+    assert!(chain.selected().block(&at(183).hash.0).unwrap().is_none());
+    assert!(chain.selected().hash_at(183).unwrap().is_none());
+    assert!(chain.block(&at(184).hash.0).unwrap().is_some());
+    assert!(chain.block(&at(0).hash.0).unwrap().is_some());
+    assert_eq!(
+        history::challenge(&chain, &p, candidate, 0).unwrap(),
+        challenge
+    );
+    let retained = history::infusion(&chain, &p, parent, 0).unwrap();
+    assert_eq!(
+        (retained.hash, retained.num_iters),
+        (infusion.hash, infusion.num_iters)
+    );
+    assert_eq!(
+        vote::validators(&chain, &p, candidate, 1000).unwrap(),
+        validators
+    );
+    assert!(chain.rollback_to(1199).is_err());
+    chain.rollback_to(1200).unwrap();
+    assert_eq!(chain.selected().tip().unwrap().unwrap().height, 1200);
+    drop(chain);
+    let chain = ForkChain::open_native(directory.path(), p).unwrap();
+    assert_eq!(chain.selected().tip().unwrap().unwrap().height, 1200);
+}
+
+#[test]
 fn purged_forks_allow_replacement_at_the_boundary_but_cannot_replace_the_boundary() {
     use mmx_execution::chain::forks::ForkChain;
     let (g, steps) = synthetic();
