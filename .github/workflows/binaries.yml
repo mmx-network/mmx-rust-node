@@ -23,6 +23,9 @@ jobs:
           for bin in mmx-node mmx mmx-wallet mmxwallet mmx-farmer mmx-harvester; do target/release/$bin --help; done
           mkdir -p dist/bin
           for bin in mmx-node mmx mmx-wallet mmxwallet mmx-farmer mmx-harvester; do cp target/release/$bin dist/bin/; done
+          ln -s mmx-node dist/bin/mmx_node
+          ln -s mmx-farmer dist/bin/mmx_farmer
+          ln -s mmx-harvester dist/bin/mmx_harvester
           printf '%s\n' "$GITHUB_SHA" > dist/COMMIT
           tar -C dist -czf "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz" COMMIT bin
           sha256sum "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz" > "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz.sha256"

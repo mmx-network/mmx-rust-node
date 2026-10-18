@@ -401,7 +401,7 @@ pub struct HarvesterArgs {
     password_file: Option<PathBuf>,
     #[arg(long)]
     plot_dir: Vec<PathBuf>,
-    #[arg(long, default_value = "127.0.0.1:11333")]
+    #[arg(long, alias = "node", default_value = "127.0.0.1:11333")]
     farmer: String,
     #[arg(long, default_value = "127.0.0.1:11334")]
     listen: String,
@@ -450,9 +450,7 @@ pub fn harvester_main() -> Result<()> {
         &mut args.reload_interval,
     )?;
     config::apply(&matches, &cfg, "farmer", "node", &mut args.farmer)?;
-    if args.farmer.starts_with(':') {
-        args.farmer = format!("127.0.0.1{}", args.farmer);
-    }
+    args.farmer = config::remote_endpoint(&args.farmer, 11333);
     if args.plot_dir.is_empty() && args.layers.paths.is_empty() {
         return Err(err("supply --plot-dir or Harvester.plot_dirs in -c CONFIG"));
     }

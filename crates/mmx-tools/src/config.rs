@@ -61,3 +61,20 @@ pub fn endpoint(host: &str, port: u16) -> Result<String> {
         .map_err(|_| err("listener endpoint must be an explicit IP address"))?;
     Ok(std::net::SocketAddr::new(ip, port).to_string())
 }
+
+pub fn remote_endpoint(value: &str, port: u16) -> String {
+    if value.starts_with("unix://") || value.ends_with(".sock") {
+        return value.into();
+    }
+    let raw = value.strip_prefix("tcp://").unwrap_or(value);
+    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+        return std::net::SocketAddr::new(ip, port).to_string();
+    }
+    if raw.starts_with(':') {
+        return format!("127.0.0.1{raw}");
+    }
+    if !raw.contains(':') || raw.starts_with('[') && raw.ends_with(']') {
+        return format!("{raw}:{port}");
+    }
+    raw.into()
+}
