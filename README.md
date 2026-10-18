@@ -100,8 +100,9 @@ after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
 
 Each connection correlates reordered native returns while serving peer requests,
-with at most 32 body requests outstanding. The aggregate content-group bound
-still applies when common content uses one provider's wider pipeline.
+with at most 32 body requests outstanding. A shared group contains at most 32
+contents across all providers, independent of pool size, so smaller pools can
+fill a complete pipeline while retaining the previous eight-peer maximum.
 Common content is fetched from its
 fastest successful hash claimant; a slower provider is tried only after the request
 lease expires. Hash requests fan out to available pool members. Each height window
@@ -113,6 +114,14 @@ owner is joined before the pool closes. Whole frames share a ten-second deadline
 across header and payload reads, also bounded by the client's fifteen-second RPC
 deadline. Trickling bytes cannot extend either deadline; failed frames close the
 connection.
+
+In adjacent mainnet samples with six peers, filling 32-content groups reduced
+body-download time from 2.25 to 1.53 ms per block; the wider-group live sample
+averaged 183 blocks/s with HTTP status p95 of 0.49 s. Peer and host load affect
+these observations. The isolated loopback comparisons were nearly flat in both
+binary orders, and all runs retained one body download per missing content.
+Scheduler tests exercise full common-content batches and 36 competing contents
+split across three providers without exceeding the shared bound.
 Each connection retains independent input/output type state. Outgoing dynamic
 classes are declared once, as in native `TypeOutput`; queued RPCs share a bounded
 TCP write while retaining separate native compressed frames. A representative
@@ -300,7 +309,7 @@ reads only. Native compressed peer requests carry lossless block records.
 
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A mainnet run validated through height 1,571,088 using five to seven authenticated peers,
+A mainnet run validated through height 1,727,608 using five to seven authenticated peers,
 with no timeout body reassignments. Its selected hash matched C++, including
 checks immediately before and after the first hard fork at height 1,000,000.
 HTTP RPC remains available during sync. A complete mainnet sync has not finished.

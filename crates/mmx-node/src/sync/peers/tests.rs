@@ -324,7 +324,7 @@ fn common_content_fills_the_fastest_claimants_pipeline_within_the_aggregate_boun
     let (network, node, mut blocks) = fixture();
     // Statically valid descendants exercise scheduling without selecting a
     // chain or substituting fabricated space work for consensus validation.
-    for height in 3..=24 {
+    for height in 3..=65 {
         let mut child = blocks[2].clone();
         child.fields.insert("height".into(), Value::Uint(height));
         child.fields.insert(
@@ -341,7 +341,7 @@ fn common_content_fills_the_fastest_claimants_pipeline_within_the_aggregate_boun
             peer.source.as_mut().unwrap().hash_delay = Duration::from_millis(50);
         }
     }
-    let window = pool.window(1, 24, &node, &AtomicBool::new(false)).unwrap();
+    let window = pool.window(1, 65, &node, &AtomicBool::new(false)).unwrap();
     assert_eq!(
         window.heights,
         blocks[1..]
@@ -350,12 +350,12 @@ fn common_content_fills_the_fastest_claimants_pipeline_within_the_aggregate_boun
             .map(|block| vec![block])
             .collect::<Vec<_>>()
     );
-    assert_eq!((window.body_requests, window.body_retries), (24, 0));
+    assert_eq!((window.body_requests, window.body_retries), (65, 0));
     let events = events.lock().unwrap();
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e, Event::Hash(_, 1, 24)))
+            .filter(|e| matches!(e, Event::Hash(_, 1, 65)))
             .count(),
         3
     );
@@ -366,7 +366,7 @@ fn common_content_fills_the_fastest_claimants_pipeline_within_the_aggregate_boun
             _ => None,
         })
         .collect();
-    assert_eq!(providers, vec![1; 24]);
+    assert_eq!(providers, vec![1; 65]);
     let batches: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
@@ -376,8 +376,68 @@ fn common_content_fills_the_fastest_claimants_pipeline_within_the_aggregate_boun
         .collect();
     assert_eq!(
         batches,
-        [12, 12],
-        "three peers bound each group to twelve contents"
+        [32, 32, 1],
+        "three peers can fill the pipeline without exceeding the global bound"
+    );
+}
+
+#[test]
+fn competing_contents_share_one_global_group_bound_across_all_providers() {
+    let (network, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let sources = (1..=3u8)
+        .map(|peer| {
+            // Statically valid alternatives test transport/admission only. No CPU
+            // proof capability is fabricated and the selected genesis stays put.
+            let alternatives: Vec<_> = (1..=12)
+                .map(|height| {
+                    let mut block = blocks[2].clone();
+                    block.fields.insert("height".into(), Value::Uint(height));
+                    block.fields.insert(
+                        "reward_amount".into(),
+                        Value::Uint(
+                            block.field("reward_amount").unwrap().uint().unwrap() + u64::from(peer),
+                        ),
+                    );
+                    resign(&mut block, &network.params);
+                    block
+                })
+                .collect();
+            ([peer; 32], Fake::new(peer, &alternatives, &events))
+        })
+        .collect();
+    let mut pool = PeerPool::new(sources);
+    let window = pool.window(1, 12, &node, &AtomicBool::new(false)).unwrap();
+    assert_eq!(window.heights.len(), 12);
+    assert!(window.heights.iter().all(|blocks| blocks.len() == 3));
+    assert_eq!((window.body_requests, window.body_retries), (36, 0));
+    assert!(counts(&events).values().all(|&count| count == 1));
+    let batches: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| {
+            if let Event::Batch(size) = event {
+                Some(*size)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(batches, [10, 10, 10, 2, 2, 2]);
+    assert!(batches
+        .chunks(3)
+        .all(|round| round.iter().sum::<usize>() <= 32));
+    assert_eq!(
+        node.lock()
+            .unwrap()
+            .chain
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
     );
 }
 fn resign(block: &mut Record, params: &mmx::ChainParams) {

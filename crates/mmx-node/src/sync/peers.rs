@@ -22,6 +22,9 @@ use std::{
 pub const MIN_PEERS: usize = 3;
 pub const MAX_PEERS: usize = 8;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+// Preserve the previous eight-peer worst-case bound while allowing smaller
+// authenticated pools to fill a complete body-request pipeline as well.
+const MAX_GROUP_CONTENTS: usize = 32;
 type Missing = BTreeSet<(u32, Hash)>;
 mod metadata;
 mod prefetch;
@@ -392,15 +395,15 @@ impl<S: PeerSource> PeerPool<S> {
         let mut unsupported = BTreeMap::new();
         let mut bytes = 0usize;
         // Bound each group by unique content count, including competing
-        // candidates. Keep this aggregate bound when increasing per-connection
-        // concurrency, so common content can use a fuller single-peer pipeline.
+        // candidates. The global bound does not shrink with the peer count;
+        // common content can fill one provider's complete bounded pipeline.
         let mut first = 0;
         while first < count && bytes < BATCH_BYTES {
             let mut end = start + first + 1;
             let mut contents = jobs.range((start + first, [0; 32])..(end, [0; 32])).count();
             while end < start + count {
                 let additional = jobs.range((end, [0; 32])..=(end, [255; 32])).count();
-                if contents + additional > 4 * self.peers.len() {
+                if contents + additional > MAX_GROUP_CONTENTS {
                     break;
                 }
                 contents += additional;
