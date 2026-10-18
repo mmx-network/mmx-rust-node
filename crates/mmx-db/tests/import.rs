@@ -160,6 +160,43 @@ fn interrupted_import_resumes_without_recopying_committed_payloads_or_exposing_p
 }
 
 #[test]
+fn transfer_pacing_does_not_accumulate_credit_during_a_long_pause() {
+    use std::time::{Duration, Instant};
+    let root = tempfile::tempdir().unwrap();
+    let from = root.path().join("source");
+    let to = root.path().join("native");
+    source(&from, false);
+    let rate = 65536;
+    let pause = Duration::from_millis(500);
+    let started = Instant::now();
+    let mut paused = false;
+    let report = import::indexed(
+        &from,
+        &to,
+        Options {
+            bytes_per_second: Some(rate),
+            ..options()
+        },
+        |report| {
+            if report.rows > 0 && !paused {
+                paused = true;
+                std::thread::sleep(pause);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    // One already-active batch can absorb its own delay. No later batch may
+    // spend that idle time. The largest fixture batch transfers under 4 KiB.
+    let minimum = Duration::from_secs_f64(report.transfer_bytes as f64 / rate as f64) + pause
+        - Duration::from_secs_f64(4096.0 / rate as f64);
+    assert!(
+        started.elapsed() >= minimum,
+        "paused time bypassed subsequent batch pacing"
+    );
+}
+
+#[test]
 fn import_rejects_active_writers_changed_sources_and_foreign_or_completed_targets() {
     let root = tempfile::tempdir().unwrap();
     let from = root.path().join("source");

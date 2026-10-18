@@ -270,10 +270,12 @@ pub fn indexed(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let started = Instant::now();
-    let initial_bytes = state.report.transfer_bytes;
     progress(state.report)?;
     loop {
+        // Idle/paused time must not buy credit for a later burst. Budget each
+        // bounded batch independently, including cancellation callback delays.
+        let started = Instant::now();
+        let initial_bytes = state.report.transfer_bytes;
         let (entries, cursor, value_bytes, transfer) = batch(&conn, &state, options.batch_bytes)?;
         if entries.is_empty() {
             break;
