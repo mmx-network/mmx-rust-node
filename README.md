@@ -783,6 +783,8 @@ cargo run --release -p mmx-node --example audit_rollback -- \
 
 The audit needs space for multiple full snapshots and temporary layout rewrites.
 Separate scratch storage reduces competition with a running node's disk I/O.
+Use `--restore-dir /other/disk/scratch` to keep the selected-state restore image
+in an automatically removed temporary directory on another disk.
 Its JSON lines identify completed phases and the hard forks actually checked;
 it performs no network block downloads.
 

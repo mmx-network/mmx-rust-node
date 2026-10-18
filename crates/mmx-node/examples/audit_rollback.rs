@@ -228,6 +228,7 @@ fn replay(
 fn main() -> Result<()> {
     let mut source = None;
     let mut output = None;
+    let mut restore_root = None;
     let mut root = PathBuf::from("../mmx-node");
     let mut name = "mainnet".to_owned();
     let mut args = std::env::args().skip(1);
@@ -236,11 +237,20 @@ fn main() -> Result<()> {
         match arg.as_str() {
             "--source-dir" => source = Some(PathBuf::from(value)),
             "--output" => output = Some(PathBuf::from(value)),
+            "--restore-dir" => restore_root = Some(PathBuf::from(value)),
             "--mmx-root" => root = value.into(),
             "--network" => name = value,
             _ => return Err(format!("unknown audit argument: {arg}").into()),
         }
     }
+    let restore_directory = restore_root
+        .map(|path| -> Result<_> {
+            std::fs::create_dir_all(&path)?;
+            Ok(tempfile::Builder::new()
+                .prefix("rollback-restore-")
+                .tempdir_in(path)?)
+        })
+        .transpose()?;
     let network = Network::load(root, &name)?;
     let output = output.ok_or("missing --output")?;
     std::fs::create_dir_all(&output)?;
@@ -262,8 +272,12 @@ fn main() -> Result<()> {
         );
     }
     let selected = data.join("chain/selected/state.sqlite");
-    let rowid_original = temporary.path().join("selected.rowid.sqlite");
+    let rowid_original = restore_directory
+        .as_ref()
+        .map_or(temporary.path(), |dir| dir.path())
+        .join("selected.rowid.sqlite");
     backup(&selected, &rowid_original)?;
+    println!("{}", json!({"phase":"restore_image","path":rowid_original}));
     let expected = readonly(&reference.join("chain/selected/state.sqlite"))?;
     let tip: u32 = expected.query_row("SELECT version-1 FROM meta", [], |row| row.get(0))?;
     if tip == 0 {
