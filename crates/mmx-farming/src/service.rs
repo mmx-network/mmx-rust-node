@@ -385,7 +385,13 @@ pub fn harvester_options(
         })),
         session_releaser: Some(Arc::new(move |id| auth.logout(id))),
         export_topics: ["harvester.challenges".into()].into(),
-        publish_topics: ["harvester.proof".into(), "harvester.info".into()].into(),
+        publish_topics: [
+            "harvester.proof".into(),
+            "harvester.info".into(),
+            "harvester.lookups".into(),
+            "harvester.partials".into(),
+        ]
+        .into(),
         max_connections: 64,
         ..Default::default()
     }

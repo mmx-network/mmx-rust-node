@@ -25,6 +25,28 @@ fn start_time(pid: u32) -> Option<String> {
         .map(str::to_owned)
 }
 impl Owned {
+    fn ready(&mut self, endpoint: &str, service: &str) -> Result<()> {
+        let endpoint = endpoint.parse()?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Err(format!("{service} exited during startup: {status}").into());
+            }
+            if let Ok(client) = vnx::net::NetworkClient::connect(
+                &endpoint,
+                service,
+                mmx_types::vnx_registry()?,
+                Duration::from_millis(500),
+            ) {
+                client.close();
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("{service} did not become ready at {endpoint}").into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     fn spawn(path: &Path, args: Vec<String>) -> Result<Self> {
         use std::os::unix::ffi::OsStrExt;
         let exe = std::fs::canonicalize(path)?;
@@ -110,6 +132,11 @@ impl Services {
             services
                 .0
                 .push(Owned::spawn(&directory.join("mmx-wallet"), args)?);
+            services
+                .0
+                .last_mut()
+                .unwrap()
+                .ready(&wallet_endpoint, "Wallet")?;
         }
         if farming {
             let mut args = base.clone();
@@ -124,6 +151,7 @@ impl Services {
             services
                 .0
                 .push(Owned::spawn(&directory.join("mmx-farmer"), args)?);
+            services.0.last_mut().unwrap().ready(farmer, "Farmer")?;
             if config.read::<bool>("harvester")?.unwrap_or(true) {
                 let remote = config.read::<bool>("allow_remote")?.unwrap_or(false);
                 let harvester_farmer = if remote {

@@ -877,6 +877,14 @@ fn node_starts_configured_wallet_farmer_and_remote_harvester_services() {
         root,
     );
     let line = daemon.line("P2P ");
+    daemon.line("Wallet VNX RPC ");
+    // The remote surface and the local harvester both announce this prefix;
+    // wait for the control endpoint itself before querying it.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !root.join("harvester.sock").exists() {
+        assert!(Instant::now() < deadline, "harvester did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
     let node_endpoint = line
         .split_whitespace()
         .nth(4)
