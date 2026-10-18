@@ -1198,3 +1198,25 @@ alongside any semantic changes to the port.
    relevant original tests as each component becomes executable.
 
 Licensed under Apache-2.0, following the original MMX project. See [LICENSE](LICENSE).
+
+### Wallet
+
+The `mmx-wallet` library and `mmxwallet` CLI are ported from `mmx-node/rust`
+(Apache-2.0), with the original C++ compatibility fixtures and mock HTTP CLI
+suite. They support existing VNX key files, recovery words (including historical
+checksums), passphrases, accounts, addresses, exact amounts, offline transfer
+signing, validation and explicit broadcast through the C++ public HTTP API.
+`Transaction::to_record()` bridges wallet presentation into native VNX records;
+tests compare the transaction ID, content hash, cost and wire round trip with
+the consensus engine. The standalone CLI currently uses the C++ REST API, which
+is broader than this node's JSON-RPC interface.
+
+```sh
+cargo run -p mmxwallet -- create --json
+cargo run -p mmxwallet -- address --json
+cargo run -p mmxwallet -- balance --rpc https://rpc.mmx.network --json
+```
+
+Key files contain the seed in plaintext, matching C++; a passphrase changes key
+derivation rather than encrypting the file. The CLI creates private directories
+and files and takes secrets through interactive prompts or `--input-stdin`.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node"]
+members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node", "crates/mmx-wallet", "crates/mmxwallet"]
 exclude = ["vendor/vnx-rust"]
 resolver = "2"
 
@@ -10,6 +10,11 @@ rust-version = "1.89"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+hex = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+mmx-wallet = { path = "crates/mmx-wallet" }
 mmx-db = { path = "crates/mmx-db" }
 mmx-types = { path = "crates/mmx-types" }
 mmx-consensus = { path = "crates/mmx-consensus" }
