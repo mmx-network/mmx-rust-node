@@ -152,6 +152,15 @@ impl Connection {
     pub fn receive(&mut self, idle: Duration) -> Result<Option<Record>> {
         self.receive_until(idle, Instant::now() + Duration::from_secs(10))
     }
+    fn quick_ack(&self) {
+        // Native peers can leave small response tails behind Nagle's gate.
+        // QUICKACK is transient, so refresh the receiver hint after reads.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::linux::net::TcpStreamExt;
+            let _ = self.stream.set_quickack(true);
+        }
+    }
     fn receive_until(&mut self, idle: Duration, end: Instant) -> Result<Option<Record>> {
         let result = self.receive_frame_until(idle, end);
         if result.is_err() {
@@ -167,7 +176,7 @@ impl Connection {
         let mut header = [0; 8];
         match self.stream.read(&mut header[..1]) {
             Ok(0) => return Err(error("peer disconnected")),
-            Ok(_) => (),
+            Ok(_) => self.quick_ack(),
             Err(e)
                 if matches!(
                     e.kind(),
@@ -209,7 +218,10 @@ impl Connection {
             self.stream.set_read_timeout(Some(remaining))?;
             match self.stream.read(bytes) {
                 Ok(0) => return Err(error("peer disconnected during frame")),
-                Ok(count) => bytes = &mut bytes[count..],
+                Ok(count) => {
+                    self.quick_ack();
+                    bytes = &mut bytes[count..];
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e)
                     if matches!(
