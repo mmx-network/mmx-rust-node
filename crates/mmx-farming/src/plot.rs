@@ -42,13 +42,15 @@ impl Prover {
             use std::os::unix::fs::MetadataExt;
             (metadata.dev(), metadata.ino())
         };
-        let mut reader = Reader::new(file.take(1024 * 1024), mmx_types::vnx_registry()?)
-            .with_limits(vnx::binary::Limits {
+        let registry = mmx_types::vnx_registry()?;
+        let max_schemas = registry.len() + 128;
+        let mut reader =
+            Reader::new(file.take(1024 * 1024), registry).with_limits(vnx::binary::Limits {
                 max_depth: 32,
                 max_container: 4096,
                 max_string_bytes: 65536,
                 max_value_bytes: 1024 * 1024,
-                max_schemas: 128,
+                max_schemas,
             });
         let value = reader.read()?;
         if value["__type"] != "mmx.PlotHeader" {
