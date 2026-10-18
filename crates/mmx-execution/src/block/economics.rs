@@ -11,15 +11,22 @@ use std::collections::BTreeMap;
 /// hash of the oldest visited ancestor, even when history is shorter than the
 /// payout interval. The chain layer is responsible for authenticating history.
 pub fn vdf_reward_winner(interval: u32, ancestors: &[mmx::BlockHeader]) -> Option<Address> {
-    let ancestors = &ancestors[..ancestors.len().min(interval as usize)];
-    let salt = ancestors.last()?.proof_hash.0;
+    vdf_reward_winner_iter(interval, ancestors.iter())
+}
+pub(crate) fn vdf_reward_winner_iter<'a>(
+    interval: u32,
+    ancestors: impl Iterator<Item = &'a mmx::BlockHeader>,
+) -> Option<Address> {
+    let mut salt = None;
     let mut counts = BTreeMap::<Address, u32>::new();
-    for header in ancestors {
+    for header in ancestors.take(interval as usize) {
+        salt = Some(header.proof_hash.0);
         for address in &header.vdf_reward_addr {
             let count = counts.entry(address.0).or_default();
             *count = count.wrapping_add(1);
         }
     }
+    let salt = salt?;
     let mut best = None;
     let mut max_count = 0;
     let mut min_hash = [0; 32];

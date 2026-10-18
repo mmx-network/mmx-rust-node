@@ -313,18 +313,21 @@ impl ChainState {
         if !height.is_multiple_of(interval) {
             return Ok(None);
         }
-        let mut ancestors = Vec::new();
-        let mut current = parent.clone();
-        for _ in 0..interval {
-            ancestors.push(current.clone());
+        let mut ancestors: Vec<Arc<mmx::BlockHeader>> = Vec::new();
+        for _ in 1..interval {
+            let current = ancestors.last().map_or(parent, Arc::as_ref);
             if current.height == 0 {
                 break;
             }
-            current = self
-                .header(&current.prev.0)?
+            let previous = self
+                .shared_header(&current.prev.0)?
                 .ok_or_else(|| invalid("missing payout ancestor"))?;
+            ancestors.push(previous);
         }
-        Ok(block::economics::vdf_reward_winner(interval, &ancestors))
+        Ok(block::economics::vdf_reward_winner_iter(
+            interval,
+            std::iter::once(parent).chain(ancestors.iter().map(Arc::as_ref)),
+        ))
     }
     fn publish(
         &mut self,
@@ -381,16 +384,7 @@ impl ChainState {
 // Full immutable blocks retain the exact header fields, including legacy fields
 // outside the hash. Persisting both duplicated the entire space-proof payload.
 fn block_header(block: &Record) -> ChainResult<mmx::BlockHeader> {
-    let header = Record {
-        name: "mmx.BlockHeader".into(),
-        fields: block
-            .fields
-            .iter()
-            .filter(|(name, _)| name.as_str() != "tx_list")
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect(),
-    };
-    Ok(mmx::BlockHeader::decode(&header.encode()?)?)
+    Ok(mmx_consensus::header::to_typed(block)?)
 }
 impl HeaderSource for ChainState {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {

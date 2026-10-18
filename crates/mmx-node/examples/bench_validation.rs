@@ -137,6 +137,10 @@ fn main() -> Result<()> {
         black_box(header(record)?);
         Ok(())
     })?;
+    measure("checked_header_projection", &records, rounds, |record| {
+        black_box(mmx_consensus::header::to_typed(record)?);
+        Ok(())
+    })?;
     let mut history = History(BTreeMap::new());
     for record in ancestors.iter().chain(&records) {
         let header = header(record)?;

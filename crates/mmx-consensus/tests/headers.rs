@@ -20,6 +20,129 @@ fn hash_result(value: mmx_consensus::Result<impl AsRef<[u8]>>) -> String {
 }
 
 #[test]
+fn checked_header_projection_matches_self_describing_native_conversion() {
+    fn compare(record: &Record) {
+        let envelope = Record {
+            name: "mmx.BlockHeader".into(),
+            fields: record
+                .fields
+                .iter()
+                .filter(|(name, _)| name.as_str() != "tx_list")
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        };
+        let expected = envelope
+            .encode()
+            .and_then(|wire| Ok(mmx::BlockHeader::decode(&wire)?));
+        let actual = header::to_typed(record);
+        match expected {
+            Ok(expected) => assert_eq!(actual.unwrap(), expected),
+            Err(_) => assert!(actual.is_err()),
+        }
+    }
+    let mut count = 0;
+    for line in include_str!("fixtures/headers.jsonl").lines() {
+        let trace: Value = serde_json::from_str(line).unwrap();
+        compare(&record(&trace["wire"]));
+        count += 1;
+    }
+    for line in include_str!("fixtures/native.tsv").lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        let record = Record::decode(&unhex(fields[2])).unwrap();
+        if matches!(record.name.as_str(), "mmx.Block" | "mmx.BlockHeader") {
+            compare(&record);
+            count += 1;
+        }
+    }
+    assert!(count >= 570);
+    let original = Record::from_generated(&mmx::BlockHeader::default()).unwrap();
+    // Exercise each field independently so zero/default fixture fields cannot
+    // hide an omitted assignment or a copy from a neighboring field.
+    for (index, (name, value)) in original.fields.iter().enumerate() {
+        use mmx_consensus::Value as V;
+        let value = match value {
+            V::Uint(_) => V::Uint(1024 + index as u64),
+            V::Int(_) => V::Int(-1),
+            V::Bool(value) => V::Bool(!value),
+            V::Bytes(value) => V::Bytes(vec![index as u8 + 1; value.len()]),
+            V::Optional(None) => V::Optional(Some(Box::new(V::Bytes(vec![
+                index as u8 + 1;
+                if name == "farmer_sig" {
+                    64
+                } else {
+                    32
+                }
+            ])))),
+            V::Sequence(_) if name == "vdf_reward_addr" => {
+                V::Sequence(vec![V::Bytes(vec![index as u8 + 1; 32])])
+            }
+            V::Sequence(_) if name == "proof" => V::Sequence(vec![V::Record(
+                Record::from_generated(&mmx::ProofOfSpaceOG::default()).unwrap(),
+            )]),
+            other => panic!("unexpected header field {name}: {other:?}"),
+        };
+        let mut changed = original.clone();
+        changed.fields.insert(name.clone(), value);
+        compare(&changed);
+    }
+    let mut unusual = original.clone();
+    unusual.fields.insert(
+        "proof".into(),
+        mmx_consensus::Value::Sequence(vec![mmx_consensus::Value::Record(
+            Record::from_generated(&mmx::ProofOfTime::default()).unwrap(),
+        )]),
+    );
+    compare(&unusual);
+    let mut full = original.clone();
+    full.name = "mmx.Block".into();
+    full.fields
+        .insert("tx_list".into(), mmx_consensus::Value::Opaque(vec![0xff]));
+    compare(&full);
+    for (name, value) in [
+        ("height", mmx_consensus::Value::Uint(u64::MAX)),
+        ("reward_vote", mmx_consensus::Value::Int(128)),
+        ("reward_vote_sum", mmx_consensus::Value::Int(i64::MIN)),
+        (
+            "farmer_sig",
+            mmx_consensus::Value::Optional(Some(Box::new(mmx_consensus::Value::Bytes(vec![
+                0;
+                63
+            ])))),
+        ),
+        ("proof_chain", mmx_consensus::Value::Bytes(vec![17; 32])),
+        ("nonce", mmx_consensus::Value::Uint(u64::MAX)),
+        ("time_stamp", mmx_consensus::Value::Int(i64::MIN)),
+    ] {
+        let mut changed = original.clone();
+        changed.fields.insert(name.into(), value);
+        compare(&changed);
+    }
+    let mut missing = original;
+    missing.fields.remove("proof_chain");
+    assert!(header::to_typed(&missing).is_err());
+}
+
+#[test]
+fn checked_header_projection_retains_general_reader_container_limits() {
+    use mmx_consensus::Value as V;
+    let mut proof = Record::from_generated(&mmx::ProofOfSpaceOG::default()).unwrap();
+    proof.fields.insert(
+        "proof_xs".into(),
+        V::Sequence(vec![
+            V::Uint(0);
+            vnx::binary::Limits::default().max_container + 1
+        ]),
+    );
+    let mut header = Record::from_generated(&mmx::BlockHeader::default()).unwrap();
+    header
+        .fields
+        .insert("proof".into(), V::Sequence(vec![V::Record(proof)]));
+    let wire = header.encode().unwrap();
+    assert!(mmx::BlockHeader::decode(&wire).is_err());
+    assert!(header::to_typed(&header).is_err());
+}
+
+#[test]
 fn time_difficulty_walk_shares_headers_and_preserves_genesis_clamping_and_wrapping() {
     use mmx_consensus::transitions::history::{block_iters, HeaderSource};
     use std::sync::Arc;

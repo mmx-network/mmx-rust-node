@@ -260,6 +260,18 @@ Replay rechecks that binding, header authentication, VDF linkage and full ledger
 execution; stale evidence falls back to work verification. It never bypasses
 body validation, and deep-prefix replay still re-verifies space work.
 
+Generated header conversion first checks the complete compiled wire layout,
+including integer widths, optional fields and fixed arrays, then copies fixed
+fields directly. It preserves legacy unhashed fields and the complete dynamic
+proof view; unusual dynamic proof values retain the general VNX reader path.
+A cached native benchmark measured 209 versus 71 microseconds per conversion.
+VDF payout walks share immutable ancestor headers instead of copying proof
+payloads, while retaining native address counts and the oldest ancestor's tie
+salt. A final 2,000-block socket comparison measured 63.9 versus 72.7 blocks/s.
+Both reached the same hash with exactly 2,000 body downloads and no timeout
+reassignments. Earlier comparisons reversing binary order showed smaller
+3–4.5% gains; overall throughput depends on host and peer load.
+
 The read API supports parameters, heights/sync status, genesis/VDF hashes,
 blocks/headers by hash/height, transaction lookup/height/block IDs, contracts and
 balances. HTTP accepts bare names or `mmx.Node.*`; `get_status` adds node status.
@@ -270,7 +282,7 @@ reads only. Native compressed peer requests carry lossless block records.
 
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A mainnet run validated through height 1,139,032 using five to seven authenticated peers,
+A mainnet run validated through height 1,330,728 using five to seven authenticated peers,
 with no timeout body reassignments. Its selected hash matched C++, including
 checks immediately before and after the first hard fork at height 1,000,000.
 HTTP RPC remains available during sync. A complete mainnet sync has not finished.
