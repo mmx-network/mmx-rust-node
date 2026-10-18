@@ -121,7 +121,7 @@ impl Node {
             sync_backpressure_retries: 0,
             work: VecDeque::new(),
             pending: BTreeMap::new(),
-            pub(crate) verified_work: BTreeMap::new(),
+            verified_work: BTreeMap::new(),
             vdf_worker: None,
             responses: vec![],
             tx_pool: Default::default(),
