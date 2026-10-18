@@ -569,7 +569,7 @@ fn purge_reclaims_old_bodies_and_keeps_the_full_private_consensus_lookback_after
         headers.insert(id, mmx_consensus::header::to_typed(&record).unwrap());
         let wire = record.encode().unwrap();
         let mut writes = vec![
-            Write::put("chain_blocks", id, &wire),
+            Write::put("chain_blocks", id, wire.as_slice()),
             Write::put("chain_height", height.to_be_bytes(), id),
             Write::put("chain_meta", b"tip", id),
         ];
@@ -582,8 +582,8 @@ fn purge_reclaims_old_bodies_and_keeps_the_full_private_consensus_lookback_after
             ),
         ];
         if height == 0 {
-            writes.push(Write::put("chain_meta", b"params", &params_wire));
-            archived.push(Write::put("fork_meta", b"params", &params_wire));
+            writes.push(Write::put("chain_meta", b"params", params_wire.as_slice()));
+            archived.push(Write::put("fork_meta", b"params", params_wire.as_slice()));
             archived.push(Write::put("fork_meta", b"genesis", id));
         }
         ledger.commit_batch(height + 1, writes).unwrap();
