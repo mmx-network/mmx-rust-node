@@ -266,6 +266,14 @@ Nagle buffering. A baseline/candidate/baseline comparison against the local
 C++ peer measured median 32-body responses of 47.7/8.1/48.2 ms; candidate p95 was
 11.9 ms versus about 51.3 ms for the baselines. The socket hint uses the Rust
 1.89 standard-library API and leaves frame validation and deadlines intact.
+The native Router inherits `tcp_no_delay = false` from
+`vnx-addons/modules/TcpServer.vni`. `TcpServer::main()` copies that setting to
+its listener endpoint, whose `accept()` applies it to incoming peer sockets.
+`MsgServer::send_to()` submits each compressed frame immediately. Although the
+standalone native `TcpEndpoint` defaults to no-delay for outgoing connections,
+that is not the Router listener's default. This accounts for the observed Nagle
+buffering on responses from an unmodified native listener; Rust also enables
+`TCP_NODELAY` on its own peer sockets.
 
 Indexed range scans first find the requested keys and latest visible versions,
 then fetch those exact primary keys. SQLite's join order is fixed so a narrow
