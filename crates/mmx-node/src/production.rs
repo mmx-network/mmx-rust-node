@@ -246,6 +246,7 @@ impl Node {
     }
     pub(crate) fn broadcast(&mut self, record: &Record) -> Result<()> {
         let id = hash(record, "content_hash")?;
+        if self.production.broadcasts.iter().any(|(old,_)|*old==id) {return Ok(());}
         let size = record.encode_compact()?.len();
         if size > 32 * 1024 * 1024 {
             return Err(error("broadcast exceeds queue bound"));
@@ -294,6 +295,7 @@ impl Node {
                         *h != current.hash.0 && now.saturating_sub(*t) > p.block_interval_ms
                     })
             {
+                let before=out.len();
                 for key in vote::validators(&self.chain, p, &current, 1000)?.intersection(keys) {
                     out.push(Record::from_generated(&mmx::ValidatorVote {
                         hash: current.hash.clone(),
@@ -301,7 +303,7 @@ impl Node {
                         ..Default::default()
                     })?);
                 }
-                if !out.is_empty() {
+                if out.len()>before {
                     self.production
                         .voted
                         .insert(current.prev.0, (current.hash.0, now));
