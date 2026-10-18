@@ -82,6 +82,12 @@ pub const WALLET_METHODS: &[&str] = &[
     "export_wallet",
 ];
 pub fn wallet_methods(accounts: Arc<Mutex<BTreeMap<u32, Account>>>) -> Methods {
+    wallet_methods_with_node(accounts, None)
+}
+pub fn wallet_methods_with_node(
+    accounts: Arc<Mutex<BTreeMap<u32, Account>>>,
+    node: Option<Arc<dyn crate::spending::WalletNode>>,
+) -> Methods {
     let mut methods = Methods::new();
     for &method in WALLET_METHODS {
         let accounts = accounts.clone();
@@ -214,6 +220,7 @@ pub fn wallet_methods(accounts: Arc<Mutex<BTreeMap<u32, Account>>>) -> Methods {
             },
         );
     }
+    crate::spending::register(&mut methods, accounts, node);
     methods
 }
 pub const FARMER_METHODS: &[&str] = &[

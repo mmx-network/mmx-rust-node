@@ -5,6 +5,7 @@ use mmx_wallet::{Address, FarmerKey, KeyFile, Wallet};
 use std::time::{Duration, Instant};
 
 pub struct Account {
+    pub(crate) spending: crate::spending::Spending,
     pub key_file: KeyFile,
     pub account: u32,
     pub name: String,
@@ -20,6 +21,7 @@ impl Account {
             return Err(error("address count must be 1..10000"));
         }
         let mut out = Self {
+            spending: Default::default(),
             key_file,
             account,
             count,

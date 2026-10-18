@@ -67,6 +67,9 @@ fn params(node: &NetworkClient, expected: Option<&str>) -> Result<mmx::ChainPara
     about = "Local native VNX wallet service; create/import key files with mmx wallet"
 )]
 pub struct WalletArgs {
+    /// Native node VNX endpoint for balances, validation and spending.
+    #[arg(long)]
+    node: Option<String>,
     #[arg(long, required = true)]
     key_file: Vec<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:11335")]
@@ -96,7 +99,18 @@ pub fn wallet_main() -> Result<()> {
     }
     let accounts = Arc::new(Mutex::new(accounts));
     let runtime = Runtime::new()?;
-    runtime.register("Wallet", service::wallet_methods(accounts.clone()))?;
+    let node = args
+        .node
+        .as_deref()
+        .map(|address| {
+            connect(address, "Node")
+                .map(|client| Arc::new(client) as Arc<dyn mmx_farming::spending::WalletNode>)
+        })
+        .transpose()?;
+    runtime.register(
+        "Wallet",
+        service::wallet_methods_with_node(accounts.clone(), node),
+    )?;
     let mut server = service::bind_private(
         args.listen.parse()?,
         runtime,

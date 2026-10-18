@@ -16,6 +16,8 @@ use std::{
     },
 };
 
+type BalanceRows = BTreeMap<([u8; 32], [u8; 32]), u128>;
+
 const MAX_POOL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_POOL_ITEMS: usize = 4096;
 const MAX_RELAY_TX_BYTES: usize = 256 * 1024;
@@ -283,10 +285,7 @@ impl Node {
 impl Node {
     /// Native balance RPCs deduplicate owners. A whitelist uses point reads;
     /// otherwise scan only the selected address prefix, never the whole table.
-    pub(crate) fn all_balances(
-        &self,
-        request: &Record,
-    ) -> Result<BTreeMap<([u8; 32], [u8; 32]), u128>> {
+    pub(crate) fn all_balances(&self, request: &Record) -> Result<BalanceRows> {
         let owners = request
             .field("addresses")?
             .seq()?

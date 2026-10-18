@@ -4,6 +4,7 @@ pub mod farmer;
 pub mod harvester;
 pub mod plot;
 pub mod service;
+pub mod spending;
 pub mod wallet;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

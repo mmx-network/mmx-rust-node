@@ -7,6 +7,7 @@ mod keyfile;
 mod keys;
 mod mnemonic;
 mod native;
+mod spend;
 mod transaction;
 
 pub use address::Address;
@@ -14,11 +15,14 @@ pub use amount::{format_amount, parse_amount};
 pub use keyfile::KeyFile;
 pub use keys::{fingerprint, FarmerKey, Wallet};
 pub use mnemonic::{seed_to_words, words_to_seed};
+pub use spend::Balances;
 pub use transaction::{ChainParams, Input, Output, Solution, Transaction, TransferOptions};
 
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Native(#[from] mmx_consensus::Error),
     #[error("{0}")]
     InvalidArgument(String),
     #[error("invalid payment amount: {0}")]
