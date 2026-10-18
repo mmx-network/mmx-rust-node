@@ -1,0 +1,21 @@
+[package]
+name = "mmx-farming"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MMX farmer signing and native plot harvesting"
+
+[dependencies]
+mmx-types.workspace = true
+mmx-consensus.workspace = true
+mmx-crypto.workspace = true
+mmx-wallet.workspace = true
+vnx.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+rand = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true
+hex.workspace = true

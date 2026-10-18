@@ -801,6 +801,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmx-farming"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "mmx-consensus",
+ "mmx-crypto",
+ "mmx-types",
+ "mmx-wallet",
+ "rand",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "vnx",
+]
+
+[[package]]
 name = "mmx-node"
 version = "0.1.0"
 dependencies = [

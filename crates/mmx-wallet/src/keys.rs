@@ -33,9 +33,9 @@ pub struct Wallet {
 }
 impl Wallet {
     pub fn derive(seed: &[u8; 32], passphrase: &str, account: u32, count: u32) -> Result<Self> {
-        if *seed == [0; 32] || !(1..=10).contains(&count) {
+        if *seed == [0; 32] || !(1..=10000).contains(&count) {
             return Err(Error::InvalidArgument(
-                "nonzero seed and 1..10 addresses required".into(),
+                "nonzero seed and 1..10000 addresses required".into(),
             ));
         }
         let mut pass = Zeroizing::new(format!("MMX/seed/{passphrase}"));
