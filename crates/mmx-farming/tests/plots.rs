@@ -228,3 +228,35 @@ fn harvested_response_is_accepted_by_the_cpp_derived_consensus_verifier() {
     let p = responses[0].field("proof").unwrap().record().unwrap();
     proof::verify(p, &params, &challenge.challenge.0, 1, challenge.vdf_height).unwrap();
 }
+
+#[test]
+fn cpp_written_and_cpp_proven_plot_files_are_read_without_conversion() {
+    let f = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    for (mode, bytes) in [
+        include_bytes!("native/native-0.plot").as_slice(),
+        include_bytes!("native/native-1.plot").as_slice(),
+        include_bytes!("native/native-2.plot").as_slice(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.path().join(format!("native-{mode}.plot"));
+        fs::write(&path, bytes).unwrap();
+        let p = Prover::open(&path).unwrap();
+        let full = p.full_proof(0, 65536).unwrap();
+        assert_eq!(
+            full.meta.as_slice(),
+            unhex(&f["compute"]["entries"][0]["meta"])
+        );
+        assert_eq!(
+            full.proof,
+            f["compute"]["entries"][0]["proof"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_u64().unwrap() as u32)
+                .collect::<Vec<_>>()
+        );
+    }
+}

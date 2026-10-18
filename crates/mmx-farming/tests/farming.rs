@@ -38,6 +38,9 @@ fn farmer_identity_matches_independent_cpp_kdf_and_signed_messages_verify() {
         hex::encode(key().secret_bytes().as_slice()),
         "8fb3a130f85eee1969992d60242ba1f01c4ffd65d8b83d0b98587bc3beaee175"
     );
+    let native: Vec<_> = include_str!("native/farmer-key.txt").lines().collect();
+    assert!(hex::encode(key().secret_bytes().as_slice()).eq_ignore_ascii_case(native[0]));
+    assert!(hex::encode(key().public_key()).eq_ignore_ascii_case(native[1]));
     let hash = [123; 32];
     let k = key();
     let sig = k.sign(&hash).unwrap();

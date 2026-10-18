@@ -1393,7 +1393,8 @@ fn outgoing_peer_can_answer_height_and_identity_queries_while_the_ledger_is_lock
 #[test]
 fn native_rpc_farming_topics_publish_only_synced_challenges_and_bound_proof_handoff() {
     use vnx::{net::NetworkClient, runtime::OverflowPolicy};
-    let (network, g, steps, _) = fixture();
+    let (mut network, g, _, _) = fixture();
+    network.params.challenge_delay = 3;
     let n = node(&network);
     assert!(n.lock().unwrap().farming_challenges().unwrap().is_empty());
     let mut server = rpc::vnx_server("127.0.0.1:0".parse().unwrap(), n.clone()).unwrap();
@@ -1409,11 +1410,7 @@ fn native_rpc_farming_topics_publish_only_synced_challenges_and_bound_proof_hand
         .unwrap();
     assert!(challenges.recv_timeout(Duration::from_millis(50)).is_err());
     let mut source = MemorySource {
-        blocks: vec![
-            wire(&g["block"]),
-            wire(&steps[0]["block"]),
-            wire(&steps[1]["block"]),
-        ],
+        blocks: vec![wire(&g["block"])],
         wrong: false,
     };
     sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
