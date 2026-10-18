@@ -88,6 +88,21 @@ expires. Restart, rewind and tip probes reuse matching archived content.
 This ports the height-job approach in native `Router::process()` and
 `Node::sync_result()`, with the requested minimum of three. Upstream declares
 two in `modules/Router.vni` and configures five in `config/default/Router.json`.
+In the inspected C++ revision
+[`ca6438b`](https://github.com/mmx-network/mmx-node/blob/ca6438b37c08007106d58efe4a990f6ecb276649/src/Router.cpp#L586),
+each height job queries a random subset of up to `min_sync_peers + 3` synced
+connections. Replies contain both the chain ID and content commitment; body
+requests use the chain ID, while completed bodies and outstanding leases are
+keyed by content hash. One body therefore satisfies all matching claimants.
+The native body lease is `fetch_timeout_ms / 8` (22.5 seconds with its default
+configuration), although exceptions and disconnects can release it early.
+Native completion counts failed/empty replies together with successful
+claimants and can finish while other requests remain outstanding. Rust instead
+requires three fresh successful hash-window responses before downloading and
+processes every distinct content observed in that window. It retains the full
+15-second body lease after unsuccessful responses. The native setting of eight
+limits outgoing synced connections; Rust caps its coordinator pool at eight
+distinct authenticated identities.
 All candidates reach native fork choice, CPU proof checks and ledger
 validation; a rejected candidate does not discard another peer's valid block.
 Unknown parents trigger bounded backwards discovery above genesis, including
