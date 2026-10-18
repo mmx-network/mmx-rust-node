@@ -337,6 +337,8 @@ pub fn private_options(services: impl IntoIterator<Item = String>) -> ServerOpti
                 "mmx.permission_e.REMOTE".into(),
                 "mmx.permission_e.SPENDING".into(),
                 "mmx.permission_e.SIGN_BLOCK".into(),
+                "vnx.permission_e.VIEW".into(),
+                "vnx.permission_e.PUBLISH".into(),
             ],
         ),
         ..Default::default()

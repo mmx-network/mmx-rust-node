@@ -145,6 +145,43 @@ impl Node {
         }
         Ok(())
     }
+    /// Native Node::update challenge window; ancestry is resolved by the same
+    /// consensus helper used to verify incoming farmer responses.
+    pub fn farming_challenges(&self) -> Result<Vec<mmx::Challenge>> {
+        if !self.synced {
+            return Ok(Vec::new());
+        }
+        let tip = self
+            .chain
+            .selected()
+            .tip()?
+            .ok_or_else(|| error("missing tip"))?;
+        let params = self.chain.selected().params();
+        let advance = self
+            .vdf_peak()?
+            .0
+            .saturating_sub(tip.vdf_height)
+            .saturating_add(params.challenge_delay.saturating_sub(1))
+            .min(params.max_vdf_count);
+        (1..=advance)
+            .map(|offset| {
+                let (challenge, difficulty) = mmx_consensus::transitions::history::challenge(
+                    &self.chain,
+                    params,
+                    &tip,
+                    offset,
+                )?;
+                Ok(mmx::Challenge {
+                    vdf_height: tip
+                        .vdf_height
+                        .checked_add(offset)
+                        .ok_or_else(|| error("challenge height overflow"))?,
+                    challenge: challenge.into(),
+                    difficulty,
+                })
+            })
+            .collect()
+    }
     pub fn pending_proofs(&self) -> usize {
         self.responses.len()
     }

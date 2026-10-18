@@ -1,6 +1,6 @@
 use mmx_consensus::{header, proof, response, vote, Record, Value};
 use mmx_farming::{encoding, farmer::Farmer, service, wallet::Account};
-use mmx_types::{mmx, VnxType};
+use mmx_types::mmx;
 use mmx_wallet::{Address, FarmerKey, KeyFile};
 use std::{
     collections::BTreeMap,

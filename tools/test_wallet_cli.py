@@ -17,6 +17,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 BINARY = None
+PREFIX = []
 
 class RPC(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -71,7 +72,7 @@ class WalletCLI(unittest.TestCase):
         cls.fixtures = tempfile.TemporaryDirectory(prefix='mmxwallet-fixtures-')
         cls.fixture = Path(cls.fixtures.name)
         env = dict(os.environ, MMX_HOME=str(cls.fixture))
-        proc = subprocess.run([BINARY, 'create', '--json', '--show-mnemonic'], cwd=cls.fixture,
+        proc = subprocess.run([BINARY, *PREFIX, 'create', '--json', '--show-mnemonic'], cwd=cls.fixture,
                               env=env, text=True, capture_output=True, timeout=30)
         if proc.returncode:
             raise RuntimeError('fixture wallet creation failed: ' + proc.stderr)
@@ -106,7 +107,7 @@ class WalletCLI(unittest.TestCase):
         self.server.transaction = None
 
     def run_cli(self, *args, secret=None, error=None, env=None, json_mode=True):
-        argv = [BINARY, *args]
+        argv = [BINARY, *PREFIX, *args]
         if json_mode:
             argv.append('--json')
         if secret is not None:
@@ -413,4 +414,5 @@ if __name__ == '__main__':
     parser.add_argument('--binary', required=True)
     args, remaining = parser.parse_known_args()
     BINARY = str(Path(args.binary).resolve())
+    PREFIX = ["wallet"] if Path(BINARY).name == "mmx" else []
     unittest.main(argv=[__file__, *remaining])

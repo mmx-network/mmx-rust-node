@@ -14,7 +14,7 @@ use std::{
 use vnx::{
     binary::{Reader, Writer},
     net::{Endpoint, Server, ServerOptions},
-    runtime::{Methods, Runtime, Session},
+    runtime::{Methods, OverflowPolicy, Runtime, Session},
     serde_json::{self, json, Value},
 };
 
@@ -69,7 +69,29 @@ fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Va
         .read()?;
     Ok(response["_ret_0"].clone())
 }
-pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<Server> {
+pub struct VnxServer {
+    server: Server,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+impl VnxServer {
+    pub fn endpoint(&self) -> &Endpoint {
+        self.server.endpoint()
+    }
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        self.server.shutdown();
+    }
+}
+impl Drop for VnxServer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServer> {
     let runtime = Runtime::new()?;
     let mut methods = Methods::new();
     for &method in METHODS {
@@ -83,17 +105,97 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<Server> 
         );
     }
     runtime.register("Node", methods)?;
-    Ok(Server::bind(
+    let incoming = runtime.subscribe("farmer.proof", 64, OverflowPolicy::DropOldest, false)?;
+    let inbox = node
+        .lock()
+        .map_err(|_| error("node lock poisoned"))?
+        .inbox();
+    let server = Server::bind(
         endpoint,
-        runtime,
+        runtime.clone(),
         mmx_types::vnx_registry()?,
         ServerOptions {
             services: ["Node".into()].into(),
-            session: Session::new("public", ["mmx.permission_e.PUBLIC".into()]),
+            session: Session::new(
+                "public",
+                [
+                    "mmx.permission_e.PUBLIC".into(),
+                    "vnx.permission_e.VIEW".into(),
+                    "vnx.permission_e.PUBLISH".into(),
+                ],
+            ),
+            export_topics: ["harvester.challenges".into()].into(),
+            publish_topics: ["farmer.proof".into()].into(),
             ..Default::default()
         },
-    )?)
+    )?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let running = stop.clone();
+    let worker = thread::spawn(move || {
+        let mut published = std::collections::BTreeSet::new();
+        let mut checked = std::time::Instant::now() - Duration::from_secs(1);
+        while !running.load(Ordering::Relaxed) {
+            while let Ok(Some(sample)) = incoming.try_recv() {
+                if sample.replay {
+                    continue;
+                }
+                let decoded = (|| -> Result<()> {
+                    let mut writer = Writer::new(Vec::new(), mmx_types::vnx_registry()?);
+                    writer.write(&sample.value)?;
+                    let bytes = writer.into_inner();
+                    if bytes.len() > 64 * 1024 {
+                        return Err(error("farmer proof exceeds 64 KiB"));
+                    }
+                    let record = Record::decode(&bytes)?;
+                    if record.name != "mmx.ProofResponse" {
+                        return Err(error("expected farmer proof response"));
+                    }
+                    inbox.submit(record, bytes.len())
+                })();
+                if let Err(e) = decoded {
+                    eprintln!("Farmer proof handoff: {e}");
+                }
+            }
+            if checked.elapsed() >= Duration::from_secs(1) {
+                if let Ok(n) = node.try_lock() {
+                    match n.farming_challenges() {
+                        Ok(challenges) => {
+                            let mut current = std::collections::BTreeSet::new();
+                            for challenge in challenges {
+                                let identity = (
+                                    challenge.vdf_height,
+                                    challenge.challenge.0,
+                                    challenge.difficulty,
+                                );
+                                current.insert(identity);
+                                if !published.contains(&identity) {
+                                    match serde_json::to_value(challenge)
+                                        .map_err(Into::into)
+                                        .and_then(|v| {
+                                            runtime.publish("harvester.challenges", v, false)
+                                        }) {
+                                        Ok(()) => (),
+                                        Err(e) => eprintln!("Challenge publication: {e}"),
+                                    }
+                                }
+                            }
+                            published = current;
+                        }
+                        Err(e) => eprintln!("Farming challenge lookup: {e}"),
+                    }
+                }
+                checked = std::time::Instant::now();
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+    Ok(VnxServer {
+        server,
+        stop,
+        worker: Some(worker),
+    })
 }
+
 fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
     let id = r.get("id").cloned().unwrap_or(Value::Null);
     let failure = |code, message: String| json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}});
