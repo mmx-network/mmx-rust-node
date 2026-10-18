@@ -355,7 +355,9 @@ pub fn harvester_main() -> Result<()> {
                 continue;
             }
             let age = Duration::from_micros(
-                vnx::time::now_micros().saturating_sub(sample.recv_time) as u64,
+                vnx::time::now_micros()
+                    .saturating_sub(sample.recv_time)
+                    .max(0) as u64,
             );
             match mmx::Challenge::from_value(sample.value) {
                 Ok(challenge) => {
@@ -364,16 +366,16 @@ pub fn harvester_main() -> Result<()> {
                 Err(e) => eprintln!("Invalid farming challenge: {e}"),
             }
         }
-        if let Some(challenge) = queue.pop() {
+        if let Some((challenge, remaining)) = queue.pop_with_remaining() {
             let started = Instant::now();
             match harvester
                 .lock()
                 .map_err(|_| err("harvester lock poisoned"))?
-                .lookup(&challenge, &params)
+                .lookup_for(&challenge, &params, remaining)
             {
                 Ok(proofs) => {
                     for proof in proofs {
-                        if started.elapsed() > Duration::from_secs(10) {
+                        if started.elapsed() > remaining {
                             eprintln!("Discarding late proof");
                             break;
                         }

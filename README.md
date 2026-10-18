@@ -1268,7 +1268,8 @@ delta-coded Y/PD parks, triangular X pairs and CPU X decompression. Park reads u
 `pread` on Unix, reuse parks within a lookup and do not write plot data. CPU work
 is limited by `--max-f1`; compression that exceeds the configured expansion limit
 is rejected explicitly. There is no GPU or remote recompute path yet.
-Challenges use a bounded queue and expire after ten seconds; failures in one plot
+Challenges use a bounded queue, prioritize the newest height, deduplicate work
+and expire after ten seconds; failures in one plot
 do not discard proofs from other plots. The node publishes its C++ challenge
 window only while synced, and accepts signed farmer responses through its bounded
 inbox for the existing consensus checks.
@@ -1280,4 +1281,7 @@ submission and virtual plots, persistent service configuration, and the wallet
 service's transaction/contract/offer/swap methods. Production plot files and an
 actual farm have not been exercised. Existing C++ witnesses, tiny native park
 files, permission tests and the complete standalone wallet CLI suite cover the
-implemented paths; mainnet sync continues in its existing process.
+implemented paths. Tests also launch the actual wallet, farmer, harvester and
+`mmx` binaries and deliver a signed C++ plot proof over VNX sockets. Farmer and
+harvester parameters come from node RPC, without C++ data files. Mainnet sync
+continues in its existing process.

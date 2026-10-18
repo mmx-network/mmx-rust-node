@@ -306,8 +306,13 @@ impl ChallengeQueue {
         true
     }
     pub fn pop(&mut self) -> Option<mmx::Challenge> {
-        self.pending.retain(|_, (t, _)| t.elapsed() <= self.timeout);
-        self.pending.pop_last().map(|(_, (_, r))| r)
+        self.pop_with_remaining().map(|(r, _)| r)
+    }
+    pub fn pop_with_remaining(&mut self) -> Option<(mmx::Challenge, std::time::Duration)> {
+        self.pending.retain(|_, (t, _)| t.elapsed() < self.timeout);
+        self.pending
+            .pop_last()
+            .map(|(_, (t, r))| (r, self.timeout.saturating_sub(t.elapsed())))
     }
     pub fn clear(&mut self) {
         self.pending.clear();

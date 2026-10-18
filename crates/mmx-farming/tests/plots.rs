@@ -260,3 +260,64 @@ fn cpp_written_and_cpp_proven_plot_files_are_read_without_conversion() {
         );
     }
 }
+
+#[test]
+fn quality_ranges_include_duplicates_across_parks_and_the_short_final_park() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ranges.plot");
+    let mut h = make_plot(&path, true, false);
+    h.num_entries_y = 10;
+    h.park_size_y = 3;
+    h.park_bytes_y = 6;
+    h.table_offset_y = 5500;
+    h.table_offset_meta = 6000;
+    h.park_size_meta = 4;
+    h.park_bytes_meta = 48;
+    h.plot_size = 7000;
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.resize(7000, 0);
+    let ys = [20u32, 21, 21, 21, 22, 23, 23, 23, 24, 25];
+    for (park, entries) in ys.chunks(3).enumerate() {
+        let data = &mut bytes[5500 + park * 6..5506 + park * 6];
+        data.fill(0);
+        data[..4].copy_from_slice(&entries[0].to_le_bytes());
+        for i in 1..entries.len() {
+            bits(
+                data,
+                32 + (i - 1) * 2,
+                2,
+                u64::from(entries[i] - entries[i - 1]),
+            );
+        }
+    }
+    for index in 0..ys.len() {
+        let offset = 6000 + (index / 4) * 48;
+        let data = &mut bytes[offset..offset + 48];
+        for j in 0..12 {
+            bits(data, ((index % 4) * 12 + j) * 8, 8, index as u64);
+        }
+    }
+    let header = h.encode(&mmx_types::vnx_registry().unwrap()).unwrap();
+    bytes[..header.len()].copy_from_slice(&header);
+    fs::write(&path, bytes).unwrap();
+    let p = Prover::open(&path).unwrap();
+    for (begin, filter, indices) in [
+        (21, 0, vec![1, 2, 3]),
+        (23, 0, vec![5, 6, 7]),
+        (22, 1, vec![4, 5, 6, 7]),
+        (25, 0, vec![9]),
+        (19, 0, vec![]),
+        (255, 0, vec![]),
+    ] {
+        let mut challenge = [0; 32];
+        challenge[0] = begin;
+        let result = p.qualities(&challenge, filter, 65536).unwrap();
+        assert_eq!(result.iter().map(|q| q.index).collect::<Vec<_>>(), indices);
+        for q in result {
+            assert_eq!(
+                u32::from_le_bytes(q.meta[..4].try_into().unwrap()) as u64,
+                q.index
+            );
+        }
+    }
+}
