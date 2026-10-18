@@ -423,7 +423,7 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
             .map(|r| r["_ret_0"].clone())
     };
     let options = json!({"nonce":500,"passphrase":"protected","gas_limit":100_000});
-    let args = json!({"index":0,"amount":1000_u128.to_le_bytes(),"currency":[0;32],"dst_addr":recipient,"options":options});
+    let args = json!({"index":0,"amount":1000_u128.to_le_bytes(),"currency":([0u8;32]),"dst_addr":recipient,"options":options});
     let sent = service::from_json(&call("send", args.clone()).unwrap()).unwrap();
     assert_eq!(
         call("is_locked", json!({"index":0})).unwrap(),
@@ -441,7 +441,7 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
             .unwrap(),
         Some(30_000_000)
     );
-    let balance = call("get_balance", json!({"index":0,"currency":[0;32]})).unwrap();
+    let balance = call("get_balance", json!({"index":0,"currency":([0u8;32])})).unwrap();
     let total: u128 = u128::from_le_bytes(
         serde_json::from_value::<vnx::Fixed<u8, 16>>(balance["total"].clone())
             .unwrap()
@@ -477,7 +477,7 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
     )
     .unwrap();
     assert_eq!(
-        call("get_balance", json!({"index":0,"currency":[0;32]})).unwrap(),
+        call("get_balance", json!({"index":0,"currency":([0u8;32])})).unwrap(),
         balance
     );
     let mut preview = args.clone();
@@ -493,15 +493,15 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
     assert_eq!(node.lock().unwrap().pending_transactions(), 1);
     let execute=call("execute",json!({"index":0,"address":contract,"method":"run","args":[1],"user":0,"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
     assert!(!execute["exec_result"]["did_fail"].as_bool().unwrap());
-    let deposit=call("deposit",json!({"index":0,"address":contract,"method":"run","args":[2],"amount":100_u128.to_le_bytes(),"currency":[0;32],"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
+    let deposit=call("deposit",json!({"index":0,"address":contract,"method":"run","args":[2],"amount":100_u128.to_le_bytes(),"currency":([0u8;32]),"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
     assert!(!deposit["exec_result"]["did_fail"].as_bool().unwrap());
     let deploy=call("deploy",json!({"index":0,"contract":{"__type":"mmx.contract.Data","value":{"example":123}},"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
     assert!(!deploy["exec_result"]["did_fail"].as_bool().unwrap());
-    let many=call("send_many",json!({"index":0,"amounts":[[recipient,10_u128.to_le_bytes()],[recipient,20_u128.to_le_bytes()]],"currency":[0;32],"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
+    let many=call("send_many",json!({"index":0,"amounts":[[recipient,10_u128.to_le_bytes()],[recipient,20_u128.to_le_bytes()]],"currency":([0u8;32]),"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
     assert_eq!(many["outputs"].as_array().unwrap().len(), 2);
     assert_eq!(node.lock().unwrap().pending_transactions(), 1);
     // Existing source inputs must respect the same reservation-adjusted balance.
-    let too_much = json!({"index":0,"amount":30_000_000_u128.to_le_bytes(),"src_addr":sender,"dst_addr":recipient,"currency":[0;32],"options":options});
+    let too_much = json!({"index":0,"amount":30_000_000_u128.to_le_bytes(),"src_addr":sender,"dst_addr":recipient,"currency":([0u8;32]),"options":options});
     assert!(call("send_from", too_much).is_err());
     call("lock", json!({"index":0})).unwrap();
     let mut invalid = args.clone();

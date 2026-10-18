@@ -494,3 +494,77 @@ fn template(
     }
     Ok(tx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mmx_wallet::KeyFile;
+    struct Mock {
+        confirmed: Mutex<bool>,
+        height: Mutex<u32>,
+        owner: [u8; 32],
+    }
+    impl WalletNode for Mock {
+        fn call(&self, method: &str, _args: Value) -> Result<Value> {
+            Ok(match method {
+                "get_height" => json!(*self.height.lock().unwrap()),
+                "get_block_hash" => json!(([42u8; 32])),
+                "get_all_balances" => json!([[[self.owner, [0; 32]], 1000_u128.to_le_bytes()]]),
+                "get_tx_height" => {
+                    if *self.confirmed.lock().unwrap() {
+                        json!(4)
+                    } else {
+                        Value::Null
+                    }
+                }
+                _ => return Err(error("unexpected mock method")),
+            })
+        }
+    }
+    #[test]
+    fn fresh_reads_reapply_pending_reservations_after_a_fork_and_release_at_expiry() {
+        let mut account = Account::new(KeyFile::new([81; 32], None), 0, 1, "test".into()).unwrap();
+        let owner = account.addresses()[0];
+        let node = Mock {
+            confirmed: Mutex::new(true),
+            height: Mutex::new(5),
+            owner: owner.0,
+        };
+        account
+            .spending
+            .reserved
+            .insert((owner, Address::default()), 100);
+        account.spending.pending.insert(
+            [5; 32],
+            Pending {
+                expires: 20,
+                debits: Balances::from([((owner, Address::default()), 200)]),
+            },
+        );
+        assert_eq!(
+            fresh(&mut account, &node).unwrap().1[&(owner, Address::default())],
+            900
+        );
+        assert_eq!(
+            account.spending.pending.len(),
+            1,
+            "confirmation must not discard fork reservations"
+        );
+        *node.confirmed.lock().unwrap() = false;
+        assert_eq!(
+            fresh(&mut account, &node).unwrap().1[&(owner, Address::default())],
+            700
+        );
+        *node.height.lock().unwrap() = 20;
+        assert_eq!(
+            fresh(&mut account, &node).unwrap().1[&(owner, Address::default())],
+            900
+        );
+        assert!(account.spending.pending.is_empty());
+        account.spending.reserved.clear();
+        assert_eq!(
+            fresh(&mut account, &node).unwrap().1[&(owner, Address::default())],
+            1000
+        );
+    }
+}
