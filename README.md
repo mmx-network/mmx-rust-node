@@ -813,8 +813,9 @@ All 990 VM keys across 161 contracts matched C++ at height 1,124,592, including
 2,970 historical reads. A separate pinned view of the running node at height
 2,151,672 matched all 1,010 keys across 166 contracts in 3,030 reads. The C++ CLI
 also returned identical contract output for all nine genesis binaries through
-the native and Rust VNX RPC servers. At height 4,502,608, all 1,052 VM keys
-across 176 contracts matched in 3,156 historical reads.
+the native and Rust VNX RPC servers. After crossing the second hard fork,
+height 5,055,440 matched all 3,337 VM keys across 435 contracts in 10,011
+historical reads.
 
 `audit_native_rpc` compares complete immutable VNX RPC results with C++ at fixed
 heights: blocks, headers, both hash forms, transaction bodies and height/ID
@@ -855,6 +856,8 @@ comparisons passed at four transaction-bearing blocks near height 3,200,000.
 The 3.5-million, 4-million and 4.5-million milestones each added 68 passing
 comparisons at six heights, including four recent transaction-bearing blocks,
 while the node continued downloading.
+The second-hard-fork crossing added 86 passing comparisons at eight heights,
+including 5,049,999 through 5,050,002 and four recent transaction-bearing blocks.
 
 The live node admits signed farmer `ProofResponse` envelopes only after native
 hash, plot identity, signature, selected-history challenge/difficulty and CPU space
