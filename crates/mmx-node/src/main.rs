@@ -1,3 +1,5 @@
+#[cfg(unix)]
+mod services;
 use mmx_execution::chain::network::Network;
 use mmx_node::{peer, production, rpc, sync, Node, Result};
 use std::{
@@ -13,7 +15,7 @@ use std::{
 const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir PATH]
   [--peer HOST[:PORT]]... [--offline] [--sync-once] [--rollback-to HEIGHT]
   [--purge-before HEIGHT]
-  [--farmer ENDPOINT] [--reward-vote -1|0|1] [-c CONFIG]...
+  [--no-services] [--farmer ENDPOINT] [--reward-vote -1|0|1] [-c CONFIG]...
   [--p2p-listen HOST:PORT] [--rpc-listen HOST:PORT] [--http-listen HOST:PORT]
 
 Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
@@ -26,6 +28,7 @@ History is retained by default. --purge-before reclaims older history before ser
 keeps HEIGHT available, and prevents RPC reads or rollback below HEIGHT (native databases).";
 struct Options {
     configs: Vec<PathBuf>,
+    no_services: bool,
     farmer: Option<String>,
     reward_vote: i8,
     root: PathBuf,
@@ -43,6 +46,7 @@ struct Options {
 fn options() -> Result<Option<Options>> {
     let mut o = Options {
         configs: vec![],
+        no_services: false,
         farmer: None,
         reward_vote: 0,
         root: "../mmx-node".into(),
@@ -57,7 +61,7 @@ fn options() -> Result<Option<Options>> {
         rpc: "127.0.0.1:11331".into(),
         http: "127.0.0.1:11380".into(),
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -65,6 +69,7 @@ fn options() -> Result<Option<Options>> {
                 return Ok(None);
             }
             "--offline" => o.offline = true,
+            "--no-services" => o.no_services = true,
             "--sync-once" => o.once = true,
             _ => {
                 let value = args
@@ -72,7 +77,12 @@ fn options() -> Result<Option<Options>> {
                     .ok_or_else(|| std::io::Error::other(format!("missing value for {arg}")))?;
                 match arg.as_str() {
                     "--mmx-root" => o.root = value.into(),
-                    "-c" | "--config" => o.configs.push(value.into()),
+                    "-c" | "--config" => {
+                        o.configs.push(value.into());
+                        while args.peek().is_some_and(|s| !s.starts_with('-')) {
+                            o.configs.push(args.next().unwrap().into());
+                        }
+                    }
                     "--farmer" => o.farmer = Some(value),
                     "--reward-vote" => o.reward_vote = value.parse()?,
                     "--network" => o.network = value,
@@ -110,6 +120,7 @@ fn main() -> Result<()> {
     let network = Network::from_config(&config, options.root.join("data"))?;
     if !options.configs.is_empty()
         && config.read::<bool>("farmer")?.unwrap_or(true)
+        && config.read::<bool>("wallet")?.unwrap_or(true)
         && options.farmer.is_none()
     {
         options.farmer = Some(
@@ -181,6 +192,21 @@ fn main() -> Result<()> {
         vnx.endpoint(),
         http.address()
     );
+    #[cfg(unix)]
+    let mut services =
+        if !options.offline && !options.once && !options.no_services && !options.configs.is_empty()
+        {
+            let mut paths = vec![options.root.join("config").join(&options.network)];
+            paths.extend(options.configs.iter().cloned());
+            Some(services::Services::start(
+                &config,
+                &paths,
+                &vnx.endpoint().to_string(),
+                options.farmer.as_deref().unwrap_or("127.0.0.1:11333"),
+            )?)
+        } else {
+            None
+        };
     let mut farming = if !options.offline {
         options
             .farmer
@@ -228,7 +254,18 @@ fn main() -> Result<()> {
     }
 
     while !stop.load(Ordering::Relaxed) {
+        #[cfg(unix)]
+        if let Some(services) = &mut services {
+            if let Err(e) = services.check() {
+                eprintln!("Service startup/runtime failure: {e}");
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
         thread::sleep(Duration::from_millis(200));
+    }
+    #[cfg(unix)]
+    if let Some(services) = &mut services {
+        services.shutdown();
     }
     if let Some(farming) = &mut farming {
         farming.shutdown();

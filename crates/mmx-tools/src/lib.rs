@@ -88,6 +88,7 @@ pub fn wallet_main() -> Result<()> {
     let matches = WalletArgs::command().get_matches();
     let mut args = WalletArgs::from_arg_matches(&matches)?;
     let cfg = args.layers.load()?;
+    config::apply(&matches, &cfg, "listen", "Wallet.listen", &mut args.listen)?;
     config::apply(
         &matches,
         &cfg,
@@ -429,7 +430,7 @@ pub fn harvester_main() -> Result<()> {
     if args.farmer.starts_with(':') {
         args.farmer = format!("127.0.0.1{}", args.farmer);
     }
-    if args.plot_dir.is_empty() {
+    if args.plot_dir.is_empty() && args.layers.paths.is_empty() {
         return Err(err("supply --plot-dir or Harvester.plot_dirs in -c CONFIG"));
     }
     if args.username.is_none() {
