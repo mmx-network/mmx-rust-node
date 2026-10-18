@@ -20,7 +20,7 @@ use vnx::serde_json::{self, Value};
 fn decode(value: &Value) -> Record {
     Record::decode(&vnx::util::from_hex_string(value.as_str().unwrap()).unwrap()).unwrap()
 }
-fn fixture() -> (Network, Record) {
+fn fixture() -> (Network, Record, Record) {
     let rows: Vec<Value> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -46,7 +46,8 @@ fn fixture() -> (Network, Record) {
     };
     let first =
         decode(&rows.iter().find(|row| row["kind"] == "chain").unwrap()["steps"][0]["block"]);
-    (network, first)
+    let vdf = decode(&rows.iter().find(|row| row["kind"] == "chain").unwrap()["steps"][0]["vdf"]);
+    (network, first, vdf)
 }
 fn signer() -> SigningKey {
     let mut scalar = [0; 32];
@@ -85,10 +86,7 @@ fn main() -> Result<()> {
         let decoded = peer::decode_frame(&peer::encode_frame(&data)?)?;
         println!("REVIEW decoder count={count} dynamic_bytes={} record_bytes={} expanded_value_bytes={expanded} decoded={}", bytes.len(), wire.len(), decoded == data);
     }
-    let (network, first) = fixture();
-    let mut chain = ForkChain::memory(network.params.clone());
-    chain.initialize(&network.assets)?;
-    let root = chain.selected().hash_at(0)?.unwrap();
+    let (network, first, vdf) = fixture();
     let mut disconnected = first.clone();
     disconnected.fields.insert("height".into(), N::Uint(2));
     resign(&mut disconnected, &network.params)?;
@@ -98,9 +96,19 @@ fn main() -> Result<()> {
         "challenge",
     )?;
     let expected = proof::calc_proof_hash(disconnected.field("proof")?.seq()?[0].record()?)?;
-    chain.admit(&disconnected, &[])?;
-    let result = chain.update_sync_at(root, None, vnx::util::get_wall_time_millis())?;
-    println!("REVIEW disconnected best_selected={} proof_rank_registered={} invalid={} selected_height={}", result.best.is_some(), chain.best_proof(&challenge) == Some(expected), result.invalid.len(), chain.selected().tip()?.unwrap().height);
+    for live in [false, true] {
+        let mut chain = ForkChain::memory(network.params.clone());
+        chain.initialize(&network.assets)?;
+        let root = chain.selected().hash_at(0)?.unwrap();
+        chain.admit(&disconnected, std::slice::from_ref(&vdf))?;
+        let now = vnx::util::get_wall_time_millis();
+        let result = if live {
+            chain.update_at(root, None, now)?
+        } else {
+            chain.update_sync_at(root, None, now)?
+        };
+        println!("REVIEW disconnected live={live} best_selected={} proof_rank_registered={} invalid={} selected_height={}", result.best.is_some(), chain.best_proof(&challenge) == Some(expected), result.invalid.len(), chain.selected().tip()?.unwrap().height);
+    }
 
     let dir = tempfile::tempdir()?;
     let mut disk = ForkChain::open_native(dir.path(), network.params.clone())?;
