@@ -16,6 +16,7 @@ use vnx::{
     net::{Endpoint, Server, ServerOptions},
     runtime::{Methods, OverflowPolicy, Runtime, Session},
     serde_json::{self, json, Value},
+    VnxType,
 };
 
 pub const METHODS: &[&str] = &[
@@ -169,11 +170,9 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
                                 );
                                 current.insert(identity);
                                 if !published.contains(&identity) {
-                                    match serde_json::to_value(challenge)
-                                        .map_err(Into::into)
-                                        .and_then(|v| {
-                                            runtime.publish("harvester.challenges", v, false)
-                                        }) {
+                                    match challenge.to_value().and_then(|v| {
+                                        runtime.publish("harvester.challenges", v, false)
+                                    }) {
                                         Ok(()) => (),
                                         Err(e) => eprintln!("Challenge publication: {e}"),
                                     }

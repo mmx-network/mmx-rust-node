@@ -18,6 +18,7 @@ use vnx::{
     net::NetworkClient,
     runtime::{Methods, OverflowPolicy, Runtime},
     serde_json::{self, json, Value},
+    VnxType,
 };
 
 fn err(s: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
@@ -318,7 +319,7 @@ pub fn harvester_main() -> Result<()> {
                 .lock()
                 .map_err(|_| err("harvester lock poisoned"))?
                 .farm_info()?;
-            farmer.publish("harvester.info", serde_json::to_value(info)?)?;
+            farmer.publish("harvester.info", info.to_value()?)?;
             reported = Instant::now();
         }
         if args.reload_interval > 0

@@ -280,11 +280,7 @@ fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof()
         difficulty: 1,
     };
     runtime
-        .publish(
-            "harvester.challenges",
-            serde_json::to_value(&challenge).unwrap(),
-            false,
-        )
+        .publish("harvester.challenges", challenge.to_value().unwrap(), false)
         .unwrap();
     let signed = service::from_json(
         &received

@@ -1416,13 +1416,9 @@ fn native_rpc_farming_topics_publish_only_synced_challenges_and_bound_proof_hand
     sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
     let expected = n.lock().unwrap().farming_challenges().unwrap();
     assert!(!expected.is_empty());
-    let actual: mmx::Challenge = serde_json::from_value(
-        challenges
-            .recv_timeout(Duration::from_secs(3))
-            .unwrap()
-            .value,
-    )
-    .unwrap();
+    let sample = challenges.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(sample.value["__type"], "mmx.Challenge");
+    let actual: mmx::Challenge = serde_json::from_value(sample.value).unwrap();
     assert!(expected.contains(&actual));
     let state = n.lock().unwrap();
     let tip = state.chain().selected().tip().unwrap().unwrap();
