@@ -1569,3 +1569,63 @@ fn native_rpc_farming_topics_publish_only_synced_challenges_and_bound_proof_hand
     client.close();
     server.shutdown();
 }
+
+#[test]
+fn pending_transaction_crosses_real_peer_transport_without_ledger_writes() {
+    let (network, g, steps, _) = fixture();
+    let a = node(&network);
+    let b = node(&network);
+    for n in [&a, &b] {
+        sync::synchronize_pipelined(
+            &mut MemorySource {
+                blocks: vec![wire(&g["block"])],
+                wrong: false,
+            },
+            n,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+    }
+    let block = wire(&steps[0]["block"]);
+    let mut tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+        .record()
+        .unwrap()
+        .clone();
+    tx.fields.insert("exec_result".into(), V::Optional(None));
+    tx.fields.insert(
+        "static_cost".into(),
+        V::Uint(tx.calc_cost(&(&network.params).into()).unwrap()),
+    );
+    tx.fields.insert(
+        "content_hash".into(),
+        V::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
+    );
+    a.lock().unwrap().add_transaction(&tx, true).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", a.clone()).unwrap();
+    let mut client = peer::Client::connect(&server.address().to_string(), b.clone()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while b.lock().unwrap().pending_transactions() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "transaction not relayed"
+        );
+        client.poll().unwrap();
+        b.lock().unwrap().tick().unwrap();
+    }
+    assert_eq!(a.lock().unwrap().pending_transactions(), 1);
+    assert!(!b.lock().unwrap().add_transaction(&tx, true).unwrap());
+    assert_eq!(
+        b.lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
+    );
+    drop(client);
+    server.shutdown();
+}

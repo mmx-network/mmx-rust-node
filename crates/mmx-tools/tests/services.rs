@@ -363,6 +363,7 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
         &vnx::util::from_hex_string(g["params"].as_str().unwrap()).unwrap(),
     )
     .unwrap();
+    let contract = hash(&bins[1], "id").unwrap();
     let network = Network {
         params,
         assets: Assets {
@@ -490,10 +491,27 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
         .unwrap()
         .is_some());
     assert_eq!(node.lock().unwrap().pending_transactions(), 1);
+    let execute=call("execute",json!({"index":0,"address":contract,"method":"run","args":[1],"user":0,"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
+    assert!(!execute["exec_result"]["did_fail"].as_bool().unwrap());
+    let deposit=call("deposit",json!({"index":0,"address":contract,"method":"run","args":[2],"amount":100_u128.to_le_bytes(),"currency":[0;32],"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
+    assert!(!deposit["exec_result"]["did_fail"].as_bool().unwrap());
+    let deploy=call("deploy",json!({"index":0,"contract":{"__type":"mmx.contract.Data","value":{"example":123}},"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
+    assert!(!deploy["exec_result"]["did_fail"].as_bool().unwrap());
+    let many=call("send_many",json!({"index":0,"amounts":[[recipient,10_u128.to_le_bytes()],[recipient,20_u128.to_le_bytes()]],"currency":[0;32],"options":{"auto_send":false,"gas_limit":100_000}})).unwrap();
+    assert_eq!(many["outputs"].as_array().unwrap().len(), 2);
+    assert_eq!(node.lock().unwrap().pending_transactions(), 1);
     // Existing source inputs must respect the same reservation-adjusted balance.
     let too_much = json!({"index":0,"amount":30_000_000_u128.to_le_bytes(),"src_addr":sender,"dst_addr":recipient,"currency":[0;32],"options":options});
     assert!(call("send_from", too_much).is_err());
     call("lock", json!({"index":0})).unwrap();
+    let mut invalid = args.clone();
+    invalid["amount"] = json!(30_000_000_u128.to_le_bytes());
+    assert!(call("send", invalid).is_err());
+    assert_eq!(
+        call("is_locked", json!({"index":0})).unwrap(),
+        true,
+        "failed temporary spend must also relock"
+    );
     let mut bad = args;
     bad["options"]["passphrase"] = json!("wrong");
     assert!(call("send", bad).is_err());
