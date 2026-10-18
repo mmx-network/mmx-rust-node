@@ -1,5 +1,5 @@
 use mmx_db::{
-    sorted::{Builder, Entry, Run},
+    sorted::{merge, Builder, Entry, Run, View},
     Write,
 };
 use std::{fs, path::Path};
@@ -35,6 +35,86 @@ fn fixture(path: &Path) -> Vec<Entry> {
         entries
     );
     entries
+}
+
+#[test]
+fn merge_masks_rolled_back_suffix_and_purge_keeps_each_boundary_value_or_deletion() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_path = directory.path().join("first.sst");
+    let entries = fixture(&first_path);
+    let first = Run::open(&first_path).unwrap();
+    let mut builder = Builder::new(directory.path(), 0).unwrap();
+    for (key, version, value) in [
+        (b"a".as_slice(), 7, Some(b"replacement".as_slice())),
+        (b"a", 4, None),
+        (b"z", 6, None),
+    ] {
+        builder
+            .push(&Entry {
+                version,
+                write: Write {
+                    table: "a".into(),
+                    key: key.into(),
+                    value: value.map(ToOwned::to_owned),
+                },
+            })
+            .unwrap();
+    }
+    let second = builder
+        .finish(&directory.path().join("second.sst"))
+        .unwrap();
+    let views = [
+        View {
+            run: &first,
+            cutoff: 9,
+        },
+        View {
+            run: &second,
+            cutoff: u32::MAX,
+        },
+    ];
+    let full = merge(&directory.path().join("full.sst"), 1, &views, None)
+        .unwrap()
+        .unwrap();
+    let pruned = merge(&directory.path().join("pruned.sst"), 1, &views, Some(5))
+        .unwrap()
+        .unwrap();
+    assert_eq!(pruned.metadata().records, 14);
+    for max in 5..12 {
+        for table in ["a", "b"] {
+            for key in [b"".as_slice(), b"a", b"z", b"\xff", b"aa", b"\xff\xff"] {
+                assert_eq!(
+                    full.get(table, key, max).unwrap(),
+                    pruned.get(table, key, max).unwrap()
+                );
+            }
+        }
+    }
+    // An explicit deletion at the boundary wins a duplicate old empty value.
+    assert_eq!(pruned.get("a", b"a", 5).unwrap().unwrap().write.value, None);
+    assert_eq!(
+        pruned.get("a", b"a", 7).unwrap().unwrap().write.value,
+        Some(b"replacement".to_vec())
+    );
+    assert_eq!(pruned.get("a", b"z", 6).unwrap().unwrap().write.value, None);
+    assert!(pruned.entries().all(|entry| entry.unwrap().version >= 4));
+    // Existing snapshots keep the entire old history while new output is built.
+    assert_eq!(
+        first.entries().collect::<mmx_db::Result<Vec<_>>>().unwrap(),
+        entries
+    );
+    let none = merge(
+        &directory.path().join("empty.sst"),
+        0,
+        &[View {
+            run: &first,
+            cutoff: 0,
+        }],
+        Some(5),
+    )
+    .unwrap();
+    assert!(none.is_none());
+    assert!(!directory.path().join("empty.sst").exists());
 }
 
 #[test]

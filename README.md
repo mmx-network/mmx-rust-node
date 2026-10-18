@@ -976,6 +976,12 @@ checksums, and a complete file is synced before atomic publication. The builder
 reuses its index directly rather than reading the new file back. This is not yet
 the node's primary backend.
 
+Sorted-file merging streams one record per input file, honors rollback cutoffs
+without first rewriting those files, and resolves equal-version entries in favor
+of the newer input. Its optional retention boundary keeps every newer version
+and the latest preceding value or tombstone per key. Database-wide retention
+metadata and RPC enforcement are still required before retiring history.
+
 The primary backend port will include optional history purging. A durable
 retention floor must preserve the state and private consensus context at the
 boundary, reject earlier rollbacks, and hide earlier blocks and transactions

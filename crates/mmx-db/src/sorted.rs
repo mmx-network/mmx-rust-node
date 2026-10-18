@@ -4,6 +4,7 @@
 use crate::{validate, Error, Key, Result, Write, MAX_FRAME};
 use std::{
     cmp::{Ordering, Reverse},
+    collections::BTreeMap,
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write as IoWrite},
     path::Path,
@@ -46,6 +47,65 @@ struct FileData {
 }
 #[derive(Clone)]
 pub struct Run(Arc<FileData>);
+
+/// An exclusive version limit lets a rollback mask a file's future records
+/// without rewriting that file. `u32::MAX` includes every stored version.
+pub struct View<'a> {
+    pub run: &'a Run,
+    pub cutoff: u32,
+}
+
+/// Merge chronological views with bounded memory: one current record per file.
+/// Later views win duplicate table/key/version entries. A retention boundary
+/// keeps all newer versions and one preceding value or tombstone per key. The
+/// owning database must durably record and enforce its corresponding read and
+/// rollback floor before retiring any inputs; this primitive publishes one file.
+pub fn merge(
+    path: &Path,
+    level: u32,
+    views: &[View<'_>],
+    retained_from: Option<u32>,
+) -> Result<Option<Run>> {
+    let mut builder = Builder::new(path.parent().ok_or(Error::InvalidEntry)?, level)?;
+    let mut cursors = views
+        .iter()
+        .map(|view| view.run.entries())
+        .collect::<Vec<_>>();
+    let mut heap = BTreeMap::new();
+    for (index, cursor) in cursors.iter_mut().enumerate() {
+        if let Some(entry) = cursor.next().transpose()? {
+            heap.insert((entry.order_key(), Reverse(index)), entry);
+        }
+    }
+    let mut previous = None;
+    let mut key = None;
+    let mut baseline = false;
+    let mut count = 0;
+    while let Some(((order, Reverse(index)), entry)) = heap.pop_first() {
+        if entry.version < views[index].cutoff && previous.as_ref() != Some(&order) {
+            if key.as_ref() != Some(&(order.0.clone(), order.1.clone())) {
+                key = Some((order.0.clone(), order.1.clone()));
+                baseline = false;
+            }
+            let old = retained_from.is_some_and(|floor| entry.version < floor);
+            if !old || !baseline {
+                builder.push(&entry)?;
+                count += 1;
+            }
+            if old {
+                baseline = true;
+            }
+            previous = Some(order);
+        }
+        if let Some(entry) = cursors[index].next().transpose()? {
+            heap.insert((entry.order_key(), Reverse(index)), entry);
+        }
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(builder.finish(path)?))
+}
 
 /// An unpublished file is removed on drop. Publication is an atomic rename
 /// after the complete records, offset index, and checksums have reached disk.
