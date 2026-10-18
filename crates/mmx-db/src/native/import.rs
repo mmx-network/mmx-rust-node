@@ -315,9 +315,14 @@ pub fn indexed(
                 value: e.write.value.as_deref(),
             })
             .collect::<Vec<_>>();
+        let generation = next
+            .native
+            .generation
+            .checked_add(1)
+            .ok_or(Error::InvalidEntry)?;
         let mut indexes = journal.append(
             Action {
-                generation: next.native.generation + 1,
+                generation,
                 expected: if next.native.generation == 0 {
                     0
                 } else {
@@ -329,7 +334,7 @@ pub fn indexed(
             },
             &changes,
         )?;
-        next.native.generation += 1;
+        next.native.generation = generation;
         next.native.cursor = journal.end();
         drop(journal);
         indexes.sort_by(|a, b| {

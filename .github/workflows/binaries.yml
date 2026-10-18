@@ -1,0 +1,36 @@
+name: Binaries
+on:
+  workflow_dispatch:
+  push:
+    branches: [node-build]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked -p mmx-node
+      - run: cargo build --release --locked -p mmx-db --example import_indexed
+      - name: Package binaries and source revision
+        shell: bash
+        run: |
+          target/release/mmx-node --help
+          mkdir -p dist/bin
+          cp target/release/mmx-node dist/bin/
+          cp target/release/examples/import_indexed dist/bin/
+          printf '%s\n' "$GITHUB_SHA" > dist/COMMIT
+          tar -C dist -czf "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz" COMMIT bin
+          sha256sum "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz" > "mmx-node-linux-x86_64-${GITHUB_SHA}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mmx-node-linux-x86_64-${{ github.sha }}
+          path: mmx-node-linux-x86_64-*.tar.gz*
+          retention-days: 7
+          if-no-files-found: error

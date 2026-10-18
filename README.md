@@ -960,6 +960,32 @@ forks, and atomic suffix replacement share the reference model's semantics.
 `Database::open()` retain the original journal for library callers/reference tests.
 Explicit native opens reject legacy data until an import is requested.
 
+Legacy SQLite databases can be converted offline without a second SQLite copy or
+a global sort of block payloads. Stop the source writer, then import each database
+into a new directory with:
+
+```sh
+cargo run --release -p mmx-db --example import_indexed -- \
+  OLD_DB_DIR NEW_NATIVE_DB_DIR 4
+```
+
+The last argument limits approximate aggregate payload/key reads and writes to
+MiB/s (default 4; zero disables pacing). Input follows physical row order, while
+only references are sorted and compacted. Memory and open index files stay
+bounded; the source is opened read-only under its writer lock. Both ordinary and
+older `WITHOUT ROWID` tables retain every version, tombstone, and empty value.
+Interrupted imports resume at their durable source cursor, truncate unpublished
+tails, and reuse completed value segments. Partial targets refuse normal opens.
+Resume rejects a source whose version or publication generation changed. The
+complete native manifest appears only after EOF; the source is retained. Selected
+and archive databases must come from the same stopped node before switching the
+node's data directories.
+
+The `Binaries` GitHub workflow builds the node and import tool on Ubuntu 24.04,
+checks `mmx-node --help`, and uploads a Linux x86-64 archive with its source commit
+and SHA-256 checksum. It runs manually or when the `node-build` branch advances,
+so deployment does not require compiling on the node's machine.
+
 Indexed forks pin a read snapshot of the original database and keep speculative
 changes in memory, following the native table's memory index. They create no
 temporary database or replay write log. Publication inserts the validated suffix
