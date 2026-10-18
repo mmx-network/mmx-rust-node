@@ -4,8 +4,13 @@ use std::{hint::black_box, time::Instant};
 use vnx::serde_json::{self, Value};
 
 fn main() {
-    let repetitions: u32 = std::env::args()
-        .nth(1)
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let workers = args.first().is_some_and(|arg| arg == "--header-workers");
+    if workers {
+        args.remove(0);
+    }
+    let repetitions: u32 = args
+        .first()
         .map(|v| v.parse().expect("repetition count"))
         .unwrap_or(100);
     assert!(repetitions > 0);
@@ -25,8 +30,13 @@ fn main() {
         .try_into()
         .unwrap();
     let mut ksize = 29;
-    if let Some(path) = std::env::args().nth(2) {
-        let block = Record::decode(&std::fs::read(path).unwrap()).unwrap();
+    if let Some(path) = args.get(1) {
+        let bytes = std::fs::read(path).unwrap();
+        let block = if let Some(payload) = bytes.strip_prefix(b"MMXR\x01\0\0\0") {
+            Record::decode_compact(payload).unwrap()
+        } else {
+            Record::decode(&bytes).unwrap()
+        };
         println!(
             "Block: {} wire bytes, {} compact payload bytes",
             block.encode().unwrap().len(),
@@ -57,6 +67,36 @@ fn main() {
         println!("Native F1/table-2 fixture (no final proof)");
     }
     let expected = pos::compute(&xs, &id, ksize);
+    if workers {
+        // Keep serial match tables on the eight caller threads and send only
+        // F1 work into the global Rayon pool, exactly as header verification.
+        let compute = || {
+            assert_eq!(
+                pos::compute(black_box(&xs), black_box(&id), ksize),
+                expected
+            );
+        };
+        let start = Instant::now();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let compute = &compute;
+                scope.spawn(move || {
+                    for _ in 0..repetitions {
+                        compute();
+                    }
+                });
+            }
+        });
+        let seconds = start.elapsed().as_secs_f64();
+        println!(
+            "{} global F1 threads, eight header workers: {:.3} ms/proof, {:.1} proofs/s ({} proofs)",
+            std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "default".into()),
+            seconds * 1000.0 / (8.0 * f64::from(repetitions)),
+            8.0 * f64::from(repetitions) / seconds,
+            8 * repetitions,
+        );
+        return;
+    }
     for threads in [1, 2, 4, 8, 20] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -91,5 +131,16 @@ fn main() {
                 start.elapsed().as_secs_f64() * 1000.0 / f64::from(repetitions)
             );
         }
+        drop(pool);
+        // A fresh process gives each trial an independent global Rayon pool.
+        // Installing the entire compute() in a local pool would also move the
+        // serial match tables and would not model the production scheduler.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--header-workers")
+            .args(&args)
+            .env("RAYON_NUM_THREADS", threads.to_string())
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

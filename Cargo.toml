@@ -27,3 +27,5 @@ tempfile = "3"
 
 [profile.release]
 overflow-checks = true
+lto = "thin"
+codegen-units = 1

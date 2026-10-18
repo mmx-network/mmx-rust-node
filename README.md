@@ -205,6 +205,24 @@ python3 tools/bench_sync.py --source-dir ./mmx-data \
   --from-height 4000 --to-height 4500 --output ./tmp/sync-benchmark
 ```
 
+`bench_pos` accepts both native wire blocks and versioned `MMXR` archive records.
+It checks complete proof results while comparing single calls, batches, and eight
+ordinary header threads sharing a global F1 pool. Each pool-size trial runs in a
+fresh child process, retaining serial match tables on the caller threads as in
+the node. To measure one pool size directly:
+
+```sh
+RAYON_NUM_THREADS=8 cargo run --release -p mmx-consensus --example bench_pos -- \
+  --header-workers 100 /tmp/block.vnx
+```
+
+Release builds retain overflow checks and use portable ThinLTO with one codegen
+unit. Two 2,000-block socket comparisons, reversing binary order, measured
+75.2→78.2 and 74.6→80.2 blocks/s. RPC p95 changed from 1.41→1.30 and 1.37→1.31 s.
+All four reached the same hash with exactly 2,000 body downloads and no timeout
+reassignments. CPU-specific code generation was also tested; the portable build
+won both full replays despite some faster isolated proof measurements.
+
 `bench_validation` profiles cached bodies from a running local node. It reports
 first-pass and warm farmer authentication, static validity, typed-header
 conversion, validator/history lookup, CPU space work and wire encoding as JSON
@@ -282,10 +300,12 @@ reads only. Native compressed peer requests carry lossless block records.
 
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A mainnet run validated through height 1,330,728 using five to seven authenticated peers,
+A mainnet run validated through height 1,571,088 using five to seven authenticated peers,
 with no timeout body reassignments. Its selected hash matched C++, including
 checks immediately before and after the first hard fork at height 1,000,000.
 HTTP RPC remains available during sync. A complete mainnet sync has not finished.
+The C++ CLI also read heights, headers, full blocks and balances through the
+running node's native VNX RPC service.
 The node uses an indexed disk backend with every
 historical version retained. Sync throughput and remaining peer services are
 still being improved.
