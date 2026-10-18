@@ -6,8 +6,27 @@ struct Parser<'a> {
     input: &'a [u8],
     registry: Registry,
     trusted_fallback: bool,
+    allocation_left: usize,
+}
+// Transport/storage resource limits, not a replacement for consensus gas/size
+// validation. Encoded bytes alone cannot bound arrays of zero-width elements.
+fn allocation_budget(bytes: usize) -> usize {
+    bytes
+        .saturating_mul(96)
+        .saturating_add(4096)
+        .min(256 * 1024 * 1024)
 }
 impl<'a> Parser<'a> {
+    fn allocate(&mut self, count: usize, size: usize) -> Result<()> {
+        let bytes = count
+            .checked_mul(size)
+            .ok_or_else(|| input("decoded allocation limit"))?;
+        self.allocation_left = self
+            .allocation_left
+            .checked_sub(bytes)
+            .ok_or_else(|| input("decoded allocation limit"))?;
+        Ok(())
+    }
     fn schema(&self, hash: u64) -> vnx::Result<&TypeCode> {
         self.registry.get(hash).or_else(|e| {
             if self.trusted_fallback {
@@ -56,6 +75,7 @@ impl<'a> Parser<'a> {
                     reader.read_type_code()?;
                     self.registry = reader.registry().clone();
                     let n = reader.into_inner().position() as usize;
+                    self.allocate(n, 4)?;
                     self.take(n - 2)?;
                 }
                 15 | 0x0f00 => {
@@ -92,10 +112,13 @@ impl<'a> Parser<'a> {
                 schema.name
             )));
         }
+        self.allocate(schema.fields.len(), std::mem::size_of::<V>() + 96)?;
+        self.allocate(schema.name.len(), 1)?;
         let mut fields = BTreeMap::new();
         for ext in [false, true] {
             for field in schema.fields.iter().filter(|f| f.is_extended == ext) {
                 let before = self.input.len();
+                self.allocate(field.name.len(), 1)?;
                 let code = Code::from_words(&field.code)?;
                 let value = self.value(&code, Some(schema), depth + 1)?;
                 let used = before - self.input.len();
@@ -164,11 +187,13 @@ impl<'a> Parser<'a> {
             Code::F64 => V::Float64(self.number(8, big)?),
             Code::String => {
                 let n = self.count(big)?;
+                self.allocate(n, 1)?;
                 V::String(self.take(n)?.to_vec())
             }
             Code::Optional(code) => V::Optional(if self.number(1, big)? == 0 {
                 None
             } else {
+                self.allocate(1, std::mem::size_of::<V>())?;
                 Some(Box::new(self.value(code, owner, depth + 1)?))
             }),
             Code::Any => self.any(depth + 1)?,
@@ -192,7 +217,10 @@ impl<'a> Parser<'a> {
                 let mut value = self.value(&code, None, depth + 1)?;
                 let json_depth = json_depth(&code, &value).map(|n| n + 1);
                 let copy_depth = copy_depth(&code, &value) + 1;
-                let raw = before[..before.len() - self.input.len()].to_vec();
+                let used = before.len() - self.input.len();
+                self.allocate(used, 1)?;
+                self.allocate(1, std::mem::size_of::<V>())?;
+                let raw = before[..used].to_vec();
                 // Tuple is not an array in Variant's native classification.
                 if matches!(base(&code), Code::Tuple(_)) {
                     value = V::Opaque(raw.clone());
@@ -216,15 +244,20 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| input("matrix size"))?;
                 self.sequence(n, code, owner, depth + 1, None)?
             }
-            Code::Tuple(codes) => V::Sequence(
-                codes
-                    .iter()
-                    .map(|c| self.value(c, owner, depth + 1))
-                    .collect::<Result<_>>()?,
-            ),
+            Code::Tuple(codes) => {
+                self.allocate(codes.len(), std::mem::size_of::<V>())?;
+                V::Sequence(
+                    codes
+                        .iter()
+                        .map(|c| self.value(c, owner, depth + 1))
+                        .collect::<Result<_>>()?,
+                )
+            }
             Code::Map(key, value) => {
                 let mut out = BTreeMap::new();
-                for _ in 0..self.count(big)? {
+                let count = self.count(big)?;
+                self.allocate(count, 2 * std::mem::size_of::<V>() + 64)?;
+                for _ in 0..count {
                     let key = self.value(key, owner, depth + 1)?;
                     let value = self.value(value, owner, depth + 1)?;
                     // Native CODE_MAP reads into map[key], replacing an
@@ -235,8 +268,11 @@ impl<'a> Parser<'a> {
             }
             Code::Object => {
                 let mut out = Vec::new();
-                for _ in 0..self.count(big)? {
+                let count = self.count(big)?;
+                self.allocate(count, std::mem::size_of::<V>() + 32)?;
+                for _ in 0..count {
                     let n = self.count(big)?;
+                    self.allocate(n, 1)?;
                     let key = self.take(n)?.to_vec();
                     let dynamic = if big {
                         Code::Alt(Box::new(Code::Dynamic))
@@ -270,13 +306,16 @@ impl<'a> Parser<'a> {
             return Err(input("container length"));
         }
         if matches!(code, Code::U8 | Code::Alt(_)) && matches!(base(code), Code::U8) {
+            self.allocate(n, 1)?;
             return Ok(V::Bytes(self.take(n)?.to_vec()));
         }
         if matches!((list_order, code), (Some(false), Code::I8))
             || matches!((list_order,code), (Some(true), Code::Alt(c)) if matches!(c.as_ref(), Code::I8))
         {
+            self.allocate(n, 1)?;
             return Ok(V::String(self.take(n)?.to_vec()));
         }
+        self.allocate(n, std::mem::size_of::<V>())?;
         Ok(V::Sequence(
             (0..n)
                 .map(|_| self.value(code, owner, depth + 1))
@@ -360,23 +399,15 @@ fn json_depth(code: &Code, value: &V) -> Option<usize> {
             };
             1 + values
                 .iter()
-                .map(|v| json_depth(c, v))
-                .collect::<Option<Vec<_>>>()?
-                .into_iter()
-                .max()
-                .unwrap_or(0)
+                .try_fold(0, |depth, v| Some(depth.max(json_depth(c, v)?)))?
         }
         Code::Object => {
             let V::Object(values) = value else {
                 return None;
             };
-            1 + values
-                .iter()
-                .map(|(_, v)| json_depth(&Code::Dynamic, v))
-                .collect::<Option<Vec<_>>>()?
-                .into_iter()
-                .max()
-                .unwrap_or(0)
+            1 + values.iter().try_fold(0, |depth, (_, v)| {
+                Some(depth.max(json_depth(&Code::Dynamic, v)?))
+            })?
         }
         _ => return None,
     })
@@ -389,6 +420,7 @@ pub(crate) fn decode_with_registry(bytes: &[u8], registry: &mut Registry) -> Res
         input: bytes,
         registry: registry.clone(),
         trusted_fallback: false,
+        allocation_left: allocation_budget(bytes.len()),
     };
     let record = parse_record(&mut parser)?;
     *registry = parser.registry;
@@ -399,6 +431,7 @@ pub(crate) fn compact(bytes: &[u8]) -> Result<Record> {
         input: bytes,
         registry: Registry::new(),
         trusted_fallback: true,
+        allocation_left: allocation_budget(bytes.len()),
     })
 }
 fn parse_record(parser: &mut Parser<'_>) -> Result<Record> {
@@ -416,6 +449,7 @@ pub(crate) fn variant(bytes: &[u8]) -> Result<Variant> {
         input: bytes,
         registry: Registry::new(),
         trusted_fallback: false,
+        allocation_left: allocation_budget(bytes.len()),
     };
     let value = parser.value(&Code::Dynamic, None, 0)?;
     if !parser.input.is_empty() {

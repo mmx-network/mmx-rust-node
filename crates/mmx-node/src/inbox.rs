@@ -36,6 +36,7 @@ impl Inbox {
         ) {
             return Ok(());
         }
+        let wire_bytes = wire_bytes.max(record.memory_size());
         let mut queue = self.0.lock().map_err(|_| error("peer inbox poisoned"))?;
         if record.name == "mmx.Transaction" {
             if wire_bytes > 256 * 1024 {
@@ -145,9 +146,12 @@ mod tests {
         assert_eq!(inbox.stats().unwrap().dropped, 3);
         inbox.clear().unwrap();
         assert_eq!(inbox.stats().unwrap().messages, 0);
-        inbox.submit(record("mmx.ValidatorVote", []), 10).unwrap();
-        inbox.submit(record("mmx.Block", []), 20).unwrap();
-        assert_eq!(inbox.stats().unwrap().bytes, 30);
+        let vote = record("mmx.ValidatorVote", []);
+        let block = record("mmx.Block", []);
+        let charged = vote.memory_size().max(10) + block.memory_size().max(20);
+        inbox.submit(vote, 10).unwrap();
+        inbox.submit(block, 20).unwrap();
+        assert_eq!(inbox.stats().unwrap().bytes, charged);
         assert_eq!(
             inbox
                 .take()

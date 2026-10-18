@@ -392,6 +392,65 @@ impl ForkChain {
         }
         self.retain(block, proofs)
     }
+    /// Unsolicited live blocks must pass work AND ledger validation before
+    /// entering the durable archive. Missing parents/VDFs stay in Node's bounded
+    /// RAM quarantine; requested historical batches use admit_blocks instead.
+    pub fn admit_live(
+        &mut self,
+        block: &Record,
+        points: &[vdf::VerifiedPoint],
+        root_height: u32,
+    ) -> ChainResult<bool> {
+        block::prevalidate(block, self.chain.params())?;
+        let id = bytes::<32>(block.field("hash")?)?;
+        if self.block(&id)?.is_some() {
+            return Ok(true);
+        }
+        let parent_id = bytes::<32>(block.field("prev")?)?;
+        if self.get_header(&parent_id)?.is_none() {
+            return Ok(false);
+        }
+        let Some((common, parents)) = self.line(parent_id)? else {
+            return Ok(false);
+        };
+        // Deeper recovery belongs to the coordinated multi-peer sync path.
+        if parents.len() > 1000 || common.height.saturating_add(1000) < root_height {
+            return Ok(false);
+        }
+        let linked = match vdf::link_block(block, self.chain.params(), self, points) {
+            Ok(points) => points.into_iter().cloned().collect::<Vec<_>>(),
+            Err(_) => return Ok(false),
+        };
+        let mut preview = self.chain.snapshot_at(common.height)?;
+        for parent in parents {
+            let record = self
+                .block(&parent)?
+                .ok_or_else(|| invalid("missing live parent"))?;
+            let historical = uint(&record, "height")? <= u64::from(root_height)
+                || self.sync_verified.contains(&parent);
+            let work = self.verified.get(&parent).cloned().unwrap_or_default();
+            preview.append_mode(
+                &record,
+                &work,
+                if historical {
+                    ValidationMode::HistoricalSync
+                } else {
+                    ValidationMode::Live
+                },
+            )?;
+        }
+        let context = transitions::ProofContext::resolve(block, self.chain.params(), &preview)?;
+        let evidence = transitions::verify_evidence(block, self.chain.params(), &context)?;
+        preview.append_evidence(block, &linked, ValidationMode::Live, Some(&evidence))?;
+        let work = linked
+            .iter()
+            .map(|point| Record::from_generated(point.proof()))
+            .collect::<mmx_consensus::Result<Vec<_>>>()?;
+        self.retain(block, &work)?;
+        self.evidence.insert(id, evidence);
+        self.verified.insert(id, linked);
+        Ok(true)
+    }
     /// Atomically retain a historical download window with no attached PoTs.
     /// First-record and height/arrival ordering match sequential admission.
     pub fn admit_blocks(&mut self, blocks: &[Record]) -> ChainResult<()> {
@@ -585,6 +644,51 @@ impl ForkChain {
             archive: &self.archive,
             cache: &self.headers,
         };
+        // Match native verify_block_proofs(): connectivity precedes CPU proof
+        // checks and registration in the global proof/vote pool. A known direct
+        // parent alone does not establish connection to a root-height anchor.
+        let mut connected = BTreeSet::new();
+        for entry in &entries {
+            let h = &entry.header;
+            if entry.invalid {
+                continue;
+            }
+            let Some(mut parent) = history.get_header(&h.prev.0)? else {
+                continue;
+            };
+            if parent.height.checked_add(1) != Some(h.height) {
+                continue;
+            }
+            let rooted = if root_header.height.checked_add(1) == Some(h.height) {
+                let mut available = true;
+                for _ in 0..self
+                    .chain
+                    .params()
+                    .commit_delay
+                    .saturating_add(self.chain.params().infuse_delay)
+                    .saturating_sub(1)
+                {
+                    if parent.height == 0 {
+                        break;
+                    }
+                    match history.get_header(&parent.prev.0)? {
+                        Some(previous) if previous.height.checked_add(1) == Some(parent.height) => {
+                            parent = previous
+                        }
+                        _ => {
+                            available = false;
+                            break;
+                        }
+                    }
+                }
+                available
+            } else {
+                connected.contains(&h.prev.0)
+            };
+            if rooted {
+                connected.insert(h.hash.0);
+            }
+        }
         self.verified.retain(|hash, _| headers.contains_key(hash));
         self.evidence.retain(|hash, _| headers.contains_key(hash));
         self.sync_verified.retain(|hash| headers.contains_key(hash));
@@ -603,7 +707,10 @@ impl ForkChain {
         // Node::verify_block_proofs(), without sharing any database connection.
         for entry in &entries {
             let h = &entry.header;
-            if h.height <= root_header.height || self.verified.contains_key(&h.hash.0) {
+            if h.height <= root_header.height
+                || !connected.contains(&h.hash.0)
+                || self.verified.contains_key(&h.hash.0)
+            {
                 continue;
             }
             let Some(parent) = history.get_header(&h.prev.0)? else {
@@ -651,7 +758,9 @@ impl ForkChain {
             }
             let mut verified = false;
             let mut bad = entry.invalid || bad_context.contains(&h.hash.0);
-            if let Some(work) = self.verified.get(&h.hash.0) {
+            if !connected.contains(&h.hash.0) {
+                // Remain waiting; do not classify missing ancestry as invalid.
+            } else if let Some(work) = self.verified.get(&h.hash.0) {
                 verified = true;
                 points.insert(h.hash.0, work.clone());
             } else if let Some(result) = checked.remove(&h.hash.0) {
@@ -711,7 +820,7 @@ impl ForkChain {
             self.connected = selection
                 .states
                 .iter()
-                .filter(|(_, s)| s.all_proofs_verified)
+                .filter(|(_, s)| s.anchor.is_some() && s.all_proofs_verified && !s.invalid)
                 .map(|(hash, _)| *hash)
                 .collect();
             out.best = selection.best;
@@ -796,8 +905,9 @@ impl ForkChain {
         let mut line = Vec::new();
         let mut expected = None;
         loop {
-            let h = cached_header(&self.archive, &self.headers, &current)?
-                .ok_or_else(|| invalid("missing fork ancestor"))?;
+            let Some(h) = cached_header(&self.archive, &self.headers, &current)? else {
+                return Ok(None);
+            };
             if expected.is_some_and(|height| height != h.height) {
                 return Err(invalid("fork ancestor height mismatch"));
             }

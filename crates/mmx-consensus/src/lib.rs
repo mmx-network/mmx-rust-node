@@ -114,6 +114,18 @@ pub struct Record {
     pub fields: BTreeMap<String, Value>,
 }
 impl Record {
+    /// Conservative decoded-memory charge for bounded network queues. Includes
+    /// tree/container overhead and original Variant bytes, not just wire bytes.
+    pub fn memory_size(&self) -> usize {
+        self.fields.iter().fold(
+            std::mem::size_of::<Self>().saturating_add(self.name.len()),
+            |n, (key, value)| {
+                n.saturating_add(96)
+                    .saturating_add(key.len())
+                    .saturating_add(value.memory_size())
+            },
+        )
+    }
     /// Decode one self-describing VNX record, requiring complete consumption.
     /// Only the checked-in schema versions are supported; other versions fail
     /// explicitly. Schema migration/default insertion is not implemented.
@@ -179,6 +191,29 @@ impl Record {
     }
 }
 impl Value {
+    fn memory_size(&self) -> usize {
+        let extra = match self {
+            Self::String(v) | Self::Bytes(v) | Self::Opaque(v) => v.capacity(),
+            Self::Sequence(v) => v
+                .iter()
+                .fold(0usize, |n, v| n.saturating_add(v.memory_size())),
+            Self::Map(v) => v.iter().fold(0usize, |n, (k, v)| {
+                n.saturating_add(64)
+                    .saturating_add(k.memory_size())
+                    .saturating_add(v.memory_size())
+            }),
+            Self::Object(v) => v.iter().fold(0usize, |n, (k, v)| {
+                n.saturating_add(32)
+                    .saturating_add(k.capacity())
+                    .saturating_add(v.memory_size())
+            }),
+            Self::Optional(Some(v)) => v.memory_size(),
+            Self::Record(v) => v.memory_size(),
+            Self::Variant(v) => v.raw.capacity().saturating_add(v.value.memory_size()),
+            _ => 0,
+        };
+        std::mem::size_of::<Self>().saturating_add(extra)
+    }
     pub fn record(&self) -> Result<&Record> {
         match self {
             Self::Record(r) => Ok(r),

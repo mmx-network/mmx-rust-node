@@ -28,10 +28,12 @@ pub struct Node {
     pub(crate) sync_body_retries: u64,
     pub(crate) sync_backpressure_retries: u64,
     work: VecDeque<Record>,
-    pending: BTreeMap<Hash, Record>,
+    pending: BTreeMap<Hash, (Record, i64, usize)>,
+    pending_bytes: usize,
     pub(crate) verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
     vdf_worker: Option<crate::vdf_worker::Worker>,
-    responses: Vec<(Record, i64)>,
+    responses: BTreeMap<Hash, (Record, i64, usize)>,
+    response_bytes: usize,
     pub(crate) tx_pool: crate::transactions::Pool,
     inbox: Inbox,
     peer_state: PeerState,
@@ -121,9 +123,11 @@ impl Node {
             sync_backpressure_retries: 0,
             work: VecDeque::new(),
             pending: BTreeMap::new(),
+            pending_bytes: 0,
             verified_work: BTreeMap::new(),
             vdf_worker: None,
-            responses: vec![],
+            responses: BTreeMap::new(),
+            response_bytes: 0,
             tx_pool: Default::default(),
             inbox: Inbox::default(),
             peer_state,
@@ -226,8 +230,10 @@ impl Node {
         self.sync_pending.clear();
         self.work.clear();
         self.pending.clear();
+        self.pending_bytes = 0;
         self.verified_work.clear();
         self.responses.clear();
+        self.response_bytes = 0;
         self.tx_pool.clear()?;
         for (id, _) in &self.production.broadcasts {
             self.tx_pool.relay.remove(id)?;
@@ -322,13 +328,44 @@ impl Node {
         }
         self.verified_work
             .retain(|_, p| p.point().start >= root.vdf_iters);
-        let work = self
-            .verified_work
-            .values()
-            .map(|p| Record::from_generated(p.proof()))
-            .collect::<mmx_consensus::Result<Vec<_>>>()?;
-        for block in self.pending.values() {
-            self.chain.admit(block, &work)?;
+        let points = self.verified_work.values().cloned().collect::<Vec<_>>();
+        let now = vnx::util::get_wall_time_millis();
+        let ttl = self
+            .chain
+            .selected()
+            .params()
+            .block_interval_ms
+            .saturating_mul(10);
+        let mut remove = Vec::new();
+        let mut pending: Vec<_> = self.pending.iter().collect();
+        pending.sort_by_key(|(_, (block, _, _))| number(block, "height").unwrap_or(u32::MAX));
+        let mut attempts = 0;
+        for (id, (block, received, _)) in pending {
+            if number(block, "height")? <= self.root || now.saturating_sub(*received) > ttl {
+                remove.push(*id);
+                continue;
+            }
+            if attempts >= 4 || self.chain.block(&hash(block, "prev")?)?.is_none() {
+                continue;
+            }
+            attempts += 1;
+            match self.chain.admit_live(block, &points, self.root) {
+                Ok(true) => remove.push(*id),
+                Ok(false) => (),
+                Err(
+                    e @ (mmx_execution::chain::ChainError::Database(_)
+                    | mmx_execution::chain::ChainError::Storage(_)),
+                ) => return Err(e.into()),
+                Err(e) => {
+                    eprintln!("Rejected quarantined block: {e}");
+                    remove.push(*id);
+                }
+            }
+        }
+        for id in remove {
+            if let Some((_, _, size)) = self.pending.remove(&id) {
+                self.pending_bytes -= size;
+            }
         }
         self.chain
             .cache_verified_work(&self.verified_work.values().cloned().collect::<Vec<_>>())?;
@@ -396,8 +433,13 @@ impl Node {
         if let Some(height) = advance.heights.last() {
             self.root = *height;
         }
-        self.pending
-            .retain(|_, b| number(b, "height").is_ok_and(|h| h > self.root));
+        self.pending.retain(|_, (b, _, size)| {
+            let keep = number(b, "height").is_ok_and(|h| h > self.root);
+            if !keep {
+                self.pending_bytes -= *size;
+            }
+            keep
+        });
         self.prune_transactions()?;
         if self.synced {
             if let Some(common) = out.common_ancestor.filter(|h| *h != previous_tip.hash.0) {
@@ -474,15 +516,21 @@ impl Node {
         let params = self.chain.selected().params().clone();
         let now = vnx::util::get_wall_time_millis();
         let height = self.vdf_peak()?.0;
-        let mut pending = Vec::new();
-        for (record, received) in std::mem::take(&mut self.responses) {
+        let mut pending = BTreeMap::new();
+        self.response_bytes = 0;
+        let mut checks = 0;
+        for (id, (record, received, size)) in std::mem::take(&mut self.responses) {
             if now.wrapping_sub(received) > params.block_interval_ms.wrapping_mul(10) {
                 continue;
             }
-            if number(&record, "vdf_height")? >= height.wrapping_add(params.challenge_delay) {
-                pending.push((record, received));
+            if number(&record, "vdf_height")? >= height.wrapping_add(params.challenge_delay)
+                || checks >= 16
+            {
+                pending.insert(id, (record, received, size));
+                self.response_bytes += size;
                 continue;
             }
+            checks += 1;
             match mmx_consensus::response::verify(
                 &record,
                 &params,
@@ -511,8 +559,43 @@ impl Node {
         let mut update = false;
         match message.name.as_str() {
             "mmx.Block" if self.synced => {
-                self.chain.admit(message, &[])?;
-                self.pending.insert(hash(message, "hash")?, message.clone());
+                let height = number(message, "height")?;
+                let tip = self
+                    .chain
+                    .selected()
+                    .tip()?
+                    .ok_or_else(|| error("missing tip"))?;
+                if height <= self.root || height > tip.height.saturating_add(1000) {
+                    return Ok(false);
+                }
+                let id = hash(message, "hash")?;
+                if self.pending.contains_key(&id) || self.chain.block(&id)?.is_some() {
+                    return Ok(false);
+                }
+                let size = message.memory_size().max(message.encode_compact()?.len());
+                if size > 32 * 1024 * 1024
+                    || self.pending.len() >= 256
+                    || self.pending_bytes.saturating_add(size) > 32 * 1024 * 1024
+                {
+                    return Err(error("live block quarantine full"));
+                }
+                mmx_execution::block::prevalidate(message, self.chain.selected().params())?;
+                let mmx_consensus::Value::Int(stamp) = message.field("time_stamp")? else {
+                    return Err(error("invalid block timestamp"));
+                };
+                if !mmx_execution::chain::sync::allows_timestamp(
+                    *stamp,
+                    vnx::util::get_wall_time_millis(),
+                    self.chain.selected().params().block_interval_ms,
+                    100,
+                ) {
+                    return Err(error("block too far in the future"));
+                }
+                self.pending.insert(
+                    id,
+                    (message.clone(), vnx::util::get_wall_time_millis(), size),
+                );
+                self.pending_bytes += size;
                 update = true;
             }
             "mmx.ProofOfTime" => {
@@ -520,6 +603,14 @@ impl Node {
                     return Err(error("invalid VDF content"));
                 }
                 mmx_consensus::vdf::authenticate(message)?;
+                let id = hash(message, "content_hash")?;
+                if self
+                    .work
+                    .iter()
+                    .any(|work| hash(work, "content_hash").ok() == Some(id))
+                {
+                    return Ok(false);
+                }
                 self.work.push_back(message.clone());
                 while self.work.len() > 32 {
                     if let Some(old) = self.work.pop_front() {
@@ -533,11 +624,44 @@ impl Node {
                     .admit_vote(message, vnx::util::get_wall_time_millis())?;
             }
             "mmx.ProofResponse" => {
+                let size = message.memory_size().max(message.encode_compact()?.len());
+                if size > 64 * 1024 {
+                    return Err(error("proof response exceeds 64 KiB"));
+                }
                 if !mmx_consensus::response::is_valid(message)? {
                     return Err(error("invalid proof response"));
                 }
-                self.responses
-                    .push((message.clone(), vnx::util::get_wall_time_millis()));
+                // Authenticate before deferral. Future height is not permission
+                // to retain an unsigned envelope, nor to refresh a replay's TTL.
+                mmx_consensus::response::authenticate(message)?;
+                let tip = self
+                    .chain
+                    .selected()
+                    .tip()?
+                    .ok_or_else(|| error("missing tip"))?;
+                let params = self.chain.selected().params();
+                if number(message, "vdf_height")?
+                    > tip
+                        .vdf_height
+                        .saturating_add(params.max_vdf_count)
+                        .saturating_add(params.challenge_delay)
+                {
+                    return Err(error("proof response too far ahead"));
+                }
+                let id = hash(message, "content_hash")?;
+                if self.responses.contains_key(&id) {
+                    return Ok(false);
+                }
+                if self.responses.len() >= 4096
+                    || self.response_bytes.saturating_add(size) > 8 * 1024 * 1024
+                {
+                    return Err(error("proof response queue full"));
+                }
+                self.responses.insert(
+                    id,
+                    (message.clone(), vnx::util::get_wall_time_millis(), size),
+                );
+                self.response_bytes += size;
             }
             "mmx.Transaction" if self.synced => {
                 self.add_transaction(message, false)?;

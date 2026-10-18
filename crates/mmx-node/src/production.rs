@@ -84,10 +84,17 @@ impl Node {
             .proofs
             .entry(*verified.challenge())
             .or_default();
-        if proofs.len() < 128 {
+        if proofs.len() < 128
+            || proofs
+                .last_key_value()
+                .is_some_and(|(worst, _)| verified.hash() < worst)
+        {
             proofs
                 .entry(*verified.hash())
                 .or_insert_with(|| record.clone());
+            if proofs.len() > 128 {
+                proofs.pop_last();
+            }
         }
         Ok(())
     }

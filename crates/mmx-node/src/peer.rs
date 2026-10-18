@@ -262,6 +262,32 @@ fn respond_with(
     let id = number(request, "id")?;
     let method = request.field("method")?.record()?;
     let call = || -> Result<Record> {
+        // Router::on_request is deliberately narrower than the public RPC API.
+        // Never expose VM execution or arbitrary ledger scans over peer sockets.
+        if !matches!(
+            method.name.as_str(),
+            "mmx.Router.get_id"
+                | "mmx.Router.get_info"
+                | "mmx.Router.sign_msg"
+                | "mmx.Router.get_peers"
+                | "mmx.Node.get_height"
+                | "mmx.Node.get_synced_height"
+                | "mmx.Node.get_block"
+                | "mmx.Node.get_block_at"
+                | "mmx.Node.get_block_hash"
+                | "mmx.Node.get_block_hash_ex"
+                | "mmx.Node.get_header"
+                | "mmx.Node.get_header_at"
+                | "mmx.Node.get_tx_ids_at"
+        ) {
+            return Ok(record(
+                "vnx.NoSuchMethod",
+                [(
+                    "what".into(),
+                    Value::String(b"method is not available to peers".to_vec()),
+                )],
+            ));
+        }
         if let Some(reply) = state.call(method)? {
             return Ok(reply);
         }
