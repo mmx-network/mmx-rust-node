@@ -1,5 +1,5 @@
 use mmx_execution::chain::network::Network;
-use mmx_node::{peer, rpc, sync, Node, Result};
+use mmx_node::{peer, production, rpc, sync, Node, Result};
 use std::{
     path::PathBuf,
     sync::{
@@ -13,6 +13,7 @@ use std::{
 const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir PATH]
   [--peer HOST[:PORT]]... [--offline] [--sync-once] [--rollback-to HEIGHT]
   [--purge-before HEIGHT]
+  [--farmer ENDPOINT] [--reward-vote -1|0|1] [-c CONFIG]...
   [--p2p-listen HOST:PORT] [--rpc-listen HOST:PORT] [--http-listen HOST:PORT]
 
 Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
@@ -24,6 +25,9 @@ Historical sync uses configured native seed peers unless --peer is supplied.
 History is retained by default. --purge-before reclaims older history before serving,
 keeps HEIGHT available, and prevents RPC reads or rollback below HEIGHT (native databases).";
 struct Options {
+    configs: Vec<PathBuf>,
+    farmer: Option<String>,
+    reward_vote: i8,
     root: PathBuf,
     network: String,
     data: PathBuf,
@@ -38,6 +42,9 @@ struct Options {
 }
 fn options() -> Result<Option<Options>> {
     let mut o = Options {
+        configs: vec![],
+        farmer: None,
+        reward_vote: 0,
         root: "../mmx-node".into(),
         network: "mainnet".into(),
         data: "mmx-data".into(),
@@ -65,6 +72,9 @@ fn options() -> Result<Option<Options>> {
                     .ok_or_else(|| std::io::Error::other(format!("missing value for {arg}")))?;
                 match arg.as_str() {
                     "--mmx-root" => o.root = value.into(),
+                    "-c" | "--config" => o.configs.push(value.into()),
+                    "--farmer" => o.farmer = Some(value),
+                    "--reward-vote" => o.reward_vote = value.parse()?,
                     "--network" => o.network = value,
                     "--data-dir" => o.data = value.into(),
                     "--peer" => o.peers.push(value),
@@ -92,10 +102,30 @@ fn main() -> Result<()> {
     let Some(mut options) = options()? else {
         return Ok(());
     };
-    let network = Network::load(&options.root, &options.network)?;
+    let config = vnx::config::Config::new();
+    config.load_tree(options.root.join("config").join(&options.network))?;
+    for path in &options.configs {
+        config.load_tree(path)?;
+    }
+    let network = Network::from_config(&config, options.root.join("data"))?;
+    if !options.configs.is_empty()
+        && config.read::<bool>("farmer")?.unwrap_or(true)
+        && options.farmer.is_none()
+    {
+        options.farmer = Some(
+            config
+                .read::<String>("Farmer.private_endpoint")?
+                .unwrap_or_else(|| {
+                    if config.read::<bool>("allow_remote").ok().flatten() == Some(true) {
+                        "127.0.0.1:11332".into()
+                    } else {
+                        "127.0.0.1:11333".into()
+                    }
+                }),
+        );
+        options.reward_vote = config.read("Node.reward_vote")?.unwrap_or(0);
+    }
     if options.peers.is_empty() && !options.offline {
-        let config = vnx::config::Config::new();
-        config.load_tree(options.root.join("config").join(&options.network))?;
         if let Some(peers) = config.get("Router.seed_peers")? {
             options.peers = vnx::serde_json::from_value(peers)?;
         }
@@ -151,6 +181,22 @@ fn main() -> Result<()> {
         vnx.endpoint(),
         http.address()
     );
+    let mut farming = if !options.offline {
+        options
+            .farmer
+            .as_ref()
+            .map(|endpoint| {
+                production::Worker::start(
+                    node.clone(),
+                    endpoint.parse()?,
+                    stop.clone(),
+                    options.reward_vote,
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let mut workers = Vec::new();
     {
         let node = node.clone();
@@ -183,6 +229,9 @@ fn main() -> Result<()> {
 
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(200));
+    }
+    if let Some(farming) = &mut farming {
+        farming.shutdown();
     }
     p2p.shutdown();
     http.shutdown();

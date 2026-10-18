@@ -17,6 +17,7 @@ use std::{
 };
 
 pub struct Node {
+    pub(crate) production: crate::production::State,
     pub(crate) chain: ForkChain,
     pub(crate) root: u32,
     pub(crate) synced: bool,
@@ -109,6 +110,7 @@ impl Node {
         peer_state.set_earliest_height(chain.earliest_height());
         Ok(Self {
             chain,
+            production: Default::default(),
             root,
             synced: false,
             sync_pos: tip.height.saturating_add(1),
@@ -227,6 +229,10 @@ impl Node {
         self.verified_work.clear();
         self.responses.clear();
         self.tx_pool.clear()?;
+        for (id, _) in &self.production.broadcasts {
+            self.tx_pool.relay.remove(id)?;
+        }
+        self.production = Default::default();
         self.inbox.clear()?;
         Ok(())
     }
@@ -470,7 +476,10 @@ impl Node {
                 root.vdf_height,
                 1000,
             ) {
-                Ok(proof) => self.chain.observe_proof(&proof),
+                Ok(proof) => {
+                    self.chain.observe_proof(&proof);
+                    self.remember_proof(&record, &proof)?;
+                }
                 Err(e) => eprintln!("Rejected farmer proof: {e}"),
             }
         }

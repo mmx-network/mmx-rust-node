@@ -326,6 +326,9 @@ impl ForkChain {
     }
     /// Additional work-verified farmer proofs can change future vote eligibility;
     /// already counted votes remain counted. Response admission belongs to Node.
+    pub fn best_proof(&self, challenge: &Hash) -> Option<Hash> {
+        self.voting.best_proof(challenge)
+    }
     pub fn observe_proof(&mut self, proof: &mmx_consensus::proof::VerifiedProof) {
         self.voting.observe_proof(proof);
     }

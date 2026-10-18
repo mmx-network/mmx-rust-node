@@ -19,6 +19,14 @@ use vnx::{
     VnxType,
 };
 
+pub(crate) fn from_json_record(value: &Value) -> Result<Record> {
+    let mut writer = Writer::new(Vec::new(), mmx_types::vnx_registry()?);
+    writer.write(value)?;
+    Ok(Record::decode(&writer.into_inner())?)
+}
+pub(crate) fn to_json_record(record: &Record) -> Result<Value> {
+    Ok(Reader::new(Cursor::new(record.encode()?), mmx_types::vnx_registry()?).read()?)
+}
 pub const METHODS: &[&str] = &[
     "get_params",
     "get_height",

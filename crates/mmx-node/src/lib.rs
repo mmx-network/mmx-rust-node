@@ -4,6 +4,7 @@ mod inbox;
 pub mod node;
 pub mod peer;
 mod peer_state;
+pub mod production;
 pub mod rpc;
 pub mod sync;
 mod transactions;

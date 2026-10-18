@@ -113,6 +113,24 @@ impl ChainState {
     pub fn storage(&self) -> &StorageDb {
         &self.storage
     }
+    /// Pin a selected historical parent without changing the live ledger or
+    /// writing files. Used for candidate construction and peak replacement.
+    pub fn snapshot_at(&self, height: u32) -> ChainResult<Self> {
+        if self.hash_at(height)?.is_none() {
+            return Err(invalid("snapshot parent is not selected"));
+        }
+        Ok(Self {
+            storage: StorageDb::new(
+                self.storage.database().fork(
+                    height
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("snapshot height overflow"))?,
+                )?,
+            ),
+            params: self.params.clone(),
+            headers: Default::default(),
+        })
+    }
     pub fn params(&self) -> &mmx::ChainParams {
         &self.params
     }
@@ -305,7 +323,11 @@ impl ChainState {
         self.headers = branch.headers;
         Ok(receipts)
     }
-    fn vdf_payout(&self, height: u32, parent: &mmx::BlockHeader) -> ChainResult<Option<Address>> {
+    pub fn vdf_payout(
+        &self,
+        height: u32,
+        parent: &mmx::BlockHeader,
+    ) -> ChainResult<Option<Address>> {
         let interval = self.params.vdf_reward_interval;
         if interval == 0 {
             return Err(invalid("zero VDF reward interval"));

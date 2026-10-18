@@ -32,7 +32,7 @@ struct RelayState {
     ids: BTreeMap<[u8; 32], u64>,
 }
 impl Relay {
-    fn publish(&self, id: [u8; 32], record: Arc<Record>, size: usize) -> Result<()> {
+    pub(crate) fn publish(&self, id: [u8; 32], record: Arc<Record>, size: usize) -> Result<()> {
         let mut state = self
             .state
             .lock()
@@ -50,7 +50,7 @@ impl Relay {
         self.latest.store(seq, Ordering::Release);
         Ok(())
     }
-    fn remove(&self, id: &[u8; 32]) -> Result<()> {
+    pub(crate) fn remove(&self, id: &[u8; 32]) -> Result<()> {
         let mut state = self
             .state
             .lock()
@@ -364,7 +364,10 @@ pub(crate) struct RelayPeer {
 }
 impl RelayPeer {
     pub fn note(&mut self, record: &Record) {
-        if record.name != "mmx.Transaction" {
+        if !matches!(
+            record.name.as_str(),
+            "mmx.Transaction" | "mmx.Block" | "mmx.ValidatorVote"
+        ) {
             return;
         }
         if let Ok(id) = hash(record, "content_hash") {

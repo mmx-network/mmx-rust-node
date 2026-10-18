@@ -6,6 +6,7 @@
 //! NFT reward targets are resolved against the parent ledger snapshot. The
 //! caller supplies the VDF payout winner from authenticated ancestor headers.
 //! This API does not select a chain or advance the database version.
+pub mod assemble;
 pub mod economics;
 
 use crate::{
