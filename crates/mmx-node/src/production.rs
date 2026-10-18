@@ -671,9 +671,9 @@ impl Worker {
                         if let Some(plan) = plan {
                             let produce = || -> Result<Candidate> {
                                 let block = plan.build()?;
-                                let mut request = block.clone();
-                                request.name = "mmx.BlockHeader".into();
-                                request.fields.remove("tx_list");
+                                // Native get_type_hash is virtual: preserve
+                                // Block's identity through the BlockHeader* RPC.
+                                let request = block.clone();
                                 let signed = farmer.call_value(
                                     "mmx.Farmer.sign_block",
                                     json!({"block":crate::rpc::to_json_record(&request)?}),
