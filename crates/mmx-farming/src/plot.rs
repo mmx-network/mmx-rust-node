@@ -32,7 +32,14 @@ impl Prover {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
         let length = file.metadata()?.len();
-        let mut reader = Reader::new(file.take(1024 * 1024), mmx_types::vnx_registry()?);
+        let mut reader = Reader::new(file.take(1024 * 1024), mmx_types::vnx_registry()?)
+            .with_limits(vnx::binary::Limits {
+                max_depth: 32,
+                max_container: 4096,
+                max_string_bytes: 65536,
+                max_value_bytes: 1024 * 1024,
+                max_schemas: 128,
+            });
         let value = reader.read()?;
         if value["__type"] != "mmx.PlotHeader" {
             return Err(error("invalid plot header type"));

@@ -1389,3 +1389,68 @@ fn outgoing_peer_can_answer_height_and_identity_queries_while_the_ledger_is_lock
         server.join().unwrap();
     }
 }
+
+#[test]
+fn native_rpc_farming_topics_publish_only_synced_challenges_and_bound_proof_handoff() {
+    use vnx::{net::NetworkClient, runtime::OverflowPolicy};
+    let (network, g, steps, _) = fixture();
+    let n = node(&network);
+    assert!(n.lock().unwrap().farming_challenges().unwrap().is_empty());
+    let mut server = rpc::vnx_server("127.0.0.1:0".parse().unwrap(), n.clone()).unwrap();
+    let client = NetworkClient::connect(
+        server.endpoint(),
+        "Node",
+        mmx_types::vnx_registry().unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let challenges = client
+        .subscribe("harvester.challenges", 32, OverflowPolicy::Reject, false)
+        .unwrap();
+    assert!(challenges.recv_timeout(Duration::from_millis(50)).is_err());
+    let mut source = MemorySource {
+        blocks: vec![
+            wire(&g["block"]),
+            wire(&steps[0]["block"]),
+            wire(&steps[1]["block"]),
+        ],
+        wrong: false,
+    };
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    let expected = n.lock().unwrap().farming_challenges().unwrap();
+    assert!(!expected.is_empty());
+    let actual: mmx::Challenge = serde_json::from_value(
+        challenges
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .value,
+    )
+    .unwrap();
+    assert!(expected.contains(&actual));
+    let state = n.lock().unwrap();
+    let tip = state.chain().selected().tip().unwrap().unwrap();
+    let (hash, diff) = mmx_consensus::transitions::history::challenge(
+        state.chain(),
+        &network.params,
+        &tip,
+        actual.vdf_height - tip.vdf_height,
+    )
+    .unwrap();
+    assert_eq!((actual.challenge.0, actual.difficulty), (hash, diff));
+    drop(state);
+    client
+        .publish("farmer.proof", json!({"__type":"mmx.ProofResponse"}))
+        .unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        let status =
+            rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#).unwrap();
+        if status["result"]["queued_messages"] == 1 {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.close();
+    server.shutdown();
+}
