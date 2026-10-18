@@ -829,6 +829,9 @@ hash as that view before and after the reads; a moving or unsynced tip rejects
 the mutable comparison and requires a retry. The default samples up to 128
 evenly spaced known keys per table. Balance checks include the full 128-bit
 amount and currency; contract checks compare both native contract lookup methods.
+Key enumeration seeks between indexed keys instead of walking every historical
+balance version. A 10,000-version SQL-work regression also checks deleted keys,
+table separation and key widths.
 Local TCP tests cover matching values, divergent servers, two servers agreeing
 on an incorrect balance, tombstones and tip movement. Full-mainnet mutable-state
 parity remains pending until the running nodes have caught up at matching tips.

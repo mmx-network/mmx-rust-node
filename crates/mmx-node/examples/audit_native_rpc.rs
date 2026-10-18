@@ -47,6 +47,22 @@ fn require_state_tip(height: &Value, synced: &Value, expected: u32) -> Result<()
     Ok(())
 }
 
+// DISTINCT can walk every historical version before returning a handful of
+// balance keys. Seek past all versions of each key to keep the live audit short.
+const STATE_KEYS_SQL: &str = "WITH RECURSIVE keys(k) AS (
+    SELECT (SELECT k FROM history WHERE t=?1 AND n=?2 ORDER BY k LIMIT 1)
+    UNION ALL
+    SELECT (SELECT k FROM history WHERE t=?1 AND n=?2 AND k>keys.k ORDER BY k LIMIT 1)
+    FROM keys WHERE k IS NOT NULL)
+    SELECT k FROM keys WHERE k IS NOT NULL";
+fn state_keys(conn: &Connection, table: &str, size: usize) -> Result<Vec<Vec<u8>>> {
+    let mut statement = conn.prepare(STATE_KEYS_SQL)?;
+    let keys = statement
+        .query_map((table, size), |row| row.get::<_, Vec<u8>>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(keys)
+}
+
 struct Audit {
     native: NetworkClient,
     rust: NetworkClient,
@@ -146,10 +162,7 @@ impl Audit {
         let mut contract_count = 0;
         let checked = (|| -> Result<()> {
             for (table, size) in [("balances", 64), ("contracts", 32)] {
-                let keys = conn
-                    .prepare("SELECT DISTINCT k FROM history WHERE t=?1 AND n=?2 ORDER BY k")?
-                    .query_map((table, size), |row| row.get::<_, Vec<u8>>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let keys = state_keys(&conn, table, size)?;
                 if keys.is_empty() {
                     return Err(
                         format!("no {table} keys available for mutable state comparison").into(),
@@ -326,6 +339,33 @@ mod tests {
         ] {
             assert!(require_state_tip(&height, &synced, 7).is_err());
         }
+    }
+
+    #[test]
+    fn state_key_listing_skips_old_versions_and_preserves_deleted_keys_and_scope() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE history(t TEXT,n INTEGER,k BLOB,v INTEGER,value BLOB,
+            PRIMARY KEY(t,n,k,v));
+            WITH RECURSIVE seq(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM seq WHERE v<10000)
+            INSERT INTO history SELECT 'balances',2,x'6161',v,x'01' FROM seq;
+            INSERT INTO history VALUES('balances',2,x'6161',10001,NULL),
+            ('balances',2,x'617a',1,NULL),('balances',2,x'ffff',1,x'01'),
+            ('balances',1,x'61',1,x'01'),('contracts',2,x'6162',1,x'01');",
+        )?;
+        let expected = vec![b"aa".to_vec(), b"az".to_vec(), vec![255, 255]];
+        assert_eq!(state_keys(&conn, "balances", 2)?, expected);
+        assert!(state_keys(&conn, "missing", 2)?.is_empty());
+        let mut statement = conn.prepare(STATE_KEYS_SQL)?;
+        let rows = statement
+            .query_map(("balances", 2), |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(rows, expected);
+        assert!(
+            statement.get_status(rusqlite::StatementStatus::VmStep) < 1000,
+            "key listing must not walk all 10000 versions"
+        );
+        Ok(())
     }
 
     #[test]
