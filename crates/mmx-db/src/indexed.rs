@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const APPLICATION_ID: i64 = 0x4D4D5852;
+pub(crate) const APPLICATION_ID: i64 = 0x4D4D5852;
 const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 const SCHEMA: &str = "CREATE TABLE meta(id INTEGER PRIMARY KEY CHECK(id=0),version INTEGER NOT NULL,generation INTEGER NOT NULL);
@@ -50,7 +50,7 @@ fn configure(conn: &Connection) -> Result<()> {
     )?;
     Ok(())
 }
-fn meta(conn: &Connection) -> Result<(u32, u64)> {
+pub(crate) fn meta(conn: &Connection) -> Result<(u32, u64)> {
     let (version, generation): (u64, u64) =
         conn.query_row("SELECT version,generation FROM meta WHERE id=0", [], |r| {
             Ok((r.get(0)?, r.get(1)?))

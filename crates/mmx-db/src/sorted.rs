@@ -166,7 +166,10 @@ pub struct Builder {
 }
 impl Builder {
     pub fn new(directory: &Path, level: u32) -> Result<Self> {
-        let temporary = tempfile::NamedTempFile::new_in(directory)?;
+        let temporary = tempfile::Builder::new()
+            .prefix("native-index-build-")
+            .suffix(".tmp")
+            .tempfile_in(directory)?;
         let mut output = BufWriter::with_capacity(64 * 1024, temporary.reopen()?);
         output.write_all(&[0; HEADER as usize])?;
         Ok(Self {

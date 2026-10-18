@@ -1,6 +1,7 @@
 //! Versioned append-only storage. Values stay in commit log segments; immutable
 //! sorted files contain only references. Forks share those files and keep their
 //! speculative suffix in RAM. A manifest checkpoints a bounded journal tail.
+pub mod import;
 mod manifest;
 use crate::{
     journal::{Action, Change, Indexed, Journal, Reader, ValueRef},
@@ -190,28 +191,48 @@ impl State {
         Ok(())
     }
     fn get(&self, context: &Context, table: &str, key: &[u8], max: u32) -> Result<Option<Vec<u8>>> {
-        if let Some(((t, k, _), value)) = self
+        let mut latest = None;
+        if let Some(((t, k, Reverse(version)), value)) = self
             .mem
             .range((table.into(), Key(key.to_vec()), Reverse(max))..)
             .next()
         {
             if t == table && k.0 == key {
-                return value.map(|v| context.value(&self.files, v)).transpose();
+                latest = Some((*version, *value));
             }
         }
         for view in self.runs.iter().rev() {
             if view.cutoff == 0 {
                 continue;
             }
-            if let Some(entry) = view.file.run.get(table, key, max.min(view.cutoff - 1))? {
-                return entry
+            let limit = max
+                .min(view.cutoff - 1)
+                .min(view.file.run.metadata().max_version);
+            if latest
+                .as_ref()
+                .is_some_and(|(version, _)| *version >= limit)
+            {
+                continue;
+            }
+            if let Some(entry) = view.file.run.get(table, key, limit)? {
+                if latest
+                    .as_ref()
+                    .is_some_and(|(version, _)| *version >= entry.version)
+                {
+                    continue;
+                }
+                let value = entry
                     .write
                     .value
-                    .map(|v| context.value(&self.files, ValueRef::decode(&v)?))
-                    .transpose();
+                    .map(|v| ValueRef::decode(&v))
+                    .transpose()?;
+                latest = Some((entry.version, value));
             }
         }
-        Ok(None)
+        latest
+            .and_then(|(_, value)| value)
+            .map(|value| context.value(&self.files, value))
+            .transpose()
     }
     fn rows(
         &self,
@@ -321,6 +342,11 @@ impl Native {
             return Err(Error::InvalidEntry);
         }
         let path = std::path::absolute(path)?;
+        if path.join("native.import").exists() {
+            return Err(Error::Corrupt(
+                "native import must be completed before opening",
+            ));
+        }
         if path.join("state.sqlite").exists() || path.join("journal.mmx").exists() {
             return Err(Error::Corrupt(
                 "native database requires explicit legacy import",
@@ -1251,7 +1277,8 @@ impl Snapshot {
 }
 
 fn manifest_temporary(name: &str) -> bool {
-    name.starts_with("native-manifest-") && name.ends_with(".tmp")
+    (name.starts_with("native-manifest-") || name.starts_with("native-index-build-"))
+        && name.ends_with(".tmp")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

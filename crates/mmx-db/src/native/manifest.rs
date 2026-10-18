@@ -6,6 +6,7 @@ use std::{
 };
 const MAGIC: &[u8; 8] = b"MMXNDB\x02\n";
 const PREVIOUS: &[u8; 8] = b"MMXNDB\x01\n";
+#[derive(Clone)]
 pub(super) struct Manifest {
     pub version: u32,
     pub generation: u64,
@@ -26,6 +27,9 @@ impl Manifest {
             return Err(Error::Corrupt("native manifest size"));
         }
         file.take(64 * 1024 * 1024).read_to_end(&mut bytes)?;
+        Self::decode(&bytes)
+    }
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 12 || (&bytes[..8] != MAGIC && &bytes[..8] != PREVIOUS) {
             return Err(Error::Corrupt("native manifest header"));
         }
@@ -93,6 +97,9 @@ impl Manifest {
         Ok(out)
     }
     pub fn save(&self, path: &Path, initial: bool) -> Result<()> {
+        save_bytes(path, &self.encode()?, initial)
+    }
+    pub(super) fn encode(&self) -> Result<Vec<u8>> {
         let mut bytes = MAGIC.to_vec();
         bytes.extend(self.version.to_le_bytes());
         bytes.extend(self.generation.to_le_bytes());
@@ -120,20 +127,23 @@ impl Manifest {
             bytes.extend(cutoff.to_le_bytes());
         }
         bytes.extend(crc32fast::hash(&bytes).to_le_bytes());
-        let mut file = tempfile::Builder::new()
-            .prefix("native-manifest-")
-            .suffix(".tmp")
-            .tempfile_in(crate::parent_dir(path))?;
-        file.write_all(&bytes)?;
-        file.as_file().sync_all()?;
-        if initial {
-            file.persist_noclobber(path).map_err(|e| e.error)?;
-        } else {
-            file.persist(path).map_err(|e| e.error)?;
-        }
-        File::open(crate::parent_dir(path))?.sync_all()?;
-        Ok(())
+        Ok(bytes)
     }
+}
+pub(super) fn save_bytes(path: &Path, bytes: &[u8], initial: bool) -> Result<()> {
+    let mut file = tempfile::Builder::new()
+        .prefix("native-manifest-")
+        .suffix(".tmp")
+        .tempfile_in(crate::parent_dir(path))?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    if initial {
+        file.persist_noclobber(path).map_err(|e| e.error)?;
+    } else {
+        file.persist(path).map_err(|e| e.error)?;
+    }
+    File::open(crate::parent_dir(path))?.sync_all()?;
+    Ok(())
 }
 struct Input<'a>(&'a [u8]);
 impl Input<'_> {
