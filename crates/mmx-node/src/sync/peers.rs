@@ -459,6 +459,7 @@ impl<S: PeerSource> PeerPool<S> {
                     }
                     complete(&mut self.completed, &jobs[&key], None);
                 }
+                let profiling = std::env::var_os("MMX_PROFILE_REPLAY").is_some();
                 let results = thread::scope(|scope| {
                     let tasks: Vec<_> = self
                         .peers
@@ -474,8 +475,20 @@ impl<S: PeerSource> PeerPool<S> {
                                     .source
                                     .as_mut()
                                     .expect("hash claimant owns its connection");
+                                let busy_before = source.backpressure_retries();
                                 let result = source.fetch(&ids);
+                                let elapsed = requested.elapsed();
                                 peer.backpressure = source.backpressure_retries();
+                                if profiling {
+                                    let returned = result.as_ref().map_or(0, |values| {
+                                        values.iter().filter(|value| value.is_some()).count()
+                                    });
+                                    eprintln!("Sync body: peer={} count={} returned={} metadata_ms={:.3} elapsed_ms={:.3} busy_retries={}",
+                                        vnx::util::to_hex_string(&peer.id[..8], true, false),
+                                        keys.len(), returned, peer.latency.as_secs_f64() * 1e3,
+                                        elapsed.as_secs_f64() * 1e3,
+                                        peer.backpressure.saturating_sub(busy_before));
+                                }
                                 if let Err(e) = &result {
                                     eprintln!(
                                         "Sync peer {}: block request failed: {e}",

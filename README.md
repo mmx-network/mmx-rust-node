@@ -257,7 +257,9 @@ proof-evidence reuse and each durable suffix replacement's deletion, row-copy
 and commit times. Updates applying at least 64 blocks also report node
 preparation, archive/header loading, proof checks, fork selection, ancestry
 lookup, replay and root-policy costs, so update overhead can be attributed
-before changing consensus or storage paths.
+before changing consensus or storage paths. Body-request samples include the
+authenticated peer ID, requested/returned counts, metadata-window latency,
+body-response latency and explicitly unexecuted backpressure retries.
 
 Indexed range scans first find the requested keys and latest visible versions,
 then fetch those exact primary keys. SQLite's join order is fixed so a narrow
