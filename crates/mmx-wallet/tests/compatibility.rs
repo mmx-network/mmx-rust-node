@@ -81,7 +81,10 @@ fn transactions_match_cpp() {
             native.hash_serialize(false).unwrap(),
             tx.hash_serialize(false).unwrap()
         );
-        let validation = mmx_consensus::ValidationParams::default();
+        let validation = mmx_consensus::ValidationParams {
+            network: params.network.as_bytes().to_vec(),
+            ..Default::default()
+        };
         assert!(native.is_valid(&validation).unwrap());
         assert_eq!(
             native.calc_cost(&validation).unwrap(),

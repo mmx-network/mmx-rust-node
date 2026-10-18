@@ -240,7 +240,7 @@ impl Prover {
                         h.park_bytes_meta as usize,
                     )?;
                     let mut meta = [0; 48];
-                    for (j, word) in meta.chunks_exact_mut(4).enumerate() {
+                    for (j, word) in meta.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                         let value = read_bits(
                             &data,
                             ((index % h.park_size_meta as u64) as usize * 12 + j)

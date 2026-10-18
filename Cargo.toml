@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node", "crates/mmx-wallet", "crates/mmxwallet", "crates/mmx-farming"]
+members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node", "crates/mmx-wallet", "crates/mmxwallet", "crates/mmx-farming", "crates/mmx-tools"]
 exclude = ["vendor/vnx-rust"]
 resolver = "2"
 

@@ -1,0 +1,22 @@
+[package]
+name = "mmx-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MMX wallet, farmer, harvester and command line utility"
+
+[dependencies]
+mmx-types.workspace = true
+mmx-consensus.workspace = true
+mmx-execution.workspace = true
+mmx-farming.workspace = true
+mmx-wallet.workspace = true
+mmxwallet = { path = "../mmxwallet" }
+vnx.workspace = true
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -838,6 +838,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmx-tools"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctrlc",
+ "mmx-consensus",
+ "mmx-execution",
+ "mmx-farming",
+ "mmx-types",
+ "mmx-wallet",
+ "mmxwallet",
+ "rand",
+ "tempfile",
+ "vnx",
+]
+
+[[package]]
 name = "mmx-types"
 version = "0.1.0"
 dependencies = [
