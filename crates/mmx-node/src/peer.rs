@@ -713,6 +713,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compressed_zero_width_values_cannot_bypass_decoded_allocation_limits() {
+        let mut raw = Record::from_generated(&mmx::contract::Data::default())
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert!(raw.ends_with(&[1, 0, 0, 0]));
+        raw.truncate(raw.len() - 4);
+        // Dynamic List<Null>: ten million decoded values consume no element
+        // bytes. Reject the count before allocating or iterating the elements.
+        for word in [2u16, 12, 0] {
+            raw.extend(word.to_le_bytes());
+        }
+        raw.extend(10_000_000u32.to_le_bytes());
+        let frame = frame_bytes(&raw).unwrap();
+        assert!(frame.len() < 1024);
+        assert!(decode_frame(&frame)
+            .unwrap_err()
+            .to_string()
+            .contains("allocation limit"));
+    }
+
+    #[test]
     fn schema_announcements_are_connection_local_and_failed_frames_do_not_advance_them() {
         fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
             let mut header = [0; 8];

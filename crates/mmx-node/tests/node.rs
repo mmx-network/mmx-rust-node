@@ -149,6 +149,16 @@ fn unsolicited_orphans_do_not_write_disk_and_valid_live_blocks_still_apply() {
         before,
         "invalid space work must never be archived"
     );
+    for i in 0..8 {
+        let mut waiting = original.clone();
+        waiting
+            .fields
+            .insert("vdf_output".into(), V::Bytes(vec![100 + i; 32]));
+        let waiting = farmer.sign_block(&waiting, &network.params).unwrap();
+        n.lock().unwrap().receive(&waiting).unwrap();
+    }
+    // More blocks waiting for VDF work than the per-tick ledger budget cannot
+    // stop a later block with available work from being admitted immediately.
     n.lock().unwrap().receive(&original).unwrap();
     assert_eq!(
         n.lock()
@@ -190,22 +200,115 @@ fn farmer_response_replays_and_unsigned_future_envelopes_cannot_grow_the_queue()
     assert_eq!(n.lock().unwrap().pending_proofs(), 0);
 }
 #[test]
+fn authenticated_future_responses_have_a_height_window_and_decoded_byte_limit() {
+    use mmx_farming::farmer::Farmer;
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let farmer = Farmer::new([farmer_scalar()], None);
+    let template = native_farming_response();
+    let sign = |mut response: Record| {
+        response.fields.insert(
+            "hash".into(),
+            V::Bytes(response.calc_hash(false, 0).unwrap().to_vec()),
+        );
+        response.fields.insert(
+            "content_hash".into(),
+            V::Bytes(
+                mmx_consensus::response::content_hash(&response)
+                    .unwrap()
+                    .to_vec(),
+            ),
+        );
+        farmer.sign_response(&response).unwrap()
+    };
+    let mut distant = template.clone();
+    distant
+        .fields
+        .insert("vdf_height".into(), V::Uint(u32::MAX.into()));
+    let distant = sign(distant);
+    mmx_consensus::response::authenticate(&distant).unwrap();
+    assert!(n
+        .lock()
+        .unwrap()
+        .receive(&distant)
+        .unwrap_err()
+        .to_string()
+        .contains("too far ahead"));
+    assert_eq!(n.lock().unwrap().pending_proofs(), 0);
+    let mut size = 0;
+    let mut rejected = false;
+    let mut first = None;
+    for i in 0u32..4097 {
+        let mut response = template.clone();
+        let mut proof = response.field("proof").unwrap().record().unwrap().clone();
+        let mut seed = vec![0; 32];
+        seed[..4].copy_from_slice(&i.to_le_bytes());
+        proof.fields.insert("seed".into(), V::Bytes(seed));
+        proof.fields.insert(
+            "plot_id".into(),
+            V::Bytes(mmx_consensus::proof::calc_plot_id(&proof).unwrap().to_vec()),
+        );
+        response.fields.insert("proof".into(), V::Record(proof));
+        response
+            .fields
+            .insert("harvester".into(), V::String(vec![b'x'; 1023]));
+        let response = sign(response);
+        let charge = response
+            .memory_size()
+            .max(response.encode_compact().unwrap().len());
+        assert!(charge < 64 * 1024);
+        let before = n.lock().unwrap().pending_proofs();
+        match n.lock().unwrap().receive(&response) {
+            Ok(()) => size += charge,
+            Err(e) => {
+                assert!(e.to_string().contains("queue full"));
+                assert_eq!(size / (1024 * 1024), 7);
+                assert!(size + charge > 8 * 1024 * 1024);
+                rejected = true;
+            }
+        }
+        if rejected {
+            assert_eq!(n.lock().unwrap().pending_proofs(), before);
+            // Duplicates are harmless even when the byte quota is exhausted.
+            n.lock().unwrap().receive(first.as_ref().unwrap()).unwrap();
+            assert_eq!(n.lock().unwrap().pending_proofs(), before);
+            break;
+        }
+        if first.is_none() {
+            first = Some(response.clone());
+        }
+        n.lock().unwrap().receive(&response).unwrap();
+        assert_eq!(n.lock().unwrap().pending_proofs(), before + 1);
+    }
+    assert!(
+        rejected,
+        "the decoded byte quota must bind before the entry cap"
+    );
+}
+#[test]
 fn peer_socket_has_only_native_router_methods_and_never_executes_validation() {
     let (network, _, _, _) = fixture();
     let n = node(&network);
     let mut server = peer::Server::bind("127.0.0.1:0", n).unwrap();
     let mut connection = peer::Connection::connect(&server.address().to_string()).unwrap();
-    for name in [
-        "mmx.Node.validate",
-        "mmx.Node.get_all_balances",
-        "mmx.Node.get_params",
+    for method in [
+        record("mmx.Node.validate", [("tx".into(), V::Optional(None))]),
+        record(
+            "mmx.Node.get_all_balances",
+            [
+                ("addresses".into(), V::Sequence(vec![])),
+                ("whitelist".into(), V::Sequence(vec![])),
+                ("limit".into(), V::Int(100)),
+            ],
+        ),
+        record("mmx.Node.get_params", []),
     ] {
         connection
             .send(&record(
                 "mmx.Request",
                 [
                     ("id".into(), V::Uint(1)),
-                    ("method".into(), V::Record(record(name, []))),
+                    ("method".into(), V::Record(method)),
                 ],
             ))
             .unwrap();
@@ -252,6 +355,10 @@ fn http_deadlines_isolate_slow_clients_and_shutdown_cancels_reads() {
     let mut slow = TcpStream::connect(server.address()).unwrap();
     slow.write_all(b"POST /rpc HTTP/1.1\r\nHost: slow\r\nContent-Length: 100\r\n\r\n{")
         .unwrap();
+    let mut slow_header = TcpStream::connect(server.address()).unwrap();
+    slow_header
+        .write_all(b"POST /rpc HTTP/1.1\r\nHost: ")
+        .unwrap();
     fn post(address: &str, request: &[u8]) -> String {
         let mut stream = TcpStream::connect(address).unwrap();
         stream
@@ -269,13 +376,16 @@ fn http_deadlines_isolate_slow_clients_and_shutdown_cancels_reads() {
         std::str::from_utf8(body).unwrap()
     );
     assert!(post(server.address(), request.as_bytes()).starts_with("HTTP/1.1 200"));
-    slow.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    let mut byte = [0];
-    assert_eq!(
-        slow.read(&mut byte).unwrap(),
-        0,
-        "absolute deadline closes the incomplete body"
-    );
+    for mut stalled in [slow, slow_header] {
+        stalled
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(
+            stalled.read(&mut [0]).unwrap(),
+            0,
+            "absolute deadline closes incomplete headers and bodies"
+        );
+    }
     let chunked=format!("POST /rpc HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",body.len(),std::str::from_utf8(body).unwrap());
     assert!(post(server.address(), chunked.as_bytes()).starts_with("HTTP/1.1 200"));
     assert!(post(
@@ -283,6 +393,11 @@ fn http_deadlines_isolate_slow_clients_and_shutdown_cancels_reads() {
         b"POST /rpc HTTP/1.1\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n"
     )
     .starts_with("HTTP/1.1 400"));
+    assert!(post(
+        server.address(),
+        b"POST /rpc HTTP/1.1\r\nContent-Length: 1048577\r\n\r\n"
+    )
+    .starts_with("HTTP/1.1 413"));
     server.shutdown();
     let mut server =
         rpc::HttpServer::bind_with_timeout("127.0.0.1:0", n, Duration::from_secs(30)).unwrap();

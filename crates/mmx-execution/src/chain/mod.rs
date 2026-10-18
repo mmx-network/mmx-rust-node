@@ -51,6 +51,22 @@ pub enum ChainError {
     #[error(transparent)]
     Proof(#[from] mmx_consensus::proof::ProofError),
 }
+impl ChainError {
+    /// Storage failures must stop admission rather than reject a peer's block.
+    pub fn is_storage_error(&self) -> bool {
+        use crate::transaction::ValidationError;
+        let error = match self {
+            Self::Database(_) | Self::Storage(_) => return true,
+            Self::Validation(e) => e,
+            Self::Block(e) => &e.error,
+            _ => return false,
+        };
+        matches!(
+            error,
+            ValidationError::Storage(_) | ValidationError::Execution(mmx_vm::Error::Storage(_))
+        )
+    }
+}
 pub type ChainResult<T> = Result<T, ChainError>;
 /// Native Node skips VDF verification only while fetching historical blocks.
 /// Both modes verify space work, authentication, transitions and full execution.

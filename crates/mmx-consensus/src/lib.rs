@@ -196,17 +196,25 @@ impl Value {
             Self::String(v) | Self::Bytes(v) | Self::Opaque(v) => v.capacity(),
             Self::Sequence(v) => v
                 .iter()
-                .fold(0usize, |n, v| n.saturating_add(v.memory_size())),
+                .fold(0usize, |n, v| n.saturating_add(v.memory_size()))
+                .saturating_add(
+                    (v.capacity() - v.len()).saturating_mul(std::mem::size_of::<Self>()),
+                ),
             Self::Map(v) => v.iter().fold(0usize, |n, (k, v)| {
                 n.saturating_add(64)
                     .saturating_add(k.memory_size())
                     .saturating_add(v.memory_size())
             }),
-            Self::Object(v) => v.iter().fold(0usize, |n, (k, v)| {
-                n.saturating_add(32)
-                    .saturating_add(k.capacity())
-                    .saturating_add(v.memory_size())
-            }),
+            Self::Object(v) => v
+                .iter()
+                .fold(0usize, |n, (k, v)| {
+                    n.saturating_add(32)
+                        .saturating_add(k.capacity())
+                        .saturating_add(v.memory_size())
+                })
+                .saturating_add(
+                    (v.capacity() - v.len()).saturating_mul(std::mem::size_of::<(Vec<u8>, Self)>()),
+                ),
             Self::Optional(Some(v)) => v.memory_size(),
             Self::Record(v) => v.memory_size(),
             Self::Variant(v) => v.raw.capacity().saturating_add(v.value.memory_size()),

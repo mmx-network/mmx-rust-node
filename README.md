@@ -189,8 +189,38 @@ snapshot tooling; the production executable always uses the peer coordinator.
 Peer broadcasts enter a bounded FIFO without taking the ledger mutex, so proof
 validation does not interrupt socket reads. The node update drains and validates
 the queue; embedded callers must drive `Node::tick()`. The queue retains at most
-32 MiB of decompressed messages and 16,384 entries, dropping oldest entries when
-full. HTTP status exposes queued messages, bytes and the dropped-message count.
+32 MiB and 16,384 entries, charging the larger of decoded heap usage and wire
+bytes and dropping oldest entries when full. Each update takes at most 256
+consensus messages and four transactions. HTTP status exposes queued messages,
+bytes and the dropped-message count. Lossless decoding charges allocations before
+expanding containers, including zero-width elements and nested fixed arrays;
+each record has a decoded allocation budget of 96 times its wire length plus
+4 KiB, capped at 64 MiB.
+
+Unsolicited live blocks wait in RAM, limited to 256 blocks / 32 MiB, within
+1,000 heights of the selected tip and for at most ten block intervals. They enter
+the durable archive only after connected-history, space/VDF and full ledger
+validation on a temporary snapshot. Missing VDF work does not consume the
+per-update ledger-validation budget. Disconnected headers cannot register best
+proofs or validator eligibility. Historical multi-peer downloads retain their
+separate backward-recovery path.
+
+Farmer response envelopes authenticate before deferral. Replays do not refresh
+their lifetime or use additional entries. The queue holds at most 4,096 responses
+/ 8 MiB, with a 64 KiB decoded/wire limit per response, a tip-relative future
+height window and a ten-block-interval lifetime. Each update checks at most 16
+space proofs. Production retains the best 128 verified proofs per challenge,
+replacing the worst when a stronger proof arrives, and prunes committed work
+even without a local farmer.
+
+The peer socket accepts only the C++ Router request allow-list: identity, info,
+peer discovery, height/sync status, blocks, headers, block hashes and transaction
+IDs. Other methods return `vnx.NoSuchMethod` before ledger dispatch. Public
+VNX/HTTP APIs retain their own method access. HTTP JSON-RPC permits eight active
+connections, with a five-second absolute socket deadline covering headers,
+bodies and response writes. Headers/trailers are limited to 16 KiB / 64 fields
+and bodies to 1 MiB; chunked requests are supported, ambiguous framing is
+rejected, and shutdown cancels incomplete socket reads and writes.
 
 Immutable header caches are shared across validator/challenge walks. Speculative
 replay retains only cached headers below its replacement height and publishes its

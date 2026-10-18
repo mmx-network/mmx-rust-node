@@ -351,14 +351,23 @@ impl Node {
             if attempts >= 4 || self.chain.block(&hash(block, "prev")?)?.is_none() {
                 continue;
             }
+            // Waiting for time work must not spend the ledger-validation budget
+            // on every tick and starve another block whose work is available.
+            if mmx_consensus::vdf::link_block(
+                block,
+                self.chain.selected().params(),
+                &self.chain,
+                &points,
+            )
+            .is_err()
+            {
+                continue;
+            }
             attempts += 1;
             match self.chain.admit_live(block, &points, self.root) {
                 Ok(true) => remove.push(*id),
                 Ok(false) => (),
-                Err(
-                    e @ (mmx_execution::chain::ChainError::Database(_)
-                    | mmx_execution::chain::ChainError::Storage(_)),
-                ) => return Err(e.into()),
+                Err(e) if e.is_storage_error() => return Err(e.into()),
                 Err(e) => {
                     eprintln!("Rejected quarantined block: {e}");
                     remove.push(*id);
