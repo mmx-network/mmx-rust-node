@@ -5,8 +5,7 @@ with the smart contract engine and versioned database. The workspace now include
 a node executable with native peer sync, durable fork handling, native VNX read
 RPC and HTTP JSON-RPC, compatible wallet tools, wallet/farmer/harvester VNX
 services, native block production and validator scheduling. Local and remote
-solo harvesting are connected end to end; pool partials and virtual farming
-remain to be ported.
+solo harvesting are connected end to end; pool partials remain to be ported.
 
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
 `ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
@@ -1366,7 +1365,7 @@ window only while synced, and accepts signed farmer responses through its bounde
 inbox for the existing consensus checks.
 
 Remaining work includes reverse farmer RPC routing for a C++ node, pool/NFT
-partial submission and virtual plots, wallet pending history, contract withdrawal
+partial submission, wallet pending history, contract withdrawal
 owner resolution, offer/swap convenience RPCs and the C++ REST API. Production
 plot files and an actual farm have not been exercised. Existing C++ witnesses,
 tiny native park files, permission tests and the complete standalone wallet CLI
@@ -1385,7 +1384,7 @@ harvester parameters come from node RPC, without C++ data files.
 2. The Rust JavaScript-subset compiler and the remaining original contract suites.
 3. Database compaction, cache/flush tuning and benchmarks,
    using an independent disk format while preserving logical state semantics.
-4. Pool/NFT partials and virtual farming, reverse farmer RPC,
+4. Pool/NFT partials, reverse farmer RPC,
    advanced wallet RPCs, durable wallet pending history
    and the remaining public node methods. Carry over the original tests as each
    component becomes executable.
