@@ -126,9 +126,15 @@ impl Services {
                 .push(Owned::spawn(&directory.join("mmx-farmer"), args)?);
             if config.read::<bool>("harvester")?.unwrap_or(true) {
                 let remote = config.read::<bool>("allow_remote")?.unwrap_or(false);
-                let harvester_farmer = if remote { "127.0.0.1:11333" } else { farmer };
+                let harvester_farmer = if remote {
+                    config
+                        .read::<String>("Farmer.harvester_endpoint")?
+                        .unwrap_or_else(|| "127.0.0.1:11333".into())
+                } else {
+                    farmer.to_owned()
+                };
                 let mut args = base;
-                args.extend(["--farmer".into(), harvester_farmer.into()]);
+                args.extend(["--farmer".into(), harvester_farmer]);
                 services
                     .0
                     .push(Owned::spawn(&directory.join("mmx-harvester"), args)?);

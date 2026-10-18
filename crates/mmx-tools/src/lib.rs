@@ -219,6 +219,20 @@ pub fn farmer_main() -> Result<()> {
     config::apply(
         &matches,
         &cfg,
+        "harvester_listen",
+        "Farmer.harvester_endpoint",
+        &mut args.harvester_listen,
+    )?;
+    config::apply(
+        &matches,
+        &cfg,
+        "listen",
+        "Farmer.private_endpoint",
+        &mut args.listen,
+    )?;
+    config::apply(
+        &matches,
+        &cfg,
         "reward_address",
         "Farmer.reward_addr",
         &mut args.reward_address,
@@ -404,6 +418,13 @@ pub fn harvester_main() -> Result<()> {
     let matches = HarvesterArgs::command().get_matches();
     let mut args = HarvesterArgs::from_arg_matches(&matches)?;
     let cfg = args.layers.load()?;
+    config::apply(
+        &matches,
+        &cfg,
+        "listen",
+        "Harvester.listen",
+        &mut args.listen,
+    )?;
     config::apply(
         &matches,
         &cfg,

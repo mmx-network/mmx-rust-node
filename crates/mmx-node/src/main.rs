@@ -206,8 +206,7 @@ fn main() -> Result<()> {
     let mut services =
         if !options.offline && !options.once && !options.no_services && !options.configs.is_empty()
         {
-            let mut paths = vec![options.root.join("config").join(&options.network)];
-            paths.extend(options.configs.iter().cloned());
+            let paths = config_paths.clone();
             Some(services::Services::start(
                 &config,
                 &paths,
