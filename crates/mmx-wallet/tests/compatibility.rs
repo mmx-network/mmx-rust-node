@@ -81,10 +81,10 @@ fn transactions_match_cpp() {
             native.hash_serialize(false).unwrap(),
             tx.hash_serialize(false).unwrap()
         );
-        let params = mmx_consensus::ValidationParams::default();
-        assert!(native.is_valid(&params).unwrap());
+        let validation = mmx_consensus::ValidationParams::default();
+        assert!(native.is_valid(&validation).unwrap());
         assert_eq!(
-            native.calc_cost(&params).unwrap(),
+            native.calc_cost(&validation).unwrap(),
             u64::from(tx.static_cost)
         );
         let decoded = mmx_consensus::Record::decode(&native.encode().unwrap()).unwrap();
