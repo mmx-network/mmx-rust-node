@@ -287,11 +287,15 @@ fn dispatch(
                 .checked_add(n)
                 .ok_or_else(|| error("balance overflow"))?;
         }
-        let value = |total: u128, spendable: u128| -> Result<Value> {
+        if args["with_zero"].as_bool() == Some(true) {
+            out.entry(Address::default()).or_default();
+        }
+        let value = |currency: Address, total: u128, spendable: u128| -> Result<Value> {
             to_json(&Record::from_generated(&mmx::balance_t {
                 total: total.to_le_bytes().into(),
                 spendable: spendable.to_le_bytes().into(),
                 reserved: total.saturating_sub(spendable).to_le_bytes().into(),
+                is_validated: currency == Address::default(),
                 ..Default::default()
             })?)
         };
@@ -300,11 +304,11 @@ fn dispatch(
                 .get(&Address(bytes(&args["currency"])?))
                 .copied()
                 .unwrap_or_default();
-            return value(total, spendable);
+            return value(Address(bytes(&args["currency"])?), total, spendable);
         }
         return Ok(Value::Array(
             out.into_iter()
-                .map(|(c, (t, s))| Ok(json!([c.0, value(t, s)?])))
+                .map(|(c, (t, s))| Ok(json!([c.0, value(c, t, s)?])))
                 .collect::<Result<_>>()?,
         ));
     }
