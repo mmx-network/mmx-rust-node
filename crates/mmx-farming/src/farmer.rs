@@ -112,6 +112,8 @@ impl Farmer {
             (_, Some(name)) => Sha256::digest(name.as_bytes()).into(),
             _ => return Err(error("harvester report has no identity")),
         };
+        self.reports
+            .retain(|_, (time, _)| time.elapsed() <= self.harvester_timeout);
         if self.reports.len() >= 4096 && !self.reports.contains_key(&id) {
             return Err(error("too many harvesters"));
         }

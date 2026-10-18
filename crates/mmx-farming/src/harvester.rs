@@ -79,9 +79,17 @@ impl Harvester {
         }
         files.sort();
         files.dedup();
+        let old: BTreeMap<_, _> = std::mem::take(&mut self.plots)
+            .into_values()
+            .map(|p| (p.path().to_path_buf(), p))
+            .collect();
         let mut plots = BTreeMap::new();
         for path in files {
-            match Prover::open(&path) {
+            let candidate = match old.get(&path).filter(|p| p.unchanged()) {
+                Some(p) => Ok(p.clone()),
+                None => Prover::open(&path),
+            };
+            match candidate {
                 Ok(plot) => {
                     if !self.farmer_keys.contains(&plot.header.farmer_key.0) {
                         failures.push((path, "unknown farmer key".into()));

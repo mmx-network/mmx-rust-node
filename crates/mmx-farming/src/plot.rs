@@ -26,12 +26,22 @@ pub struct Prover {
     path: PathBuf,
     pub header: mmx::PlotHeader,
     length: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64),
 }
 impl Prover {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
-        let length = file.metadata()?.len();
+        let metadata = file.metadata()?;
+        let length = metadata.len();
+        let modified = metadata.modified().ok();
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        };
         let mut reader = Reader::new(file.take(1024 * 1024), mmx_types::vnx_registry()?)
             .with_limits(vnx::binary::Limits {
                 max_depth: 32,
@@ -49,12 +59,32 @@ impl Prover {
             path,
             header,
             length,
+            modified,
+            #[cfg(unix)]
+            inode,
         };
         out.validate()?;
         Ok(out)
     }
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    /// A reload reuses unchanged immutable plot headers, like the C++ plot map.
+    pub fn unchanged(&self) -> bool {
+        let Ok(m) = std::fs::metadata(&self.path) else {
+            return false;
+        };
+        if m.len() != self.length || self.modified.is_none() || m.modified().ok() != self.modified {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (m.dev(), m.ino()) != self.inode {
+                return false;
+            }
+        }
+        true
     }
     pub fn length(&self) -> u64 {
         self.length

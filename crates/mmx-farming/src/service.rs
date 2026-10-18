@@ -33,7 +33,7 @@ fn remote(e: Box<dyn std::error::Error + Send + Sync>) -> vnx::Error {
     vnx::Error::Remote(e.to_string())
 }
 fn result(value: Value) -> Value {
-    json!({"_ret_0":value})
+    value
 }
 fn bytes<const N: usize>(v: &Value) -> Result<[u8; N]> {
     Ok(serde_json::from_value::<vnx::Fixed<u8, N>>(v.clone())?.0)
