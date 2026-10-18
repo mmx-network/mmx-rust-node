@@ -144,7 +144,9 @@ impl<S: Storage> Engine<'_, S> {
                                 return Err(Error::Conversion);
                             }
                             bytes
-                                .chunks_exact(2)
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
                                 .map(|v| (digit(v[0]).unwrap() * 16 + digit(v[1]).unwrap()) as u8)
                                 .collect()
                         }

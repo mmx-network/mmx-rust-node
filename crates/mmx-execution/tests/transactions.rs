@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use vnx::serde_json::{self, Value};
 fn bytes(text: &str) -> Vec<u8> {
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
         .collect()
 }

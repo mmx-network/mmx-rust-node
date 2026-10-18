@@ -30,13 +30,13 @@ const INIT: [u32; 16] = [
 /// arithmetic so debug/release and CPU architecture have identical behavior.
 pub fn memory_hash(key: &[u8; 64]) -> [u8; 128] {
     let mut state = [0u32; 32];
-    for (i, bytes) in key.chunks_exact(4).enumerate() {
-        state[i] = u32::from_le_bytes(bytes.try_into().unwrap());
+    for (i, bytes) in key.as_chunks::<4>().0.iter().enumerate() {
+        state[i] = u32::from_le_bytes(*bytes);
     }
     state[16..].copy_from_slice(&INIT);
     let (mut b, mut c) = (0u32, 0u32);
     let mut memory = [0u32; 1024];
-    for row in memory.chunks_exact_mut(32) {
+    for row in memory.as_chunks_mut::<32>().0.iter_mut() {
         for _ in 0..4 {
             for k in 0..16 {
                 let (mut a, mut d) = (state[k], state[16 + k]);
@@ -71,7 +71,7 @@ pub fn memory_hash(key: &[u8; 64]) -> [u8; 128] {
         }
     }
     let mut hash = [0; 128];
-    for (dst, v) in hash.chunks_exact_mut(4).zip(state) {
+    for (dst, v) in hash.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         dst.copy_from_slice(&v.to_le_bytes());
     }
     hash
@@ -86,8 +86,8 @@ fn hash_meta(bytes: &[u8], kmask: u32) -> (u32, [u32; N_META]) {
     let hash = Sha512::digest(bytes);
     let mut y = 0;
     let mut meta = [0; N_META];
-    for (i, v) in hash.chunks_exact(4).take(N_META).enumerate() {
-        let word = u32::from_le_bytes(v.try_into().unwrap());
+    for (i, v) in hash.as_chunks::<4>().0.iter().take(N_META).enumerate() {
+        let word = u32::from_le_bytes(*v);
         y ^= word;
         meta[i] = word & kmask;
     }
@@ -134,7 +134,9 @@ pub fn compute(xs: &[u32], id: &Hash, ksize: u8) -> Result<Vec<Entry>> {
                 if yr == yl.wrapping_add(1) {
                     let mut message = [0; N_META * 8];
                     for (dst, word) in message
-                        .chunks_exact_mut(4)
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
                         .zip(meta[pl].iter().chain(meta[pr].iter()))
                     {
                         dst.copy_from_slice(&word.to_le_bytes());
@@ -169,7 +171,7 @@ pub fn compute(xs: &[u32], id: &Hash, ksize: u8) -> Result<Vec<Entry>> {
                 .collect();
         }
         let mut bytes = [0; META_BYTES];
-        for (dst, v) in bytes.chunks_exact_mut(4).zip(meta[index]) {
+        for (dst, v) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(meta[index]) {
             dst.copy_from_slice(&v.to_le_bytes());
         }
         out.push(Entry {

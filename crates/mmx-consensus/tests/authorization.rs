@@ -2,7 +2,9 @@ use mmx_consensus::{authorization::*, Error, Hash, Record};
 use mmx_vm::address::encode;
 fn unhex(text: &str) -> Vec<u8> {
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap(), 16).unwrap())
         .collect()
 }

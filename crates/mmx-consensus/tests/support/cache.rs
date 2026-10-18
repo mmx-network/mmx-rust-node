@@ -6,7 +6,9 @@ use mmx_types::mmx;
 use mmx_vm::{Engine, Instruction, Opcode, StorageDb, Value as VmValue, MEM_STACK};
 fn bytes<const N: usize>(text: &str) -> [u8; N] {
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
         .collect::<Vec<_>>()
         .try_into()
