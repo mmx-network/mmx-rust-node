@@ -1,5 +1,11 @@
 use clap::Parser;
-use mmx_farming::{farmer::Farmer, harvester::Harvester, service, wallet::Account, Result};
+use mmx_farming::{
+    farmer::Farmer,
+    harvester::{ChallengeQueue, Harvester},
+    service,
+    wallet::Account,
+    Result,
+};
 use mmx_types::mmx;
 use mmx_wallet::{Address, FarmerKey, KeyFile};
 use std::{
@@ -190,8 +196,12 @@ pub fn farmer_main() -> Result<()> {
     let proofs = runtime.subscribe("harvester.proof", 64, OverflowPolicy::DropOldest, false)?;
     let reports = runtime.subscribe("harvester.info", 64, OverflowPolicy::DropOldest, false)?;
     // Do not request replay: an old challenge must never trigger fresh disk work.
-    let challenges =
-        node.subscribe("harvester.challenges", 8, OverflowPolicy::DropOldest, false)?;
+    let challenges = node.subscribe(
+        "harvester.challenges",
+        128,
+        OverflowPolicy::DropOldest,
+        false,
+    )?;
     let mut options = service::private_options(["Farmer".into(), "Node".into()]);
     options.publish_topics = ["harvester.proof".into(), "harvester.info".into()].into();
     options.export_topics = ["harvester.challenges".into(), "farmer.proof".into()].into();
@@ -308,11 +318,16 @@ pub fn harvester_main() -> Result<()> {
         runtime,
         service::private_options(["Harvester".into()]),
     )?;
-    let challenges =
-        farmer.subscribe("harvester.challenges", 1, OverflowPolicy::DropOldest, false)?;
+    let challenges = farmer.subscribe(
+        "harvester.challenges",
+        128,
+        OverflowPolicy::DropOldest,
+        false,
+    )?;
     println!("Harvester VNX RPC {}", server.endpoint());
     let stop = stopping()?;
     let (mut reported, mut reloaded) = (Instant::now() - Duration::from_secs(10), Instant::now());
+    let mut queue = ChallengeQueue::new(Duration::from_secs(10));
     while !stop.load(Ordering::Relaxed) {
         if reported.elapsed() >= Duration::from_secs(10) {
             let info = harvester
@@ -332,15 +347,24 @@ pub fn harvester_main() -> Result<()> {
                 .map_err(|_| err("harvester lock poisoned"))?;
             h.farmer_keys = keys.into_iter().map(|k| k.0).collect();
             h.reload();
+            queue.clear();
             reloaded = Instant::now();
         }
-        if let Some(sample) = challenges.try_recv()? {
-            if sample.replay
-                || vnx::time::now_micros().saturating_sub(sample.recv_time) > 10_000_000
-            {
+        while let Some(sample) = challenges.try_recv()? {
+            if sample.replay {
                 continue;
             }
-            let challenge: mmx::Challenge = serde_json::from_value(sample.value)?;
+            let age = Duration::from_micros(
+                vnx::time::now_micros().saturating_sub(sample.recv_time) as u64,
+            );
+            match mmx::Challenge::from_value(sample.value) {
+                Ok(challenge) => {
+                    queue.push(challenge, age);
+                }
+                Err(e) => eprintln!("Invalid farming challenge: {e}"),
+            }
+        }
+        if let Some(challenge) = queue.pop() {
             let started = Instant::now();
             match harvester
                 .lock()

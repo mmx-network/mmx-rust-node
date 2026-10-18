@@ -263,3 +263,55 @@ impl Harvester {
         Ok(out)
     }
 }
+
+/// C++ harvesters prioritize the newest queued height and look up a challenge
+/// only once. Bound the remembered identities so reconnects cannot grow RAM.
+pub struct ChallengeQueue {
+    pending: BTreeMap<u32, (Instant, mmx::Challenge)>,
+    seen: BTreeSet<([u8; 32], u64)>,
+    order: std::collections::VecDeque<([u8; 32], u64)>,
+    timeout: std::time::Duration,
+}
+impl ChallengeQueue {
+    pub fn new(timeout: std::time::Duration) -> Self {
+        Self {
+            pending: BTreeMap::new(),
+            seen: BTreeSet::new(),
+            order: std::collections::VecDeque::new(),
+            timeout,
+        }
+    }
+    pub fn push(&mut self, request: mmx::Challenge, age: std::time::Duration) -> bool {
+        if age > self.timeout {
+            return false;
+        }
+        let id = (request.challenge.0, request.difficulty);
+        if !self.seen.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        if self.order.len() > 4096 {
+            self.seen.remove(&self.order.pop_front().unwrap());
+        }
+        self.pending.insert(
+            request.vdf_height,
+            (
+                Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+                request,
+            ),
+        );
+        while self.pending.len() > 128 {
+            self.pending.pop_first();
+        }
+        true
+    }
+    pub fn pop(&mut self) -> Option<mmx::Challenge> {
+        self.pending.retain(|_, (t, _)| t.elapsed() <= self.timeout);
+        self.pending.pop_last().map(|(_, (_, r))| r)
+    }
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.seen.clear();
+        self.order.clear();
+    }
+}

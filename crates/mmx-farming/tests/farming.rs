@@ -257,3 +257,32 @@ fn farm_reports_replace_by_identity_expire_and_detect_overflow() {
     f.harvester_timeout = Duration::ZERO;
     assert_eq!(f.farm_info().unwrap().total_bytes, 0);
 }
+
+#[test]
+fn challenge_queue_prioritizes_newest_height_deduplicates_and_expires_work() {
+    use mmx_farming::harvester::ChallengeQueue;
+    let mut q = ChallengeQueue::new(Duration::from_secs(10));
+    let first = mmx::Challenge {
+        vdf_height: 1,
+        challenge: [1; 32].into(),
+        difficulty: 1,
+    };
+    let later = mmx::Challenge {
+        vdf_height: 2,
+        challenge: [2; 32].into(),
+        difficulty: 1,
+    };
+    assert!(q.push(first.clone(), Duration::ZERO));
+    assert!(!q.push(first.clone(), Duration::ZERO));
+    assert!(q.push(later.clone(), Duration::ZERO));
+    assert_eq!(q.pop(), Some(later));
+    assert_eq!(q.pop(), Some(first.clone()));
+    assert!(q.pop().is_none());
+    assert!(!q.push(first.clone(), Duration::ZERO));
+    q.clear();
+    assert!(!q.push(first.clone(), Duration::from_secs(11)));
+    assert!(q.push(first, Duration::ZERO));
+    let mut expired = ChallengeQueue::new(Duration::ZERO);
+    expired.push(mmx::Challenge::default(), Duration::ZERO);
+    assert!(expired.pop().is_none());
+}
