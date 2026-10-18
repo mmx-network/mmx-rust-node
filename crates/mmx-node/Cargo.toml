@@ -24,3 +24,5 @@ rand = "0.8"
 [dev-dependencies]
 mmx-db.workspace = true
 sha2.workspace = true
+mmx-farming.workspace = true
+mmx-wallet.workspace = true

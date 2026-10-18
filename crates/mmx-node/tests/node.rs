@@ -1641,3 +1641,294 @@ fn pending_transaction_crosses_real_peer_transport_without_ledger_writes() {
     drop(client);
     server.shutdown();
 }
+
+fn farmer_scalar() -> mmx_wallet::FarmerKey {
+    let mut scalar = [0; 32];
+    scalar[31] = 1;
+    mmx_wallet::FarmerKey::from_bytes(&scalar).unwrap()
+}
+fn pending_fixture_tx(network: &Network, step: &Value) -> Record {
+    let block = wire(&step["block"]);
+    let mut tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+        .record()
+        .unwrap()
+        .clone();
+    tx.fields.insert("exec_result".into(), V::Optional(None));
+    tx.fields.insert(
+        "static_cost".into(),
+        V::Uint(tx.calc_cost(&(&network.params).into()).unwrap()),
+    );
+    tx.fields.insert(
+        "content_hash".into(),
+        V::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
+    );
+    tx
+}
+fn native_farming_response() -> Record {
+    let row: Value = include_str!("../../mmx-consensus/tests/fixtures/responses.jsonl")
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).unwrap())
+        .find(|r| r["name"] == "extensions1_0")
+        .unwrap();
+    wire(&row["wire"])
+}
+#[test]
+fn farming_candidate_matches_cpp_fields_uses_no_disk_writes_and_rejects_stale_signatures() {
+    use mmx_farming::farmer::Farmer;
+    use mmx_wallet::Address;
+    let (network, g, steps, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let n = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
+    sync::synchronize_pipelined(
+        &mut MemorySource {
+            blocks: vec![wire(&g["block"])],
+            wrong: false,
+        },
+        &n,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    let expected = wire(&steps[0]["block"]);
+    let tx = pending_fixture_tx(&network, &steps[0]);
+    let mut n = n.lock().unwrap();
+    n.add_transaction(&tx, true).unwrap();
+    n.receive(&native_farming_response()).unwrap();
+    n.receive(&wire(&steps[0]["vdf"])).unwrap();
+    let key = farmer_scalar();
+    let keys = [key.public_key()].into();
+    let files = || {
+        fn walk(p: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+            for e in std::fs::read_dir(p).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else {
+                    out.push((p.clone(), std::fs::read(p).unwrap()));
+                }
+            }
+        }
+        let mut out = vec![];
+        walk(dir.path(), &mut out);
+        out.sort();
+        out
+    };
+    let before = files();
+    let time = match expected.field("time_stamp").unwrap() {
+        V::Int(n) => *n,
+        _ => panic!(),
+    };
+    let plan = n.farming_plan(&keys, time, 0).unwrap().unwrap();
+    let unsigned = plan.build().unwrap();
+    for field in [
+        "prev",
+        "height",
+        "time_stamp",
+        "time_diff",
+        "space_diff",
+        "weight",
+        "total_weight",
+        "vdf_height",
+        "vdf_count",
+        "vdf_iters",
+        "vdf_output",
+        "vdf_reward_addr",
+        "vdf_reward_payout",
+        "proof_hash",
+        "proof_chain",
+        "challenge",
+        "is_space_fork",
+        "space_fork_len",
+        "space_fork_proofs",
+        "base_reward",
+        "reward_vote_sum",
+        "reward_vote_count",
+        "txfee_buffer",
+        "tx_count",
+        "tx_fees",
+        "tx_hash",
+        "static_cost",
+        "total_cost",
+        "reward_amount",
+        "tx_list",
+    ] {
+        assert_eq!(
+            unsigned.field(field).unwrap(),
+            expected.field(field).unwrap(),
+            "{field}"
+        );
+    }
+    let reward: [u8; 32] = expected
+        .field("reward_addr")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let farmer = Farmer::new([key], Some(Address(reward)));
+    let signed = farmer.sign_block(&unsigned, &network.params).unwrap();
+    let candidate = plan.with_signature(&unsigned, &signed).unwrap();
+    assert_eq!(
+        files(),
+        before,
+        "candidate execution must not write ledger files"
+    );
+    let mut changed = signed.clone();
+    changed
+        .fields
+        .insert("project_addr".into(), V::Bytes(vec![99; 32]));
+    assert!(plan.with_signature(&unsigned, &changed).is_err());
+    assert!(
+        n.farming_plan(&keys, time, 0).unwrap().is_none(),
+        "one signing attempt per proof"
+    );
+    assert!(n.accept_produced(&candidate).unwrap());
+    assert!(
+        !n.accept_produced(&candidate).unwrap(),
+        "stale signing reply must be discarded"
+    );
+    assert_eq!(n.chain().selected().tip().unwrap().unwrap().height, 1);
+    assert_eq!(n.pending_transactions(), 0);
+    for b in steps[0]["state"]["balances"].as_array().unwrap() {
+        assert_eq!(
+            n.chain()
+                .selected()
+                .storage()
+                .get_balance(
+                    &raw(&b["address"]).try_into().unwrap(),
+                    &raw(&b["currency"]).try_into().unwrap()
+                )
+                .unwrap(),
+            Some(b["amount"].as_str().unwrap().parse().unwrap())
+        );
+    }
+    n.rollback_to(0).unwrap();
+    assert_eq!(
+        n.chain()
+            .selected()
+            .storage()
+            .get_balance(&reward, &[0; 32])
+            .unwrap(),
+        Some(10_000_000)
+    );
+}
+
+#[test]
+fn private_farmer_rpc_worker_produces_and_relays_a_live_block() {
+    use mmx_farming::{farmer::Farmer, service};
+    use mmx_wallet::Address;
+    use vnx::runtime::Runtime;
+    let (network, g, steps, _) = fixture();
+    let n = node(&network);
+    let observer = node(&network);
+    for state in [&n, &observer] {
+        sync::synchronize_pipelined(
+            &mut MemorySource {
+                blocks: vec![wire(&g["block"])],
+                wrong: false,
+            },
+            state,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+    }
+    let expected = wire(&steps[0]["block"]);
+    let reward = expected
+        .field("reward_addr")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let runtime = Runtime::new().unwrap();
+    runtime
+        .register(
+            "Farmer",
+            service::farmer_methods(
+                Arc::new(Mutex::new(Farmer::new(
+                    [farmer_scalar()],
+                    Some(Address(reward)),
+                ))),
+                network.params.clone(),
+                1,
+            ),
+        )
+        .unwrap();
+    let mut farmer = service::bind_private(
+        "127.0.0.1:0".parse().unwrap(),
+        runtime,
+        service::private_options(["Farmer".into()]),
+    )
+    .unwrap();
+    n.lock()
+        .unwrap()
+        .add_transaction(&pending_fixture_tx(&network, &steps[0]), true)
+        .unwrap();
+    n.lock()
+        .unwrap()
+        .receive(&native_farming_response())
+        .unwrap();
+    for state in [&n, &observer] {
+        state
+            .lock()
+            .unwrap()
+            .receive(&wire(&steps[0]["vdf"]))
+            .unwrap();
+    }
+    let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
+    let mut remote =
+        peer::Client::connect(&server.address().to_string(), observer.clone()).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut worker =
+        mmx_node::production::Worker::start(n.clone(), farmer.endpoint().clone(), stop.clone(), 0)
+            .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while observer
+        .lock()
+        .unwrap()
+        .chain()
+        .selected()
+        .tip()
+        .unwrap()
+        .unwrap()
+        .height
+        == 0
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "produced block did not reach peer"
+        );
+        remote.poll().unwrap();
+        observer.lock().unwrap().tick().unwrap();
+    }
+    assert_eq!(
+        n.lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .hash,
+        observer
+            .lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .hash
+    );
+    worker.shutdown();
+    drop(remote);
+    server.shutdown();
+    farmer.shutdown();
+}
