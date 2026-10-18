@@ -254,7 +254,10 @@ lines. It loads preceding headers for the ancestry-dependent measurements.
 Set `MMX_PROFILE_REPLAY=1` when launching the node to sample replay's context,
 history, execution and private-publication costs every 128 heights. It also logs
 proof-evidence reuse and each durable suffix replacement's deletion, row-copy
-and commit times.
+and commit times. Updates applying at least 64 blocks also report node
+preparation, archive/header loading, proof checks, fork selection, ancestry
+lookup, replay and root-policy costs, so update overhead can be attributed
+before changing consensus or storage paths.
 
 `bench_layout` compares ordinary SQLite rowid tables with `WITHOUT ROWID` using
 the actual versioned writes from a validated selected-chain snapshot. Each run

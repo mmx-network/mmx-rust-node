@@ -13,6 +13,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Write},
     path::Path,
+    time::Instant,
 };
 
 pub struct Node {
@@ -163,6 +164,7 @@ impl Node {
         Ok(())
     }
     pub(crate) fn update(&mut self) -> Result<Update> {
+        let started = Instant::now();
         for (message, _) in self.inbox.take()? {
             if let Err(e) = self.admit_message(&message) {
                 eprintln!("Rejected {}: {e}", message.name);
@@ -237,6 +239,7 @@ impl Node {
             .hash_at(self.root)?
             .ok_or_else(|| error("missing node root"))?;
         let now = vnx::util::get_wall_time_millis();
+        let prepared = Instant::now();
         let out = if self.synced {
             self.chain
                 .update_at(root, self.sync_pending.first().copied(), now)?
@@ -244,6 +247,7 @@ impl Node {
             self.chain
                 .update_sync_at(root, self.sync_pending.first().copied(), now)?
         };
+        let forked = Instant::now();
         // A deep branch switch may replace the root's block. Heights remain soft.
         let selected = self.chain.selected();
         let header = selected
@@ -295,6 +299,18 @@ impl Node {
         self.pending
             .retain(|_, b| number(b, "height").is_ok_and(|h| h > self.root));
         self.peer_state.publish(tip.height, self.synced);
+        if out.applied.len() >= 64 && std::env::var_os("MMX_PROFILE_REPLAY").is_some() {
+            eprintln!("Node update: blocks={} prepare_ms={:.3} fork_ms={:.3} load_ms={:.3} proofs_ms={:.3} choice_ms={:.3} lineage_ms={:.3} replay_ms={:.3} policy_ms={:.3}",
+                out.applied.len(),
+                prepared.duration_since(started).as_secs_f64() * 1e3,
+                forked.duration_since(prepared).as_secs_f64() * 1e3,
+                out.load_time.as_secs_f64() * 1e3,
+                out.verification_time.as_secs_f64() * 1e3,
+                out.choice_time.as_secs_f64() * 1e3,
+                out.lineage_time.as_secs_f64() * 1e3,
+                out.replay_time.as_secs_f64() * 1e3,
+                forked.elapsed().as_secs_f64() * 1e3);
+        }
         Ok(out)
     }
     fn vdf_peak(&self) -> Result<(u32, Hash)> {

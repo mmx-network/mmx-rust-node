@@ -30,7 +30,10 @@ pub struct Update {
     pub invalid: BTreeSet<Hash>,
     pub waiting: BTreeSet<Hash>,
     pub votes: voting::Report,
+    pub load_time: Duration,
     pub verification_time: Duration,
+    pub choice_time: Duration,
+    pub lineage_time: Duration,
     pub replay_time: Duration,
 }
 struct Entry {
@@ -413,6 +416,7 @@ impl ForkChain {
         now_ms: i64,
         mode: ValidationMode,
     ) -> ChainResult<Update> {
+        let load_started = Instant::now();
         let root_header = self
             .chain
             .header(&root)?
@@ -434,7 +438,10 @@ impl ForkChain {
         self.verified.retain(|hash, _| headers.contains_key(hash));
         self.evidence.retain(|hash, _| headers.contains_key(hash));
         self.sync_verified.retain(|hash| headers.contains_key(hash));
-        let mut out = Update::default();
+        let mut out = Update {
+            load_time: load_started.elapsed(),
+            ..Default::default()
+        };
         let mut candidates = Vec::new();
         let mut points = BTreeMap::new();
         let verification_started = Instant::now();
@@ -549,6 +556,7 @@ impl ForkChain {
         }
         self.persist_invalid(&out.invalid)?;
         loop {
+            let choice_started = Instant::now();
             let selection = choice::select(root_header.height, root, sync_pending, &candidates);
             self.connected = selection
                 .states
@@ -563,11 +571,15 @@ impl ForkChain {
                     out.waiting.remove(&hash);
                 }
             }
+            out.choice_time += choice_started.elapsed();
             let Some(best) = out.best else { return Ok(out) };
+            let lineage_started = Instant::now();
             if self.chain.tip()?.is_some_and(|tip| tip.hash.0 == best) {
+                out.lineage_time += lineage_started.elapsed();
                 return Ok(out);
             }
             let (common, line) = self.line(best)?;
+            out.lineage_time += lineage_started.elapsed();
             let archive = &self.archive;
             let sync_verified = &self.sync_verified;
             let evidence = &self.evidence;
