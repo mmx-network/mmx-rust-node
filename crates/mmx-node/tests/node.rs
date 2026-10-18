@@ -317,7 +317,10 @@ fn peer_socket_has_only_native_router_methods_and_never_executes_validation() {
         let result = reply.field("result").unwrap().record().unwrap();
         assert_eq!(result.name, "vnx.NoSuchMethod");
         assert_eq!(result.field("dst_mac").unwrap().uint().unwrap(), 0);
-        assert_eq!(result.field("method").unwrap().text().unwrap(), name);
+        assert_eq!(
+            result.field("method").unwrap().text().unwrap(),
+            name.as_bytes()
+        );
     }
     connection
         .send(&record(
