@@ -1,0 +1,353 @@
+{
+  "source": "mmx-node ca6438b37c08007106d58efe4a990f6ecb276649, native VNX RPC get_block_at(0) descriptors",
+  "types": [
+    {
+      "name": "mmx.Transaction",
+      "type_hash": 14845098766300259772,
+      "code_hash": 7746820774683388707,
+      "fields": [
+        {
+          "name": "id",
+          "code": [
+            11,
+            32,
+            1
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "version",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "",
+          "data_size": 4
+        },
+        {
+          "name": "expires",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "-1",
+          "data_size": 4
+        },
+        {
+          "name": "fee_ratio",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "1024",
+          "data_size": 4
+        },
+        {
+          "name": "static_cost",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "",
+          "data_size": 4
+        },
+        {
+          "name": "max_fee_amount",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "",
+          "data_size": 4
+        },
+        {
+          "name": "note",
+          "code": [
+            19,
+            0
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "nonce",
+          "code": [
+            4
+          ],
+          "is_extended": false,
+          "value": "",
+          "data_size": 8
+        },
+        {
+          "name": "network",
+          "code": [
+            32
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "sender",
+          "code": [
+            33,
+            11,
+            32,
+            1
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "inputs",
+          "code": [
+            12,
+            19,
+            1
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "outputs",
+          "code": [
+            12,
+            19,
+            2
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "execute",
+          "code": [
+            12,
+            16
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "solutions",
+          "code": [
+            12,
+            16
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "deploy",
+          "code": [
+            16
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "exec_result",
+          "code": [
+            33,
+            19,
+            3
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "content_hash",
+          "code": [
+            11,
+            32,
+            1
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        }
+      ],
+      "static_fields": [],
+      "parents": [
+        2779746684477443950
+      ],
+      "depends": [
+        8584159394109392497,
+        17984551057221839950,
+        11987527294615484945,
+        11607700469178682401
+      ],
+      "methods": [],
+      "return_type": 0,
+      "enum_map": {},
+      "alias_map": {},
+      "is_enum": false,
+      "is_class": true,
+      "is_method": false,
+      "is_return": false,
+      "permission": "",
+      "is_const": false,
+      "is_async": false
+    },
+    {
+      "name": "mmx.exec_error_t",
+      "type_hash": 418136518981637311,
+      "code_hash": 16590658751294550533,
+      "fields": [
+        {
+          "name": "code",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "",
+          "data_size": 4
+        },
+        {
+          "name": "address",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "-1",
+          "data_size": 4
+        },
+        {
+          "name": "operation",
+          "code": [
+            3
+          ],
+          "is_extended": false,
+          "value": "-1",
+          "data_size": 4
+        },
+        {
+          "name": "line",
+          "code": [
+            33,
+            3
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "message",
+          "code": [
+            32
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        }
+      ],
+      "static_fields": [],
+      "parents": [],
+      "depends": [],
+      "methods": [],
+      "return_type": 0,
+      "enum_map": {},
+      "alias_map": {},
+      "is_enum": false,
+      "is_class": false,
+      "is_method": false,
+      "is_return": false,
+      "permission": "",
+      "is_const": false,
+      "is_async": false
+    },
+    {
+      "name": "mmx.txin_t",
+      "type_hash": 983570811327758655,
+      "code_hash": 17984551057221839950,
+      "fields": [
+        {
+          "name": "address",
+          "code": [
+            11,
+            32,
+            1
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "contract",
+          "code": [
+            11,
+            32,
+            1
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "amount",
+          "code": [
+            11,
+            16,
+            1
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "memo",
+          "code": [
+            33,
+            32
+          ],
+          "is_extended": true,
+          "value": "",
+          "data_size": 0
+        },
+        {
+          "name": "solution",
+          "code": [
+            2
+          ],
+          "is_extended": false,
+          "value": "-1",
+          "data_size": 2
+        },
+        {
+          "name": "flags",
+          "code": [
+            1
+          ],
+          "is_extended": false,
+          "value": "",
+          "data_size": 1
+        }
+      ],
+      "static_fields": [],
+      "parents": [
+        9069385323639138269
+      ],
+      "depends": [],
+      "methods": [],
+      "return_type": 0,
+      "enum_map": {},
+      "alias_map": {},
+      "is_enum": false,
+      "is_class": false,
+      "is_method": false,
+      "is_return": false,
+      "permission": "",
+      "is_const": false,
+      "is_async": false
+    }
+  ]
+}

@@ -41,6 +41,28 @@ fn generated_type_identities_match_the_native_cpp_snapshot() {
 }
 
 #[test]
+fn native_transaction_descriptors_match_even_when_unsigned_defaults_are_negative() {
+    // Captured from the native genesis-block RPC, which previously closed a
+    // NetworkClient because generated metadata rewrote -1 to an unsigned max.
+    let fixture: vnx::serde_json::Value =
+        vnx::serde_json::from_str(include_str!("fixtures/native_defaults.json")).unwrap();
+    let codes: Vec<vnx::TypeCode> = vnx::serde_json::from_value(fixture["types"].clone()).unwrap();
+    let mut registry = vnx_registry().unwrap();
+    for code in &codes {
+        registry.register(code.clone()).unwrap();
+        let mut conflicting = code.clone();
+        conflicting.fields[0].value = "different".into();
+        assert!(registry.register(conflicting).is_err());
+    }
+    let mut writer = vnx::binary::Writer::new(Vec::new(), registry);
+    writer.write(&json!({"__type":"mmx.Transaction"})).unwrap();
+    assert_eq!(
+        mmx::Transaction::decode(&writer.into_inner()).unwrap(),
+        mmx::Transaction::default()
+    );
+}
+
+#[test]
 fn native_cpp_wire_fixtures_decode_into_our_generated_types() {
     let key = mmx::KeyFile::decode(&fixture(include_str!(
         "../../../vendor/vnx-rust/crates/vnx/tests/fixtures/key.hex"

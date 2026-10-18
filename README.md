@@ -813,6 +813,29 @@ All 990 VM keys across 161 contracts matched C++ at height 1,124,592, including
 also returned identical contract output for all nine genesis binaries through
 the native and Rust VNX RPC servers.
 
+`audit_native_rpc` compares complete immutable VNX RPC results with C++ at fixed
+heights: blocks, headers, both hash forms, transaction bodies and height/ID
+indexes, parameters and genesis. It also checks missing IDs and batched duplicate
+IDs, then rechecks each canonical hash. By default it checks genesis and a point
+24 blocks below the lower tip; repeat `--height` for hard-fork boundaries or
+transaction-bearing blocks. Mutable balances/contracts and live status require
+separate checks at matching tips.
+
+```sh
+cargo run -p mmx-node --example audit_native_rpc -- \
+  --native-rpc 127.0.0.1:11330 --rust-rpc 127.0.0.1:12331 \
+  --height 0 --height 999999 --height 1000000 --height 1000001
+```
+
+The native genesis RPC exposed unsigned defaults rewritten in generated VNX
+metadata (`-1` became `4294967295` or `65535`), causing the strict client registry
+to close its connection. The generator now preserves native descriptor defaults;
+omitted fields apply unsigned casts when constructing values. Captured native
+transaction/input/error descriptors guard this compatibility alongside range
+checks for explicit caller values. After the fix, 80 comparisons across six
+heights through 3,100,000 matched all 12 immutable read methods. Another 50
+comparisons passed at four transaction-bearing blocks near height 3,200,000.
+
 The live node admits signed farmer `ProofResponse` envelopes only after native
 hash, plot identity, signature, selected-history challenge/difficulty and CPU space
 work checks. Pending responses wait for VDF progress and expire after ten block
