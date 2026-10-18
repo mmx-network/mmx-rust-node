@@ -517,6 +517,8 @@ impl Node {
             )?
             .ok_or_else(|| error("missing root header"))?;
         let params = self.chain.selected().params().clone();
+        // Also prune on nodes with no local farmer/production worker.
+        self.production.prune(root.vdf_height);
         let now = vnx::util::get_wall_time_millis();
         let height = self.vdf_peak()?.0;
         let mut pending = BTreeMap::new();

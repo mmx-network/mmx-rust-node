@@ -14,7 +14,7 @@ fn allocation_budget(bytes: usize) -> usize {
     bytes
         .saturating_mul(96)
         .saturating_add(4096)
-        .min(256 * 1024 * 1024)
+        .min(64 * 1024 * 1024)
 }
 impl<'a> Parser<'a> {
     fn allocate(&mut self, count: usize, size: usize) -> Result<()> {

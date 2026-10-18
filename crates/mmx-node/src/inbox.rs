@@ -72,8 +72,15 @@ impl Inbox {
     }
     pub fn take(&self) -> Result<VecDeque<(Record, usize)>> {
         let mut queue = self.0.lock().map_err(|_| error("peer inbox poisoned"))?;
-        queue.bytes = 0;
-        let mut messages = std::mem::take(&mut queue.messages);
+        let mut messages = VecDeque::new();
+        // Bound signature checks and malformed-message logging per ledger tick.
+        for _ in 0..256 {
+            let Some((record, size)) = queue.messages.pop_front() else {
+                break;
+            };
+            queue.bytes -= size;
+            messages.push_back((record, size));
+        }
         for _ in 0..4 {
             if let Some((r, size)) = queue.transactions.pop_front() {
                 queue.transaction_bytes -= size;

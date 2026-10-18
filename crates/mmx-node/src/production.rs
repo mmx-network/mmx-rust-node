@@ -39,6 +39,27 @@ pub(crate) struct State {
     pub(crate) broadcasts: VecDeque<(Hash, usize)>,
     bytes: usize,
 }
+impl State {
+    pub(crate) fn prune(&mut self, root_vdf_height: u32) {
+        self.proofs.retain(|_, proofs| {
+            proofs.retain(|_, r| number(r, "vdf_height").is_ok_and(|h| h > root_vdf_height));
+            !proofs.is_empty()
+        });
+        self.attempted.retain(|_, height| *height > root_vdf_height);
+    }
+}
+fn keep_best(proofs: &mut BTreeMap<Hash, Record>, hash: Hash, record: &Record) {
+    if proofs.len() < 128
+        || proofs
+            .last_key_value()
+            .is_some_and(|(worst, _)| hash < *worst)
+    {
+        proofs.entry(hash).or_insert_with(|| record.clone());
+        if proofs.len() > 128 {
+            proofs.pop_last();
+        }
+    }
+}
 pub struct Candidate {
     block: Record,
     anchor: Hash,
@@ -77,25 +98,14 @@ impl Node {
         if self.production.proofs.len() >= 1000
             && !self.production.proofs.contains_key(verified.challenge())
         {
-            return Err(error("too many farming challenges"));
+            return Ok(());
         }
         let proofs = self
             .production
             .proofs
             .entry(*verified.challenge())
             .or_default();
-        if proofs.len() < 128
-            || proofs
-                .last_key_value()
-                .is_some_and(|(worst, _)| verified.hash() < worst)
-        {
-            proofs
-                .entry(*verified.hash())
-                .or_insert_with(|| record.clone());
-            if proofs.len() > 128 {
-                proofs.pop_last();
-            }
-        }
+        keep_best(proofs, *verified.hash(), record);
         Ok(())
     }
     pub fn farming_plan(
@@ -126,13 +136,7 @@ impl Node {
                     .ok_or_else(|| error("missing farming root"))?,
             )?
             .ok_or_else(|| error("missing farming root header"))?;
-        self.production.proofs.retain(|_, proofs| {
-            proofs.retain(|_, r| number(r, "vdf_height").is_ok_and(|h| h > root.vdf_height));
-            !proofs.is_empty()
-        });
-        self.production
-            .attempted
-            .retain(|_, height| *height > root.vdf_height);
+        self.production.prune(root.vdf_height);
         let points: Vec<_> = self.verified_work.values().cloned().collect();
         // Native update first tries replacing an uncommitted peak, then extends it.
         let mut parents = vec![];
@@ -761,5 +765,34 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_late_winning_proof_evicts_the_worst_and_survives_replays() {
+        let response =
+            crate::node::record("mmx.ProofResponse", [("vdf_height".into(), N::Uint(1))]);
+        let mut pool = BTreeMap::new();
+        for score in 1..=128 {
+            let mut id = [0; 32];
+            id[0] = score;
+            keep_best(&mut pool, id, &response);
+        }
+        assert_eq!(pool.len(), 128);
+        keep_best(&mut pool, [0; 32], &response);
+        assert_eq!(pool.first_key_value().unwrap().0, &[0; 32]);
+        assert_eq!(pool.last_key_value().unwrap().0[0], 127);
+        for _ in 0..10 {
+            keep_best(&mut pool, [0; 32], &response);
+        }
+        keep_best(&mut pool, [255; 32], &response);
+        assert_eq!(pool.len(), 128);
+        assert!(!pool.contains_key(&[255; 32]));
+        let mut state = State::default();
+        state.proofs.insert([3; 32], pool);
+        state.prune(1);
+        assert!(state.proofs.is_empty());
     }
 }
