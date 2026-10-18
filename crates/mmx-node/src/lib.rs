@@ -6,6 +6,7 @@ pub mod peer;
 mod peer_state;
 pub mod rpc;
 pub mod sync;
+mod vdf_worker;
 
 pub use node::Node;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

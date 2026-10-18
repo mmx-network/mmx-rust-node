@@ -94,6 +94,16 @@ fn native_vdf_hashes_admission_cpu_work_and_point_metadata() {
         let verified = vdf::verify(&r, &p, &source);
         if row["admission"] == "OK" && row["cpu"] == "OK" {
             let verified = verified.unwrap_or_else(|e| panic!("{name}: {e}"));
+            let cpu = vdf::CpuVerifiedProof::verify(r.clone()).unwrap();
+            let background = cpu.admit(&p, &source).unwrap();
+            assert_eq!(background.proof(), verified.proof());
+            assert_eq!(background.point(), verified.point());
+            let mut different = p.clone();
+            different.vdf_segment_size = different.vdf_segment_size.wrapping_add(1);
+            assert!(cpu.admit(&different, &source).is_err());
+            assert!(cpu
+                .admit(&p, &BTreeMap::<Hash, mmx::BlockHeader>::new())
+                .is_err());
             assert_eq!(
                 hex(&verified.point().content_hash.0),
                 row["point_hash"],

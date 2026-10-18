@@ -982,6 +982,14 @@ boundary, reject earlier rollbacks, and hide earlier blocks and transactions
 from every RPC lookup, including hashes and batches. RPC will report the earliest
 retained height. Purging is opt-in; the current node retains all history.
 
+The runtime verifies VDF CPU work outside the ledger mutex. One active proof
+and one queued proof bound the worker; independent segments use the shared Rayon
+pool, preserving first-failing-index reporting. Immutable CPU evidence owns the
+exact checked record and must pass signature, shape, and history admission again
+against the current fork before becoming a verified point. Completed failures
+are cached only while their proofs remain in the bounded receive window. Direct
+embedded nodes retain synchronous admission unless background work is enabled.
+
 C++ `Node::write_block()` appends full bodies to a block file and stores their
 offsets in a separate index. Its `Table` implementation uses a write log and
 sorted runs with offset indexes. Rust currently stores block payloads in its

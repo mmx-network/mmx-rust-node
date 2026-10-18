@@ -29,6 +29,7 @@ pub struct Node {
     work: VecDeque<Record>,
     pending: BTreeMap<Hash, Record>,
     verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
+    vdf_worker: Option<crate::vdf_worker::Worker>,
     responses: Vec<(Record, i64)>,
     inbox: Inbox,
     peer_state: PeerState,
@@ -116,6 +117,7 @@ impl Node {
             work: VecDeque::new(),
             pending: BTreeMap::new(),
             verified_work: BTreeMap::new(),
+            vdf_worker: None,
             responses: vec![],
             inbox: Inbox::default(),
             peer_state,
@@ -132,6 +134,14 @@ impl Node {
     }
     pub fn is_synced(&self) -> bool {
         self.synced
+    }
+    /// Runtime CPU tasks must never hold the ledger mutex while hashing a VDF.
+    /// Embedded callers retain synchronous admission unless they opt in.
+    pub fn enable_background_vdf(&mut self) -> Result<()> {
+        if self.vdf_worker.is_none() {
+            self.vdf_worker = Some(crate::vdf_worker::Worker::new()?);
+        }
+        Ok(())
     }
     pub fn pending_proofs(&self) -> usize {
         self.responses.len()
@@ -192,6 +202,14 @@ impl Node {
             .verified_vdf_inputs(self.root)?
             .into_iter()
             .collect();
+        if let Some(worker) = &mut self.vdf_worker {
+            let retained = self
+                .work
+                .iter()
+                .map(|work| hash(work, "content_hash"))
+                .collect::<Result<_>>()?;
+            worker.poll(&retained);
+        }
         for height in self.root..=tip.height {
             let header = selected
                 .header(
@@ -210,7 +228,25 @@ impl Node {
                 continue;
             }
             if !self.verified_work.contains_key(&id) {
-                if let Ok(point) =
+                if let Some(worker) = &mut self.vdf_worker {
+                    if mmx_consensus::vdf::validate(
+                        work,
+                        self.chain.selected().params(),
+                        &self.chain,
+                    )
+                    .is_ok()
+                    {
+                        if let Some(cpu) = worker.proof(id, work)? {
+                            // The fork can move while CPU work runs. Admission
+                            // always rechecks authenticated current history.
+                            if let Ok(point) =
+                                cpu.admit(self.chain.selected().params(), &self.chain)
+                            {
+                                self.verified_work.insert(id, point);
+                            }
+                        }
+                    }
+                } else if let Ok(point) =
                     mmx_consensus::vdf::verify(work, self.chain.selected().params(), &self.chain)
                 {
                     self.verified_work.insert(id, point);

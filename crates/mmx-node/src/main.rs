@@ -117,6 +117,7 @@ fn main() -> Result<()> {
     if let Some(height) = options.rollback {
         state.rollback_to(height)?;
     }
+    state.enable_background_vdf()?;
     let tip = state.chain().selected().tip()?.ok_or("missing tip")?;
     println!(
         "Opened {} at height {} / VDF {}, root {}",

@@ -330,8 +330,18 @@ fn continuing_native_stream_reuses_type_codes_and_preserves_tuple_bytes() {
 
 #[test]
 fn farmer_response_waits_for_verified_future_vdf_then_live_block_uses_the_same_evidence() {
+    live_vdf_evidence(false);
+}
+#[test]
+fn background_vdf_releases_farmer_response_and_authenticates_the_live_block() {
+    live_vdf_evidence(true);
+}
+fn live_vdf_evidence(background: bool) {
     let (network, g, steps, _) = fixture();
     let n = node(&network);
+    if background {
+        n.lock().unwrap().enable_background_vdf().unwrap();
+    }
     let row: Value = include_str!("../../mmx-consensus/tests/fixtures/responses.jsonl")
         .lines()
         .map(|l| serde_json::from_str::<Value>(l).unwrap())
@@ -350,6 +360,17 @@ fn farmer_response_waits_for_verified_future_vdf_then_live_block_uses_the_same_e
     n.lock().unwrap().receive(&metadata).unwrap();
     assert_eq!(n.lock().unwrap().pending_proofs(), 1);
     n.lock().unwrap().receive(&wire(&steps[0]["vdf"])).unwrap();
+    if background {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while n.lock().unwrap().pending_proofs() != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "VDF worker did not complete"
+            );
+            n.lock().unwrap().tick().unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
     assert_eq!(n.lock().unwrap().pending_proofs(), 0);
     check(&n, &g);
     let height = n

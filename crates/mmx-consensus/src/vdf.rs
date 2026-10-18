@@ -1,6 +1,7 @@
 //! Native timelord proof admission, portable CPU work verification and
 //! Node::find_vdf_points output linkage. Hashes and signatures are independent
-//! stages; only `verify` can construct a `VerifiedPoint`.
+//! stages; verified CPU evidence and current history admission are both required
+//! to construct a `VerifiedPoint`.
 use crate::{
     hash, input,
     proof::bytes,
@@ -8,6 +9,7 @@ use crate::{
     Hash, Record, Result,
 };
 use mmx_types::{mmx, VnxType};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -132,22 +134,56 @@ pub fn verify_cpu(record: &Record) -> VdfResult<()> {
     let mut reward = Sha256::new();
     reward.update(initial.finalize());
     reward.update(bytes::<32>(record, "reward_addr")?);
-    let mut previous: Hash = reward.finalize().into();
-    for (i, segment) in segments.iter().enumerate() {
-        let supplied: Hash = segment
-            .bytes()?
-            .try_into()
-            .map_err(|_| input("VDF segment size"))?;
-        let mut value = previous;
-        for _ in 0..size {
-            value = Sha256::digest(value).into();
-        }
-        if value != supplied {
-            return Err(invalid(format!("invalid output on segment {i}")));
-        }
-        previous = supplied;
+    let initial: Hash = reward.finalize().into();
+    // Supplied segment outputs make the checks independent, as in native CPU
+    // verification. Preserve deterministic first-failure reporting afterward.
+    let results: Vec<VdfResult<()>> = segments
+        .par_iter()
+        .enumerate()
+        .map(|(i, segment)| {
+            let supplied: Hash = segment
+                .bytes()?
+                .try_into()
+                .map_err(|_| input("VDF segment size"))?;
+            let mut value = if i == 0 {
+                initial
+            } else {
+                segments[i - 1]
+                    .bytes()?
+                    .try_into()
+                    .map_err(|_| input("VDF segment size"))?
+            };
+            for _ in 0..size {
+                value = Sha256::digest(value).into();
+            }
+            if value != supplied {
+                return Err(invalid(format!("invalid output on segment {i}")));
+            }
+            Ok(())
+        })
+        .collect();
+    for result in results {
+        result?;
     }
     Ok(())
+}
+
+/// Owns the exact CPU-checked proof. No caller can substitute unchecked fields
+/// or treat this as evidence that the proof belongs to the current fork.
+pub struct CpuVerifiedProof(Record);
+impl CpuVerifiedProof {
+    pub fn verify(record: Record) -> VdfResult<Self> {
+        verify_cpu(&record)?;
+        Ok(Self(record))
+    }
+    pub fn admit<S: HeaderSource>(
+        &self,
+        params: &mmx::ChainParams,
+        source: &S,
+    ) -> VdfResult<VerifiedPoint> {
+        validate(&self.0, params, source)?;
+        verified_point(&self.0)
+    }
 }
 
 /// Immutable evidence of successful signature, history, shape and CPU checks.
@@ -175,6 +211,9 @@ pub fn verify<S: HeaderSource>(
 ) -> VdfResult<VerifiedPoint> {
     validate(record, params, source)?;
     verify_cpu(record)?;
+    verified_point(record)
+}
+fn verified_point(record: &Record) -> VdfResult<VerifiedPoint> {
     let proof = mmx::ProofOfTime::decode(&record.encode()?).map_err(crate::Error::from)?;
     let mut point = mmx::VDF_Point {
         vdf_height: proof.vdf_height,
