@@ -78,12 +78,12 @@ fn main() -> Result<()> {
         ]
         .concat();
         let value = Variant::decode(&bytes)?;
-        let values = value.value().seq()?;
+        let expanded = value.value().seq()?.len() * std::mem::size_of::<N>();
         let mut data = Record::from_generated(&mmx::contract::Data::default())?;
         data.fields.insert("value".into(), N::Variant(value));
         let wire = data.encode()?;
         let decoded = peer::decode_frame(&peer::encode_frame(&data)?)?;
-        println!("REVIEW decoder count={count} dynamic_bytes={} record_bytes={} expanded_value_bytes={} decoded={}", bytes.len(), wire.len(), values.len() * std::mem::size_of::<N>(), decoded == data);
+        println!("REVIEW decoder count={count} dynamic_bytes={} record_bytes={} expanded_value_bytes={expanded} decoded={}", bytes.len(), wire.len(), decoded == data);
     }
     let (network, first) = fixture();
     let mut chain = ForkChain::memory(network.params.clone());
