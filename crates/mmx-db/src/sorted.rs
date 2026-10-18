@@ -521,15 +521,21 @@ impl Run {
     /// One newest eligible entry per key, including tombstones. The resident
     /// offset index jumps over older versions after finding the visible entry.
     /// Historical views skip only versions newer than their inclusive limit.
-    pub fn visible_entries_from(
+    pub fn visible_entries_range(
         &self,
         table: &str,
-        key: &[u8],
+        start: &[u8],
+        end: Option<&[u8]>,
         max: u32,
     ) -> Result<impl Iterator<Item = Result<Entry>> + '_> {
-        let index = self.lower_bound(table, key)?;
-        Ok((index..self.0.offsets.len())
-            .filter_map(move |index| self.visible_at(index, max, None).transpose()))
+        let index = self.lower_bound(table, start)?;
+        let end = if let Some(end) = end {
+            self.lower_bound(table, end)?
+        } else {
+            // Exact table boundary, before any table whose name extends it.
+            self.lower_bound(&format!("{table}\0"), &[])?
+        };
+        Ok((index..end).filter_map(move |index| self.visible_at(index, max, None).transpose()))
     }
     pub fn entries(&self) -> Cursor {
         self.cursor(HEADER)

@@ -11,11 +11,12 @@ fn visible_cursors_match_full_history_for_tombstones_ranges_and_historical_limit
     fixture(&path);
     let run = Run::open(&path).unwrap();
     for max in [0, 1, 3, 4, 8, 9, u32::MAX] {
-        for (table, start) in [
-            ("a", b"".as_slice()),
-            ("a", b"aa"),
-            ("b", b"\xff"),
-            ("z", b""),
+        for (table, start, end) in [
+            ("a", b"".as_slice(), None),
+            ("a", b"aa", None),
+            ("a", b"a", Some(b"aa".as_slice())),
+            ("b", b"\xff", None),
+            ("z", b"", None),
         ] {
             let mut seen = std::collections::BTreeSet::new();
             let expected = run
@@ -23,11 +24,16 @@ fn visible_cursors_match_full_history_for_tombstones_ranges_and_historical_limit
                 .unwrap()
                 .map(|e| e.unwrap())
                 .filter(|e| {
-                    e.version <= max && seen.insert((e.write.table.clone(), e.write.key.clone()))
+                    e.write.table == table
+                        && end.is_none_or(|end| {
+                            (e.write.key.len(), e.write.key.as_slice()) < (end.len(), end)
+                        })
+                        && e.version <= max
+                        && seen.insert((e.write.table.clone(), e.write.key.clone()))
                 })
                 .collect::<Vec<_>>();
             let visible = run
-                .visible_entries_from(table, start, max)
+                .visible_entries_range(table, start, end, max)
                 .unwrap()
                 .collect::<mmx_db::Result<Vec<_>>>()
                 .unwrap();
@@ -71,7 +77,7 @@ fn latest_visible_scan_does_not_read_thirty_thousand_old_versions() {
     assert!(run.metadata().data_bytes > 1024 * 1024);
     let before = bytes_read();
     let visible = run
-        .visible_entries_from("state", b"", u32::MAX)
+        .visible_entries_range("state", b"", None, u32::MAX)
         .unwrap()
         .collect::<mmx_db::Result<Vec<_>>>()
         .unwrap();
