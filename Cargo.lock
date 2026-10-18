@@ -849,7 +849,7 @@ dependencies = [
  "mmx-types",
  "mmx-wallet",
  "mmxwallet",
- "rand",
+ "rayon",
  "tempfile",
  "vnx",
 ]

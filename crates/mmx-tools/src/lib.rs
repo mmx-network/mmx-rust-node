@@ -260,6 +260,8 @@ pub struct HarvesterArgs {
     name: String,
     #[arg(long, default_value_t = 65536)]
     max_f1: usize,
+    #[arg(long, default_value_t = 2)]
+    threads: usize,
     #[arg(long, default_value_t = 3600)]
     reload_interval: u64,
     #[arg(long, default_value = "../mmx-node")]
@@ -269,6 +271,12 @@ pub struct HarvesterArgs {
 }
 pub fn harvester_main() -> Result<()> {
     let args = HarvesterArgs::parse();
+    if args.threads == 0 || args.threads > 256 {
+        return Err(err("--threads must be 1..256"));
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global()?;
     let params = params(&args.mmx_root, &args.network)?;
     let farmer = connect(&args.farmer, "Farmer")?;
     let keys: Vec<vnx::Fixed<u8, 33>> =

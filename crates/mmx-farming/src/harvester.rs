@@ -148,10 +148,24 @@ impl Harvester {
         if request.difficulty == 0 || params.plot_filter > 30 {
             return Err(error("invalid challenge difficulty or filter"));
         }
+        self.lookup_for(request, params, std::time::Duration::from_secs(10))
+    }
+    pub fn lookup_for(
+        &self,
+        request: &mmx::Challenge,
+        params: &mmx::ChainParams,
+        window: std::time::Duration,
+    ) -> Result<Vec<Record>> {
+        if request.difficulty == 0 || params.plot_filter > 30 {
+            return Err(error("invalid challenge difficulty or filter"));
+        }
         let hard_fork = request.vdf_height >= params.hardfork1_height;
         let started = Instant::now();
         let mut out = Vec::new();
         for plot in self.plots.values() {
+            if started.elapsed() >= window {
+                break;
+            }
             let h = &plot.header;
             if h.ksize < params.min_ksize as i32
                 || h.ksize > params.max_ksize as i32
@@ -159,78 +173,91 @@ impl Harvester {
             {
                 continue;
             }
-            let local = proof::plot_challenge(&request.challenge.0, &h.plot_id.0);
-            for mut quality in plot.qualities(&local, params.plot_filter, self.max_f1)? {
-                if hard_fork && !pos::check_post_filter(&local, &quality.meta, params.post_filter) {
-                    continue;
-                }
-                if hard_fork && quality.proof.is_empty() {
-                    quality = plot.full_proof(quality.index, self.max_f1)?;
-                }
-                let mut p = Record::from_generated(&mmx::ProofOfSpaceOG {
-                    ksize: h.ksize as u8,
-                    seed: h.seed.clone(),
-                    plot_id: h.plot_id.clone(),
-                    farmer_key: h.farmer_key.clone(),
-                    challenge: request.challenge.clone(),
-                    difficulty: request.difficulty,
-                    proof_xs: quality.proof.clone(),
-                    ..Default::default()
-                })?;
-                if let Some(contract) = &h.contract {
-                    p.name = "mmx.ProofOfSpaceNFT".into();
-                    p.fields
-                        .insert("contract".into(), Value::Bytes(contract.0.to_vec()));
-                }
-                let target = if hard_fork {
-                    let mut local_proof = p.clone();
-                    local_proof
-                        .fields
-                        .insert("challenge".into(), Value::Bytes(local.to_vec()));
-                    proof::calc_proof_hash(&local_proof)?
-                } else {
-                    pos::calc_quality(&local, &quality.meta)
-                };
-                if !proof::check_threshold(
-                    params,
-                    h.ksize as u8,
-                    &target,
-                    request.difficulty,
-                    hard_fork,
-                )? {
-                    continue;
-                }
-                if quality.proof.is_empty() {
-                    quality = plot.full_proof(quality.index, self.max_f1)?;
+            let one = (|| -> Result<Vec<Record>> {
+                let mut found = Vec::new();
+                let local = proof::plot_challenge(&request.challenge.0, &h.plot_id.0);
+                for mut quality in plot.qualities(&local, params.plot_filter, self.max_f1)? {
+                    if started.elapsed() >= window {
+                        break;
+                    }
+                    if hard_fork
+                        && !pos::check_post_filter(&local, &quality.meta, params.post_filter)
+                    {
+                        continue;
+                    }
+                    if hard_fork && quality.proof.is_empty() {
+                        quality = plot.full_proof(quality.index, self.max_f1)?;
+                    }
+                    let mut p = Record::from_generated(&mmx::ProofOfSpaceOG {
+                        ksize: h.ksize as u8,
+                        seed: h.seed.clone(),
+                        plot_id: h.plot_id.clone(),
+                        farmer_key: h.farmer_key.clone(),
+                        challenge: request.challenge.clone(),
+                        difficulty: request.difficulty,
+                        proof_xs: quality.proof.clone(),
+                        ..Default::default()
+                    })?;
+                    if let Some(contract) = &h.contract {
+                        p.name = "mmx.ProofOfSpaceNFT".into();
+                        p.fields
+                            .insert("contract".into(), Value::Bytes(contract.0.to_vec()));
+                    }
+                    let target = if hard_fork {
+                        let mut local_proof = p.clone();
+                        local_proof
+                            .fields
+                            .insert("challenge".into(), Value::Bytes(local.to_vec()));
+                        proof::calc_proof_hash(&local_proof)?
+                    } else {
+                        pos::calc_quality(&local, &quality.meta)
+                    };
+                    if !proof::check_threshold(
+                        params,
+                        h.ksize as u8,
+                        &target,
+                        request.difficulty,
+                        hard_fork,
+                    )? {
+                        continue;
+                    }
+                    if quality.proof.is_empty() {
+                        quality = plot.full_proof(quality.index, self.max_f1)?;
+                        p.fields.insert(
+                            "proof_xs".into(),
+                            Value::Sequence(
+                                quality
+                                    .proof
+                                    .into_iter()
+                                    .map(|x| Value::Uint(x.into()))
+                                    .collect(),
+                            ),
+                        );
+                    }
                     p.fields.insert(
-                        "proof_xs".into(),
-                        Value::Sequence(
-                            quality
-                                .proof
-                                .into_iter()
-                                .map(|x| Value::Uint(x.into()))
-                                .collect(),
-                        ),
+                        "score".into(),
+                        Value::Uint(proof::calc_proof_hash(&p)?[0].into()),
                     );
+                    let mut r = Record::from_generated(&mmx::ProofResponse {
+                        vdf_height: request.vdf_height,
+                        harvester: self.name.clone(),
+                        lookup_time_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                        ..Default::default()
+                    })?;
+                    r.fields.insert("proof".into(), Value::Record(p));
+                    r.fields
+                        .insert("hash".into(), Value::Bytes(r.calc_hash(false, 0)?.to_vec()));
+                    r.fields.insert(
+                        "content_hash".into(),
+                        Value::Bytes(response::content_hash(&r)?.to_vec()),
+                    );
+                    found.push(r);
                 }
-                p.fields.insert(
-                    "score".into(),
-                    Value::Uint(proof::calc_proof_hash(&p)?[0].into()),
-                );
-                let mut r = Record::from_generated(&mmx::ProofResponse {
-                    vdf_height: request.vdf_height,
-                    harvester: self.name.clone(),
-                    lookup_time_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
-                    ..Default::default()
-                })?;
-                r.fields.insert("proof".into(), Value::Record(p));
-                r.fields
-                    .insert("hash".into(), Value::Bytes(r.calc_hash(false, 0)?.to_vec()));
-                r.fields.insert(
-                    "content_hash".into(),
-                    Value::Bytes(response::content_hash(&r)?.to_vec()),
-                );
-                out.push(r);
+                Ok(found)
+            })();
+            match one {
+                Ok(found) => out.extend(found),
+                Err(e) => eprintln!("Plot {}: {e}", plot.path().display()),
             }
         }
         Ok(out)

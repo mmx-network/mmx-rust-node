@@ -1220,3 +1220,64 @@ cargo run -p mmxwallet -- balance --rpc https://rpc.mmx.network --json
 Key files contain the seed in plaintext, matching C++; a passphrase changes key
 derivation rather than encrypting the file. The CLI creates private directories
 and files and takes secrets through interactive prompts or `--input-stdin`.
+
+### Wallet, farmer, harvester and `mmx` services
+
+Build the tools with `cargo build --locked -p mmx-tools -p mmxwallet`. CI release
+archives include `mmx`, `mmx-wallet`, `mmxwallet`, `mmx-farmer`, `mmx-harvester`
+and `mmx-node` from the same source revision.
+
+```sh
+# The same wallet CLI is available under mmx wallet.
+mmx wallet create --json
+mmx wallet address --json
+
+# Native VNX services; use disposable/test keys while testing this port.
+mmx-wallet --key-file /path/to/wallet.dat --listen 127.0.0.1:11335
+mmx-farmer --wallet 127.0.0.1:11335 --node 127.0.0.1:11331 \
+  --reward-address mmx1... --listen 127.0.0.1:11333
+mmx-harvester --farmer 127.0.0.1:11333 --plot-dir /path/to/plots \
+  --threads 2 --max-f1 65536 --listen 127.0.0.1:11334
+
+# Generic native RPC; --args accepts the VNX JSON representation.
+mmx node get_height --endpoint 127.0.0.1:11331
+mmx farmer get_farm_info
+mmx harvester get_farm_info
+mmx wallet-rpc get_address --args '{"index":0,"offset":0}'
+# Secret RPC arguments can be supplied through stdin using --args -.
+```
+
+The wallet service loads one or more compatible key files, exposes account and
+address queries, lock/unlock, message signing, recovery/export and farmer-key
+access. Spending keys expire after `--lock-timeout` seconds (default 600); locking
+drops those keys while retaining addresses and the farmer identity. Each key
+file becomes wallet index 0, 1, ...; `--account` selects the derivation account.
+Passphrase-protected accounts acquire their address list on their first unlock.
+The standalone `mmx wallet` command handles transfers via the C++ REST API.
+
+Farmer keys use the C++ passphrase-independent KDF. The farmer signs native proof
+responses, headers (including reward targets and content hashes) and domain
+separated validator votes. It aggregates live harvester reports and drops expired
+reports. Signing services accept only explicit loopback IPs or private Unix
+sockets; spending/signing methods use separate VNX permission checks.
+
+The harvester discovers native `.plot` files with bounded recursion, ignores
+symlinks, rejects unknown farmer keys and duplicate plot IDs, and reuses unchanged
+plot headers on reload. It supports native HDD metadata parks, SSD proof lookups,
+delta-coded Y/PD parks, triangular X pairs and CPU X decompression. Park reads use
+`pread` on Unix, reuse parks within a lookup and do not write plot data. CPU work
+is limited by `--max-f1`; compression that exceeds the configured expansion limit
+is rejected explicitly. There is no GPU or remote recompute path yet.
+Challenges use a bounded queue and expire after ten seconds; failures in one plot
+do not discard proofs from other plots. The node publishes its C++ challenge
+window only while synced, and accepts signed farmer responses through its bounded
+inbox for the existing consensus checks.
+
+This is the first service checkpoint, **not production farming readiness**.
+Remaining work includes node block assembly/production and validator-vote
+scheduling, reverse farmer RPC routing for the C++ node, pool/NFT partial
+submission and virtual plots, persistent service configuration, and the wallet
+service's transaction/contract/offer/swap methods. Production plot files and an
+actual farm have not been exercised. Existing C++ witnesses, tiny native park
+files, permission tests and the complete standalone wallet CLI suite cover the
+implemented paths; mainnet sync continues in its existing process.

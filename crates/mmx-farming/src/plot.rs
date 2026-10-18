@@ -234,6 +234,7 @@ impl Prover {
             }
         }
         let mut result = Vec::new();
+        let mut meta_park: Option<(u64, Vec<u8>)> = None;
         for park in lo.saturating_sub(1)..parks {
             let data = self.read(
                 &file,
@@ -267,19 +268,22 @@ impl Prover {
                 }
                 let index = park * h.park_size_y as u64 + i as u64;
                 let quality = if h.has_meta {
-                    let data = self.read(
-                        &file,
-                        Self::offset(
-                            h.table_offset_meta,
-                            index / h.park_size_meta as u64,
-                            h.park_bytes_meta,
-                        )?,
-                        h.park_bytes_meta as usize,
-                    )?;
+                    let park = index / h.park_size_meta as u64;
+                    if meta_park.as_ref().is_none_or(|(id, _)| *id != park) {
+                        meta_park = Some((
+                            park,
+                            self.read(
+                                &file,
+                                Self::offset(h.table_offset_meta, park, h.park_bytes_meta)?,
+                                h.park_bytes_meta as usize,
+                            )?,
+                        ));
+                    }
+                    let data = &meta_park.as_ref().unwrap().1;
                     let mut meta = [0; 48];
                     for (j, word) in meta.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                         let value = read_bits(
-                            &data,
+                            data,
                             ((index % h.park_size_meta as u64) as usize * 12 + j)
                                 * h.ksize as usize,
                             h.ksize as usize,
