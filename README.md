@@ -214,6 +214,26 @@ history, execution and private-publication costs every 128 heights. It also logs
 proof-evidence reuse and each durable suffix replacement's deletion, row-copy
 and commit times.
 
+`bench_layout` compares ordinary SQLite rowid tables with `WITHOUT ROWID` using
+the actual versioned writes from a validated selected-chain snapshot. Each run
+replays the last 2,000 blocks into disposable databases, compares every historical
+row and tombstone, and checks deep rewinds through genesis. It holds a read
+snapshot while running; the source node can continue syncing.
+
+```sh
+cargo run --release -p mmx-db --example bench_layout -- \
+  --source-dir ./mmx-data --blocks 2000 --output ./tmp/layout-benchmark
+```
+
+On a million-block mainnet prefix, the same 2,000-block suffix took 1.349 s to
+publish with `WITHOUT ROWID` and 0.201 s with ordinary rowid tables. Both layouts
+matched every historical row and passed the deep rewind checks. This measures
+database publication; proof validation and networking still contribute to sync
+time. An offline rewrite of the running sync database preserved identical
+fingerprints for all 9,067,149 retained selected/archive rows. After reopening,
+sync averaged 169 blocks/s over an 82-second observation, and 60 HTTP status
+requests had p95 latency 0.54 s. These timings depend on host and peer load.
+
 The sync benchmark starts three frozen snapshot peers with independent node
 identities, then uses the production coordinator. `serve_snapshot` is a local
 benchmark utility that serves a previously validated archive, without a
@@ -250,10 +270,11 @@ reads only. Native compressed peer requests carry lossless block records.
 
 Socket integration tests download the native fixture chain, switch a deep fork,
 query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A mainnet run validated through height 113,248 before replacing the original
-single-peer downloader. Download then resumed with seven authenticated peers
-and HTTP RPC available throughout. A complete mainnet
-sync has not finished. The node uses an indexed disk backend with every
+A mainnet run validated through height 1,139,032 using five to seven authenticated peers,
+with no timeout body reassignments. Its selected hash matched C++, including
+checks immediately before and after the first hard fork at height 1,000,000.
+HTTP RPC remains available during sync. A complete mainnet sync has not finished.
+The node uses an indexed disk backend with every
 historical version retained. Sync throughput and remaining peer services are
 still being improved.
 
@@ -732,6 +753,25 @@ tip/version in one SQLite transaction, including replacements larger than 64 MiB
 Snapshot identity/generation checks reject stale or foreign replacements. Failed
 writes poison the handle until reopen; uncommitted publication recovers the old
 state and committed publication recovers the new state. No history is pruned.
+
+C++ `Node::write_block()` appends full bodies to a block file and stores their
+offsets in a separate index. Its `Table` implementation uses a write log and
+sorted runs with offset indexes. Rust currently stores block payloads in its
+versioned SQLite tables. New indexed tables use ordinary rowid storage so large
+payloads stay outside the composite primary-key index. Existing `WITHOUT ROWID`
+databases remain readable and are not rewritten automatically.
+
+To rewrite an existing node's physical layout, stop it, take a database backup,
+and run the offline utility. The exclusive writer lock prevents rewriting an
+active node. Each database rewrite is one full synchronous transaction, retains
+all historical versions and tombstones, and leaves its version unchanged.
+The logical schema remains compatible with earlier Rust readers. Rewriting
+needs temporary space for another copy; released pages remain reusable afterward.
+
+```sh
+cargo run --release -p mmx-db --example optimize_layout -- \
+  ./mmx-data/chain/selected ./mmx-data/chain/archive
+```
 
 The writer attempts a passive WAL checkpoint before opening a new branch reader
 when the WAL is at least 64 MiB, at most once every five seconds. These reader

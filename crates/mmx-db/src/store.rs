@@ -39,6 +39,15 @@ impl Store {
             Backend::Snapshot(s) => s.local.has_pending(),
         }
     }
+    /// Rewrite a legacy indexed table into the large-row layout, retaining all
+    /// versions and tombstones atomically. The logical format stays compatible.
+    /// Requires a primary indexed writer with no pending writes or snapshots.
+    pub fn optimize_layout(&mut self) -> Result<bool> {
+        match &mut self.0 {
+            Backend::Disk(d) => d.optimize_layout(),
+            Backend::Journal(_) | Backend::Snapshot(_) => Err(Error::SnapshotMismatch),
+        }
+    }
     pub fn get(&self, t: &str, k: &[u8], max: Option<u32>) -> Result<Option<Vec<u8>>> {
         match &self.0 {
             Backend::Journal(d) => Ok(d.get(t, k, max).map(ToOwned::to_owned)),

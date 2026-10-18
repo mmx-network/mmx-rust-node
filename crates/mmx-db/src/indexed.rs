@@ -16,7 +16,7 @@ const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 const SCHEMA: &str = "CREATE TABLE meta(id INTEGER PRIMARY KEY CHECK(id=0),version INTEGER NOT NULL,generation INTEGER NOT NULL);
     INSERT INTO meta VALUES(0,0,0);
-    CREATE TABLE history(t TEXT NOT NULL,n INTEGER NOT NULL,k BLOB NOT NULL,v INTEGER NOT NULL,value BLOB,PRIMARY KEY(t,n,k,v)) WITHOUT ROWID;
+    CREATE TABLE history(t TEXT NOT NULL,n INTEGER NOT NULL,k BLOB NOT NULL,v INTEGER NOT NULL,value BLOB,PRIMARY KEY(t,n,k,v));
     CREATE INDEX history_version ON history(v);
     CREATE INDEX history_key ON history(t,k,v);
     PRAGMA application_id=1296914514; PRAGMA user_version=1;";
@@ -161,6 +161,41 @@ impl Disk {
     }
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+    pub fn optimize_layout(&mut self) -> Result<bool> {
+        self.readable()?;
+        let without_rowid: bool = self.conn.query_row(
+            "SELECT wr FROM pragma_table_list WHERE schema='main' AND name='history'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !without_rowid {
+            return Ok(false);
+        }
+        // A rewrite cannot invalidate a detached branch's publication epoch.
+        if !self.pending.is_empty() || Arc::strong_count(&self.identity) != 1 {
+            return Err(Error::SnapshotMismatch);
+        }
+        let generation = self.generation.checked_add(1).ok_or(Error::InvalidEntry)?;
+        let result = (|| -> Result<()> {
+            let transaction = self.conn.transaction()?;
+            transaction.execute_batch(
+                "ALTER TABLE history RENAME TO history_legacy;
+                 CREATE TABLE history(t TEXT NOT NULL,n INTEGER NOT NULL,k BLOB NOT NULL,v INTEGER NOT NULL,value BLOB,PRIMARY KEY(t,n,k,v));
+                 INSERT INTO history SELECT * FROM history_legacy ORDER BY t,n,k,v;
+                 DROP TABLE history_legacy;
+                 CREATE INDEX history_version ON history(v);
+                 CREATE INDEX history_key ON history(t,k,v);")?;
+            transaction.execute("UPDATE meta SET generation=?1 WHERE id=0", [generation])?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result?;
+        self.generation = generation;
+        Ok(true)
     }
     pub fn commit_batch(
         &mut self,
@@ -669,6 +704,135 @@ mod failure_tests {
         assert_eq!(disk.version, 1);
         assert_eq!(disk.get("t", b"x", None).unwrap(), Some(b"old".to_vec()));
         assert_eq!(disk.get("t", b"pending", None).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn legacy(path: &Path) -> Disk {
+        fs::create_dir_all(path).unwrap();
+        let conn = Connection::open(path.join("state.sqlite")).unwrap();
+        let schema = SCHEMA.replace(
+            "PRIMARY KEY(t,n,k,v));",
+            "PRIMARY KEY(t,n,k,v)) WITHOUT ROWID;",
+        );
+        conn.execute_batch(&schema).unwrap();
+        drop(conn);
+        let disk = Disk::open(path).unwrap();
+        assert!(is_without_rowid(&disk.conn));
+        disk
+    }
+    fn is_without_rowid(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT wr FROM pragma_table_list WHERE schema='main' AND name='history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+    fn compare(disk: &Disk, memory: &Database) {
+        assert_eq!(disk.version, memory.version());
+        for max in [None, Some(0), Some(1), Some(7), Some(20), Some(u32::MAX)] {
+            for table in ["a", "b", "missing"] {
+                for key in [b"".as_slice(), b"a", b"aa", b"\xff"] {
+                    assert_eq!(
+                        disk.get(table, key, max).unwrap(),
+                        memory.get(table, key, max).map(ToOwned::to_owned)
+                    );
+                }
+                assert_eq!(
+                    disk.scan(table, Some(&[]), &[], None, max).unwrap(),
+                    memory.scan(table, &[], max)
+                );
+            }
+        }
+    }
+    #[test]
+    fn legacy_layout_rewrite_preserves_all_versions_tombstones_and_snapshot_guards() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut disk = legacy(directory.path());
+        let mut memory = Database::memory();
+        for height in 0..21u32 {
+            let writes: Vec<_> = [b"".as_slice(), b"a", b"aa", b"\xff"]
+                .iter()
+                .enumerate()
+                .map(|(i, key)| {
+                    let table = if i % 2 == 0 { "a" } else { "b" };
+                    if (height + i as u32).is_multiple_of(4) {
+                        Write::delete(table, *key)
+                    } else {
+                        Write::put(table, *key, vec![height as u8; 5300 + i])
+                    }
+                })
+                .collect();
+            disk.commit_batch(height + 1, writes.clone()).unwrap();
+            memory.commit_batch(height + 1, writes).unwrap();
+        }
+        let branch = disk.fork(disk.version).unwrap();
+        assert!(matches!(
+            disk.optimize_layout(),
+            Err(Error::SnapshotMismatch)
+        ));
+        drop(branch);
+        disk.apply([Write::put("a", b"pending", b"pending")])
+            .unwrap();
+        assert!(matches!(
+            disk.optimize_layout(),
+            Err(Error::SnapshotMismatch)
+        ));
+        disk.revert(21).unwrap();
+        let generation = disk.generation;
+        assert!(disk.optimize_layout().unwrap());
+        assert!(!is_without_rowid(&disk.conn));
+        assert_eq!(disk.generation, generation + 1);
+        assert!(!disk.optimize_layout().unwrap());
+        compare(&disk, &memory);
+        drop(disk);
+        let mut disk = Disk::open(directory.path()).unwrap();
+        compare(&disk, &memory);
+        // Exercise a detached suffix from the rewritten layout, then every
+        // rewind through genesis against the independent journal backend.
+        let mut branch = disk.fork(21).unwrap();
+        branch
+            .local
+            .commit_batch(22, [Write::put("a", b"aa", b"new")])
+            .unwrap();
+        disk.replace(21, &branch).unwrap();
+        drop(branch);
+        memory
+            .commit_batch(22, [Write::put("a", b"aa", b"new")])
+            .unwrap();
+        compare(&disk, &memory);
+        for height in (0..=22).rev() {
+            disk.revert(height).unwrap();
+            memory.revert(height).unwrap();
+            compare(&disk, &memory);
+        }
+    }
+    #[test]
+    fn failed_layout_rewrite_rolls_back_ddl_and_requires_writer_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut disk = legacy(directory.path());
+        disk.commit_batch(1, [Write::put("a", b"a", vec![7; 65536])])
+            .unwrap();
+        let pages: u32 = disk
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        disk.conn
+            .execute_batch(&format!("PRAGMA max_page_count={pages}"))
+            .unwrap();
+        assert!(disk.optimize_layout().is_err());
+        assert!(matches!(disk.get("a", b"a", None), Err(Error::Poisoned)));
+        assert!(is_without_rowid(&disk.conn));
+        drop(disk);
+        let mut disk = Disk::open(directory.path()).unwrap();
+        assert_eq!(disk.version, 1);
+        assert_eq!(disk.get("a", b"a", None).unwrap(), Some(vec![7; 65536]));
+        assert!(disk.optimize_layout().unwrap());
+        assert_eq!(disk.get("a", b"a", None).unwrap(), Some(vec![7; 65536]));
     }
 }
 
