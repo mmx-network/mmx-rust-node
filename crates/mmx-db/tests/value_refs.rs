@@ -49,7 +49,7 @@ fn compaction_moves_only_references_and_preserves_empty_values_and_tombstones() 
         )
         .unwrap();
     let log_size = journal.end();
-    assert!(log_size >= 2 * 1024 * 1024 && log_size < 2 * 1024 * 1024 + 1024);
+    assert!((2 * 1024 * 1024..2 * 1024 * 1024 + 1024).contains(&log_size));
     let mut builder = Builder::new(directory.path(), 0).unwrap();
     for index in indexes {
         builder
