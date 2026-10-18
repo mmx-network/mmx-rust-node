@@ -6,6 +6,7 @@ pub mod peer;
 mod peer_state;
 pub mod rpc;
 pub mod sync;
+mod transactions;
 mod vdf_worker;
 
 pub use node::Node;

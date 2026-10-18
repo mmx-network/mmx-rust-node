@@ -31,6 +31,7 @@ pub struct Node {
     verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
     vdf_worker: Option<crate::vdf_worker::Worker>,
     responses: Vec<(Record, i64)>,
+    pub(crate) tx_pool: crate::transactions::Pool,
     inbox: Inbox,
     peer_state: PeerState,
 }
@@ -121,6 +122,7 @@ impl Node {
             verified_work: BTreeMap::new(),
             vdf_worker: None,
             responses: vec![],
+            tx_pool: Default::default(),
             inbox: Inbox::default(),
             peer_state,
         })
@@ -224,6 +226,7 @@ impl Node {
         self.pending.clear();
         self.verified_work.clear();
         self.responses.clear();
+        self.tx_pool.clear()?;
         self.inbox.clear()?;
         Ok(())
     }
@@ -388,6 +391,7 @@ impl Node {
         }
         self.pending
             .retain(|_, b| number(b, "height").is_ok_and(|h| h > self.root));
+        self.prune_transactions()?;
         self.peer_state.publish(tip.height, self.synced);
         if out.applied.len() >= 64 && std::env::var_os("MMX_PROFILE_REPLAY").is_some() {
             eprintln!("Node update: blocks={} prepare_ms={:.3} fork_ms={:.3} load_ms={:.3} proofs_ms={:.3} choice_ms={:.3} lineage_ms={:.3} replay_ms={:.3} policy_ms={:.3}",
@@ -511,8 +515,10 @@ impl Node {
                 self.responses
                     .push((message.clone(), vnx::util::get_wall_time_millis()));
             }
-            // Other broadcasts are not ledger admissions. Transaction submission
-            // and farmer response relay are separate from the read/sync service.
+            "mmx.Transaction" if self.synced => {
+                self.add_transaction(message, false)?;
+            }
+            // Unrecognized broadcasts have no ledger effects.
             _ => (),
         }
         Ok(update)
@@ -561,6 +567,10 @@ impl Node {
             }))
         };
         let value = match request.name.as_str() {
+            "mmx.Node.validate" => Value::Record(
+                self.validate_transaction(request.field("tx")?.record()?)?
+                    .to_record(),
+            ),
             "mmx.Node.get_params" => Value::Record(Record::from_generated(selected.params())?),
             "mmx.Node.get_vdf_height" => Value::Uint(self.vdf_peak()?.0.into()),
             "mmx.Node.get_synced_vdf_height" => optional(
@@ -590,7 +600,19 @@ impl Node {
                     })
                     .transpose()?,
             ),
-            "mmx.Node.get_transaction" => block_value(visible_transaction(&hash(request, "id")?)?),
+            "mmx.Node.get_transaction" => {
+                let id = hash(request, "id")?;
+                let pending = request.field("pending")?.boolean()?;
+                block_value(if pending {
+                    if let Some(entry) = self.tx_pool.entries.get(&id) {
+                        Some(entry.record.as_ref().clone())
+                    } else {
+                        visible_transaction(&id)?
+                    }
+                } else {
+                    visible_transaction(&id)?
+                })
+            }
             "mmx.Node.get_transactions" => Value::Sequence(
                 request
                     .field("ids")?
@@ -631,6 +653,63 @@ impl Node {
                     })?);
                 }
                 block_value(contract)
+            }
+            "mmx.Node.get_all_balances"
+            | "mmx.Node.get_total_balances"
+            | "mmx.Node.get_balances"
+            | "mmx.Node.get_total_balance" => {
+                let mut query = request.clone();
+                if request.name == "mmx.Node.get_balances" {
+                    query.fields.insert(
+                        "addresses".into(),
+                        Value::Sequence(vec![request.field("address")?.clone()]),
+                    );
+                }
+                if request.name == "mmx.Node.get_total_balance" {
+                    query.fields.insert(
+                        "whitelist".into(),
+                        Value::Sequence(vec![request.field("currency")?.clone()]),
+                    );
+                    query.fields.insert("limit".into(), Value::Int(-1));
+                }
+                let values = self.all_balances(&query)?;
+                if request.name == "mmx.Node.get_all_balances" {
+                    Value::Map(
+                        values
+                            .into_iter()
+                            .map(|((a, c), n)| {
+                                (
+                                    Value::Sequence(vec![bytes(a), bytes(c)]),
+                                    bytes(n.to_le_bytes()),
+                                )
+                            })
+                            .collect(),
+                    )
+                } else {
+                    let mut totals = BTreeMap::<Hash, u128>::new();
+                    for ((_, currency), amount) in values {
+                        let value = totals.entry(currency).or_default();
+                        *value = value
+                            .checked_add(amount)
+                            .ok_or_else(|| error("balance total overflow"))?;
+                    }
+                    if request.name == "mmx.Node.get_total_balance" {
+                        bytes(
+                            totals
+                                .get(&hash(request, "currency")?)
+                                .copied()
+                                .unwrap_or(0)
+                                .to_le_bytes(),
+                        )
+                    } else {
+                        Value::Map(
+                            totals
+                                .into_iter()
+                                .map(|(c, n)| (bytes(c), bytes(n.to_le_bytes())))
+                                .collect(),
+                        )
+                    }
+                }
             }
             "mmx.Node.get_balance" => bytes(
                 selected

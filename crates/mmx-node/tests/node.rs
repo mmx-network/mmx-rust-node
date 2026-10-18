@@ -64,6 +64,122 @@ fn node(network: &Network) -> Arc<Mutex<Node>> {
         Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap(),
     ))
 }
+#[test]
+fn transaction_validation_pool_rpc_and_confirmation_use_native_snapshots() {
+    let (network, g, steps, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let n = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
+    let mut source = MemorySource {
+        blocks: vec![wire(&g["block"])],
+        wrong: false,
+    };
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    let block = wire(&steps[0]["block"]);
+    let mut tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+        .record()
+        .unwrap()
+        .clone();
+    let receipt = tx
+        .field("exec_result")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .unwrap()
+        .clone();
+    tx.fields.insert("exec_result".into(), V::Optional(None));
+    tx.fields.insert(
+        "static_cost".into(),
+        V::Uint(tx.calc_cost(&(&network.params).into()).unwrap()),
+    );
+    tx.fields.insert(
+        "content_hash".into(),
+        V::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
+    );
+    let id = hash(&tx, "id").unwrap();
+    let sender = tx
+        .field("sender")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .unwrap()
+        .clone();
+    let files = || {
+        fn visit(path: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+            for e in std::fs::read_dir(path).unwrap() {
+                let path = e.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, out);
+                } else {
+                    out.push((path.clone(), std::fs::read(path).unwrap()));
+                }
+            }
+        }
+        let mut out = vec![];
+        visit(dir.path(), &mut out);
+        out.sort();
+        out
+    };
+    let before = files();
+    {
+        let mut node = n.lock().unwrap();
+        assert!(node.is_synced());
+        let result = node.validate_transaction(&tx).unwrap();
+        assert_eq!(V::Record(result.to_record()), receipt);
+        assert!(node.add_transaction(&tx, true).unwrap());
+        assert!(!node.add_transaction(&tx, true).unwrap());
+        assert_eq!(node.pending_transactions(), 1);
+        for pending in [false, true] {
+            let response = node
+                .call(&record(
+                    "mmx.Node.get_transaction",
+                    [("id", V::Bytes(id.to_vec())), ("pending", V::Bool(pending))],
+                ))
+                .unwrap();
+            assert_eq!(
+                response
+                    .field("_ret_0")
+                    .unwrap()
+                    .optional()
+                    .unwrap()
+                    .is_some(),
+                pending
+            );
+        }
+        let response = node
+            .call(&record(
+                "mmx.Node.get_total_balance",
+                [
+                    ("addresses", V::Sequence(vec![sender.clone(), sender])),
+                    ("currency", V::Bytes(vec![0; 32])),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            u128::from_le_bytes(
+                response
+                    .field("_ret_0")
+                    .unwrap()
+                    .bytes()
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            ),
+            10_000_000
+        );
+        let mut bad = tx.clone();
+        bad.fields.insert("id".into(), V::Bytes(vec![42; 32]));
+        assert!(node.add_transaction(&bad, true).is_err());
+        assert_eq!(node.pending_transactions(), 1);
+    }
+    assert_eq!(
+        files(),
+        before,
+        "mempool and dry-run validation must not write database files"
+    );
+    source.blocks.push(block);
+    sync::synchronize_pipelined(&mut source, &n, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(n.lock().unwrap().pending_transactions(), 0);
+}
 fn check(node: &Arc<Mutex<Node>>, step: &Value) {
     let n = node.lock().unwrap();
     let s = n.chain().selected();

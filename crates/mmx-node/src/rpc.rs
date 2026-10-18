@@ -1,5 +1,5 @@
-//! Native VNX reads and bounded farming topics, plus a JSON-RPC 2.0 HTTP
-//! presentation of the reads. Peer block transport retains lossless records.
+//! Native VNX ledger RPCs, transaction admission and bounded farming topics,
+//! plus a JSON-RPC 2.0 HTTP presentation. Peer block transport retains lossless records.
 use crate::{error, Node, Result};
 use mmx_consensus::Record;
 use std::{
@@ -40,6 +40,12 @@ pub const METHODS: &[&str] = &[
     "get_contract",
     "get_contract_for",
     "get_balance",
+    "get_all_balances",
+    "get_balances",
+    "get_total_balance",
+    "get_total_balances",
+    "validate",
+    "add_transaction",
 ];
 
 fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Value> {
@@ -47,7 +53,7 @@ fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Va
         return Err(error("RPC parameters must be an object"));
     }
     if !METHODS.contains(&method) {
-        return Err(error(format!("unsupported read method: {method}")));
+        return Err(error(format!("unsupported node method: {method}")));
     }
     args["__type"] = json!(format!("mmx.Node.{method}"));
     let registry = mmx_types::vnx_registry()?;
@@ -60,11 +66,17 @@ fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Va
     let mut writer = Writer::new(Vec::new(), registry.clone());
     writer.write(&args)?;
     let request = Record::decode(&writer.into_inner())?;
-    let response = node
-        .lock()
-        .map_err(|_| error("node lock poisoned"))?
-        .call(&request)?
-        .encode()?;
+    let response = {
+        let mut n = node.lock().map_err(|_| error("node lock poisoned"))?;
+        if method == "add_transaction" {
+            n.add_transaction(
+                request.field("tx")?.record()?,
+                request.field("pre_validate")?.boolean()?,
+            )?;
+            return Ok(Value::Null);
+        }
+        n.call(&request)?.encode()?
+    };
     let response = Reader::new(Cursor::new(response), registry)
         .with_utf8_lossy(true)
         .read()?;
@@ -99,7 +111,14 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
         let node = node.clone();
         methods.add(
             format!("mmx.Node.{method}"),
-            Some("mmx.permission_e.PUBLIC".into()),
+            Some(
+                if method == "add_transaction" {
+                    "vnx.permission_e.PUBLISH"
+                } else {
+                    "mmx.permission_e.PUBLIC"
+                }
+                .into(),
+            ),
             move |args, _| {
                 dispatch(&node, method, args).map_err(|e| vnx::Error::Remote(e.to_string()))
             },
@@ -220,7 +239,7 @@ fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
             let inbox = n.inbox().stats()?;
             Ok(
                 json!({"height":tip.height,"vdf_height":tip.vdf_height,"root_height":n.root,"earliest_height":n.earliest_height(),
-                "synced":n.synced,"sync_peers":n.sync_peers,"network":n.chain.selected().params().network,
+                "pending_transactions":n.pending_transactions(),"synced":n.synced,"sync_peers":n.sync_peers,"network":n.chain.selected().params().network,
                 "sync_body_requests":n.sync_body_requests,"sync_body_retries":n.sync_body_retries,
                 "sync_backpressure_retries":n.sync_backpressure_retries,
                 "hash":vnx::util::to_hex_string(&tip.hash.0,false,false),

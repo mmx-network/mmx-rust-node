@@ -6,6 +6,7 @@ use crate::{
     inbox::Inbox,
     node::{number, record},
     peer_state::PeerState,
+    transactions::{Relay, RelayPeer},
     Node, Result,
 };
 use mmx_consensus::{Hash, Record, Value};
@@ -290,12 +291,14 @@ pub struct Client {
     inbox: Inbox,
     backpressure_retries: u64,
     peer_state: PeerState,
+    relay: Relay,
+    relay_peer: RelayPeer,
 }
 impl Client {
     pub fn connect(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
-        let (inbox, peer_state) = {
+        let (inbox, peer_state, relay) = {
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
-            (local.inbox(), local.peer_state())
+            (local.inbox(), local.peer_state(), local.transaction_relay())
         };
         Ok(Self {
             connection: Connection::connect(address)?,
@@ -304,6 +307,8 @@ impl Client {
             inbox,
             backpressure_retries: 0,
             peer_state,
+            relay,
+            relay_peer: Default::default(),
         })
     }
     pub fn call(&mut self, method: Record) -> Result<Value> {
@@ -312,6 +317,8 @@ impl Client {
             .ok_or_else(|| error("missing peer result"))
     }
     fn call_many(&mut self, methods: Vec<Record>) -> Result<Vec<Value>> {
+        self.relay_peer
+            .flush(&self.relay, |r| self.connection.send(r))?;
         let mut pending = std::collections::BTreeMap::new();
         let mut results = vec![None; methods.len()];
         let mut queued: std::collections::VecDeque<_> = (0..methods.len()).collect();
@@ -531,6 +538,7 @@ impl Client {
             .collect()
     }
     fn handle(&mut self, message: Record) -> Result<()> {
+        self.relay_peer.note(&message);
         if message.name == "mmx.Request" {
             respond_with(&self.node, &self.peer_state, &mut self.connection, &message)
         } else {
@@ -540,6 +548,8 @@ impl Client {
         }
     }
     pub fn poll(&mut self) -> Result<()> {
+        self.relay_peer
+            .flush(&self.relay, |r| self.connection.send(r))?;
         if let Some(message) = self.connection.receive(Duration::from_millis(500))? {
             self.handle(message)?;
         }
@@ -583,9 +593,9 @@ pub struct Server {
 }
 impl Server {
     pub fn bind(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
-        let (inbox, peer_state) = {
+        let (inbox, peer_state, relay) = {
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
-            (local.inbox(), local.peer_state())
+            (local.inbox(), local.peer_state(), local.transaction_relay())
         };
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
@@ -608,14 +618,18 @@ impl Server {
                         let node = node.clone();
                         let inbox = inbox.clone();
                         let peer_state = peer_state.clone();
+                        let relay = relay.clone();
                         let stop = running.clone();
                         workers.push(thread::spawn(move || {
                             let run = || -> Result<()> {
                                 let mut connection = Connection::new(stream)?;
+                                let mut relay_peer = RelayPeer::default();
                                 while !stop.load(Ordering::Relaxed) {
+                                    relay_peer.flush(&relay, |r| connection.send(r))?;
                                     if let Some(msg) =
                                         connection.receive(Duration::from_millis(200))?
                                     {
+                                        relay_peer.note(&msg);
                                         if msg.name == "mmx.Request" {
                                             respond_with(
                                                 &node,

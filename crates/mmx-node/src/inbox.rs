@@ -14,6 +14,8 @@ pub(crate) struct Inbox(Arc<Mutex<Queue>>);
 struct Queue {
     messages: VecDeque<(Record, usize)>,
     bytes: usize,
+    transactions: VecDeque<(Record, usize)>,
+    transaction_bytes: usize,
     dropped: u64,
 }
 #[derive(Clone, Copy)]
@@ -26,11 +28,34 @@ impl Inbox {
     pub fn submit(&self, record: Record, wire_bytes: usize) -> Result<()> {
         if !matches!(
             record.name.as_str(),
-            "mmx.Block" | "mmx.ProofOfTime" | "mmx.ValidatorVote" | "mmx.ProofResponse"
+            "mmx.Block"
+                | "mmx.ProofOfTime"
+                | "mmx.ValidatorVote"
+                | "mmx.ProofResponse"
+                | "mmx.Transaction"
         ) {
             return Ok(());
         }
         let mut queue = self.0.lock().map_err(|_| error("peer inbox poisoned"))?;
+        if record.name == "mmx.Transaction" {
+            if wire_bytes > 256 * 1024 {
+                queue.dropped = queue.dropped.wrapping_add(1);
+                return Ok(());
+            }
+            while queue.transaction_bytes + wire_bytes > 8 * 1024 * 1024
+                || queue.transactions.len() >= 256
+            {
+                let (_, bytes) = queue
+                    .transactions
+                    .pop_front()
+                    .expect("nonempty transaction inbox");
+                queue.transaction_bytes -= bytes;
+                queue.dropped = queue.dropped.wrapping_add(1);
+            }
+            queue.transaction_bytes += wire_bytes;
+            queue.transactions.push_back((record, wire_bytes));
+            return Ok(());
+        }
         if wire_bytes > MAX_BYTES {
             queue.dropped = queue.dropped.wrapping_add(1);
             return Ok(());
@@ -47,17 +72,28 @@ impl Inbox {
     pub fn take(&self) -> Result<VecDeque<(Record, usize)>> {
         let mut queue = self.0.lock().map_err(|_| error("peer inbox poisoned"))?;
         queue.bytes = 0;
-        Ok(std::mem::take(&mut queue.messages))
+        let mut messages = std::mem::take(&mut queue.messages);
+        for _ in 0..4 {
+            if let Some((r, size)) = queue.transactions.pop_front() {
+                queue.transaction_bytes -= size;
+                messages.push_back((r, size));
+            }
+        }
+        Ok(messages)
     }
     pub fn clear(&self) -> Result<()> {
-        drop(self.take()?);
+        let mut queue = self.0.lock().map_err(|_| error("peer inbox poisoned"))?;
+        queue.messages.clear();
+        queue.transactions.clear();
+        queue.bytes = 0;
+        queue.transaction_bytes = 0;
         Ok(())
     }
     pub fn stats(&self) -> Result<Stats> {
         let queue = self.0.lock().map_err(|_| error("peer inbox poisoned"))?;
         Ok(Stats {
-            messages: queue.messages.len(),
-            bytes: queue.bytes,
+            messages: queue.messages.len() + queue.transactions.len(),
+            bytes: queue.bytes + queue.transaction_bytes,
             dropped: queue.dropped,
         })
     }
@@ -67,6 +103,22 @@ impl Inbox {
 mod tests {
     use super::*;
     use crate::node::record;
+
+    #[test]
+    fn transaction_flood_cannot_evict_consensus_messages() {
+        let inbox = Inbox::default();
+        inbox.submit(record("mmx.Block", []), 100).unwrap();
+        for _ in 0..300 {
+            inbox.submit(record("mmx.Transaction", []), 100).unwrap();
+        }
+        let batch = inbox.take().unwrap();
+        assert_eq!(batch.len(), 5);
+        assert_eq!(batch[0].0.name, "mmx.Block");
+        assert_eq!(inbox.stats().unwrap().messages, 252);
+        assert_eq!(inbox.stats().unwrap().dropped, 44);
+        inbox.clear().unwrap();
+        assert_eq!(inbox.stats().unwrap().bytes, 0);
+    }
 
     #[test]
     fn handoff_preserves_fifo_and_bounds_bytes_and_count() {
