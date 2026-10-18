@@ -843,11 +843,31 @@ fn publish_with(
     account_window(&window, progress);
     let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
     let params = local.chain.selected().params();
+    let genesis = if window.start == 0 {
+        local
+            .chain
+            .selected()
+            .hash_at(0)?
+            .map(|id| local.chain.block(&id))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
     let mut blocks = Vec::new();
     let mut accepted = Vec::new();
     for values in &window.heights {
         let mut ids = Vec::new();
         for block in values {
+            // The final tip probe includes height zero on a fresh network.
+            // Recognize only our exact bootstrap; never admit peer genesis
+            // variants or search for a genesis predecessor.
+            if number(block, "height")? == 0 {
+                if genesis.as_ref() == Some(block) {
+                    ids.push(hash(block, "hash")?);
+                }
+                continue;
+            }
             let Value::Int(stamp) = block.field("time_stamp")? else {
                 continue;
             };

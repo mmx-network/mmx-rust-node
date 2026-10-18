@@ -142,6 +142,43 @@ fn counts(events: &Arc<Mutex<Vec<Event>>>) -> BTreeMap<Hash, usize> {
     out
 }
 #[test]
+fn genesis_only_network_finishes_coordinated_sync_without_readmitting_genesis() {
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = peers(&blocks[..1], &events);
+    let progress = synchronize_peers(&mut pool, &node, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(progress.selected, 0);
+    assert_eq!(progress.body_requests, 0, "reuse the trusted genesis body");
+    assert!(node.lock().unwrap().is_synced());
+    assert!(node.lock().unwrap().sync_pending.is_empty());
+
+    let mut changed = blocks[0].clone();
+    changed.fields.insert("time_stamp".into(), Value::Int(123));
+    let published = publish_with(
+        Window {
+            start: 0,
+            heights: vec![vec![changed], vec![]],
+            ..Default::default()
+        },
+        &node,
+        &mut Progress::default(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(published.usable, [false, false]);
+    assert_eq!(
+        node.lock()
+            .unwrap()
+            .chain
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
+    );
+}
+#[test]
 fn requires_three_distinct_hash_responses_before_any_body_download() {
     let (_, node, blocks) = fixture();
     let events = Arc::new(Mutex::new(vec![]));
