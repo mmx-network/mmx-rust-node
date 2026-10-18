@@ -1,4 +1,5 @@
-use clap::Parser;
+mod config;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use mmx_farming::{
     farmer::Farmer,
     harvester::{ChallengeQueue, Harvester},
@@ -21,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 use vnx::{
-    net::NetworkClient,
+    net::{NetworkClient, Server},
     runtime::{Methods, OverflowPolicy, Runtime},
     serde_json::{self, json, Value},
     VnxType,
@@ -67,10 +68,12 @@ fn params(node: &NetworkClient, expected: Option<&str>) -> Result<mmx::ChainPara
     about = "Local native VNX wallet service; create/import key files with mmx wallet"
 )]
 pub struct WalletArgs {
+    #[command(flatten)]
+    layers: config::Layers,
     /// Native node VNX endpoint for balances, validation and spending.
     #[arg(long)]
     node: Option<String>,
-    #[arg(long, required = true)]
+    #[arg(long)]
     key_file: Vec<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:11335")]
     listen: String,
@@ -82,7 +85,38 @@ pub struct WalletArgs {
     lock_timeout: u64,
 }
 pub fn wallet_main() -> Result<()> {
-    let args = WalletArgs::parse();
+    let matches = WalletArgs::command().get_matches();
+    let mut args = WalletArgs::from_arg_matches(&matches)?;
+    let cfg = args.layers.load()?;
+    config::apply(
+        &matches,
+        &cfg,
+        "key_file",
+        "Wallet.key_files",
+        &mut args.key_file,
+    )?;
+    config::apply(
+        &matches,
+        &cfg,
+        "num_addresses",
+        "Wallet.num_addresses",
+        &mut args.num_addresses,
+    )?;
+    config::apply(
+        &matches,
+        &cfg,
+        "lock_timeout",
+        "Wallet.lock_timeout_sec",
+        &mut args.lock_timeout,
+    )?;
+    if args.key_file.is_empty() {
+        return Err(err("supply --key-file or Wallet.key_files in -c CONFIG"));
+    }
+    args.key_file = args
+        .key_file
+        .iter()
+        .map(|p| args.layers.relative(p))
+        .collect();
     let mut accounts = BTreeMap::new();
     for (index, path) in args.key_file.iter().enumerate() {
         let mut account = Account::new(
@@ -137,6 +171,14 @@ pub fn wallet_main() -> Result<()> {
     about = "Native farmer signer and harvester topic relay"
 )]
 pub struct FarmerArgs {
+    #[command(flatten)]
+    layers: config::Layers,
+    /// Restricted challenge/proof listener for remote harvesters.
+    #[arg(long)]
+    harvester_listen: Option<String>,
+    /// Require configured VNX user credentials on the harvester listener.
+    #[arg(long)]
+    require_harvester_login: bool,
     #[arg(long, default_value = "127.0.0.1:11335")]
     wallet: String,
     #[arg(long, default_value = "127.0.0.1:11331")]
@@ -170,7 +212,26 @@ fn farmer_keys(wallet: &NetworkClient) -> Result<Vec<FarmerKey>> {
         .collect()
 }
 pub fn farmer_main() -> Result<()> {
-    let args = FarmerArgs::parse();
+    let matches = FarmerArgs::command().get_matches();
+    let mut args = FarmerArgs::from_arg_matches(&matches)?;
+    let cfg = args.layers.load()?;
+    config::apply(
+        &matches,
+        &cfg,
+        "reward_address",
+        "Farmer.reward_addr",
+        &mut args.reward_address,
+    )?;
+    if args.harvester_listen.is_none() && cfg.read::<bool>("allow_remote")? == Some(true) {
+        args.harvester_listen = Some(config::endpoint(
+            &cfg.read::<String>("endpoint")?
+                .unwrap_or_else(|| "0.0.0.0".into()),
+            11333,
+        )?);
+        if matches.value_source("listen") != Some(clap::parser::ValueSource::CommandLine) {
+            args.listen = "127.0.0.1:11332".into();
+        }
+    }
     let node = connect(&args.node, "Node")?;
     let params = params(&node, args.network.as_deref())?;
     let wallet = connect(&args.wallet, "Wallet")?;
@@ -192,7 +253,11 @@ pub fn farmer_main() -> Result<()> {
             }
         }
     }
-    let farmer = Arc::new(Mutex::new(Farmer::new(keys, reward)));
+    let mut farmer = Farmer::new(keys, reward);
+    if let Some(seconds) = cfg.read::<u64>("Farmer.harvester_timeout")? {
+        farmer.harvester_timeout = Duration::from_secs(seconds);
+    }
+    let farmer = Arc::new(Mutex::new(farmer));
     let runtime = Runtime::new()?;
     let mac = vnx::util::random_nonzero_u64()?;
     let native_params = service::to_json(&mmx_consensus::Record::from_generated(&params)?)?;
@@ -220,7 +285,28 @@ pub fn farmer_main() -> Result<()> {
     options.publish_topics = ["harvester.proof".into(), "harvester.info".into()].into();
     options.export_topics = ["harvester.challenges".into(), "farmer.proof".into()].into();
     let mut server = service::bind_private(args.listen.parse()?, runtime.clone(), options)?;
-    println!("Farmer VNX RPC {}", server.endpoint());
+    let mut remote = args
+        .harvester_listen
+        .as_ref()
+        .map(|endpoint| -> Result<Server> {
+            let auth = vnx::auth::AuthenticationServer::from_config(&cfg)?;
+            Ok(Server::bind(
+                endpoint.parse()?,
+                runtime.clone(),
+                mmx_types::vnx_registry()?,
+                service::harvester_options(auth, args.require_harvester_login),
+            )?)
+        })
+        .transpose()?;
+    if let Some(remote) = &remote {
+        println!(
+            "Harvester VNX RPC {} / Farmer VNX RPC {}",
+            remote.endpoint(),
+            server.endpoint()
+        );
+    } else {
+        println!("Farmer VNX RPC {}", server.endpoint());
+    }
     let stop = stopping()?;
     let mut updated = Instant::now();
     while !stop.load(Ordering::Relaxed) {
@@ -280,13 +366,23 @@ pub fn farmer_main() -> Result<()> {
     }
     node.close();
     wallet.close();
+    if let Some(remote) = &mut remote {
+        remote.shutdown();
+    }
     server.shutdown();
     Ok(())
 }
 #[derive(Parser)]
 #[command(name = "mmx-harvester", about = "Native MMX disk plot harvester")]
 pub struct HarvesterArgs {
-    #[arg(long, required = true)]
+    #[command(flatten)]
+    layers: config::Layers,
+    #[arg(long)]
+    username: Option<String>,
+    /// Read the VNX login password from this file.
+    #[arg(long)]
+    password_file: Option<PathBuf>,
+    #[arg(long)]
     plot_dir: Vec<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:11333")]
     farmer: String,
@@ -304,7 +400,61 @@ pub struct HarvesterArgs {
     network: Option<String>,
 }
 pub fn harvester_main() -> Result<()> {
-    let args = HarvesterArgs::parse();
+    let matches = HarvesterArgs::command().get_matches();
+    let mut args = HarvesterArgs::from_arg_matches(&matches)?;
+    let cfg = args.layers.load()?;
+    config::apply(
+        &matches,
+        &cfg,
+        "plot_dir",
+        "Harvester.plot_dirs",
+        &mut args.plot_dir,
+    )?;
+    config::apply(&matches, &cfg, "name", "Harvester.my_name", &mut args.name)?;
+    config::apply(
+        &matches,
+        &cfg,
+        "threads",
+        "Harvester.num_threads",
+        &mut args.threads,
+    )?;
+    config::apply(
+        &matches,
+        &cfg,
+        "reload_interval",
+        "Harvester.reload_interval",
+        &mut args.reload_interval,
+    )?;
+    config::apply(&matches, &cfg, "farmer", "node", &mut args.farmer)?;
+    if args.farmer.starts_with(':') {
+        args.farmer = format!("127.0.0.1{}", args.farmer);
+    }
+    if args.plot_dir.is_empty() {
+        return Err(err("supply --plot-dir or Harvester.plot_dirs in -c CONFIG"));
+    }
+    if args.username.is_none() {
+        args.username = cfg.read("Proxy.username")?;
+    }
+    let password = if let Some(path) = &args.password_file {
+        Some(
+            std::fs::read_to_string(path)?
+                .trim_end_matches(['\r', '\n'])
+                .to_owned(),
+        )
+    } else {
+        cfg.read::<String>("Proxy.password")?
+    };
+    let login = |client: &NetworkClient| -> Result<()> {
+        if let Some(user) = &args.username {
+            client.login(
+                user,
+                password
+                    .as_deref()
+                    .ok_or_else(|| err("supply --password-file or Proxy.password"))?,
+            )?;
+        }
+        Ok(())
+    };
     if args.threads == 0 || args.threads > 256 {
         return Err(err("--threads must be 1..256"));
     }
@@ -312,14 +462,25 @@ pub fn harvester_main() -> Result<()> {
         .num_threads(args.threads)
         .build_global()?;
     let node = connect(&args.farmer, "Node")?;
+    login(&node)?;
     let params = params(&node, args.network.as_deref())?;
     node.close();
     let farmer = connect(&args.farmer, "Farmer")?;
+    login(&farmer)?;
     let keys: Vec<vnx::Fixed<u8, 33>> =
         serde_json::from_value(call(&farmer, "mmx.Farmer.get_farmer_keys", json!({}))?)?;
     let mut harvester = Harvester::new(args.name, keys.into_iter().map(|k| k.0))?;
     harvester.directories = args.plot_dir.into_iter().collect();
     harvester.max_f1 = args.max_f1;
+    if let Some(v) = cfg.read("Harvester.max_recursion")? {
+        harvester.max_recursion = v;
+    }
+    if let Some(v) = cfg.read("Harvester.recursive_search")? {
+        harvester.recursive = v;
+    }
+    if let Some(v) = cfg.read::<Vec<PathBuf>>("Harvester.dir_blacklist")? {
+        harvester.blacklist = v.into_iter().collect();
+    }
     harvester.reload();
     for (path, e) in &harvester.failures {
         eprintln!("{}: {e}", path.display());

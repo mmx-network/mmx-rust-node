@@ -853,6 +853,7 @@ dependencies = [
  "mmx-wallet",
  "mmxwallet",
  "rayon",
+ "serde",
  "tempfile",
  "vnx",
 ]

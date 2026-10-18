@@ -38,6 +38,10 @@ fn start_time(pid: u32) -> Option<String> {
 }
 impl Daemon {
     fn start(exe: &str, args: &[OsString], cwd: &Path) -> (Self, String) {
+        let (daemon, line) = Self::start_line(exe, args, cwd);
+        (daemon, line.split_whitespace().last().unwrap().into())
+    }
+    fn start_line(exe: &str, args: &[OsString], cwd: &Path) -> (Self, String) {
         use std::os::unix::ffi::OsStrExt;
         let exe = fs::canonicalize(exe).unwrap();
         let cwd = fs::canonicalize(cwd).unwrap();
@@ -74,7 +78,7 @@ impl Daemon {
             .recv_timeout(Duration::from_secs(15))
             .expect("daemon startup timed out");
         assert!(result.unwrap() > 0, "daemon exited during startup");
-        (daemon, line.split_whitespace().last().unwrap().into())
+        (daemon, line)
     }
     fn owns(&self) -> bool {
         let p = format!("/proc/{}", self.child.id());
@@ -244,7 +248,7 @@ fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof()
         include_bytes!("../../mmx-farming/tests/native/native-0.plot"),
     )
     .unwrap();
-    let (farmer, farmer_endpoint) = Daemon::start(
+    let (farmer, farmer_line) = Daemon::start_line(
         env!("CARGO_BIN_EXE_mmx-farmer"),
         &[
             "--wallet".into(),
@@ -253,16 +257,37 @@ fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof()
             node.endpoint().to_string().into(),
             "--listen".into(),
             "127.0.0.1:0".into(),
+            "--harvester-listen".into(),
+            "0.0.0.0:0".into(),
         ],
         dir.path(),
     );
+    let farmer_endpoint = farmer_line
+        .split_whitespace()
+        .nth(3)
+        .unwrap()
+        .replace("0.0.0.0:", "127.0.0.1:");
+    let remote = client(&farmer_endpoint, "Farmer");
+    assert!(remote
+        .call_value(
+            "mmx.Farmer.sign_vote",
+            json!({"vote":{"__type":"mmx.ValidatorVote"}})
+        )
+        .is_err());
+    remote.close();
+    let config = dir.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::write(
+        config.join("node"),
+        serde_json::to_vec(&farmer_endpoint).unwrap(),
+    )
+    .unwrap();
+    fs::write(config.join("Harvester.json"),serde_json::to_vec(&json!({"plot_dirs":[plot_dir],"num_threads":1,"my_name":"remote fixture","reload_interval":0})).unwrap()).unwrap();
     let (harvester, _) = Daemon::start(
         env!("CARGO_BIN_EXE_mmx-harvester"),
         &[
-            "--farmer".into(),
-            farmer_endpoint.into(),
-            "--plot-dir".into(),
-            plot_dir.into_os_string(),
+            "-c".into(),
+            config.into_os_string(),
             "--listen".into(),
             "127.0.0.1:0".into(),
             "--threads".into(),

@@ -351,3 +351,42 @@ pub fn private_options(services: impl IntoIterator<Item = String>) -> ServerOpti
         ..Default::default()
     }
 }
+
+/// Dedicated remote-harvester surface. Even a privileged configured login is
+/// restricted to these topic/read grants; block signing stays on the private socket.
+pub fn harvester_options(
+    auth: vnx::auth::AuthenticationServer,
+    require_login: bool,
+) -> ServerOptions {
+    let restrict = |mut session: Session| {
+        session.permissions = [
+            "mmx.permission_e.REMOTE",
+            "vnx.permission_e.VIEW",
+            "vnx.permission_e.PUBLISH",
+        ]
+        .map(str::to_owned)
+        .into();
+        session
+    };
+    let login = auth.clone();
+    let validate = auth.clone();
+    ServerOptions {
+        services: ["Node".into(), "Farmer".into()].into(),
+        session: if require_login {
+            Session::anonymous()
+        } else {
+            restrict(Session::anonymous())
+        },
+        authenticator: Some(Arc::new(move |name, hash| {
+            login.authenticate_hash(name, hash).map(restrict)
+        })),
+        session_validator: Some(Arc::new(move |id| {
+            Ok(validate.get_session(id)?.map(restrict))
+        })),
+        session_releaser: Some(Arc::new(move |id| auth.logout(id))),
+        export_topics: ["harvester.challenges".into()].into(),
+        publish_topics: ["harvester.proof".into(), "harvester.info".into()].into(),
+        max_connections: 64,
+        ..Default::default()
+    }
+}

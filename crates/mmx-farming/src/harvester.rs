@@ -46,7 +46,10 @@ impl Harvester {
     }
     fn files(&self, path: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
         if depth > self.max_recursion
-            || self.blacklist.contains(path)
+            || (self.blacklist.contains(path)
+                || path
+                    .file_name()
+                    .is_some_and(|name| self.blacklist.contains(Path::new(name))))
             || fs::symlink_metadata(path)?.file_type().is_symlink()
         {
             return Ok(());

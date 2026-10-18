@@ -7,6 +7,7 @@ license.workspace = true
 description = "MMX wallet, farmer, harvester and command line utility"
 
 [dependencies]
+serde.workspace = true
 mmx-types.workspace = true
 mmx-consensus.workspace = true
 mmx-farming.workspace = true

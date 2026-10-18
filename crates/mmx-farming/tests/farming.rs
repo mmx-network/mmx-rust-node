@@ -286,3 +286,69 @@ fn challenge_queue_prioritizes_newest_height_deduplicates_and_expires_work() {
     expired.push(mmx::Challenge::default(), Duration::ZERO);
     assert!(expired.pop().is_none());
 }
+
+#[test]
+fn remote_harvester_login_cannot_gain_signing_permissions() {
+    use vnx::auth::{final_hash, password_hash, AuthenticationServer, User};
+    let auth = AuthenticationServer::new();
+    auth.add_user(User {
+        name: "test".into(),
+        hashed_password: final_hash(&password_hash("test password")),
+        permissions: ["*".into()].into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let runtime = Runtime::new().unwrap();
+    runtime
+        .register(
+            "Farmer",
+            service::farmer_methods(
+                Arc::new(Mutex::new(Farmer::new([key()], None))),
+                mmx::ChainParams::default(),
+                1,
+            ),
+        )
+        .unwrap();
+    let mut server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        runtime,
+        mmx_types::vnx_registry().unwrap(),
+        service::harvester_options(auth, true),
+    )
+    .unwrap();
+    let client = NetworkClient::connect(
+        server.endpoint(),
+        "Farmer",
+        mmx_types::vnx_registry().unwrap(),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    assert!(client
+        .call_value("mmx.Farmer.get_farmer_keys", json!({}))
+        .is_err());
+    assert!(client.login("test", "wrong").is_err());
+    client.login("test", "test password").unwrap();
+    assert_eq!(
+        client
+            .call_value("mmx.Farmer.get_farmer_keys", json!({}))
+            .unwrap()["_ret_0"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(client
+        .call_value(
+            "mmx.Farmer.sign_vote",
+            json!({"vote":{"__type":"mmx.ValidatorVote"}})
+        )
+        .is_err());
+    assert!(client
+        .call_value(
+            "mmx.Farmer.sign_block",
+            json!({"block":{"__type":"mmx.BlockHeader"}})
+        )
+        .is_err());
+    client.close();
+    server.shutdown();
+}
