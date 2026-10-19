@@ -251,9 +251,11 @@ fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof()
     scalar[31] = 1;
     let key = FarmerKey::from_bytes(&scalar).unwrap();
     let public = key.public_key();
-    methods.add("mmx.Wallet.get_all_farmer_keys", None, move |_, _| {
-        Ok(json!([[scalar, public.as_slice()]]))
-    });
+    methods.add(
+        "mmx.Wallet.get_all_farmer_keys",
+        Some("mmx.permission_e.SPENDING".into()),
+        move |_, _| Ok(json!([[scalar, public.as_slice()]])),
+    );
     methods.add("mmx.Wallet.get_all_accounts", None, |_, _| {
         Ok(serde_json::to_value(vec![mmx::account_info_t {
             address: Some([7; 32].into()),
@@ -261,17 +263,35 @@ fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof()
         }])?)
     });
     wallet.register("Wallet", methods).unwrap();
+    let auth = vnx::auth::AuthenticationServer::new();
+    auth.add_user(vnx::auth::User {
+        name: "farmer-test".into(),
+        hashed_password: vnx::auth::final_hash(&vnx::auth::password_hash("wallet-test-password")),
+        permissions: ["mmx.permission_e.SPENDING".into()].into(),
+        ..Default::default()
+    })
+    .unwrap();
     let mut wallet = Server::bind(
         "127.0.0.1:0".parse().unwrap(),
         wallet,
         mmx_types::vnx_registry().unwrap(),
         ServerOptions {
             services: ["Wallet".into()].into(),
+            authenticator: Some(std::sync::Arc::new(move |name, hash| {
+                auth.authenticate_hash(name, hash)
+            })),
             ..Default::default()
         },
     )
     .unwrap();
+    let unauthorized = client(&wallet.endpoint().to_string(), "Wallet");
+    assert!(unauthorized
+        .call_value("mmx.Wallet.get_all_farmer_keys", json!({}))
+        .is_err());
+    unauthorized.close();
     let dir = tempfile::tempdir().unwrap();
+    let password = dir.path().join("wallet-password");
+    fs::write(&password, b"wallet-test-password\n").unwrap();
     let plot_dir = dir.path().join("plots");
     fs::create_dir(&plot_dir).unwrap();
     fs::write(
@@ -284,6 +304,10 @@ fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof()
         &[
             "--wallet".into(),
             wallet.endpoint().to_string().into(),
+            "--wallet-username".into(),
+            "farmer-test".into(),
+            "--wallet-password-file".into(),
+            password.into_os_string(),
             "--node".into(),
             node.endpoint().to_string().into(),
             "--listen".into(),

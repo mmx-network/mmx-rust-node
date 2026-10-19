@@ -1307,6 +1307,12 @@ mmx wallet-rpc get_address --args '{"index":0,"offset":0}'
 # Secret RPC arguments can be supplied through stdin using --args -.
 ```
 
+When using a C++ wallet that protects farmer keys, pass
+`--wallet-username mmx-admin --wallet-password-file /private/path/PASSWD` to
+`mmx-farmer`, or set `Farmer.wallet_username` and `Farmer.wallet_password_file`.
+Keep the wallet endpoint on loopback or inside an SSH tunnel. Only the derived
+farmer identities are requested; wallet seed files stay on the wallet host.
+
 For remote harvesters, enable native `allow_remote=true` on the farmer host.
 The restricted harvester listener defaults to `0.0.0.0:11333` (or the configured
 `endpoint` IP), while private signing moves to `127.0.0.1:11332`. Override them

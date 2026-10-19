@@ -182,6 +182,12 @@ pub struct FarmerArgs {
     require_harvester_login: bool,
     #[arg(long, default_value = "127.0.0.1:11335")]
     wallet: String,
+    /// VNX login for a wallet that protects farmer-key access.
+    #[arg(long)]
+    wallet_username: Option<String>,
+    /// Read the wallet login password from this file, never a command argument.
+    #[arg(long)]
+    wallet_password_file: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:11331")]
     node: String,
     #[arg(long, default_value = "127.0.0.1:11333")]
@@ -234,6 +240,25 @@ pub fn farmer_main() -> Result<()> {
     config::apply(
         &matches,
         &cfg,
+        "wallet_username",
+        "Farmer.wallet_username",
+        &mut args.wallet_username,
+    )?;
+    config::apply(
+        &matches,
+        &cfg,
+        "wallet_password_file",
+        "Farmer.wallet_password_file",
+        &mut args.wallet_password_file,
+    )?;
+    if args.wallet_username.is_some() != args.wallet_password_file.is_some() {
+        return Err(err(
+            "wallet login requires both --wallet-username and --wallet-password-file",
+        ));
+    }
+    config::apply(
+        &matches,
+        &cfg,
         "harvester_listen",
         "Farmer.harvester_endpoint",
         &mut args.harvester_listen,
@@ -268,6 +293,16 @@ pub fn farmer_main() -> Result<()> {
     let node = connect(&args.node, "Node")?;
     let params = params(&node, args.network.as_deref())?;
     let wallet = connect(&args.wallet, "Wallet")?;
+    if let (Some(username), Some(path)) = (&args.wallet_username, &args.wallet_password_file) {
+        let mut password = zeroize::Zeroizing::new(String::new());
+        File::open(args.layers.relative(path))?
+            .take(4097)
+            .read_to_string(&mut password)?;
+        if password.len() > 4096 {
+            return Err(err("wallet password file exceeds 4 KiB"));
+        }
+        wallet.login(username, password.trim_end_matches(['\r', '\n']))?;
+    }
     let keys = farmer_keys(&wallet)?;
     if keys.is_empty() {
         return Err(err("wallet has no farmer identities"));

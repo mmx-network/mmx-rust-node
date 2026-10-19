@@ -841,6 +841,7 @@ dependencies = [
  "serde",
  "tempfile",
  "vnx",
+ "zeroize",
 ]
 
 [[package]]
