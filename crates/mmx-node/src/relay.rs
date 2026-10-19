@@ -1,5 +1,6 @@
 //! Native peer gossip scheduling, receipts and bounded verified replay IDs.
 mod credits;
+mod history;
 mod upload;
 use crate::{
     error,
@@ -59,6 +60,7 @@ struct RelayState {
     early: BTreeMap<u64, ([u8; 32], usize)>,
     early_bytes: usize,
     max_segments: usize,
+    history: history::History,
 }
 impl Default for RelayState {
     fn default() -> Self {
@@ -78,6 +80,7 @@ impl Default for RelayState {
             early: Default::default(),
             early_bytes: 0,
             max_segments: 65536,
+            history: Default::default(),
         }
     }
 }
@@ -147,7 +150,14 @@ impl Relay {
             !state.verified.ids.contains(&content) && !state.envelopes.ids.contains(&content);
         if verified {
             if state.params.is_some() && !state.verified.ids.contains(&content) {
+                if record.name == "mmx.Block" {
+                    let through = state.credits.vdf_height;
+                    state.history.prune(through);
+                }
                 state.credits.verified(&record)?;
+            }
+            if record.name == "mmx.ProofOfTime" {
+                state.history.insert(record.clone(), size)?;
             }
             state.verified.remember(content, MAX_VERIFIED_IDS);
             // Promote an existing early publication without resetting its
@@ -264,6 +274,7 @@ impl Relay {
         }
         state.early_bytes = 0;
         state.notices = Default::default();
+        state.history = Default::default();
         Ok(())
     }
     /// Native receive_msg_hash deduplication precedes expensive ledger/space
@@ -452,7 +463,9 @@ impl Relay {
         let id = state.next_member;
         state.members.insert(id);
         Ok(RelayPeer {
+            cursors: [self.latest.load(Ordering::Acquire); 2],
             acknowledgements: [self.latest.load(Ordering::Acquire); 2],
+            replay: state.history.snapshot(),
             member: Some(Arc::new(Member {
                 id,
                 state: Arc::downgrade(&self.state),
@@ -572,6 +585,7 @@ pub(crate) struct RelayPeer {
     completed: [BTreeSet<u64>; 2],
     member: Option<Arc<Member>>,
     received: Arc<Mutex<PeerCache>>,
+    replay: history::Replay,
 }
 #[derive(Default)]
 struct PeerCache {
@@ -595,6 +609,15 @@ impl Seen {
     }
 }
 impl RelayPeer {
+    /// The decoder needs only shared receipt/cache state. Do not pin the
+    /// sender's initial VDF payload snapshot for the connection's lifetime.
+    pub(crate) fn receipt_view(&self) -> Self {
+        Self {
+            member: self.member.clone(),
+            received: self.received.clone(),
+            ..Default::default()
+        }
+    }
     pub fn note(&self, record: &Record) -> Result<()> {
         let id = if record.name == "mmx.ReceiveNote" {
             Some(hash(record, "hash")?)
@@ -693,6 +716,32 @@ impl RelayPeer {
             }
             self.cursors[class] = ready.cursor;
             self.completed[class].retain(|seq| *seq > ready.cursor);
+            if class == 0 {
+                // Live consensus first, then bounded bootstrap VDFs, then TXs.
+                // Failed writes leave the front available until disconnect or
+                // an explicit caller retry; no payload/cache lock spans I/O.
+                let mut count = 0;
+                let mut bytes = 0;
+                while let Some((record, size)) = self.replay.front().cloned() {
+                    let known = self
+                        .received
+                        .lock()
+                        .map_err(|_| error("peer relay cache poisoned"))?
+                        .seen
+                        .ids
+                        .contains(&hash(&record, "content_hash")?);
+                    if !known {
+                        if count == 16 || (count > 0 && bytes + size > 256 * 1024) {
+                            break;
+                        }
+                        send(&record)?;
+                        self.note(&record)?;
+                        count += 1;
+                        bytes += size;
+                    }
+                    self.replay.pop_front();
+                }
+            }
         }
         Ok(())
     }
@@ -1117,7 +1166,7 @@ mod tests {
             .unwrap();
     }
     #[test]
-    fn zero_target_and_connections_joined_after_publication_send_without_staging_delay() {
+    fn zero_target_sends_new_work_immediately_without_replaying_old_proofs_to_new_connections() {
         let relay = Relay::default();
         relay.set_target(Duration::ZERO).unwrap();
         let peers: Vec<_> = (0..8).map(|_| relay.attach().unwrap()).collect();
@@ -1138,9 +1187,90 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        // Newly attached peers do not receive historical receipt broadcasts.
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].name, "mmx.ProofResponse");
+        assert!(sent.is_empty());
+        relay.publish([2; 32], message(2), 100).unwrap();
+        joined
+            .flush(&relay, |r| {
+                sent.push(r.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].name, "mmx.ProofResponse");
+    }
+    #[test]
+    fn bootstrap_replays_only_shared_verified_vdfs_and_live_consensus_takes_priority() {
+        let (_, native) = native_envelopes();
+        let relay = Relay::default();
+        relay.set_target(Duration::ZERO).unwrap();
+        for record in [&native[0], &native[1], &native[2], &native[3]] {
+            relay
+                .publish(
+                    hash(record, "content_hash").unwrap(),
+                    Arc::new(record.clone()),
+                    record.memory_size(),
+                )
+                .unwrap();
+        }
+        let mut peer = relay.attach().unwrap();
+        let receiver = peer.receipt_view();
+        assert!(receiver.replay.is_empty());
+        assert_eq!(peer.replay.len(), 1);
+        let id = hash(&native[1], "content_hash").unwrap();
+        let state = relay.state.lock().unwrap();
+        let (class, seq) = state.ids[&id];
+        assert!(Arc::ptr_eq(
+            &peer.replay[0].0,
+            &state.entries[class][&seq].record
+        ));
+        drop(state);
+        relay.publish([200; 32], message(200), 100).unwrap();
+        let mut sent = vec![];
+        peer.flush(&relay, |r| {
+            if r.name != "mmx.ReceiveNote" {
+                sent.push(r.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sent, [message(200).as_ref().clone(), native[1].clone()]);
+        peer.flush(&relay, |_| panic!("initial work was replayed twice"))
+            .unwrap();
+        assert!(peer.replay.is_empty() && receiver.replay.is_empty());
+    }
+    #[test]
+    fn vdf_bootstrap_is_batched_and_stalled_sends_retain_only_their_unsent_shared_front() {
+        let relay = Relay::default();
+        for height in 1..=17 {
+            let r = Arc::new(record(
+                "mmx.ProofOfTime",
+                [
+                    ("vdf_height".into(), Value::Uint(height)),
+                    ("content_hash".into(), bytes([height as u8; 32])),
+                ],
+            ));
+            relay.publish([height as u8; 32], r, 100).unwrap();
+        }
+        let mut peer = relay.attach().unwrap();
+        assert!(peer.flush(&relay, |_| Err(error("stalled"))).is_err());
+        assert_eq!(peer.replay.len(), 17);
+        let mut sent = 0;
+        peer.flush(&relay, |_| {
+            sent += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sent, 16);
+        assert_eq!(peer.replay.len(), 1);
+        peer.flush(&relay, |_| {
+            sent += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sent, 17);
+        assert!(peer.replay.is_empty());
+        relay.reset_verified().unwrap();
+        assert!(relay.attach().unwrap().replay.is_empty());
     }
     #[test]
     fn verified_replay_ids_survive_payload_eviction_and_ignore_receipt_claims() {

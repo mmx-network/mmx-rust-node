@@ -188,7 +188,7 @@ impl Connection {
         }
         self.set_compressed_limit(relay.compressed_limit()?)?;
         let mut sender = relay.attach()?;
-        let receiver = sender.clone();
+        let receiver = sender.receipt_view();
         let output = self.output.clone();
         let socket = self.stream.try_clone()?;
         let stop = Arc::new(AtomicBool::new(false));

@@ -141,8 +141,14 @@ no live-ledger or plot scan is part of validation.
    shared records and timing metadata. A ready later consensus item can pass a
    delayed earlier item. Bounded completed-sequence sets prevent retransmission
    even if receipt traffic evicts the general per-peer hash cache. No additional
-   per-peer payload queue is introduced. New connections retain the previous
-   immediate replay behavior; native VDF-only connection replay remains open.
+   per-peer payload queue is introduced. New connections now bootstrap only
+   retained verified VDFs, following native `Router::on_connect`. Blocks, proofs,
+   transactions and early unverified work from before attachment are not replayed.
+   Shared VDF history retains the first verified record per height and prunes
+   through the previous verified VDF height on block publication. Rust adds a
+   4,096-item / 32 MiB history bound and 16-item / 256 KiB replay batches. Live
+   consensus precedes bootstrap work, which precedes transactions. The decoder
+   retains only receipt state, allowing the sender's snapshot to drain promptly.
    Transaction upload accounting now follows `Router::send_to` / `on_recv_note`:
    forwarded transactions share a global static-cost budget and have independent
    per-peer outstanding debt. Matching receipts release debt; unrelated receipts

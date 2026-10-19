@@ -1996,9 +1996,19 @@ fn pending_transaction_crosses_real_peer_transport_without_ledger_writes() {
         "content_hash".into(),
         V::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
     );
-    a.lock().unwrap().add_transaction(&tx, true).unwrap();
     let mut server = peer::Server::bind("127.0.0.1:0", a.clone()).unwrap();
     let mut client = peer::Client::connect(&server.address().to_string(), b.clone()).unwrap();
+    // Native Router bootstraps only VDF history, so establish the connection
+    // before publishing a new transaction. The reply is an acceptance barrier.
+    assert_eq!(
+        client
+            .call(record("mmx.Node.get_height", []))
+            .unwrap()
+            .uint()
+            .unwrap(),
+        0
+    );
+    a.lock().unwrap().add_transaction(&tx, true).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while b.lock().unwrap().pending_transactions() == 0 {
         assert!(

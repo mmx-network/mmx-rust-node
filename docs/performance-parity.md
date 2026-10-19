@@ -253,3 +253,19 @@ ownership and promotion without retransmission, bound failed early work, reject
 padding-cache poisoning and check immediate receipt-only delivery. All storage
 checks remain on temporary data. This establishes defenses and scheduling;
 whole-network latency and bandwidth comparisons remain open.
+
+Connection bootstrap now mirrors C++ `Router::on_connect` / `vdf_history`:
+new peers receive only retained verified VDFs, not the existing block, proof,
+transaction or unverified early-relay queues. Per-class body cursors begin at
+attachment; receipt cursors already did. History keeps the first verified VDF
+per height, shares Arc payloads with live publication and prunes through the
+previous verified VDF height when a block publishes. Deliberate safety bounds
+are 4,096 history items / 32 MiB and 16 replay bodies / 256 KiB per tick (one
+larger record can progress). Live consensus comes first, then bootstrap VDFs,
+then transactions. Unlike C++'s insertion inside its first-relay branch, Rust
+also retains work that was early-relayed and subsequently verified. Receipt-only
+decoder views never retain the sender's history snapshot. Tests cover ordered
+history, first-per-height choice, pruning, count/byte bounds, shared ownership,
+live priority, failed sends, batching, rewind and absence of old gossip replay.
+The live transaction socket fixture now establishes the peer before publishing,
+matching native's non-replay behavior. No ledger/plot scans or extra writes occur.
