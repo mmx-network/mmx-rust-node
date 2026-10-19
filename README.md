@@ -1416,7 +1416,8 @@ inbox for the existing consensus checks.
 Remaining work includes reverse farmer RPC routing for a C++ node, pool/NFT
 partial submission, wallet pending history, contract withdrawal
 owner resolution, offer/swap convenience RPCs and the C++ REST API. Production
-plot files and an actual farm have not been exercised. Existing C++ witnesses,
+farm smoke tests load existing native HDD/NFT plots alongside C++, check matching
+plot counts and farm sizes, and exercise live challenge/proof delivery. Existing C++ witnesses,
 tiny native park files, permission tests and the complete standalone wallet CLI
 suite cover the implemented paths. Tests launch the actual wallet, farmer,
 harvester, node and `mmx` binaries from native configuration; an end-to-end test
