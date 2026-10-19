@@ -63,9 +63,9 @@ no live-ledger or plot scan is part of validation.
 | Fork choice/sync: `Node.cpp::find_best_fork`, `fork_to`, `Node_update.cpp::on_sync_done`, `Router.cpp::process` | `mmx-execution/src/chain/{choice,forks,sync,voting}.rs`, `mmx-node/src/sync/peers*`; native fork/vote/root witnesses, three-observer socket tests, competing contents, timeout reassignment and deep reorg tests | Requested 3–8 observer policy is deliberately stricter than native completion. Every observed content is fetched once; no majority filter. Native transmit credits remain separate from body leases. |
 | Body/economics: `Node_validate.cpp::validate`, `execute`, native reward and fee helpers | `mmx-execution/src/{block,transaction}`, `mmx-consensus/src/authorization.rs`; native block/transaction/economics/NFT/multisig traces and rejection ordering | Canonical-parent validation hands off one verified execution delta; independent transactions still execute serially. Dependency locks and predecessor plans exist, but are not a concurrent executor. |
 | Contract execution: `vm/Engine.cpp`, `vm/instr_t.cpp`, `vm_interface.cpp`, `vm/StorageCache.cpp`, `Node_validate.cpp::prepare_context` | `mmx-vm/src/engine*`, `mmx-execution/src/lib.rs`; all declared opcodes, gas, composite ownership, remote calls, hardfork setup, locks, failed-engine publication, recursion/copy/erase and input limits have fixtures | JavaScript compiler and remaining original contract suites are unported. Per-engine/per-transaction storage overlays are bounded by execution and are distinct from a broad node state cache. |
-| Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Block/transaction payload consolidation is complete for new writes; synchronous durability and range scan materialization below remain. No SQLite backend. |
+| Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Block/transaction payload consolidation is complete for new writes; synchronous durability comparisons below remain. Public balance ranges use a streaming bounded merge. No SQLite backend. |
 | Rollback/purge: C++ `Node` storage/apply/revert and versioned tables | `mmx-execution/src/chain/{mod,forks}.rs`, `mmx-db/src/native.rs`; every retained-height rollback, deep fork/restart, crash-safe collection, pinned snapshot and RPC floor tests | Purge necessarily rewrites retained live values during explicit collection. There is no automatic background migration or ledger scan. Rollback below the durable floor is refused; private consensus ancestry does not reappear through RPC. |
-| Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native credits, rate policy, peer-role filtering and full inbound authenticated lifecycle remain incomplete. RPC range scans and validation can still occupy the ledger owner. REST/WebAPI parity is incomplete. |
+| Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native credits, rate policy, peer-role filtering and full inbound authenticated lifecycle remain incomplete. Balance scans and public validation run on pinned snapshots outside the ledger lock with two shared RPC slots; per-peer credit/rate fairness remains. REST/WebAPI parity is incomplete. |
 | Farmer/wallet: `Farmer.cpp::{sign_block,sign_vote,handle}`, `Wallet.cpp`, `include/mmx/ECDSA_Wallet.h`, key derivation and spending | `mmx-farming/src/{farmer,wallet,spending,service}.rs`, `mmx-wallet`, `mmxwallet`; native keys/KDF/signatures, protected-key unlock verification, pending/reservation/fork/ambiguous-submit tests, real daemon RPC tests | Pool partial submission, reverse farmer RPC, complete wallet/history/offer/swap API and wallet query caches remain missing. Farm reports use bounded retention. |
 | Harvester/plots: `Harvester.cpp::{check_queue,lookup_task,reload}`, `pos/Prover.cpp`, `pos/verify_full.cpp` | `mmx-farming/src/{harvester,plot,encoding}.rs`, `mmx-tools/src/lib.rs`; bounded shared Rayon pool, immediate proof emission, native deadline, filter-before-full-proof, density-based park search, retained headers, positional park reads/reuse; stalled-plot test and live sample | Batch scheduling still blocks subsequent challenges and reporting on a stuck drive. Metadata-free/corrupt-quality paths need additional slow-resource comparisons. Remote recompute remains missing. |
 | GPU and CLI/config: native OpenCL VDF code, CUDA recompute, `mmx.cpp`, native module config | `mmx-opencl`, consensus accelerator, `mmx-tools`, `mmxwallet`; GPU-only default discovery, bounded buffers, native CPU result checks/fallback, native config layering and CLI precedence tests, wallet CLI suites | Rust OpenCL F1 replaces CUDA for the implemented path. Static musl cannot load an ICD and falls back to CPU. Full C++ utility/compiler/timelord/service and configuration parity is not claimed. |
@@ -117,14 +117,27 @@ no live-ledger or plot scan is part of validation.
    lifecycle. Current bounds and verified-only relay are not equivalent to
    native per-peer fairness. Preserve transport deduplication separately from
    consensus acceptance; a claimed identity/height never earns relay credit.
-3. **Streaming RPC range reads (memory and ledger latency).**
-   C++ balance `find_range(..., limit)` stops in the table. Rust's unwhitelisted
-   `all_balances` materializes the address prefix with `scan` before applying
-   `limit`; its 10,000-result check is after a prefix read. Add bounded range
-   iterators/snapshot execution, and enforce work/output budgets while reading.
-   Also move expensive public `validate` off the ledger mutex with a pinned
-   snapshot and bounded workers. Existing request/response limits do not bound
-   all intermediate range-query work.
+3. **Streaming balance RPC reads and snapshot validation completed.**
+   Following C++ `Node_api.cpp` balance queries and `table.h::find_range`, the
+   native store now merges one visible key per input and resolves only winning
+   values. A satisfied row limit stops before advancing to the next row.
+   Tombstones, index probes and versions hidden by historical reads or rollback
+   consume work; metadata and conservative read-ahead consume bytes before
+   reads/allocation. An RPC shares 100,000 index/key operations and 32 MiB across
+   all owners/currencies, with at most 10,000 scanned rows. Exhaustion rejects
+   rather than returning a partial total. Zero balances count toward native
+   per-owner limits; whitelist queries retain native limit-independent point
+   reads and the range uses native's exclusive all-ones currency sentinel.
+   HTTP and VNX balance queries/public transaction validation capture a pinned
+   native database snapshot under the node lock, then run and encode on their
+   request worker. Two slots are shared across both protocols; saturation fails
+   promptly while cheap status/height calls remain available. VM validation
+   retains the native transaction gas/cost limits and cannot publish effects.
+   Tests cover mixed history, pending/tombstones, rollback, nested snapshots,
+   byte exhaustion before payload/index reads, corrupt masked old values, zero
+   limits/balances, all-ones addresses, whole-request budgets and lock release.
+   These are service bounds, not consensus limits. Other bounded block and
+   transaction RPCs still use the ledger owner; there is no broad state cache.
 4. **Overlapping harvester scheduling (slow-drive isolation).**
    C++ enqueues per-plot tasks and a completion task, then services the next
    challenge. Rust publishes individual proofs promptly, but the daemon holds
@@ -214,3 +227,9 @@ The independent relay scheduling checkpoint passes 310 workspace tests (one
 existing ignored test). Peer frame limits, incremental public reads, schema
 publication ordering, RPC/body deadlines and shared sync body leases remain
 enforced. A failed partial write closes the socket before schema state advances.
+
+The bounded RPC checkpoint passes 319 workspace/target tests (one existing
+ignored test), strict Clippy, formatting and the optimized local node build.
+Public query snapshots stay pinned across ledger advancement and release their
+shared worker slot on success or error. The preceding three storage/execution/
+relay checkpoints also passed GitHub Actions.

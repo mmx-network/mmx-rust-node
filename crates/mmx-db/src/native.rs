@@ -2,6 +2,7 @@
 //! sorted files contain only references. Forks share those files and keep their
 //! speculative suffix in RAM. A manifest checkpoints a bounded journal tail.
 mod manifest;
+mod range;
 use crate::{
     journal::{Action, Change, Indexed, Journal, Reader, ValueRef},
     sorted::{self, Builder, Entry, Run, View},

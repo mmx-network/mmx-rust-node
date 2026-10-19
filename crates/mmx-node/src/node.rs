@@ -40,6 +40,7 @@ pub struct Node {
     peer_state: PeerState,
     vote_ids: BTreeSet<Hash>,
     vote_order: VecDeque<Hash>,
+    pub(crate) rpc_workers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 pub fn record(name: &str, fields: impl IntoIterator<Item = (String, Value)>) -> Record {
     Record {
@@ -57,7 +58,7 @@ pub fn hash(record: &Record, field: &str) -> Result<Hash> {
 pub fn number(record: &Record, field: &str) -> Result<u32> {
     Ok(u32::try_from(record.field(field)?.uint()?)?)
 }
-fn bytes(v: impl Into<Vec<u8>>) -> Value {
+pub(crate) fn bytes(v: impl Into<Vec<u8>>) -> Value {
     Value::Bytes(v.into())
 }
 
@@ -137,6 +138,7 @@ impl Node {
             peer_state,
             vote_ids: BTreeSet::new(),
             vote_order: VecDeque::new(),
+            rpc_workers: Default::default(),
         })
     }
     pub fn chain(&self) -> &ForkChain {
@@ -809,6 +811,9 @@ impl Node {
         if let Some(reply) = self.peer_state.call(request)? {
             return Ok(reply);
         }
+        if crate::transactions::is_balance_method(&request.name) {
+            return crate::transactions::balance_response(self.chain.selected().storage(), request);
+        }
         let selected = self.chain.selected();
         let optional = |v: Option<Value>| Value::Optional(v.map(Box::new));
         let block_value = |v: Option<Record>| v.map(Value::Record).unwrap_or(Value::Null);
@@ -941,70 +946,6 @@ impl Node {
                 }
                 block_value(contract)
             }
-            "mmx.Node.get_all_balances"
-            | "mmx.Node.get_total_balances"
-            | "mmx.Node.get_balances"
-            | "mmx.Node.get_total_balance" => {
-                let mut query = request.clone();
-                if request.name == "mmx.Node.get_balances" {
-                    query.fields.insert(
-                        "addresses".into(),
-                        Value::Sequence(vec![request.field("address")?.clone()]),
-                    );
-                }
-                if request.name == "mmx.Node.get_total_balance" {
-                    query.fields.insert(
-                        "whitelist".into(),
-                        Value::Sequence(vec![request.field("currency")?.clone()]),
-                    );
-                    query.fields.insert("limit".into(), Value::Int(-1));
-                }
-                let values = self.all_balances(&query)?;
-                if request.name == "mmx.Node.get_all_balances" {
-                    Value::Map(
-                        values
-                            .into_iter()
-                            .map(|((a, c), n)| {
-                                (
-                                    Value::Sequence(vec![bytes(a), bytes(c)]),
-                                    bytes(n.to_le_bytes()),
-                                )
-                            })
-                            .collect(),
-                    )
-                } else {
-                    let mut totals = BTreeMap::<Hash, u128>::new();
-                    for ((_, currency), amount) in values {
-                        let value = totals.entry(currency).or_default();
-                        *value = value
-                            .checked_add(amount)
-                            .ok_or_else(|| error("balance total overflow"))?;
-                    }
-                    if request.name == "mmx.Node.get_total_balance" {
-                        bytes(
-                            totals
-                                .get(&hash(request, "currency")?)
-                                .copied()
-                                .unwrap_or(0)
-                                .to_le_bytes(),
-                        )
-                    } else {
-                        Value::Map(
-                            totals
-                                .into_iter()
-                                .map(|(c, n)| (bytes(c), bytes(n.to_le_bytes())))
-                                .collect(),
-                        )
-                    }
-                }
-            }
-            "mmx.Node.get_balance" => bytes(
-                selected
-                    .storage()
-                    .get_balance(&hash(request, "address")?, &hash(request, "currency")?)?
-                    .unwrap_or(0)
-                    .to_le_bytes(),
-            ),
             _ => return Err(error(format!("unsupported read method: {}", request.name))),
         };
         Ok(record(

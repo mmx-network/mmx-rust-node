@@ -48,7 +48,7 @@ time, suppresses VDF sender echoes, and releases receive-idle inbound peers.
 Fork replay reuses the already-loaded block bodies; the relay handoff reuses
 those records too. RPC point-read products and transaction batch/output sizes
 now have admission budgets. The audit distinguishes these completed changes
-from native credit/rate policy, streaming range reads and concurrent transaction execution.
+from native credit/rate policy and concurrent transaction execution.
 
 The payload consolidation checkpoint follows C++ `Node::write_block` and its
 block/transaction indexes. Headers and transactions have separate immutable
@@ -76,3 +76,15 @@ while a verified outgoing proof still arrives. Shared record ownership and
 20,000-entry per-peer echo caches avoid additional payload queues/copies. Native
 credit feedback, early earned credits, staged fanout and peer authentication
 remain separate tracked work.
+
+Public balance queries now follow C++ `table.h::find_range`: native sorted sources
+seek to the owner range, merge visible keys lazily and stop at the row limit.
+Only the winning payload is read. Hidden versions, tombstones, binary-search
+probes, metadata/read-ahead and result bytes share a request budget (100,000
+operations, 32 MiB, 10,000 scanned balance rows). Budget exhaustion rejects the
+whole result. Native zero-row, zero-balance, whitelist and exclusive currency
+sentinel behavior is covered. Historical/rollback and corrupt-value tests use
+small temporary databases. Balance and public validation RPCs use pinned
+snapshots outside the ledger mutex; two slots bound expensive HTTP/VNX work.
+Lock-held query tests establish scheduling isolation, not production latency or
+throughput parity. Other bounded read methods still run under the node lock.

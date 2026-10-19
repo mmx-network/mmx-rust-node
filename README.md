@@ -354,6 +354,12 @@ blocks/headers by hash/height, transaction lookup/height/block IDs, contracts an
 balances. HTTP accepts bare names or `mmx.Node.*`; `get_status` adds node status.
 Other HTTP methods use the generated VNX field representations (fixed byte arrays
 and little-endian uint128 bytes), and method parameters are named objects.
+Balance scans stop at the native per-owner row limit and share request-wide
+work/byte budgets (100,000 key/index operations, 32 MiB, 10,000 scanned rows).
+Budget exhaustion returns an error rather than a partial total. Balance queries
+and public transaction validation run on pinned snapshots outside the ledger
+lock, with two expensive RPC slots shared by HTTP and VNX. Saturation returns
+`node RPC workers busy`; cheap status and height calls remain available.
 Unsupported methods return explicit errors. These public RPC listeners expose
 reads only. Native compressed peer requests carry lossless block records.
 

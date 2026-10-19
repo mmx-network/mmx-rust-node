@@ -5,7 +5,7 @@ use mmx_consensus::Record;
 use std::{
     io::Cursor,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -56,6 +56,71 @@ pub const METHODS: &[&str] = &[
     "add_transaction",
 ];
 
+// Shared by HTTP and native RPC. Capture only immutable database handles while
+// holding the ledger lock; query work and encoding run on the request's worker.
+struct ReadPermit(Arc<AtomicUsize>);
+impl ReadPermit {
+    fn acquire(workers: &Arc<AtomicUsize>) -> Result<Self> {
+        workers
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 2).then_some(n + 1)
+            })
+            .map_err(|_| error("node RPC workers busy"))?;
+        Ok(Self(workers.clone()))
+    }
+}
+impl Drop for ReadPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct ReadTask {
+    storage: mmx_vm::StorageDb,
+    context: mmx_execution::transaction::TransactionContext,
+    _permit: ReadPermit,
+}
+impl ReadTask {
+    fn capture(node: &Node) -> Result<Self> {
+        let permit = ReadPermit::acquire(&node.rpc_workers)?;
+        let selected = node.chain.selected();
+        let db = selected.storage().database();
+        Ok(Self {
+            storage: mmx_vm::StorageDb::new(db.fork(db.version())?),
+            context: mmx_execution::transaction::TransactionContext {
+                height: selected
+                    .tip()?
+                    .ok_or_else(|| error("missing node tip"))?
+                    .height
+                    .checked_add(1)
+                    .ok_or_else(|| error("height overflow"))?,
+                params: selected.params().clone(),
+                locked_contracts: None,
+            },
+            _permit: permit,
+        })
+    }
+    fn call(&mut self, request: &Record) -> Result<Record> {
+        if request.name == "mmx.Node.validate" {
+            Ok(crate::node::record(
+                "mmx.Node.validate.return",
+                [(
+                    "_ret_0".into(),
+                    mmx_consensus::Value::Record(
+                        crate::transactions::validate_snapshot(
+                            &mut self.storage,
+                            &self.context,
+                            request.field("tx")?.record()?,
+                        )?
+                        .to_record(),
+                    ),
+                )],
+            ))
+        } else {
+            crate::transactions::balance_response(&self.storage, request)
+        }
+    }
+}
+
 fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Value> {
     if !args.is_object() {
         return Err(error("RPC parameters must be an object"));
@@ -74,7 +139,16 @@ fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Va
     let mut writer = Writer::new(Vec::new(), registry.clone());
     writer.write(&args)?;
     let request = Record::decode(&writer.into_inner())?;
-    let response = {
+    let mut task = if method == "validate" || crate::transactions::is_balance_method(&request.name)
+    {
+        let n = node.lock().map_err(|_| error("node lock poisoned"))?;
+        Some(ReadTask::capture(&n)?)
+    } else {
+        None
+    };
+    let response = if let Some(task) = &mut task {
+        task.call(&request)?.encode()?
+    } else {
         let mut n = node.lock().map_err(|_| error("node lock poisoned"))?;
         if method == "add_transaction" {
             n.add_transaction(
@@ -287,3 +361,144 @@ pub fn json_request(node: &Arc<Mutex<Node>>, body: &[u8]) -> Option<Value> {
     }
 }
 pub use crate::http::HttpServer;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mmx_consensus::Value as N;
+    use mmx_execution::chain::{forks::ForkChain, genesis::Assets};
+    use mmx_types::{mmx, VnxType};
+
+    fn fixture() -> (Arc<Mutex<Node>>, Record, Record) {
+        let rows: Vec<Value> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        let raw = |v: &Value| vnx::util::from_hex_string(v.as_str().unwrap()).unwrap();
+        let genesis = rows.iter().find(|r| r["name"] == "synthetic").unwrap();
+        let params = mmx::ChainParams::decode(&raw(&genesis["params"])).unwrap();
+        let assets = Assets {
+            binaries: genesis["binaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| Record::decode(&raw(v)).unwrap())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            testnet_rewards: None,
+            project_relay: None,
+        };
+        let mut chain = ForkChain::memory(params);
+        chain.initialize(&assets).unwrap();
+        let step = &rows.iter().find(|r| r["kind"] == "chain").unwrap()["steps"][0];
+        (
+            Arc::new(Mutex::new(
+                Node::from_chain(
+                    chain,
+                    k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap(),
+                )
+                .unwrap(),
+            )),
+            Record::decode(&raw(&step["block"])).unwrap(),
+            Record::decode(&raw(&step["vdf"])).unwrap(),
+        )
+    }
+    #[test]
+    fn snapshot_tasks_release_ledger_lock_retain_parent_and_bound_shared_workers() {
+        let (node, block, vdf) = fixture();
+        let mut first = ReadTask::capture(&node.lock().unwrap()).unwrap();
+        let second = ReadTask::capture(&node.lock().unwrap()).unwrap();
+        assert!(ReadTask::capture(&node.lock().unwrap()).is_err());
+        assert!(dispatch(
+            &node,
+            "get_balances",
+            json!({"address":vec![0;32], "whitelist":[], "limit":-1})
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("workers busy"));
+        assert_eq!(dispatch(&node, "get_height", json!({})).unwrap(), 0);
+        let mut owner = [0u8; 32];
+        owner[0] = 9;
+        let request = from_json_record(&json!({
+            "__type":"mmx.Node.get_all_balances", "addresses":vec![owner], "whitelist":[], "limit":-1
+        })).unwrap();
+        let before = first.call(&request).unwrap();
+        let mut n = node.lock().unwrap();
+        let root = n.chain.selected().hash_at(0).unwrap().unwrap();
+        n.chain.admit(&block, &[vdf]).unwrap();
+        n.chain.update(root, None).unwrap();
+        assert_eq!(n.chain.selected().tip().unwrap().unwrap().height, 1);
+        assert_ne!(n.call(&request).unwrap(), before);
+        // Deliberately retain the live ledger lock during the entire query.
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            sent.send(first.call(&request).unwrap()).unwrap();
+        });
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(3)).unwrap(),
+            before
+        );
+        worker.join().unwrap();
+        assert_eq!(second.context.height, 1);
+        assert_eq!(second.storage.database().version(), 1);
+        assert_eq!(n.rpc_workers.load(Ordering::Acquire), 1);
+        drop(second);
+        assert_eq!(n.rpc_workers.load(Ordering::Acquire), 0);
+        drop(n);
+        assert!(dispatch(
+            &node,
+            "get_balances",
+            json!({"address":vec![0;32], "whitelist":[], "limit":-1})
+        )
+        .is_ok());
+    }
+    #[test]
+    fn public_validation_uses_parent_snapshot_and_releases_slots_on_failure() {
+        let (node, block, _) = fixture();
+        let mut tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+            .record()
+            .unwrap()
+            .clone();
+        tx.fields.insert("exec_result".into(), N::Optional(None));
+        let params = node.lock().unwrap().chain.selected().params().clone();
+        tx.fields.insert(
+            "static_cost".into(),
+            N::Uint(tx.calc_cost(&(&params).into()).unwrap()),
+        );
+        tx.fields.insert(
+            "content_hash".into(),
+            N::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
+        );
+        let expected = node
+            .lock()
+            .unwrap()
+            .validate_transaction(&tx)
+            .unwrap()
+            .to_record();
+        let result = dispatch(
+            &node,
+            "validate",
+            json!({"tx": to_json_record(&tx).unwrap()}),
+        )
+        .unwrap();
+        let mut expected_json = to_json_record(&expected).unwrap();
+        expected_json.as_object_mut().unwrap().remove("__type");
+        assert_eq!(result, expected_json);
+        assert_eq!(node.lock().unwrap().rpc_workers.load(Ordering::Acquire), 0);
+        tx.fields.insert(
+            "exec_result".into(),
+            N::Optional(Some(Box::new(N::Record(expected)))),
+        );
+        assert!(dispatch(
+            &node,
+            "validate",
+            json!({"tx":to_json_record(&tx).unwrap()})
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("exec_result not null"));
+        assert_eq!(node.lock().unwrap().rpc_workers.load(Ordering::Acquire), 0);
+    }
+}

@@ -99,6 +99,19 @@ impl Store {
             Backend::NativeSnapshot(s) => s.get(t, k, max),
         }
     }
+    pub fn get_bounded(
+        &self,
+        t: &str,
+        k: &[u8],
+        max: Option<u32>,
+        budget: &mut crate::ReadBudget,
+    ) -> Result<Option<Vec<u8>>> {
+        match &self.0 {
+            Backend::Memory(d) => d.get_bounded(t, k, max, budget),
+            Backend::Native(d) => d.get_bounded(t, k, max, budget),
+            Backend::NativeSnapshot(s) => s.get_bounded(t, k, max, budget),
+        }
+    }
     pub fn scan(&self, t: &str, prefix: &[u8], max: Option<u32>) -> Result<Vec<Row>> {
         match &self.0 {
             Backend::Memory(d) => Ok(d.scan(t, prefix, max)),
@@ -117,6 +130,20 @@ impl Store {
             Backend::Memory(d) => Ok(d.scan_range(t, start, end, max)),
             Backend::Native(d) => d.scan_range(t, start, end, max),
             Backend::NativeSnapshot(s) => s.scan_range(t, start, end, max),
+        }
+    }
+    pub fn scan_range_bounded(
+        &self,
+        t: &str,
+        start: &[u8],
+        end: Option<&[u8]>,
+        max: Option<u32>,
+        budget: &mut crate::ReadBudget,
+    ) -> Result<Vec<Row>> {
+        match &self.0 {
+            Backend::Memory(d) => d.scan_range_bounded(t, start, end, max, budget),
+            Backend::Native(d) => d.scan_range_bounded(t, start, end, max, budget),
+            Backend::NativeSnapshot(s) => s.scan_range_bounded(t, start, end, max, budget),
         }
     }
     pub fn apply(&mut self, writes: impl IntoIterator<Item = Write>) -> Result<()> {

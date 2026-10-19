@@ -334,6 +334,13 @@ struct RecordKey {
     value_size: Option<usize>,
 }
 fn read_key(input: &mut impl Read) -> Result<RecordKey> {
+    read_key_metered(input, None)
+}
+fn read_key_metered(input: &mut impl Read, work: Option<&crate::scan::Work>) -> Result<RecordKey> {
+    if let Some(work) = work {
+        work.charge()?;
+        work.charge_bytes(RECORD_HEADER)?;
+    }
     let mut header = [0; RECORD_HEADER];
     input.read_exact(&mut header)?;
     let table_size = u16::from_le_bytes(header[..2].try_into().unwrap()) as usize;
@@ -346,6 +353,9 @@ fn read_key(input: &mut impl Read) -> Result<RecordKey> {
         || version == u32::MAX
     {
         return Err(Error::Corrupt("sorted file record size/version"));
+    }
+    if let Some(work) = work {
+        work.charge_bytes(table_size.checked_add(key_size).ok_or(Error::ReadBudget)?)?;
     }
     let mut table = vec![0; table_size];
     let mut key = vec![0; key_size];
@@ -457,13 +467,25 @@ impl Run {
         }
     }
     fn lower_bound(&self, table: &str, key: &[u8]) -> Result<usize> {
+        self.lower_bound_counted(table, key, None)
+    }
+    fn lower_bound_counted(
+        &self,
+        table: &str,
+        key: &[u8],
+        work: Option<&crate::scan::Work>,
+    ) -> Result<usize> {
         let (mut low, mut high) = (0, self.0.offsets.len());
         while low < high {
+            // Account conservatively for the probe's buffered read-ahead.
+            if let Some(work) = work {
+                work.charge_bytes(256)?;
+            }
             let middle = low + (high - low) / 2;
-            let record = read_key(&mut BufReader::with_capacity(
-                256,
-                self.section(self.0.offsets[middle]),
-            ))?;
+            let record = read_key_metered(
+                &mut BufReader::with_capacity(256, self.section(self.0.offsets[middle])),
+                work,
+            )?;
             if compare_key(&record.table, &record.key, table, key).is_lt() {
                 low = middle + 1;
             } else {
@@ -477,11 +499,30 @@ impl Run {
         let index = self.lower_bound(table, key)?;
         self.visible_at(index, max, Some((table, key)))
     }
+    pub(crate) fn get_counted(
+        &self,
+        table: &str,
+        key: &[u8],
+        max: u32,
+        work: Option<&crate::scan::Work>,
+    ) -> Result<Option<Entry>> {
+        let index = self.lower_bound_counted(table, key, work)?;
+        self.visible_at_counted(index, max, Some((table, key)), work)
+    }
     fn visible_at(
         &self,
         index: usize,
         max: u32,
         expected: Option<(&str, &[u8])>,
+    ) -> Result<Option<Entry>> {
+        self.visible_at_counted(index, max, expected, None)
+    }
+    fn visible_at_counted(
+        &self,
+        index: usize,
+        max: u32,
+        expected: Option<(&str, &[u8])>,
+        work: Option<&crate::scan::Work>,
     ) -> Result<Option<Entry>> {
         let Some(offset) = self.0.offsets.get(index) else {
             return Ok(None);
@@ -495,11 +536,20 @@ impl Run {
         let mut section = self.section(*offset);
         section.end = end;
         while section.position < end {
-            let record = read_key(&mut section)?;
+            let record = read_key_metered(&mut section, work)?;
             if expected.is_some_and(|(table, key)| record.table != table || record.key != key) {
                 return Ok(None);
             }
             if record.version <= max {
+                if let Some(work) = work {
+                    work.charge_bytes(
+                        record
+                            .value_size
+                            .unwrap_or(0)
+                            .checked_add(4)
+                            .ok_or(Error::ReadBudget)?,
+                    )?;
+                }
                 let value = read_value(&mut section, record.value_size)?;
                 return Ok(Some(Entry {
                     version: record.version,
@@ -536,6 +586,26 @@ impl Run {
             self.lower_bound(&format!("{table}\0"), &[])?
         };
         Ok((index..end).filter_map(move |index| self.visible_at(index, max, None).transpose()))
+    }
+    /// Account for every index key, including keys hidden by rollback/history.
+    pub(crate) fn visible_entries_range_counted<'a>(
+        &'a self,
+        table: &str,
+        start: &[u8],
+        end: Option<&[u8]>,
+        max: u32,
+        work: crate::scan::Work,
+    ) -> Result<impl Iterator<Item = Result<Entry>> + 'a> {
+        let index = self.lower_bound_counted(table, start, Some(&work))?;
+        let end = if let Some(end) = end {
+            self.lower_bound_counted(table, end, Some(&work))?
+        } else {
+            self.lower_bound_counted(&format!("{table}\0"), &[], Some(&work))?
+        };
+        Ok((index..end).filter_map(move |index| {
+            self.visible_at_counted(index, max, None, Some(&work))
+                .transpose()
+        }))
     }
     pub fn entries(&self) -> Cursor {
         self.cursor(HEADER)

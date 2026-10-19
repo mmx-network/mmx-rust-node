@@ -10,6 +10,7 @@ use std::path::Path;
 use thiserror::Error;
 pub mod journal;
 pub mod native;
+mod scan;
 pub mod sorted;
 pub mod store;
 pub use store::Store;
@@ -32,6 +33,19 @@ pub enum Error {
     SnapshotMismatch,
     #[error("history before database version {floor} was purged (requested {requested})")]
     Pruned { floor: u32, requested: u32 },
+    #[error("database query read budget exceeded")]
+    ReadBudget,
+}
+
+/// `rows` limits each call. `keys` (including index probes/hidden versions)
+/// and `bytes` (metadata, conservative read-ahead and materialized results)
+/// are remaining budgets, consumed across calls. Budget exhaustion
+/// rejects the query before an over-budget read; totals are never truncated.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadBudget {
+    pub rows: usize,
+    pub keys: usize,
+    pub bytes: usize,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -165,6 +179,30 @@ impl Database {
             .map(|(v, value)| (*v, value))
     }
 
+    pub fn get_bounded(
+        &self,
+        table: &str,
+        key: &[u8],
+        max: Option<u32>,
+        budget: &mut ReadBudget,
+    ) -> Result<Option<Vec<u8>>> {
+        if budget.rows == 0 {
+            return Ok(None);
+        }
+        scan::Work::run(budget, |work| {
+            work.charge()?;
+            self.get(table, key, max)
+                .map(|value| {
+                    work.charge_bytes(
+                        key.len()
+                            .checked_add(value.len())
+                            .ok_or(Error::ReadBudget)?,
+                    )?;
+                    Ok(value.to_vec())
+                })
+                .transpose()
+        })
+    }
     /// An owned, stable snapshot, ordered by the original size-first comparator.
     pub fn scan(&self, table: &str, prefix: &[u8], max_version: Option<u32>) -> Vec<Row> {
         let mut keys = BTreeSet::new();
@@ -230,6 +268,25 @@ impl Database {
                 })
             })
             .collect()
+    }
+    pub fn scan_range_bounded(
+        &self,
+        table: &str,
+        start: &[u8],
+        end: Option<&[u8]>,
+        max: Option<u32>,
+        budget: &mut ReadBudget,
+    ) -> Result<Vec<Row>> {
+        scan::Work::run(budget, |work| {
+            scan::merge(
+                scan::memory_sources(self, table, start, end, max, work.clone()),
+                &work,
+                |value| match value {
+                    scan::Payload::Inline(bytes) => Ok(bytes.to_vec()),
+                    scan::Payload::Reference(_) => Err(Error::Corrupt("reference in memory table")),
+                },
+            )
+        })
     }
 
     pub fn commit(&mut self, next_version: u32) -> Result<()> {
