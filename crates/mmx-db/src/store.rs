@@ -99,6 +99,15 @@ impl Store {
             Backend::NativeSnapshot(s) => s.get(t, k, max),
         }
     }
+    /// Index-only MVCC presence test. Value checksums are checked when a
+    /// caller actually reads the value, not when probing for its existence.
+    pub fn contains(&self, t: &str, k: &[u8], max: Option<u32>) -> Result<bool> {
+        match &self.0 {
+            Backend::Memory(d) => Ok(d.get(t, k, max).is_some()),
+            Backend::Native(d) => d.contains(t, k, max),
+            Backend::NativeSnapshot(s) => s.contains(t, k, max),
+        }
+    }
     pub fn get_bounded(
         &self,
         t: &str,

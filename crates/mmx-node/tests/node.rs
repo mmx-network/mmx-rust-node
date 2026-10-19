@@ -3085,6 +3085,7 @@ fn header_and_content_hash_rpcs_do_not_read_transaction_payloads() {
         .write_at(&[bytes[offset] ^ 1], offset as u64)
         .unwrap();
     let id = hash(&block, "hash").unwrap();
+    assert!(node.chain().contains_block(&id).unwrap());
     assert!(node
         .call(&record(
             "mmx.Node.get_block",

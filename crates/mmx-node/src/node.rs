@@ -437,7 +437,7 @@ impl Node {
                 remove.push(*id);
                 continue;
             }
-            if attempts >= 4 || self.chain.block(&hash(block, "prev")?)?.is_none() {
+            if attempts >= 4 || !self.chain.contains_block(&hash(block, "prev")?)? {
                 continue;
             }
             // Waiting for time work must not spend the ledger-validation budget
@@ -712,7 +712,7 @@ impl Node {
                     return Ok(false);
                 }
                 let id = hash(message, "hash")?;
-                if self.pending.contains_key(&id) || self.chain.block(&id)?.is_some() {
+                if self.pending.contains_key(&id) || self.chain.contains_block(&id)? {
                     return Ok(false);
                 }
                 let size = message.memory_size().max(message.encode_compact()?.len());

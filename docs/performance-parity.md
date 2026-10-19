@@ -47,8 +47,8 @@ deduplication and a 4,096-pending limit, bounds retained VDF bytes and waiting
 time, suppresses VDF sender echoes, and releases receive-idle inbound peers.
 Fork replay reuses the already-loaded block bodies; the relay handoff reuses
 those records too. RPC point-read products and transaction batch/output sizes
-now have admission budgets. The audit distinguishes these completed changes
-from native credit/rate policy and concurrent transaction execution.
+now have admission budgets. Credit/rate progress is detailed below; concurrent
+transaction execution remains separate work.
 
 The payload consolidation checkpoint follows C++ `Node::write_block` and its
 block/transaction indexes. Headers and transactions have separate immutable
@@ -73,9 +73,9 @@ and the native 20 ms tick handles remaining batches. Separate consensus/transact
 cursors prevent old transaction backlog from delaying new proofs, VDFs or blocks.
 A real socket test holds both complete RPC replies and partial inbound frames
 while a verified outgoing proof still arrives. Shared record ownership and
-20,000-entry per-peer echo caches avoid additional payload queues/copies. Native
-credit accounting, early earned credits and peer authentication
-remain separate tracked work.
+20,000-entry per-peer echo caches avoid additional payload queues/copies.
+Credit accounting and earned early relay are detailed below; full peer identity
+and role lifecycle remain open.
 
 Public balance queries now follow C++ `table.h::find_range`: native sorted sources
 seek to the owner range, merge visible keys lazily and stop at the row limit.
@@ -136,9 +136,9 @@ queueing it for the ledger. Payload eviction does not erase these IDs, replays
 do not refresh their FIFO age, and explicit rewind resets them. Tests cover
 actual receipt/RPC framing, suppression on the wire, cross-peer isolation,
 cache bounds, rollback/reacceptance and a socket barrier proving known proofs,
-blocks and votes stay out of the inbox. Native first-seen envelope deduplication,
-per-peer/global transaction cost accounting, earned early relay
-and full inbound identity/role lifecycle remain separate work.
+blocks and votes stay out of the inbox. Subsequent sections add native first-seen
+deduplication, transaction cost accounting and earned early relay. Full inbound
+identity/role lifecycle remains open.
 
 Purged-peer identity: legacy C++ Router exposes the genesis hash through
 `get_block_hash(0)`. A purged Rust node intentionally returns no historical hash
@@ -159,8 +159,8 @@ examines at most 256 entries per class/tick and retains at most 4,096 completed
 out-of-order sequence numbers per class. Payloads remain shared; there is no
 new per-peer payload queue. Eight-connection rank/lifetime tests and native
 socket/production regressions pass. Whole-network bandwidth/latency comparisons
-remain open, along with native VDF-only new-connection replay,
-earned early relay and inbound identity/role handling.
+remain open, along with inbound identity/role handling. VDF-only bootstrap and
+earned early relay are detailed below.
 
 Transaction upload credits now follow C++ `Router::send_to`, `send`, `update`
 and `on_recv_note`. The global budget uses native static-cost/MMX conversion,
@@ -269,3 +269,16 @@ history, first-per-height choice, pruning, count/byte bounds, shared ownership,
 live priority, failed sends, batching, rewind and absence of old gossip replay.
 The live transaction socket fixture now establishes the peer before publishing,
 matching native's non-replay behavior. No ledger/plot scans or extra writes occur.
+
+Block existence checks now follow C++ fork/index probes (`add_fork`,
+`block_index.find`) rather than reading full archived bodies. Native `contains`
+resolves the same MVCC reference as `get`, including pending writes, tombstones,
+snapshot overlays, historical limits and retained floors, then stops before
+opening or checksumming the payload. It works for split and legacy values.
+Live duplicate/parent checks and coordinated-sync missing-parent checks use this
+path. Actual validation, replay and RPC body reads still load/checksum payloads;
+startup retains its full selected-tip integrity check. Differential temporary
+database tests cover every rollback/reopen and nested snapshots. A corruption
+test proves presence succeeds while an actual value read fails; the native
+header/RPC fixture also probes existence despite a corrupt transaction payload.
+This removes body I/O from those predicates without a ledger cache or new writes.

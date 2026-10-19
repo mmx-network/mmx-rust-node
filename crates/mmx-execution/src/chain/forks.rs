@@ -377,6 +377,11 @@ impl ForkChain {
     pub fn header(&self, hash: &Hash) -> ChainResult<Option<Record>> {
         bodies::header_record(&self.archive, bodies::ARCHIVE, hash)
     }
+    /// Probe the immutable body index without loading a header or transaction.
+    /// Both split and legacy complete-body values use the same reference index.
+    pub fn contains_block(&self, hash: &Hash) -> ChainResult<bool> {
+        Ok(self.archive.contains("fork_blocks", hash, None)?)
+    }
     pub fn block_snapshot(&self) -> ChainResult<BlockSnapshot> {
         Ok(BlockSnapshot {
             archive: self.archive.fork(self.archive.version())?,
@@ -433,7 +438,7 @@ impl ForkChain {
     ) -> ChainResult<bool> {
         block::prevalidate(block, self.chain.params())?;
         let id = bytes::<32>(block.field("hash")?)?;
-        if self.block(&id)?.is_some() {
+        if self.contains_block(&id)? {
             return Ok(true);
         }
         let parent_id = bytes::<32>(block.field("prev")?)?;

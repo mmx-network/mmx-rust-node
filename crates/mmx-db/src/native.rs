@@ -191,6 +191,11 @@ impl State {
         Ok(())
     }
     fn get(&self, context: &Context, table: &str, key: &[u8], max: u32) -> Result<Option<Vec<u8>>> {
+        self.reference(table, key, max)?
+            .map(|value| context.value(&self.files, value))
+            .transpose()
+    }
+    fn reference(&self, table: &str, key: &[u8], max: u32) -> Result<Option<ValueRef>> {
         let mut latest = None;
         if let Some(((t, k, Reverse(version)), value)) = self
             .mem
@@ -229,10 +234,7 @@ impl State {
                 latest = Some((entry.version, value));
             }
         }
-        latest
-            .and_then(|(_, value)| value)
-            .map(|value| context.value(&self.files, value))
-            .transpose()
+        Ok(latest.and_then(|(_, value)| value))
     }
     fn rows(
         &self,
@@ -571,6 +573,20 @@ impl Native {
         }
         self.state
             .get(&self.context, table, key, max.unwrap_or(u32::MAX))
+    }
+    /// Check MVCC visibility using indexes only; never load the value payload.
+    pub fn contains(&self, table: &str, key: &[u8], max: Option<u32>) -> Result<bool> {
+        self.readable()?;
+        self.state.check_read(max)?;
+        if max.is_none_or(|v| v >= self.state.version) {
+            if let Some(value) = self.pending.get(&(table.into(), Key(key.into()))) {
+                return Ok(value.is_some());
+            }
+        }
+        Ok(self
+            .state
+            .reference(table, key, max.unwrap_or(u32::MAX))?
+            .is_some())
     }
     pub fn scan(&self, table: &str, prefix: &[u8], max: Option<u32>) -> Result<Vec<Row>> {
         self.scan_impl(table, Some(prefix), &[], None, max)
@@ -1197,6 +1213,19 @@ impl Snapshot {
             key,
             max.unwrap_or(u32::MAX).min(self.cutoff - 1),
         )
+    }
+    pub fn contains(&self, table: &str, key: &[u8], max: Option<u32>) -> Result<bool> {
+        self.base.check_read(max)?;
+        if let Some((_, value)) = self.local.row(table, &Key(key.into()), max) {
+            return Ok(value.is_some());
+        }
+        if self.cutoff == 0 {
+            return Ok(false);
+        }
+        Ok(self
+            .base
+            .reference(table, key, max.unwrap_or(u32::MAX).min(self.cutoff - 1))?
+            .is_some())
     }
     pub fn scan(&self, table: &str, prefix: &[u8], max: Option<u32>) -> Result<Vec<Row>> {
         self.scan_impl(table, Some(prefix), &[], None, max)

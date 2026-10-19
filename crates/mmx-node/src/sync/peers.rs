@@ -763,7 +763,7 @@ fn synchronize_inner(
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
             missing = missing
                 .into_iter()
-                .map(|parent| Ok(local.chain.block(&parent.1)?.is_none().then_some(parent)))
+                .map(|parent| Ok((!local.chain.contains_block(&parent.1)?).then_some(parent)))
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .flatten()
@@ -900,7 +900,7 @@ fn publish_with(
     let mut missing = BTreeSet::new();
     for block in &blocks {
         let prev = hash(block, "prev")?;
-        if local.chain.block(&prev)?.is_none() {
+        if !local.chain.contains_block(&prev)? {
             let height = number(block, "height")?
                 .checked_sub(1)
                 .ok_or_else(|| error("unexpected genesis in sync window"))?;
@@ -944,7 +944,7 @@ fn hold_missing<'a>(
     missing: impl IntoIterator<Item = &'a (u32, Hash)>,
 ) -> Result<()> {
     for (height, parent) in missing {
-        if *height > 0 && local.chain.block(parent)?.is_none() {
+        if *height > 0 && !local.chain.contains_block(parent)? {
             local.sync_pending.insert(*height);
         }
     }

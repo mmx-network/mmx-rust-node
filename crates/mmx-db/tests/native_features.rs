@@ -1,6 +1,62 @@
 use mmx_db::{Store, Write};
 
 #[test]
+fn presence_uses_only_indexes_and_respects_tombstones_empty_values_and_snapshot_cutoffs() {
+    use std::os::unix::fs::FileExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Store::open_native(dir.path()).unwrap();
+    let value = b"index-only-existence-without-payload-reads".repeat(1024);
+    db.commit_batch(1, [Write::put("t", b"key", value.clone())])
+        .unwrap();
+    db.checkpoint().unwrap();
+    // Damage a value in this tiny temporary database after checkpointing its
+    // reference index. Presence must not open/read/checksum this payload.
+    let mut damaged = 0;
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("native-data-")
+        {
+            let bytes = std::fs::read(&path).unwrap();
+            if let Some(offset) = bytes.windows(value.len()).position(|v| v == value) {
+                let offset = offset + value.len() - 1;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .write_at(&[bytes[offset] ^ 1], offset as u64)
+                    .unwrap();
+                damaged += 1;
+            }
+        }
+    }
+    assert_eq!(damaged, 1);
+    assert!(db.contains("t", b"key", None).unwrap());
+    assert!(db.get("t", b"key", None).is_err());
+    let mut snapshot = db.fork(1).unwrap();
+    assert!(snapshot.contains("t", b"key", None).unwrap());
+    snapshot.remove("t", b"key").unwrap();
+    assert!(!snapshot.contains("t", b"key", None).unwrap());
+    assert!(snapshot.contains("t", b"key", Some(0)).unwrap());
+    snapshot.insert("t", b"key", b"").unwrap();
+    assert!(snapshot.contains("t", b"key", None).unwrap());
+    assert_eq!(snapshot.get("t", b"key", None).unwrap(), Some(vec![]));
+    snapshot.commit(2).unwrap();
+    let nested = snapshot.fork(2).unwrap();
+    assert!(nested.contains("t", b"key", None).unwrap());
+    snapshot.revert(0).unwrap();
+    assert!(!snapshot.contains("t", b"key", None).unwrap());
+    assert!(!snapshot.contains("t", b"missing", None).unwrap());
+    assert!(nested.contains("t", b"key", None).unwrap());
+    db.remove("t", b"key").unwrap();
+    assert!(!db.contains("t", b"key", None).unwrap());
+    assert!(db.contains("t", b"key", Some(0)).unwrap());
+}
+
+#[test]
 fn invalid_commit_batches_preserve_pending_and_committed_state_in_both_backends() {
     let directory = tempfile::tempdir().unwrap();
     for mut db in [Store::memory(), Store::open(directory.path()).unwrap()] {
@@ -67,6 +123,10 @@ fn compare(memory: &Store, disk: &Store) {
                 );
             }
             for key in [b"".as_slice(), b"a", b"aa", b"zz", b"\xff", b"\xff\xff\x00"] {
+                assert_eq!(
+                    memory.get(table, key, max).unwrap().is_some(),
+                    disk.contains(table, key, max).unwrap()
+                );
                 assert_eq!(
                     memory.get(table, key, max).unwrap(),
                     disk.get(table, key, max).unwrap()
