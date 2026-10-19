@@ -27,7 +27,8 @@ pub struct Node {
     pub(crate) sync_body_requests: u64,
     pub(crate) sync_body_retries: u64,
     pub(crate) sync_backpressure_retries: u64,
-    work: VecDeque<Record>,
+    work: VecDeque<(Record, i64, usize)>,
+    work_bytes: usize,
     pending: BTreeMap<Hash, (Record, i64, usize)>,
     pending_bytes: usize,
     pub(crate) verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
@@ -37,6 +38,8 @@ pub struct Node {
     pub(crate) tx_pool: crate::transactions::Pool,
     inbox: Inbox,
     peer_state: PeerState,
+    vote_ids: BTreeSet<Hash>,
+    vote_order: VecDeque<Hash>,
 }
 pub fn record(name: &str, fields: impl IntoIterator<Item = (String, Value)>) -> Record {
     Record {
@@ -122,6 +125,7 @@ impl Node {
             sync_body_retries: 0,
             sync_backpressure_retries: 0,
             work: VecDeque::new(),
+            work_bytes: 0,
             pending: BTreeMap::new(),
             pending_bytes: 0,
             verified_work: BTreeMap::new(),
@@ -131,6 +135,8 @@ impl Node {
             tx_pool: Default::default(),
             inbox: Inbox::default(),
             peer_state,
+            vote_ids: BTreeSet::new(),
+            vote_order: VecDeque::new(),
         })
     }
     pub fn chain(&self) -> &ForkChain {
@@ -240,6 +246,7 @@ impl Node {
         self.sync_peers = 0;
         self.sync_pending.clear();
         self.work.clear();
+        self.work_bytes = 0;
         self.pending.clear();
         self.pending_bytes = 0;
         self.verified_work.clear();
@@ -250,6 +257,8 @@ impl Node {
             self.tx_pool.relay.remove(id)?;
         }
         self.production = Default::default();
+        self.vote_ids.clear();
+        self.vote_order.clear();
         self.inbox.clear()?;
         Ok(())
     }
@@ -283,11 +292,34 @@ impl Node {
             .verified_vdf_inputs(self.root)?
             .into_iter()
             .collect();
+        let now = vnx::util::get_wall_time_millis();
+        let ttl = self
+            .chain
+            .selected()
+            .params()
+            .block_interval_ms
+            .saturating_mul(10);
+        self.work.retain(|(work, received, size)| {
+            let keep = work
+                .field("start")
+                .and_then(Value::uint)
+                .is_ok_and(|start| start >= root.vdf_iters)
+                && (hash(work, "content_hash")
+                    .is_ok_and(|id| self.verified_work.contains_key(&id))
+                    || now.saturating_sub(*received) <= ttl);
+            if !keep {
+                self.work_bytes -= *size;
+                if let Ok(id) = hash(work, "content_hash") {
+                    self.verified_work.remove(&id);
+                }
+            }
+            keep
+        });
         if let Some(worker) = &mut self.vdf_worker {
             let retained = self
                 .work
                 .iter()
-                .map(|work| hash(work, "content_hash"))
+                .map(|(work, _, _)| hash(work, "content_hash"))
                 .collect::<Result<_>>()?;
             worker.poll(&retained);
         }
@@ -301,7 +333,7 @@ impl Node {
                 .ok_or_else(|| error("missing selected header"))?;
             inputs.insert(header.vdf_output.0);
         }
-        for work in &self.work {
+        for (work, _, _) in &self.work {
             let id = hash(work, "content_hash")?;
             if work.field("start")?.uint()? < root.vdf_iters
                 || !inputs.contains(&hash(work, "input")?)
@@ -340,6 +372,21 @@ impl Node {
         self.verified_work
             .retain(|_, p| p.point().start >= root.vdf_iters);
         let points = self.verified_work.values().cloned().collect::<Vec<_>>();
+        if self.synced {
+            // Native verify_vdf_success relays advancing work immediately,
+            // before a farmer has produced the corresponding full block.
+            for point in mmx_consensus::vdf::next_points(
+                &self.chain,
+                self.chain.selected().params(),
+                &tip,
+                &points,
+            )? {
+                let id = point.proof().content_hash.0;
+                if !self.production.broadcasts.iter().any(|(old, _)| *old == id) {
+                    self.broadcast(&Record::from_generated(point.proof())?)?;
+                }
+            }
+        }
         let now = vnx::util::get_wall_time_millis();
         let ttl = self
             .chain
@@ -404,6 +451,14 @@ impl Node {
             self.chain
                 .update_sync_at(root, self.sync_pending.first().copied(), now)?
         };
+        for (vote, disposition) in &out.votes.processed {
+            if *disposition == mmx_execution::chain::voting::Disposition::Accepted {
+                self.broadcast(vote.record())?;
+            }
+        }
+        for record in &out.validated {
+            self.broadcast(record)?;
+        }
         let forked = Instant::now();
         // A deep branch switch may replace the root's block. Heights remain soft.
         let selected = self.chain.selected();
@@ -499,7 +554,7 @@ impl Node {
         let points: Vec<_> = self
             .work
             .iter()
-            .filter_map(|w| {
+            .filter_map(|(w, _, _)| {
                 hash(w, "content_hash")
                     .ok()
                     .and_then(|h| self.verified_work.get(&h).cloned())
@@ -630,6 +685,10 @@ impl Node {
                 update = true;
             }
             "mmx.ProofOfTime" => {
+                let size = message.memory_size();
+                if size > 32 * 1024 * 1024 {
+                    return Err(error("VDF queue exceeds 32 MiB"));
+                }
                 if !mmx_consensus::vdf::is_valid(message)? {
                     return Err(error("invalid VDF content"));
                 }
@@ -638,21 +697,61 @@ impl Node {
                 if self
                     .work
                     .iter()
-                    .any(|work| hash(work, "content_hash").ok() == Some(id))
+                    .any(|(work, _, _)| hash(work, "content_hash").ok() == Some(id))
                 {
                     return Ok(false);
                 }
-                self.work.push_back(message.clone());
+                let root_hash = self
+                    .chain
+                    .selected()
+                    .hash_at(self.root)?
+                    .ok_or_else(|| error("missing root"))?;
+                let root = self
+                    .chain
+                    .selected()
+                    .header(&root_hash)?
+                    .ok_or_else(|| error("missing root header"))?;
+                if message.field("start")?.uint()? < root.vdf_iters {
+                    return Ok(false);
+                }
+                let size = message.memory_size().max(message.encode_compact()?.len());
+                if size > 32 * 1024 * 1024
+                    || self.work_bytes.saturating_add(size) > 32 * 1024 * 1024
+                {
+                    return Err(error("VDF queue exceeds 32 MiB"));
+                }
+                self.work_bytes += size;
+                self.work
+                    .push_back((message.clone(), vnx::util::get_wall_time_millis(), size));
                 while self.work.len() > 32 {
-                    if let Some(old) = self.work.pop_front() {
+                    if let Some((old, _, size)) = self.work.pop_front() {
+                        self.work_bytes -= size;
                         self.verified_work.remove(&hash(&old, "content_hash")?);
                     }
                 }
                 update = true;
             }
             "mmx.ValidatorVote" => {
-                self.chain
-                    .admit_vote(message, vnx::util::get_wall_time_millis())?;
+                let id = hash(message, "content_hash")?;
+                if self.vote_ids.contains(&id) {
+                    return Ok(false);
+                }
+                if message.memory_size() > 4096 || message.encode_compact()?.len() > 4096 {
+                    return Err(error("validator vote exceeds 4 KiB"));
+                }
+                let vote = mmx_consensus::vote::verify(message)?;
+                if !self
+                    .chain
+                    .enqueue_vote(vote, vnx::util::get_wall_time_millis())
+                {
+                    return Err(error("validator vote queue full"));
+                }
+                self.vote_ids.insert(id);
+                self.vote_order.push_back(id);
+                if self.vote_order.len() > 32_768 {
+                    self.vote_ids.remove(&self.vote_order.pop_front().unwrap());
+                }
+                update = true;
             }
             "mmx.ProofResponse" => {
                 let size = message.memory_size().max(message.encode_compact()?.len());
@@ -794,17 +893,24 @@ impl Node {
                     visible_transaction(&id)?
                 })
             }
-            "mmx.Node.get_transactions" => Value::Sequence(
-                request
-                    .field("ids")?
-                    .seq()?
-                    .iter()
-                    .map(|v| {
-                        let id: Hash = v.bytes()?.try_into()?;
-                        Ok(block_value(visible_transaction(&id)?))
-                    })
-                    .collect::<Result<_>>()?,
-            ),
+            "mmx.Node.get_transactions" => {
+                let ids = request.field("ids")?.seq()?;
+                if ids.len() > 128 {
+                    return Err(error("transaction query exceeds 128 ids"));
+                }
+                let mut values = Vec::new();
+                let mut size = 0usize;
+                for value in ids {
+                    let id = value.bytes()?.try_into()?;
+                    let tx = visible_transaction(&id)?;
+                    size = size.saturating_add(tx.as_ref().map_or(0, Record::memory_size));
+                    if size > 32 * 1024 * 1024 {
+                        return Err(error("transaction query exceeds 32 MiB"));
+                    }
+                    values.push(block_value(tx));
+                }
+                Value::Sequence(values)
+            }
             "mmx.Node.get_tx_height" => optional(
                 visible_index(&hash(request, "id")?)?.map(|i| Value::Uint(i.height.into())),
             ),
@@ -905,5 +1011,83 @@ impl Node {
             &format!("{}.return", request.name),
             [("_ret_0".into(), value)],
         ))
+    }
+}
+
+#[cfg(test)]
+mod work_queue_tests {
+    use super::*;
+    use mmx_execution::chain::genesis::Assets;
+    use mmx_types::VnxType;
+    use vnx::serde_json::{self, Value as Json};
+    fn setup() -> (Node, Record) {
+        let rows: Vec<Json> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let g = rows.iter().find(|r| r["name"] == "synthetic").unwrap();
+        let raw = |v: &Json| vnx::util::from_hex_string(v.as_str().unwrap()).unwrap();
+        let params = mmx::ChainParams::decode(&raw(&g["params"])).unwrap();
+        let assets = Assets {
+            binaries: g["binaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| Record::decode(&raw(v)).unwrap())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            testnet_rewards: None,
+            project_relay: None,
+        };
+        let mut chain = ForkChain::memory(params);
+        chain.initialize(&assets).unwrap();
+        let work = &rows.iter().find(|r| r["kind"] == "chain").unwrap()["steps"][0]["vdf"];
+        (
+            Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap(),
+            Record::decode(&raw(work)).unwrap(),
+        )
+    }
+    #[test]
+    fn waiting_vdf_expires_without_refresh_but_verified_work_lives_until_root_advances() {
+        let (mut node, work) = setup();
+        node.admit_message(&work).unwrap();
+        let ttl = node.chain.selected().params().block_interval_ms * 10;
+        // Receipt does not refresh an existing item's original arrival time.
+        node.work[0].1 -= ttl + 1000;
+        node.admit_message(&work).unwrap();
+        assert_eq!(node.work.len(), 1);
+        node.tick().unwrap();
+        assert!(node.work.is_empty());
+        assert_eq!(node.work_bytes, 0);
+        // Native verified vdf_index entries survive the waiting-queue TTL.
+        node.receive(&work).unwrap();
+        node.tick().unwrap();
+        assert_eq!(node.verified_work.len(), 1);
+        node.work[0].1 -= ttl + 1000;
+        node.tick().unwrap();
+        assert_eq!(node.work.len(), 1);
+        assert_eq!(node.verified_work.len(), 1);
+        assert!(node.work_bytes > 0);
+        node.rollback_to(0).unwrap();
+        assert_eq!(node.work_bytes, 0);
+        assert!(node.work.is_empty());
+    }
+    #[test]
+    fn vdf_budget_charges_decoded_heap_before_retaining_or_verifying_work() {
+        let (mut node, work) = setup();
+        let mut oversized = work.clone();
+        // Extra unhashed data cannot evade the retained-byte budget.
+        oversized
+            .fields
+            .insert("extra".into(), Value::Bytes(vec![0; 32 * 1024 * 1024]));
+        assert!(node.receive(&oversized).is_err());
+        assert!(node.work.is_empty());
+        assert_eq!(node.work_bytes, 0);
+        node.receive(&work).unwrap();
+        assert_eq!(
+            node.work_bytes,
+            work.memory_size().max(work.encode_compact().unwrap().len())
+        );
     }
 }

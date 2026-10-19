@@ -652,11 +652,18 @@ impl Server {
                             let run = || -> Result<()> {
                                 let mut connection = Connection::new(stream)?;
                                 let mut relay_peer = RelayPeer::default();
+                                let mut received = Instant::now();
                                 while !stop.load(Ordering::Relaxed) {
+                                    // Native Router's configured receive-idle
+                                    // timeout also releases silent inbound slots.
+                                    if received.elapsed() > Duration::from_secs(180) {
+                                        return Err(error("peer receive idle timeout"));
+                                    }
                                     relay_peer.flush(&relay, |r| connection.send(r))?;
                                     if let Some(msg) =
                                         connection.receive(Duration::from_millis(200))?
                                     {
+                                        received = Instant::now();
                                         relay_peer.note(&msg);
                                         if msg.name == "mmx.Request" {
                                             respond_with(

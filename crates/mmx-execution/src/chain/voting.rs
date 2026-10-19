@@ -35,6 +35,7 @@ pub struct Voting {
     forks: BTreeMap<Hash, Fork>,
     proofs: BTreeMap<Hash, (u32, BTreeSet<Hash>)>,
     queue: Vec<(VerifiedVote, i64)>,
+    queued: BTreeSet<Hash>,
     root_height: Option<u32>,
     max_history: u32,
 }
@@ -44,6 +45,7 @@ impl Default for Voting {
             forks: BTreeMap::new(),
             proofs: BTreeMap::new(),
             queue: vec![],
+            queued: BTreeSet::new(),
             root_height: None,
             max_history: 1000,
         }
@@ -131,12 +133,29 @@ impl Voting {
         Ok(())
     }
     pub fn admit(&mut self, record: &Record, now_ms: i64, interval_ms: i64) -> VoteResult<Report> {
-        self.queue.push((vote::verify(record)?, now_ms));
+        let vote = vote::verify(record)?;
+        self.queued.insert(*vote.content_hash());
+        self.queue.push((vote, now_ms));
         Ok(self.process(now_ms, interval_ms))
+    }
+    /// Runtime admission is batched after block-proof verification, as in
+    /// native Node::verify_votes. Duplicate arrivals never refresh the timeout.
+    /// Keep the direct `admit` API's native fixture semantics unchanged.
+    pub fn enqueue(&mut self, vote: VerifiedVote, now_ms: i64) -> bool {
+        if self.queued.contains(vote.content_hash()) {
+            return true;
+        }
+        if self.queue.len() >= 4096 {
+            return false;
+        }
+        self.queued.insert(*vote.content_hash());
+        self.queue.push((vote, now_ms));
+        true
     }
     pub fn process(&mut self, now_ms: i64, interval_ms: i64) -> Report {
         let mut report = Report::default();
         let mut pending = Vec::new();
+        self.queued.clear();
         for (vote, received) in std::mem::take(&mut self.queue) {
             let result = if now_ms.wrapping_sub(received) > interval_ms.wrapping_mul(3) {
                 Some(Disposition::Expired)
@@ -164,6 +183,7 @@ impl Voting {
             if let Some(result) = result {
                 report.processed.push((vote, result));
             } else {
+                self.queued.insert(*vote.content_hash());
                 pending.push((vote, received));
             }
         }
@@ -184,6 +204,61 @@ mod tests {
     }
     fn unhex(v: &Value) -> Vec<u8> {
         vnx::util::from_hex_string(v.as_str().unwrap()).unwrap()
+    }
+    #[test]
+    fn batched_runtime_votes_bound_unknown_blocks_and_never_refresh_duplicate_timeouts() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+        use mmx_consensus::Value;
+        let key = SigningKey::from_slice(&[1; 32]).unwrap();
+        let public: FarmerKey = key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        let signed = |n| {
+            let block = hash(n);
+            let signature: Signature = key
+                .sign_prehash(&vote::signing_hash(&block, &public))
+                .unwrap();
+            let mut record = Record {
+                name: "mmx.ValidatorVote".into(),
+                fields: [
+                    ("hash".into(), Value::Bytes(block.to_vec())),
+                    ("farmer_key".into(), Value::Bytes(public.to_vec())),
+                    (
+                        "farmer_sig".into(),
+                        Value::Bytes(signature.to_bytes().to_vec()),
+                    ),
+                    ("content_hash".into(), Value::Bytes(vec![0; 32])),
+                ]
+                .into(),
+            };
+            let id = vote::content_hash(&record).unwrap();
+            record
+                .fields
+                .insert("content_hash".into(), Value::Bytes(id.to_vec()));
+            vote::verify(&record).unwrap()
+        };
+        let mut state = Voting::default();
+        let first = signed(1);
+        assert!(state.enqueue(first.clone(), 0));
+        for n in 2..=4096 {
+            assert!(state.enqueue(signed(n), 0));
+        }
+        assert_eq!(state.pending(), 4096);
+        assert!(!state.enqueue(signed(4097), 30));
+        assert!(state.enqueue(first, 30));
+        assert_eq!(state.process(30, 10).pending, 4096);
+        let expired = state.process(31, 10);
+        assert_eq!(expired.pending, 0);
+        assert_eq!(expired.processed.len(), 4096);
+        assert!(expired
+            .processed
+            .iter()
+            .all(|(_, d)| *d == Disposition::Expired));
+        assert!(state.enqueue(signed(4097), 31));
+        assert_eq!(state.pending(), 1);
     }
     #[test]
     fn native_vote_queue_counts_duplicates_best_proof_changes_and_timeout_boundaries() {

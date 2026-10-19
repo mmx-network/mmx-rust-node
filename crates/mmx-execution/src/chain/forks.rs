@@ -30,6 +30,9 @@ pub struct Update {
     pub invalid: BTreeSet<Hash>,
     pub waiting: BTreeSet<Hash>,
     pub votes: voting::Report,
+    /// Fully applied live blocks and their verified VDFs, already loaded for
+    /// execution. Historical sync never populates this relay handoff.
+    pub validated: Vec<Record>,
     pub load_time: Duration,
     pub verification_time: Duration,
     pub choice_time: Duration,
@@ -323,6 +326,12 @@ impl ForkChain {
     pub fn process_votes(&mut self, now_ms: i64) -> voting::Report {
         self.voting
             .process(now_ms, self.chain.params().block_interval_ms)
+    }
+    pub fn enqueue_vote(&mut self, vote: mmx_consensus::vote::VerifiedVote, now_ms: i64) -> bool {
+        self.voting.enqueue(vote, now_ms)
+    }
+    pub fn pending_votes(&self) -> usize {
+        self.voting.pending()
     }
     /// Additional work-verified farmer proofs can change future vote eligibility;
     /// already counted votes remain counted. Response admission belongs to Node.
@@ -635,6 +644,10 @@ impl ForkChain {
         }
         self.voting.root(root_header.height, root_header.vdf_height);
         let entries = self.entries(root_header.height)?;
+        let bodies: BTreeMap<_, _> = entries
+            .iter()
+            .map(|entry| (entry.header.hash.0, &entry.block))
+            .collect();
         let headers: BTreeMap<_, _> = entries
             .iter()
             .map(|e| (e.header.hash.0, e.header.clone()))
@@ -847,9 +860,13 @@ impl ForkChain {
             let archive = &self.archive;
             let sync_verified = &self.sync_verified;
             let evidence = &self.evidence;
+            let mut validated = Vec::new();
             let branch = line.iter().map(|hash| {
-                let block =
-                    archive_block(archive, hash)?.ok_or_else(|| invalid("missing replay block"))?;
+                let block = if let Some(block) = bodies.get(hash) {
+                    (*block).clone()
+                } else {
+                    archive_block(archive, hash)?.ok_or_else(|| invalid("missing replay block"))?
+                };
                 // Native fork_to re-verifies space proofs and bodies below a
                 // replacement root without requiring historical PoTs. New live
                 // blocks above the root still require verified VDF evidence.
@@ -862,6 +879,12 @@ impl ForkChain {
                 };
                 let work = points.get(hash).cloned().unwrap_or_default();
                 let evidence = evidence.get(hash).cloned();
+                if mode == ValidationMode::Live && !sync_verified.contains(hash) {
+                    for point in &work {
+                        validated.push(Record::from_generated(point.proof())?);
+                    }
+                    validated.push(block.clone());
+                }
                 Ok((block, work, validation, evidence))
             });
             let replay_started = Instant::now();
@@ -873,6 +896,7 @@ impl ForkChain {
                 Ok(_) => {
                     out.common_ancestor = Some(common.hash.0);
                     out.applied = line;
+                    out.validated = validated;
                     return Ok(out);
                 }
                 Err(ChainError::Block(error)) if consensus_rejection(&error.error) => {

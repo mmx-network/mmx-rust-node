@@ -7,7 +7,11 @@ performance parity. A source comparison alone does not establish it.
 
 The initial comparison below uses `../mmx-node` at
 `5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2` (2026-10-19). Native fixtures retain
-their own recorded source revisions.
+their own recorded source revisions. The [full subsystem audit](cpp-port-audit.md)
+records the follow-up fixes and prioritized remaining work. In particular,
+reference-only compaction does not eliminate the chain layer's separate block
+and transaction payload copies; consolidating those writes remains the first
+storage optimization.
 
 | Area | C++ reference and important choices | Rust coverage and remaining checks |
 | --- | --- | --- |
@@ -37,3 +41,12 @@ native ordering wherever it affects proof identity, execution or consensus.
 For farming measurements, disable the C++ harvester and retain normal filesystem
 caches. Do not flush machine caches or scan plot contents. Record plot counts,
 compression, worker limits and proof delivery timing alongside lookup duration.
+
+The relay follow-up forwards advancing verified VDFs, fully applied live blocks
+and accepted votes. It batches runtime vote processing with authenticated replay
+deduplication and a 4,096-pending limit, bounds retained VDF bytes and waiting
+time, suppresses VDF sender echoes, and releases receive-idle inbound peers.
+Fork replay reuses the already-loaded block bodies; the relay handoff reuses
+those records too. RPC point-read products and transaction batch/output sizes
+now have admission budgets. The audit distinguishes these completed changes
+from native credit/rate policy, streaming range reads and payload consolidation.

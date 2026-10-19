@@ -8,7 +8,7 @@ services, native block production and validator scheduling. Local and remote
 solo harvesting are connected end to end; pool partials remain to be ported.
 
 The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
-`ca6438b37c08007106d58efe4a990f6ecb276649`. Port consensus behavior from the
+`5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2`. Port consensus behavior from the
 reference implementation and its tests, including protocol-specific differences.
 Consensus compatibility is required: identical transaction/block acceptance,
 execution results, state transitions, gas and limits, failure behavior, and
@@ -20,7 +20,8 @@ Performance is also a migration requirement across the node, database, wallet,
 farmer, harvester and utilities. Read the matching C++ execution strategy before
 porting, preserve its important optimizations, and verify comparable workloads.
 [Performance parity](docs/performance-parity.md) records the reference paths,
-regression checks and outstanding comparison gaps.
+regression checks and outstanding comparison gaps. The [C++ port audit](docs/cpp-port-audit.md)
+covers consensus, defenses, I/O, scheduling and remaining migration work.
 
 ## Build and run
 

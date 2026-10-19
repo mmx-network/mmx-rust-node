@@ -2070,6 +2070,16 @@ fn verified_proof_announcements_relay_before_block_production_without_local_meta
     let address = server.address().to_string();
     let mut sender = peer::Connection::connect(&address).unwrap();
     let mut observer = peer::Connection::connect(&address).unwrap();
+    for connection in [&mut sender, &mut observer] {
+        assert_eq!(
+            connection
+                .receive(Duration::from_secs(3))
+                .unwrap()
+                .unwrap()
+                .name,
+            "mmx.ProofOfTime"
+        );
+    }
     let original = native_farming_response();
     let mut private = original.clone();
     private
@@ -2135,6 +2145,168 @@ fn verified_proof_announcements_relay_before_block_production_without_local_meta
         .unwrap()
         .is_none());
     server.shutdown();
+}
+
+fn signed_farming_vote(block: Hash, key: mmx_wallet::FarmerKey) -> Record {
+    let public = key.public_key();
+    let farmer = mmx_farming::farmer::Farmer::new([key], None);
+    let mut vote = record(
+        "mmx.ValidatorVote",
+        [
+            ("hash".into(), V::Bytes(block.to_vec())),
+            ("farmer_key".into(), V::Bytes(public.to_vec())),
+            ("farmer_sig".into(), V::Bytes(vec![0; 64])),
+            ("content_hash".into(), V::Bytes(vec![0; 32])),
+        ],
+    );
+    let signature = farmer.sign_vote(&vote).unwrap();
+    vote.fields
+        .insert("farmer_sig".into(), V::Bytes(signature.to_vec()));
+    let id = mmx_consensus::vote::content_hash(&vote).unwrap();
+    vote.fields
+        .insert("content_hash".into(), V::Bytes(id.to_vec()));
+    vote
+}
+
+#[test]
+fn foreign_live_blocks_work_and_accepted_votes_relay_after_verification_without_echoes() {
+    let (network, g, steps, _) = fixture();
+    let n = node(&network);
+    sync::synchronize_pipelined(
+        &mut MemorySource {
+            blocks: vec![wire(&g["block"])],
+            wrong: false,
+        },
+        &n,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
+    let address = server.address().to_string();
+    let mut sender = peer::Connection::connect(&address).unwrap();
+    let mut observer = peer::Connection::connect(&address).unwrap();
+    let wait = |count| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let status =
+                rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#)
+                    .unwrap();
+            if status["result"]["queued_messages"].as_u64().unwrap() >= count {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // A real signed block cannot relay until its VDF and body are verified.
+    sender.send(&wire(&steps[0]["block"])).unwrap();
+    wait(1);
+    n.lock().unwrap().tick().unwrap();
+    assert!(observer
+        .receive(Duration::from_millis(100))
+        .unwrap()
+        .is_none());
+    sender.send(&wire(&steps[0]["vdf"])).unwrap();
+    wait(1);
+    n.lock().unwrap().tick().unwrap();
+    for expected in ["mmx.ProofOfTime", "mmx.Block"] {
+        assert_eq!(
+            observer
+                .receive(Duration::from_secs(3))
+                .unwrap()
+                .unwrap()
+                .name,
+            expected
+        );
+    }
+    let block = wire(&steps[1]["block"]);
+    let id = hash(&block, "hash").unwrap();
+    let vote = signed_farming_vote(id, farmer_scalar());
+    // Unknown-block votes wait; a different valid signer still cannot vote.
+    let mut scalar = [0; 32];
+    scalar[31] = 2;
+    let unauthorized = signed_farming_vote(id, mmx_wallet::FarmerKey::from_bytes(&scalar).unwrap());
+    for message in [&vote, &vote, &unauthorized] {
+        sender.send(message).unwrap();
+    }
+    wait(3);
+    n.lock().unwrap().tick().unwrap();
+    assert_eq!(n.lock().unwrap().chain().pending_votes(), 2);
+    assert!(observer
+        .receive(Duration::from_millis(100))
+        .unwrap()
+        .is_none());
+    sender.send(&block).unwrap();
+    sender.send(&wire(&steps[1]["vdf"])).unwrap();
+    wait(2);
+    n.lock().unwrap().tick().unwrap();
+    let mut received = vec![];
+    for _ in 0..3 {
+        received.push(observer.receive(Duration::from_secs(3)).unwrap().unwrap());
+    }
+    assert!(received.contains(&vote));
+    assert!(received.contains(&block));
+    assert!(received.iter().any(|r| r.name == "mmx.ProofOfTime"));
+    assert!(!received.contains(&unauthorized));
+    assert_eq!(n.lock().unwrap().chain().vote_count(&id), 1);
+    assert_eq!(n.lock().unwrap().chain().pending_votes(), 0);
+    for message in [&vote, &block, &wire(&steps[1]["vdf"])] {
+        sender.send(message).unwrap();
+    }
+    wait(3);
+    n.lock().unwrap().tick().unwrap();
+    assert!(observer
+        .receive(Duration::from_millis(100))
+        .unwrap()
+        .is_none());
+    assert!(sender
+        .receive(Duration::from_millis(100))
+        .unwrap()
+        .is_none());
+    server.shutdown();
+    // Historical catchup is silent even though the same bodies are valid.
+    let historical = node(&network);
+    let mut server = peer::Server::bind("127.0.0.1:0", historical.clone()).unwrap();
+    let mut observer = peer::Connection::connect(&server.address().to_string()).unwrap();
+    let mut blocks = vec![wire(&g["block"])];
+    blocks.extend(steps.iter().take(2).map(|s| wire(&s["block"])));
+    sync::synchronize_pipelined(
+        &mut MemorySource {
+            blocks,
+            wrong: false,
+        },
+        &historical,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    assert!(observer
+        .receive(Duration::from_millis(100))
+        .unwrap()
+        .is_none());
+    server.shutdown();
+}
+
+#[test]
+fn malformed_vote_does_not_poison_replay_cache_and_replays_do_not_grow_pending_work() {
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let vote = signed_farming_vote([222; 32], farmer_scalar());
+    let mut bad = vote.clone();
+    bad.fields
+        .insert("farmer_sig".into(), V::Bytes(vec![0; 64]));
+    assert!(n.lock().unwrap().receive(&bad).is_err());
+    for _ in 0..128 {
+        n.lock().unwrap().receive(&vote).unwrap();
+    }
+    assert_eq!(n.lock().unwrap().chain().pending_votes(), 1);
+    let mut oversized = signed_farming_vote([223; 32], farmer_scalar());
+    oversized
+        .fields
+        .insert("extra".into(), V::Bytes(vec![0; 4096]));
+    assert!(n.lock().unwrap().receive(&oversized).is_err());
+    assert_eq!(n.lock().unwrap().chain().pending_votes(), 1);
 }
 
 #[test]
@@ -2546,4 +2718,40 @@ fn private_farmer_rpc_worker_produces_and_relays_a_live_block() {
     drop(remote);
     server.shutdown();
     farmer.shutdown();
+}
+
+#[test]
+fn public_rpc_rejects_multiplicative_balance_work_and_oversized_transaction_batches() {
+    let (network, _, _, _) = fixture();
+    let n = node(&network);
+    let status = rpc::json_request(&n, &serde_json::to_vec(&json!({
+        "jsonrpc":"2.0", "id":1, "method":"get_transactions", "params":{"ids":vec![[0u8;32];129]}
+    })).unwrap()).unwrap();
+    assert!(status["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("128 ids"));
+    let owners: Vec<_> = (0u32..101)
+        .map(|v| {
+            let mut a = [0u8; 32];
+            a[..4].copy_from_slice(&v.to_le_bytes());
+            a
+        })
+        .collect();
+    let status = rpc::json_request(
+        &n,
+        &serde_json::to_vec(&json!({
+            "jsonrpc":"2.0", "id":2, "method":"get_all_balances", "params":{
+                "addresses":owners, "whitelist":owners, "limit":-1
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(status["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("10000 point reads"));
+    let good = rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":3,"method":"get_height"}"#).unwrap();
+    assert_eq!(good["result"], 0);
 }

@@ -315,6 +315,9 @@ impl Node {
         if owners.len() > 1024 || whitelist.len() > 1024 {
             return Err(error("balance query exceeds 1024 owners/currencies"));
         }
+        if owners.len().saturating_mul(whitelist.len()) > 10_000 {
+            return Err(error("balance query exceeds 10000 point reads"));
+        }
         let limit = match request.field("limit")? {
             Value::Int(v) => *v,
             Value::Uint(v) => i64::try_from(*v)?,
@@ -366,7 +369,11 @@ impl RelayPeer {
     pub fn note(&mut self, record: &Record) {
         if !matches!(
             record.name.as_str(),
-            "mmx.Transaction" | "mmx.Block" | "mmx.ValidatorVote" | "mmx.ProofResponse"
+            "mmx.Transaction"
+                | "mmx.Block"
+                | "mmx.ValidatorVote"
+                | "mmx.ProofResponse"
+                | "mmx.ProofOfTime"
         ) {
             return;
         }

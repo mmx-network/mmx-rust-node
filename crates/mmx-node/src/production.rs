@@ -291,8 +291,12 @@ impl Node {
         }
         self.chain.admit(block, &candidate.work)?;
         self.update()?;
-        self.broadcast(block)?;
-        Ok(true)
+        let block_hash = hash(block, "hash")?;
+        Ok(self
+            .chain
+            .selected()
+            .tip()?
+            .is_some_and(|tip| tip.hash.0 == block_hash))
     }
     /// Release a failed construction/signing attempt. C++ retries these while
     /// created_blocks suppresses only proofs that have already been signed.
