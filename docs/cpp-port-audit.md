@@ -158,3 +158,29 @@ for the open items above remain required before claiming C++ performance parity.
 Checkpoint validation: 304 workspace tests passed, one existing ignored test,
 strict workspace Clippy, formatting and the local optimized node build passed.
 The preceding production checkpoint also passed GitHub Actions run 39272095917.
+
+## Archived production check
+
+A bounded read of the two archived candidate heights while the Rust writer was
+stopped, followed by ordinary RPC reads, found:
+
+| Height | Rust score / proof count | Canonical score / proof count | Rust timestamp later by |
+| --- | --- | --- | --- |
+| 5,530,070 | 48 / 8 | 150 / 7 | 2,257 ms |
+| 5,530,187 | 54 / 4 | 143 / 3 | 1,971 ms |
+
+Each pair shares its parent, challenge, VDF height and total chain weight. The
+Rust proofs have lower (better) hashes. C++ `Block::is_valid`, `Block::validate`
+and the original `Node::verify_proof` methods accept both Rust block envelopes
+and all twelve included space proofs. That check does not replay ledger/history
+validation or recover network receipt/vote timing. A better primary score alone
+does not replace native vote/height/hash fork choice, and counted votes are not
+retroactively revoked. The old logs cannot establish the network cause of these
+losses. Missing proof-announcement relay is confirmed in the old source and is
+fixed; claiming it as the proven cause would go beyond the available evidence.
+
+After deploying the relay/audit checkpoint, the Rust node was synced with eight
+peers at height 5,530,444 and its canonical hash matched C++. A ten-second normal
+live sample observed approximately 0.015 MiB/s physical reads and 0.010 MiB/s
+physical writes. This is a quiet live sample, not a historical-sync benchmark.
+The remote Rust harvester stayed running and the C++ harvester stayed disabled.
