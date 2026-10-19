@@ -158,6 +158,7 @@ struct Buffer {
 pub struct OpenCl {
     pub device: DeviceInfo,
     raw_device: Handle,
+    memory_local: usize,
     vdf: Object,
     generate: Object,
     memory: Object,
@@ -175,6 +176,18 @@ unsafe impl Send for OpenCl {}
 
 impl OpenCl {
     pub fn new(index: usize, platform: Option<&str>, gpu_only: bool) -> Result<Self> {
+        Self::new_impl(index, platform, gpu_only, true)
+    }
+    /// Portable reference path, including on devices with a vendor fast path.
+    pub fn new_portable(index: usize, platform: Option<&str>, gpu_only: bool) -> Result<Self> {
+        Self::new_impl(index, platform, gpu_only, false)
+    }
+    fn new_impl(
+        index: usize,
+        platform: Option<&str>,
+        gpu_only: bool,
+        prefer_fast: bool,
+    ) -> Result<Self> {
         if !cfg!(target_endian = "little") {
             return Err(Error("OpenCL requires a little endian host".into()));
         }
@@ -200,16 +213,47 @@ impl OpenCl {
         if little == 0 {
             return Err(Error("OpenCL requires a little endian device".into()));
         }
+        let uint_info = |parameter| -> Result<u32> {
+            let mut value = 0u32;
+            // SAFETY: these properties return exactly one cl_uint.
+            check(
+                unsafe {
+                    (api.clGetDeviceInfo)(
+                        raw,
+                        parameter,
+                        size_of::<u32>(),
+                        (&mut value as *mut u32).cast(),
+                        ptr::null_mut(),
+                    )
+                },
+                "query device integer",
+            )?;
+            Ok(value)
+        };
+        let nvidia_warp = prefer_fast
+            && uint_info(0x1001).unwrap_or(0) == 0x10DE
+            && uint_info(0x4003).unwrap_or(0) == 32
+            && uint_info(0x4000).unwrap_or(0) >= 7;
         let context = Object::new(&api, api.clReleaseContext, |err| unsafe {
             (api.clCreateContext)(ptr::null(), 1, &raw, None, ptr::null_mut(), err)
         })?;
-        let source = concat!(include_str!("sha256.cl"), "\n", include_str!("work.cl"));
+        let source = concat!(
+            include_str!("sha256.cl"),
+            "\n",
+            include_str!("work.cl"),
+            "\n",
+            include_str!("memory_nv.cl")
+        );
         let sources = [source.as_ptr().cast()];
         let sizes = [source.len()];
         let program = Object::new(&api, api.clReleaseProgram, |err| unsafe {
             (api.clCreateProgramWithSource)(context.raw, 1, sources.as_ptr(), sizes.as_ptr(), err)
         })?;
-        let options = c"-cl-std=CL1.2";
+        let options = if nvidia_warp {
+            c"-cl-std=CL1.2 -DMMX_NVIDIA_WARP=1"
+        } else {
+            c"-cl-std=CL1.2"
+        };
         let code = unsafe {
             (api.clBuildProgram)(
                 program.raw,
@@ -269,9 +313,14 @@ impl OpenCl {
         Ok(Self {
             device,
             raw_device: raw,
+            memory_local: if nvidia_warp { 128 } else { 32 },
             vdf: kernel("repeated_sha256")?,
             generate: kernel("generate_memory")?,
-            memory: kernel("memory_hash")?,
+            memory: kernel(if nvidia_warp {
+                "memory_hash_nv"
+            } else {
+                "memory_hash"
+            })?,
             vdf_buffer: None,
             key_buffer: None,
             memory_buffer: None,
@@ -281,10 +330,48 @@ impl OpenCl {
             context,
         })
     }
+    pub fn memory_kernel(&self) -> &'static str {
+        if self.memory_local == 128 {
+            "NVIDIA warp"
+        } else {
+            "portable"
+        }
+    }
     /// Three independent in-order queues and pinned host buffers for asynchronous
     /// memory-hash batches. Existing synchronous APIs are unchanged.
     pub fn into_memory_pipeline(self, profiling: bool) -> Result<MemoryPipeline> {
-        MemoryPipeline::new(self, profiling)
+        MemoryPipeline::new(self, profiling, MEMORY_BATCH)
+    }
+    /// Plotting may use CUDA-sized tiles; synchronous proof work retains its
+    /// small default. Smaller NVIDIA GPUs use a conservative 16K-key tile.
+    pub fn preferred_memory_batch(&self) -> usize {
+        if self.memory_local != 128 {
+            return MEMORY_BATCH;
+        }
+        let mut bytes = 0u64;
+        let code = unsafe {
+            (self.context.api.clGetDeviceInfo)(
+                self.raw_device,
+                0x101F,
+                size_of::<u64>(),
+                (&mut bytes as *mut u64).cast(),
+                ptr::null_mut(),
+            )
+        };
+        if code != 0 {
+            MEMORY_BATCH
+        } else if bytes >= 4 * 1024 * 1024 * 1024 {
+            65536
+        } else {
+            16384
+        }
+    }
+    pub fn into_memory_pipeline_with_batch(
+        self,
+        profiling: bool,
+        batch_size: usize,
+    ) -> Result<MemoryPipeline> {
+        MemoryPipeline::new(self, profiling, batch_size)
     }
     fn ensure(&self, buffer: &mut Option<Buffer>, size: usize) -> Result<()> {
         if buffer.as_ref().is_some_and(|b| b.capacity >= size) {
@@ -445,11 +532,27 @@ impl OpenCl {
             self.argument(&self.generate, 0, &keys.object.raw)?;
             self.argument(&self.generate, 1, &memory.object.raw)?;
             self.argument(&self.generate, 2, &(n as u32))?;
-            self.enqueue(&self.generate, n, None)?;
+            self.enqueue(
+                &self.generate,
+                if self.memory_local == 128 {
+                    n.div_ceil(256) * 256
+                } else {
+                    n
+                },
+                if self.memory_local == 128 {
+                    Some(256)
+                } else {
+                    None
+                },
+            )?;
             self.argument(&self.memory, 0, &memory.object.raw)?;
             self.argument(&self.memory, 1, &output.object.raw)?;
             self.argument(&self.memory, 2, &(n as u32))?;
-            self.enqueue(&self.memory, n * 32, Some(32))?;
+            self.enqueue(
+                &self.memory,
+                (n * 32).div_ceil(self.memory_local) * self.memory_local,
+                Some(self.memory_local),
+            )?;
             let start = result.len();
             result.resize(start + n, [0; 128]);
             self.download(output, result[start..].as_flattened_mut())?;

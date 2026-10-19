@@ -2,11 +2,12 @@
 //! queue ordering supplies stage dependencies, completion events guard reuse.
 use crate::{
     ffi::{check, Api, Handle, Object},
-    Error, OpenCl, Result, MEMORY_BATCH,
+    Error, OpenCl, Result,
 };
 use std::{ptr, rc::Rc, sync::Arc};
 
 pub const MEMORY_PIPELINE_DEPTH: usize = 3;
+pub const MAX_MEMORY_PIPELINE_BATCH: usize = 65536;
 #[derive(Clone, Copy, Debug)]
 pub struct TimeSpan {
     pub start: u64,
@@ -98,7 +99,7 @@ struct Slot {
     prepared: bool,
 }
 impl Slot {
-    fn new(engine: &OpenCl, profiling: bool) -> Result<Self> {
+    fn new(engine: &OpenCl, profiling: bool, batch: usize) -> Result<Self> {
         let api = &engine.context.api;
         let queue = Rc::new(Object::new(api, api.clReleaseCommandQueue, |err| unsafe {
             (api.clCreateCommandQueue)(
@@ -114,11 +115,11 @@ impl Slot {
             })
         };
         Ok(Self {
-            keys: buffer(MEMORY_BATCH * 64)?,
-            scratch: buffer(MEMORY_BATCH * 4096)?,
-            output: buffer(MEMORY_BATCH * 128)?,
-            host_keys: Mapped::new(engine, queue.clone(), MEMORY_BATCH * 64)?,
-            host_output: Mapped::new(engine, queue.clone(), MEMORY_BATCH * 128)?,
+            keys: buffer(batch * 64)?,
+            scratch: buffer(batch * 4096)?,
+            output: buffer(batch * 128)?,
+            host_keys: Mapped::new(engine, queue.clone(), batch * 64)?,
+            host_output: Mapped::new(engine, queue.clone(), batch * 128)?,
             queue,
             events: Vec::new(),
             count: 0,
@@ -141,22 +142,33 @@ pub struct MemoryPipeline {
     engine: OpenCl,
     profiling: bool,
     poisoned: bool,
+    batch_size: usize,
 }
 // SAFETY: all Rc clones/mappings are private to this owner and move together;
 // no reference-count operations or queue/mapping mutations run concurrently.
 // OpenCL handles/mappings have no host-thread affinity. The type is not Sync.
 unsafe impl Send for MemoryPipeline {}
 impl MemoryPipeline {
-    pub(crate) fn new(engine: OpenCl, profiling: bool) -> Result<Self> {
+    pub(crate) fn new(engine: OpenCl, profiling: bool, batch_size: usize) -> Result<Self> {
+        if batch_size == 0 || batch_size > MAX_MEMORY_PIPELINE_BATCH {
+            return Err(Error("invalid memory pipeline capacity".into()));
+        }
         let slots = (0..MEMORY_PIPELINE_DEPTH)
-            .map(|_| Slot::new(&engine, profiling))
+            .map(|_| Slot::new(&engine, profiling, batch_size))
             .collect::<Result<_>>()?;
         Ok(Self {
             slots,
             engine,
             profiling,
             poisoned: false,
+            batch_size,
         })
+    }
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+    pub fn memory_kernel(&self) -> &'static str {
+        self.engine.memory_kernel()
     }
     pub fn device(&self) -> &crate::DeviceInfo {
         &self.engine.device
@@ -172,7 +184,7 @@ impl MemoryPipeline {
     /// Fill pinned keys directly. A slot cannot be prepared while its previous
     /// batch is in flight; the returned borrow also prevents concurrent submit.
     pub fn prepare(&mut self, index: usize, count: usize) -> Result<&mut [[u8; 64]]> {
-        if count == 0 || count > MEMORY_BATCH {
+        if count == 0 || count > self.batch_size {
             return Err(Error("invalid memory pipeline batch length".into()));
         }
         let slot = self.slot(index)?;
@@ -225,8 +237,16 @@ impl MemoryPipeline {
             api,
             queue,
             engine.generate.raw,
-            slot.count,
-            None,
+            if engine.memory_local == 128 {
+                slot.count.div_ceil(256) * 256
+            } else {
+                slot.count
+            },
+            if engine.memory_local == 128 {
+                Some(256)
+            } else {
+                None
+            },
         )?);
         engine.argument(&engine.memory, 0, &slot.scratch.raw)?;
         engine.argument(&engine.memory, 1, &slot.output.raw)?;
@@ -235,8 +255,8 @@ impl MemoryPipeline {
             api,
             queue,
             engine.memory.raw,
-            slot.count * 32,
-            Some(32),
+            (slot.count * 32).div_ceil(engine.memory_local) * engine.memory_local,
+            Some(engine.memory_local),
         )?);
         slot.events.push(event(api, |ev| unsafe {
             (api.clEnqueueReadBuffer)(
@@ -375,6 +395,7 @@ fn timestamp(event: &Object, parameter: u32) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MEMORY_BATCH;
     #[test]
     fn slots_guard_reuse_complete_independently_and_drain() {
         if std::env::var("MMX_OPENCL_TESTS").as_deref() != Ok("1") {

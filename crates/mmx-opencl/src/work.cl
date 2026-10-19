@@ -18,6 +18,7 @@ __kernel void repeated_sha256(__global uint *hash, uint iterations, uint count) 
 
 __kernel void generate_memory(__global const uint *keys, __global uint *memory, uint count) {
     size_t id = get_global_id(0);
+    if (id >= count) return;
     uint state[32];
     // First 16 SHA256 round constants are also the native memory-hash IV.
     #pragma unroll
@@ -39,7 +40,10 @@ __kernel void generate_memory(__global const uint *keys, __global uint *memory, 
             }
         }
         #pragma unroll
-        for (uint i = 0; i < 32; ++i) memory[((size_t)row * count + id) * 32 + i] = state[i];
+        for (uint i = 0; i < 8; ++i) {
+            ((__global uint4 *)memory)[((size_t)row * count + id) * 8 + i] =
+                (uint4)(state[i*4], state[i*4+1], state[i*4+2], state[i*4+3]);
+        }
     }
 }
 
