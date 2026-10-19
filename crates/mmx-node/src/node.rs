@@ -218,6 +218,11 @@ impl Node {
         self.tx_pool
             .relay
             .set_target(std::time::Duration::from_millis(target.max(0) as u64))?;
+        self.tx_pool.relay.set_compressed_limit(
+            config
+                .read::<u32>("Router.max_msg_size")?
+                .map_or(crate::peer::DEFAULT_COMPRESSED_LIMIT, |v| v as usize),
+        )?;
         self.tx_pool.relay.configure_upload(
             self.chain.selected().params(),
             config.read::<f64>("Router.max_tx_upload")?.unwrap_or(2.),

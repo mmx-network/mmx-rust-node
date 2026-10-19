@@ -175,3 +175,14 @@ pending cost stops foreign forwarding. Controlled-time tests cover probability,
 idle refill, independent peers, withheld/late/unrelated receipts and map bounds;
 a native socket fixture checks local versus foreign admission. This establishes
 transport behavior, not a whole-network bandwidth benchmark.
+
+Peer framing now follows C++ `vnx.addons.MsgServer::on_read`: the production
+connection rejects compressed sizes above `Router.max_msg_size` (default 8 MiB)
+from the header before reading or allocating the body. Incoming and outgoing
+connections apply the same configured bound, including the independent sender.
+The separate Rust 64 MiB decoded-byte bound remains; a highly compressible
+record larger than 8 MiB is still accepted as in C++. Local configuration above
+64 MiB or zero is rejected. Socket tests hold an oversized header open without
+a body, cover both byte orders and a configured lower bound, and decode a valid
+record exceeding 8 MiB raw. Failed output encoding preserves connection schemas
+and sends no batch prefix. No ledger or plot reads are involved.

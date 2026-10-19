@@ -120,6 +120,11 @@ no live-ledger or plot scan is part of validation.
    duplicates do not refresh FIFO age, and explicit rollback resets it so work
    can be accepted again. Native first-seen envelope deduplication before full
    verification remains a distinct follow-up.
+   Production frames now honor native `Router.max_msg_size` (default 8 MiB of
+   compressed data), rejecting oversized headers before body reads/allocation.
+   Rust retains its separate 64 MiB decoded limit; compressible records above
+   8 MiB raw remain valid. Both byte orders and configured limits have socket
+   regressions, including a sender failure that leaves schemas unchanged.
    Randomized staged fanout is now implemented: each publication shuffles live
    connection tokens once and assigns native `target / (N+1)` ranks. The native
    `Router.relay_target_ms` config is honored (repository default 2,000 ms).

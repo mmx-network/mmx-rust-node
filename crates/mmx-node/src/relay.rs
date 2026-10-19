@@ -50,6 +50,7 @@ struct RelayState {
     next_member: u64,
     target: Duration,
     upload: Option<upload::Budget>,
+    compressed_limit: usize,
 }
 impl Default for RelayState {
     fn default() -> Self {
@@ -61,6 +62,7 @@ impl Default for RelayState {
             next_member: 0,
             target: Duration::from_secs(2),
             upload: None,
+            compressed_limit: crate::peer::DEFAULT_COMPRESSED_LIMIT,
         }
     }
 }
@@ -190,6 +192,23 @@ impl Relay {
             .map_err(|_| error("relay poisoned"))?
             .upload = Some(budget);
         Ok(())
+    }
+    pub(crate) fn set_compressed_limit(&self, limit: usize) -> Result<()> {
+        if limit == 0 || limit > crate::peer::MAX_FRAME {
+            return Err(error("Router.max_msg_size must be between 1 and 67108864"));
+        }
+        self.state
+            .lock()
+            .map_err(|_| error("relay poisoned"))?
+            .compressed_limit = limit;
+        Ok(())
+    }
+    pub(crate) fn compressed_limit(&self) -> Result<usize> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| error("relay poisoned"))?
+            .compressed_limit)
     }
     fn admit_upload(
         &self,

@@ -23,6 +23,7 @@ use std::{
 
 const MAGIC: u32 = 0x4B277B06;
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+pub(crate) const DEFAULT_COMPRESSED_LIMIT: usize = 8 * 1024 * 1024;
 /// Bound native block lookups pipelined on a single peer connection.
 pub const MAX_BODY_REQUESTS: usize = 32;
 const MAX_RPC_REQUESTS: usize = 128;
@@ -55,11 +56,14 @@ pub fn encode_frame(value: &Record) -> Result<Vec<u8>> {
     frame_bytes(&raw)
 }
 fn frame_bytes(raw: &[u8]) -> Result<Vec<u8>> {
+    frame_bytes_with_limit(raw, MAX_FRAME)
+}
+fn frame_bytes_with_limit(raw: &[u8], compressed_limit: usize) -> Result<Vec<u8>> {
     if raw.len() > MAX_FRAME {
         return Err(error("peer record exceeds frame limit"));
     }
     let data = zstd::stream::encode_all(raw, 3)?;
-    if data.len() > MAX_FRAME {
+    if data.len() > compressed_limit {
         return Err(error("compressed peer frame exceeds limit"));
     }
     Ok([
@@ -105,10 +109,12 @@ pub struct Connection {
     relay_receipts: Option<RelayPeer>,
     last_size: usize,
     received_at: Instant,
+    compressed_limit: usize,
 }
 struct Output {
     stream: TcpStream,
     outbound: mmx_consensus::StreamEncoder,
+    compressed_limit: usize,
 }
 struct RelayWorker {
     stop: Arc<AtomicBool>,
@@ -119,7 +125,7 @@ impl Output {
         let mut outbound = self.outbound.clone();
         let mut batch = Vec::new();
         for value in values {
-            let frame = frame_bytes(&outbound.encode(value)?)?;
+            let frame = frame_bytes_with_limit(&outbound.encode(value)?, self.compressed_limit)?;
             if batch.len().saturating_add(frame.len()) > MAX_FRAME + 8 {
                 return Err(error("peer write batch exceeds limit"));
             }
@@ -152,6 +158,7 @@ impl Connection {
         let output = Output {
             stream: stream.try_clone()?,
             outbound: Default::default(),
+            compressed_limit: DEFAULT_COMPRESSED_LIMIT,
         };
         Ok(Self {
             stream,
@@ -161,6 +168,7 @@ impl Connection {
             relay_receipts: None,
             last_size: 0,
             received_at: Instant::now(),
+            compressed_limit: DEFAULT_COMPRESSED_LIMIT,
         })
     }
     pub fn send(&mut self, value: &Record) -> Result<()> {
@@ -178,6 +186,7 @@ impl Connection {
         if self.relay_worker.is_some() {
             return Err(error("peer relay already started"));
         }
+        self.set_compressed_limit(relay.compressed_limit()?)?;
         let mut sender = relay.attach()?;
         let receiver = sender.clone();
         let output = self.output.clone();
@@ -210,6 +219,17 @@ impl Connection {
         self.relay_worker = Some(RelayWorker { stop, thread });
         self.relay_receipts = Some(receiver.clone());
         Ok(receiver)
+    }
+    fn set_compressed_limit(&mut self, limit: usize) -> Result<()> {
+        if limit == 0 || limit > MAX_FRAME {
+            return Err(error("Router.max_msg_size must be between 1 and 67108864"));
+        }
+        self.output
+            .lock()
+            .map_err(|_| error("peer output poisoned"))?
+            .compressed_limit = limit;
+        self.compressed_limit = limit;
+        Ok(())
     }
     /// None means idle before the first frame byte. Partial-frame timeouts close
     /// the connection, so a later read can never mistake payload for a header.
@@ -278,7 +298,9 @@ impl Connection {
         } else if magic != MAGIC {
             return Err(error("invalid peer frame magic"));
         }
-        if size == 0 || size as usize > MAX_FRAME {
+        // Native MsgServer bounds compressed bytes from the header, before
+        // receiving/allocating the body. Decoded bytes have a separate bound.
+        if size == 0 || size as usize > self.compressed_limit {
             return Err(error("invalid peer frame size"));
         }
         let mut frame = Vec::from(header);
@@ -823,6 +845,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compressed_header_limit_rejects_before_waiting_for_or_allocating_a_body() {
+        for (limit, swapped) in [
+            (DEFAULT_COMPRESSED_LIMIT, false),
+            (DEFAULT_COMPRESSED_LIMIT, true),
+            (1024, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, held) = std::sync::mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let size = (limit + 1) as u32;
+                let (size, magic) = if swapped {
+                    (size.swap_bytes(), MAGIC.swap_bytes())
+                } else {
+                    (size, MAGIC)
+                };
+                stream.write_all(&size.to_le_bytes()).unwrap();
+                stream.write_all(&magic.to_le_bytes()).unwrap();
+                // Keep the socket open without transmitting a body. Rejection
+                // must come from the header rather than EOF or a read timeout.
+                held.recv_timeout(Duration::from_secs(3)).unwrap();
+            });
+            let mut connection = Connection::connect(&address.to_string()).unwrap();
+            connection.set_compressed_limit(limit).unwrap();
+            let err = connection.receive(Duration::from_secs(1)).unwrap_err();
+            release.send(()).unwrap();
+            server.join().unwrap();
+            assert_eq!(err.to_string(), "invalid peer frame size");
+        }
+    }
+
+    #[test]
+    fn native_compressed_limit_does_not_restrict_the_raw_record_to_eight_megabytes() {
+        let expected = record(
+            "mmx.Router.get_peers.return",
+            [(
+                "_ret_0".into(),
+                Value::Sequence(vec![Value::String(vec![
+                    b'x';
+                    DEFAULT_COMPRESSED_LIMIT + 1
+                ])]),
+            )],
+        );
+        let raw = expected.encode().unwrap();
+        assert!(raw.len() > DEFAULT_COMPRESSED_LIMIT && raw.len() < MAX_FRAME);
+        let frame = frame_bytes_with_limit(&raw, DEFAULT_COMPRESSED_LIMIT).unwrap();
+        assert!(frame.len() < 4096);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            listener.accept().unwrap().0.write_all(&frame).unwrap();
+        });
+        let mut connection = Connection::connect(&address.to_string()).unwrap();
+        assert_eq!(
+            connection.receive(Duration::from_secs(3)).unwrap().unwrap(),
+            expected
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
     fn compressed_zero_width_values_cannot_bypass_decoded_allocation_limits() {
         let mut raw = Record::from_generated(&mmx_types::mmx::contract::Data::default())
             .unwrap()
@@ -937,6 +1021,11 @@ mod tests {
             );
         });
         let mut connection = Connection::connect(&address.to_string()).unwrap();
+        connection.set_compressed_limit(1).unwrap();
+        assert!(connection.send(&query).is_err());
+        connection
+            .set_compressed_limit(DEFAULT_COMPRESSED_LIMIT)
+            .unwrap();
         connection.send(&query).unwrap();
         connection.send(&query).unwrap();
         let oversized = reply(vec![b'x'; MAX_FRAME]);
