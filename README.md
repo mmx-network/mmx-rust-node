@@ -935,6 +935,15 @@ fresh native sync. No conversion or deletion of existing data occurs at startup.
 Point reads, size-first ranges, prefix scans, inclusive historical reads, detached
 forks, and atomic suffix replacement share the in-memory reference's semantics.
 
+New blocks store their header and each transaction once in the fork archive.
+The selected chain commits eight-byte block references and 44-byte transaction
+locators with its ledger changes. Header/transaction reads fetch only their
+component, using native positional reads. Snapshots pin the immutable archive
+files across rollback and purge. Earlier native full-body records remain readable
+without conversion; only newly written blocks use this layout. A temporary
+two-transaction fixture reduced journal bytes from 395,819 to 132,638.
+
+
 The `Binaries` GitHub workflow builds the node on Ubuntu 24.04, checks
 `mmx-node --help`, and uploads a Linux x86-64 archive with its source commit and
 SHA-256 checksum. It runs manually or when the `node-build` branch advances.

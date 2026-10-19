@@ -8,10 +8,9 @@ performance parity. A source comparison alone does not establish it.
 The initial comparison below uses `../mmx-node` at
 `5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2` (2026-10-19). Native fixtures retain
 their own recorded source revisions. The [full subsystem audit](cpp-port-audit.md)
-records the follow-up fixes and prioritized remaining work. In particular,
-reference-only compaction does not eliminate the chain layer's separate block
-and transaction payload copies; consolidating those writes remains the first
-storage optimization.
+records the follow-up fixes and prioritized remaining work. New block headers
+and transactions now use a single archive payload store and selected-chain
+locators. Existing native payload records are read in place without migration.
 
 | Area | C++ reference and important choices | Rust coverage and remaining checks |
 | --- | --- | --- |
@@ -49,4 +48,13 @@ time, suppresses VDF sender echoes, and releases receive-idle inbound peers.
 Fork replay reuses the already-loaded block bodies; the relay handoff reuses
 those records too. RPC point-read products and transaction batch/output sizes
 now have admission budgets. The audit distinguishes these completed changes
-from native credit/rate policy, streaming range reads and payload consolidation.
+from native credit/rate policy, streaming range reads and verified execution handoff reuse.
+
+The payload consolidation checkpoint follows C++ `Node::write_block` and its
+block/transaction indexes. Headers and transactions have separate immutable
+values, enabling positional component reads. Selected snapshots pin an archive
+view, so rollback and collection cannot invalidate a detached reader. Existing
+crash, fork, purge and native consensus fixtures pass with the new layout. The
+temporary two-transaction journal fixture wrote 132,638 bytes versus 395,819
+with the former duplicate block/transaction payload writes (66.5% fewer). This
+is a bounded write-size comparison; mainnet throughput still needs measurement.

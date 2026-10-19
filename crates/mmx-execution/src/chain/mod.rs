@@ -1,7 +1,8 @@
-//! Durable selected-chain state. Ledger effects, lossless block/transaction
-//! records, height indexes and the tip commit together at the block's height.
+//! Durable selected-chain state. Ledger effects, block/transaction locators,
+//! height indexes and the tip commit together at the block's height.
 //! ChainState verifies extensions/replacements; `forks` adds orphan retention
 //! and branch selection using the native policy in `choice`.
+mod bodies;
 mod cache;
 pub mod choice;
 mod codec;
@@ -83,6 +84,7 @@ pub struct ChainState {
     storage: StorageDb,
     params: mmx::ChainParams,
     headers: cache::Headers,
+    bodies: Option<Arc<mmx_db::Store>>,
 }
 impl ChainState {
     pub fn memory(params: mmx::ChainParams) -> Self {
@@ -90,19 +92,25 @@ impl ChainState {
             storage: StorageDb::memory(),
             params,
             headers: Default::default(),
+            bodies: None,
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
-        Self::with_storage(StorageDb::open(path)?, params)
+        Self::with_storage(StorageDb::open(path)?, params, None)
     }
     pub fn open_native(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
-        Self::with_storage(StorageDb::open_native(path)?, params)
+        Self::with_storage(StorageDb::open_native(path)?, params, None)
     }
-    fn with_storage(storage: StorageDb, params: mmx::ChainParams) -> ChainResult<Self> {
+    fn with_storage(
+        storage: StorageDb,
+        params: mmx::ChainParams,
+        bodies: Option<Arc<mmx_db::Store>>,
+    ) -> ChainResult<Self> {
         let chain = Self {
             storage,
             params,
             headers: Default::default(),
+            bodies,
         };
         let db = chain.storage.database();
         if db.version() == 0 {
@@ -145,6 +153,7 @@ impl ChainState {
             ),
             params: self.params.clone(),
             headers: Default::default(),
+            bodies: self.bodies.clone(),
         })
     }
     pub fn params(&self) -> &mmx::ChainParams {
@@ -165,14 +174,28 @@ impl ChainState {
             .transpose()
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
-        let Some(wire) = self.storage.database().get("chain_blocks", hash, None)? else {
+        match self.body_source(hash)? {
+            Some((db, tables)) => bodies::block(db, tables, hash),
+            None => Ok(None),
+        }
+    }
+    fn body_source(&self, hash: &Hash) -> ChainResult<Option<(&mmx_db::Store, bodies::Tables)>> {
+        let db = self.storage.database();
+        let Some(value) = db.get("chain_blocks", hash, None)? else {
             return Ok(None);
         };
-        let block = codec::decode(&wire)?;
-        if block.name != "mmx.Block" || bytes::<32>(block.field("hash")?)? != *hash {
-            return Err(invalid("block archive key mismatch"));
+        if value.starts_with(b"MMXL") {
+            if value != bodies::EXTERNAL {
+                return Err(invalid("invalid external block locator"));
+            }
+            let archive = self
+                .bodies
+                .as_deref()
+                .ok_or_else(|| invalid("external block archive required"))?;
+            Ok(Some((archive, bodies::ARCHIVE)))
+        } else {
+            Ok(Some((db, bodies::SELECTED)))
         }
-        Ok(Some(block))
     }
     pub fn header(&self, hash: &Hash) -> ChainResult<Option<mmx::BlockHeader>> {
         Ok(self.shared_header(hash)?.map(|h| h.as_ref().clone()))
@@ -181,21 +204,9 @@ impl ChainState {
         if let Some(header) = self.headers.get_shared(hash) {
             return Ok(Some(header));
         }
-        let legacy = self
-            .storage
-            .database()
-            .get("chain_headers", hash, None)?
-            .map(|wire| {
-                let header = mmx::BlockHeader::decode(&wire)?;
-                if header.hash.0 != *hash {
-                    return Err(invalid("header archive key mismatch"));
-                }
-                Ok(header)
-            })
-            .transpose()?;
-        let header = match legacy {
-            Some(header) => Some(header),
-            None => self.block(hash)?.as_ref().map(block_header).transpose()?,
+        let header = match self.body_source(hash)? {
+            Some((db, tables)) => bodies::header(db, tables, hash)?,
+            None => bodies::header(self.storage.database(), bodies::SELECTED, hash)?,
         };
         Ok(header.map(|h| self.headers.insert(h)))
     }
@@ -204,7 +215,15 @@ impl ChainState {
             .database()
             .get("chain_transactions", id, None)?
             .map(|wire| {
-                let tx = codec::decode(&wire)?;
+                let tx = match bodies::transaction_location(&wire)? {
+                    Some((hash, index)) => {
+                        let (db, tables) = self
+                            .body_source(&hash)?
+                            .ok_or_else(|| invalid("transaction block is not selected"))?;
+                        bodies::transaction(db, tables, &hash, index)?
+                    }
+                    None => codec::decode(&wire)?,
+                };
                 if tx.name != "mmx.Transaction" || bytes::<32>(tx.field("id")?)? != *id {
                     return Err(invalid("transaction archive key mismatch"));
                 }
@@ -316,6 +335,7 @@ impl ChainState {
             storage: StorageDb::new(self.storage.database().fork(height)?),
             params: self.params.clone(),
             headers: self.headers.before(height),
+            bodies: self.bodies.clone(),
         };
         let mut receipts = Vec::new();
         for entry in blocks {
@@ -386,10 +406,14 @@ impl ChainState {
         let hash = bytes::<32>(block.field("hash")?)?;
         let header = block_header(block)?;
         let mut writes = vec![
-            Write::put("chain_blocks", hash, codec::encode(block)?),
             Write::put("chain_height", height.to_be_bytes(), hash),
             Write::put("chain_meta", b"tip", hash),
         ];
+        if self.bodies.is_some() {
+            writes.push(Write::put("chain_blocks", hash, bodies::EXTERNAL));
+        } else {
+            writes.extend(bodies::writes(block, bodies::SELECTED)?);
+        }
         if genesis {
             writes.push(Write::put(
                 "chain_meta",
@@ -397,12 +421,15 @@ impl ChainState {
                 self.params.encode(&mmx_types::vnx_registry()?)?,
             ));
         }
-        for tx in block.field("tx_list")?.seq()? {
+        for (index, tx) in block.field("tx_list")?.seq()?.iter().enumerate() {
             let tx = tx.record()?;
             writes.push(Write::put(
                 "chain_transactions",
                 bytes::<32>(tx.field("id")?)?,
-                codec::encode(tx)?,
+                bodies::locator(
+                    &hash,
+                    u32::try_from(index).map_err(|_| invalid("transaction index overflow"))?,
+                ),
             ));
         }
         self.storage.commit_transaction(batch, writes, next)?;
@@ -419,8 +446,8 @@ impl ChainState {
     }
 }
 // Slice without rehashing: native Block and Header have distinct type identities.
-// Full immutable blocks retain the exact header fields, including legacy fields
-// outside the hash. Persisting both duplicated the entire space-proof payload.
+// Immutable archive headers retain all fields, including legacy fields outside
+// the hash. Selected state points into that archive instead of copying proofs.
 fn block_header(block: &Record) -> ChainResult<mmx::BlockHeader> {
     Ok(mmx_consensus::header::to_typed(block)?)
 }

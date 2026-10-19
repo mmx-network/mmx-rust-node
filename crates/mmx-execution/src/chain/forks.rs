@@ -1,8 +1,9 @@
 //! Durable orphan archive, authenticated validator voting and native fork
 //! updates. Root advancement, sync scheduling and archive pruning are separate.
 use super::{
+    bodies,
     choice::{self, Anchor, Candidate},
-    codec, genesis, invalid, voting, ChainError, ChainResult, ChainState, ValidationMode,
+    genesis, invalid, voting, ChainError, ChainResult, ChainState, ValidationMode,
 };
 use crate::{
     block,
@@ -89,10 +90,13 @@ impl ForkChain {
         Self::open_native(path, params)
     }
     pub fn open_native(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
-        Self::with_storage(
-            ChainState::open_native(path.as_ref().join("selected"), params)?,
-            Database::open_native(path.as_ref().join("archive"))?,
-        )
+        let archive = Database::open_native(path.as_ref().join("archive"))?;
+        let selected = ChainState::with_storage(
+            mmx_vm::StorageDb::open_native(path.as_ref().join("selected"))?,
+            params,
+            Some(Arc::new(archive.fork(archive.version())?)),
+        )?;
+        Self::with_storage(selected, archive)
     }
     fn with_storage(selected: ChainState, archive: Database) -> ChainResult<Self> {
         let chain = Self {
@@ -228,6 +232,9 @@ impl ForkChain {
                             h == 0 || h >= context
                         }
                         "chain_transactions" => transactions.contains(key),
+                        "chain_body_transactions" => {
+                            key.len() == 36 && selected_hashes.contains(&key[..32])
+                        }
                         _ => true,
                     })
                 },
@@ -240,6 +247,9 @@ impl ForkChain {
                         "fork_blocks" | "fork_headers" | "fork_work" | "fork_invalid" => {
                             archive_hashes.contains(key)
                         }
+                        "fork_transactions" => {
+                            key.len() == 36 && archive_hashes.contains(&key[..32])
+                        }
                         "fork_order" => {
                             if key.len() != 8 {
                                 return Err(mmx_db::Error::Corrupt("fork order key length"));
@@ -251,6 +261,7 @@ impl ForkChain {
                     })
                 })?;
         }
+        self.refresh_bodies()?;
         self.chain.headers.clear();
         self.headers.clear();
         self.voting.reset();
@@ -491,11 +502,12 @@ impl ForkChain {
             writes.extend([
                 Write::put("fork_order", key, hash),
                 Write::put("fork_work", hash, pack(&[])?),
-                Write::put("fork_blocks", hash, codec::encode(block)?),
             ]);
+            writes.extend(bodies::writes(block, bodies::ARCHIVE)?);
         }
         if !writes.is_empty() {
             self.archive.commit_batch(arrival, writes)?;
+            self.refresh_bodies()?;
             for header in headers {
                 self.headers.insert(header);
             }
@@ -529,7 +541,7 @@ impl ForkChain {
             }
             let key = [height.to_be_bytes(), self.archive.version().to_be_bytes()].concat();
             writes.push(Write::put("fork_order", key, hash));
-            writes.push(Write::put("fork_blocks", hash, codec::encode(block)?));
+            writes.extend(bodies::writes(block, bodies::ARCHIVE)?);
             retained_header = Some(header(block)?);
         }
         self.commit_archive(writes)?;
@@ -552,6 +564,11 @@ impl ForkChain {
             .checked_add(1)
             .ok_or_else(|| invalid("fork archive version limit"))?;
         self.archive.commit_batch(next, writes)?;
+        self.refresh_bodies()?;
+        Ok(())
+    }
+    fn refresh_bodies(&mut self) -> ChainResult<()> {
+        self.chain.bodies = Some(Arc::new(self.archive.fork(self.archive.version())?));
         Ok(())
     }
     fn work(&self, hash: &Hash) -> ChainResult<Vec<Record>> {
@@ -989,16 +1006,7 @@ impl HeaderSource for ForkChain {
     }
 }
 fn archive_block(archive: &Database, hash: &Hash) -> ChainResult<Option<Record>> {
-    archive
-        .get("fork_blocks", hash, None)?
-        .map(|b| {
-            let block = codec::decode(&b)?;
-            if block.name != "mmx.Block" || bytes::<32>(block.field("hash")?)? != *hash {
-                return Err(invalid("fork archive key mismatch"));
-            }
-            Ok(block)
-        })
-        .transpose()
+    bodies::block(archive, bodies::ARCHIVE, hash)
 }
 
 fn cached_header(
@@ -1025,13 +1033,7 @@ fn cached_header_shared(
     Ok(header.map(|h| cache.insert(h)))
 }
 fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::BlockHeader>> {
-    if let Some(wire) = archive.get("fork_headers", hash, None)? {
-        return Ok(Some(mmx::BlockHeader::decode(&wire)?));
-    }
-    archive
-        .get("fork_blocks", hash, None)?
-        .map(|wire| header(&codec::decode(&wire)?))
-        .transpose()
+    bodies::header(archive, bodies::ARCHIVE, hash)
 }
 fn header(block: &Record) -> ChainResult<mmx::BlockHeader> {
     super::block_header(block)

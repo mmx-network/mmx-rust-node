@@ -1187,3 +1187,188 @@ fn cold_header_reads_preserve_legacy_unhashed_fields_and_invalidate_replaced_suf
         assert_eq!(open().header(&hash).unwrap().unwrap(), replacement);
     }
 }
+
+#[test]
+fn selected_indices_reference_one_payload_store_and_pin_it_across_reorg_purge_and_reopen() {
+    use mmx_db::Store;
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let mut forks = ForkChain::open_native(dir.path(), params(&g)).unwrap();
+    forks.initialize(&assets(&g)).unwrap();
+    retain(&mut forks, &steps[0]);
+    forks.update(block_hash(&g), None).unwrap();
+    let pinned = forks.selected().snapshot_at(1).unwrap();
+    retain(&mut forks, &steps[1]);
+    forks.update(block_hash(&g), None).unwrap();
+    verify_step(&pinned, &steps[0]);
+    assert!(pinned.block(&block_hash(&steps[1])).unwrap().is_none());
+    for step in [&g, &steps[0], &steps[1]] {
+        let db = forks.selected().storage().database();
+        assert_eq!(
+            db.get("chain_blocks", &block_hash(step), None)
+                .unwrap()
+                .unwrap(),
+            b"MMXL\x01\0\0\0"
+        );
+        assert!(db
+            .get("chain_headers", &block_hash(step), None)
+            .unwrap()
+            .is_none());
+        for tx in record(&step["block"])
+            .field("tx_list")
+            .unwrap()
+            .seq()
+            .unwrap()
+        {
+            let tx = tx.record().unwrap();
+            let id: Address = tx.field("id").unwrap().bytes().unwrap().try_into().unwrap();
+            let locator = db.get("chain_transactions", &id, None).unwrap().unwrap();
+            assert_eq!(locator.len(), 44);
+            assert!(locator.starts_with(b"MMXT\x01\0\0\0"));
+            assert_eq!(
+                forks.selected().transaction(&id).unwrap().as_ref(),
+                Some(tx)
+            );
+        }
+    }
+    assert!(forks
+        .selected()
+        .storage()
+        .database()
+        .scan("chain_body_transactions", &[], None)
+        .unwrap()
+        .is_empty());
+    forks.purge_before_height(2).unwrap();
+    verify_step(&pinned, &steps[0]);
+    assert!(forks.rollback_to(1).is_err());
+    drop(forks);
+    verify_step(&pinned, &steps[0]);
+    drop(pinned);
+    let mut forks = ForkChain::open_native(dir.path(), params(&g)).unwrap();
+    verify_step(forks.selected(), &steps[1]);
+    forks.rollback_to(2).unwrap();
+    drop(forks);
+    let archive = Store::open_native(dir.path().join("archive")).unwrap();
+    for step in [&g, &steps[0], &steps[1]] {
+        let hash = block_hash(step);
+        let descriptor = archive.get("fork_blocks", &hash, None).unwrap().unwrap();
+        assert_eq!(descriptor.len(), 12);
+        assert!(descriptor.starts_with(b"MMXB\x01\0\0\0"));
+        assert!(archive.get("fork_headers", &hash, None).unwrap().is_some());
+        for (index, tx) in record(&step["block"])
+            .field("tx_list")
+            .unwrap()
+            .seq()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let key = [hash.as_slice(), &(index as u32).to_be_bytes()].concat();
+            let payload = archive
+                .get("fork_transactions", &key, None)
+                .unwrap()
+                .unwrap();
+            assert!(payload.starts_with(b"MMXR\x01\0\0\0"));
+            assert_eq!(
+                Record::decode_compact(&payload[8..]).unwrap(),
+                *tx.record().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_payloads_reopen_without_migration_then_new_blocks_use_locators() {
+    use mmx_db::{Store, Write};
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let block = record(&g["block"]);
+    let hash = block_hash(&g);
+    let p = params(&g);
+    let mut reference = ChainState::memory(p.clone());
+    reference.initialize(&assets(&g)).unwrap();
+    let mut storage = Store::open_native(dir.path().join("selected")).unwrap();
+    let mut writes = vec![
+        Write::put("chain_blocks", hash, block.encode().unwrap()),
+        Write::put("chain_height", 0u32.to_be_bytes(), hash),
+        Write::put("chain_meta", b"tip", hash),
+        Write::put(
+            "chain_meta",
+            b"params",
+            p.encode(&mmx_types::vnx_registry().unwrap()).unwrap(),
+        ),
+    ];
+    for tx in block.field("tx_list").unwrap().seq().unwrap() {
+        let tx = tx.record().unwrap();
+        writes.push(Write::put(
+            "chain_transactions",
+            tx.field("id").unwrap().bytes().unwrap(),
+            tx.encode().unwrap(),
+        ));
+    }
+    // Native genesis deploys assets without running their init methods. Copy
+    // its four ledger/index tables, then emit the former complete-body layout.
+    for table in ["balances", "contracts", "transactions", "total_supply"] {
+        for row in reference
+            .storage()
+            .database()
+            .scan(table, &[], None)
+            .unwrap()
+        {
+            writes.push(Write::put(table, row.key, row.value));
+        }
+    }
+    storage.commit_batch(1, writes).unwrap();
+    drop(storage);
+    let mut archive = Store::open_native(dir.path().join("archive")).unwrap();
+    archive
+        .commit_batch(
+            1,
+            [
+                Write::put("fork_blocks", hash, block.encode().unwrap()),
+                Write::put("fork_order", [0; 8], hash),
+                Write::put("fork_work", hash, 0u32.to_le_bytes()),
+                Write::put(
+                    "fork_meta",
+                    b"params",
+                    p.encode(&mmx_types::vnx_registry().unwrap()).unwrap(),
+                ),
+                Write::put("fork_meta", b"genesis", hash),
+            ],
+        )
+        .unwrap();
+    drop(archive);
+    let logs = ["selected", "archive"].map(|name| {
+        dir.path()
+            .join(name)
+            .join("native-data-0000000000000000.log")
+    });
+    let before = logs.each_ref().map(|p| fs::read(p).unwrap());
+    let mut forks = ForkChain::open_native(dir.path(), p.clone()).unwrap();
+    verify_step(forks.selected(), &g);
+    for (p, bytes) in logs.iter().zip(before) {
+        assert_eq!(fs::read(p).unwrap(), bytes);
+    }
+    retain(&mut forks, &steps[0]);
+    forks.update(hash, None).unwrap();
+    verify_step(forks.selected(), &steps[0]);
+    assert_eq!(
+        forks
+            .selected()
+            .storage()
+            .database()
+            .get("chain_blocks", &block_hash(&steps[0]), None)
+            .unwrap()
+            .unwrap()
+            .len(),
+        8
+    );
+    assert_eq!(forks.selected().block(&hash).unwrap(), Some(block));
+    drop(forks);
+    verify_step(
+        ForkChain::open_native(dir.path(), p).unwrap().selected(),
+        &steps[0],
+    );
+}

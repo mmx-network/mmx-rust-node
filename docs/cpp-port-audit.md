@@ -63,7 +63,7 @@ no live-ledger or plot scan is part of validation.
 | Fork choice/sync: `Node.cpp::find_best_fork`, `fork_to`, `Node_update.cpp::on_sync_done`, `Router.cpp::process` | `mmx-execution/src/chain/{choice,forks,sync,voting}.rs`, `mmx-node/src/sync/peers*`; native fork/vote/root witnesses, three-observer socket tests, competing contents, timeout reassignment and deep reorg tests | Requested 3–8 observer policy is deliberately stricter than native completion. Every observed content is fetched once; no majority filter. Native transmit credits remain separate from body leases. |
 | Body/economics: `Node_validate.cpp::validate`, `execute`, native reward and fee helpers | `mmx-execution/src/{block,transaction}`, `mmx-consensus/src/authorization.rs`; native block/transaction/economics/NFT/multisig traces and rejection ordering | Independent transactions execute serially. Dependency locks and predecessor plans exist, but are not a concurrent executor. |
 | Contract execution: `vm/Engine.cpp`, `vm/instr_t.cpp`, `vm_interface.cpp`, `vm/StorageCache.cpp`, `Node_validate.cpp::prepare_context` | `mmx-vm/src/engine*`, `mmx-execution/src/lib.rs`; all declared opcodes, gas, composite ownership, remote calls, hardfork setup, locks, failed-engine publication, recursion/copy/erase and input limits have fixtures | JavaScript compiler and remaining original contract suites are unported. Per-engine/per-transaction storage overlays are bounded by execution and are distinct from a broad node state cache. |
-| Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Chain-level duplicate payload storage, synchronous durability difference, and range scan materialization below remain. No SQLite backend. |
+| Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Block/transaction payload consolidation is complete for new writes; synchronous durability and range scan materialization below remain. No SQLite backend. |
 | Rollback/purge: C++ `Node` storage/apply/revert and versioned tables | `mmx-execution/src/chain/{mod,forks}.rs`, `mmx-db/src/native.rs`; every retained-height rollback, deep fork/restart, crash-safe collection, pinned snapshot and RPC floor tests | Purge necessarily rewrites retained live values during explicit collection. There is no automatic background migration or ledger scan. Rollback below the durable floor is refused; private consensus ancestry does not reappear through RPC. |
 | Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native credits, rate policy, peer-role filtering and full inbound authenticated lifecycle remain incomplete. RPC range scans and validation can still occupy the ledger owner. REST/WebAPI parity is incomplete. |
 | Farmer/wallet: `Farmer.cpp::{sign_block,sign_vote,handle}`, `Wallet.cpp`, `include/mmx/ECDSA_Wallet.h`, key derivation and spending | `mmx-farming/src/{farmer,wallet,spending,service}.rs`, `mmx-wallet`, `mmxwallet`; native keys/KDF/signatures, protected-key unlock verification, pending/reservation/fork/ambiguous-submit tests, real daemon RPC tests | Pool partial submission, reverse farmer RPC, complete wallet/history/offer/swap API and wallet query caches remain missing. Farm reports use bounded retention. |
@@ -72,19 +72,25 @@ no live-ledger or plot scan is part of validation.
 
 ## Remaining work, in priority order
 
-1. **Chain payload duplication and live re-execution (I/O and CPU).**
-   `ChainState::publish` writes the selected full block to `chain_blocks` and its
-   transaction payloads again to `chain_transactions`. `ForkChain::retain` /
-   `admit_blocks` also write `fork_blocks`. Reference-only DB compaction avoids
-   rewriting these values during compaction, but does not deduplicate these
-   application writes. C++ `Node::write_block` and transaction/block offsets use
-   one block payload with indexes. Use one immutable body store and small
-   canonical/transaction locators; preserve independent snapshots, orphan
-   retention, crash ordering and purge boundaries. Do not migrate the running
-   ledger merely to change this layout. Separately, `admit_live` previews the
-   body and selected replay executes it again; reuse an authenticated execution
-   result only when its full parent snapshot still matches. Header proof
-   evidence alone does not authorize a stale execution result.
+1. **Live re-execution (CPU); block payload consolidation completed.**
+   New block headers and transaction records are written once in the fork
+   archive. Selected-chain block entries are eight-byte references and
+   transaction entries are 44-byte block/position locators. Independent header
+   and transaction lookups use positional reads without loading the whole block.
+   Detached chain snapshots pin the corresponding immutable archive view.
+   Standalone `ChainState` uses the same split layout in its own database.
+   Older native full-body records remain readable; no startup scan, conversion
+   or rewrite occurs. Purge collects the new component tables using the same
+   retained-block policy. Immutable body storage is separate from required
+   contract/ledger state, which must survive deployment-history purging.
+   Tests cover legacy/new mixed reads, reopen, every-height rollback, torn
+   publication, purge with pinned snapshots and exact payload/index contents.
+   A small two-transaction write fixture wrote 132,638 journal bytes versus
+   395,819 with the previous duplicated layout (66.5% fewer); this is a write
+   size comparison, not a historical-sync throughput claim.
+   `admit_live` still previews a live body and selected replay executes it again.
+   Reuse a verified execution handoff only when its exact ledger base still
+   matches; header proof evidence does not authorize stale execution effects.
 2. **Relay fairness and credits (public-peer defense and latency).**
    Port `Router`'s received/sent caches, `ReceiveNote` feedback, staged randomized
    sending, transaction cost/upload credits, priority congestion handling,
