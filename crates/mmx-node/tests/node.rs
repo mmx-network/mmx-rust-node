@@ -2357,12 +2357,9 @@ fn stronger_native_peer_proof_vetoes_full_block_planning_and_an_inflight_signatu
         }
         let mut state = n.lock().unwrap();
         if let Some(candidate) = candidate {
-            assert!(!state.accept_produced(&candidate).unwrap());
-            assert!(state
-                .chain()
-                .block(&hash(candidate.record(), "hash").unwrap())
-                .unwrap()
-                .is_none());
+            let candidate_hash = hash(candidate.record(), "hash").unwrap();
+            assert!(!state.accept_produced(candidate).unwrap());
+            assert!(state.chain().block(&candidate_hash).unwrap().is_none());
         } else {
             assert!(state.farming_plan(&keys, now, 0).unwrap().is_none());
         }
@@ -2398,7 +2395,7 @@ fn stronger_native_peer_proof_vetoes_full_block_planning_and_an_inflight_signatu
             .sign_block(&unsigned, &network.params)
             .unwrap();
         let candidate = plan.with_signature(&unsigned, &signed).unwrap();
-        assert!(state.accept_produced(&candidate).unwrap());
+        assert!(state.accept_produced(candidate).unwrap());
         drop(state);
         server.shutdown();
     }
@@ -2454,7 +2451,7 @@ fn native_production_retries_failed_attempts_but_never_resigns_a_created_block()
         .sign_block(&unsigned, &network.params)
         .unwrap();
     let candidate = retry.with_signature(&unsigned, &signed).unwrap();
-    assert!(state.accept_produced(&candidate).unwrap());
+    assert!(state.accept_produced(candidate).unwrap());
     // A stale failure callback must not release an already created proof.
     state.cancel_production(&first).unwrap();
     assert!(state.farming_plan(&keys, now, 0).unwrap().is_none());
@@ -2572,9 +2569,10 @@ fn farming_candidate_matches_cpp_fields_uses_no_disk_writes_and_rejects_stale_si
         n.farming_plan(&keys, time, 0).unwrap().is_none(),
         "one concurrent signing attempt per proof"
     );
-    assert!(n.accept_produced(&candidate).unwrap());
+    let duplicate = plan.with_signature(&unsigned, &signed).unwrap();
+    assert!(n.accept_produced(candidate).unwrap());
     assert!(
-        !n.accept_produced(&candidate).unwrap(),
+        !n.accept_produced(duplicate).unwrap(),
         "stale signing reply must be discarded"
     );
     assert_eq!(n.chain().selected().tip().unwrap().unwrap().height, 1);

@@ -64,13 +64,12 @@ fn keep_best(proofs: &mut BTreeMap<Hash, Record>, hash: Hash, record: &Record) {
     }
 }
 pub struct Candidate {
-    block: Record,
+    execution: mmx_execution::chain::PreparedExtension,
     anchor: Hash,
-    work: Vec<Record>,
 }
 impl Candidate {
     pub fn record(&self) -> &Record {
-        &self.block
+        self.execution.record()
     }
 }
 pub struct Plan {
@@ -260,18 +259,18 @@ impl Node {
         }
         Ok(None)
     }
-    pub fn accept_produced(&mut self, candidate: &Candidate) -> Result<bool> {
-        let id = hash(&candidate.block, "proof_hash")?;
+    pub fn accept_produced(&mut self, candidate: Candidate) -> Result<bool> {
+        let id = hash(candidate.record(), "proof_hash")?;
         self.production.inflight.remove(&id);
         // C++ records created_blocks only after successful signing. Remember
         // even a now-stale signed result, so it cannot be signed again later.
         self.production
             .created_blocks
-            .insert(id, number(&candidate.block, "vdf_height")?);
+            .insert(id, number(candidate.record(), "vdf_height")?);
         // Building and signing run off-lock. Apply newly queued announcements
         // and forks before allowing this asynchronous result onto the network.
         self.update()?;
-        let block = &candidate.block;
+        let block = candidate.record();
         if !self.synced
             || number(block, "height")? <= self.root
             || self
@@ -289,9 +288,11 @@ impl Node {
         {
             return Ok(false);
         }
-        self.chain.admit(block, &candidate.work)?;
-        self.update()?;
         let block_hash = hash(block, "hash")?;
+        if !self.chain.admit_prepared(candidate.execution)? {
+            return Ok(false);
+        }
+        self.update()?;
         Ok(self
             .chain
             .selected()
@@ -665,28 +666,9 @@ impl Plan {
         for key in allowed {
             block.fields.insert(key.into(), signed.field(key)?.clone());
         }
-        let mut snapshot = mmx_vm::StorageDb::new(
-            self.parent
-                .storage()
-                .database()
-                .fork(self.parent.storage().database().version())?,
-        );
-        let context = block::BlockContext {
-            params: self.parent.params().clone(),
-            previous: self.previous.clone(),
-            expected_vdf_payout: self
-                .parent
-                .vdf_payout(number(&block, "height")?, &self.previous)?,
-        };
-        block::prepare_with_vdf(&mut snapshot, &context, &block, &self.parent, &self.points)?;
         Ok(Candidate {
-            block,
+            execution: self.parent.prepare_extension(&block, &self.points)?,
             anchor: self.anchor,
-            work: self
-                .points
-                .iter()
-                .map(|p| Record::from_generated(p.proof()))
-                .collect::<mmx_consensus::Result<Vec<_>>>()?,
         })
     }
 }
@@ -746,19 +728,14 @@ impl Worker {
                             };
                             match produce() {
                                 Ok(candidate) => {
-                                    let height =
-                                        number(candidate.record(), "height").unwrap_or_default();
-                                    if node
-                                        .lock()
-                                        .map_err(|_| error("node lock poisoned"))?
-                                        .accept_produced(&candidate)?
-                                    {
-                                        let block = candidate.record();
-                                        println!("Created and broadcast block at height {height}, VDF {}, score {}, hash {}, proof {}",
-                                            number(block, "vdf_height")?,
-                                            block.field("proof")?.seq()?[0].record()?.field("score")?.uint()?,
-                                            vnx::util::to_hex_string(&hash(block, "hash")?, false, false),
-                                            vnx::util::to_hex_string(&hash(block, "proof_hash")?, false, false));
+                                    let block = candidate.record();
+                                    let height = number(block, "height")?;
+                                    let vdf_height = number(block, "vdf_height")?;
+                                    let score = block.field("proof")?.seq()?[0].record()?.field("score")?.uint()?;
+                                    let block_hash = vnx::util::to_hex_string(&hash(block, "hash")?, false, false);
+                                    let proof_hash = vnx::util::to_hex_string(&hash(block, "proof_hash")?, false, false);
+                                    if node.lock().map_err(|_| error("node lock poisoned"))?.accept_produced(candidate)? {
+                                        println!("Created and broadcast block at height {height}, VDF {vdf_height}, score {score}, hash {block_hash}, proof {proof_hash}");
                                     }
                                 }
                                 Err(e) => {

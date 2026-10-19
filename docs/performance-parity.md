@@ -48,7 +48,7 @@ time, suppresses VDF sender echoes, and releases receive-idle inbound peers.
 Fork replay reuses the already-loaded block bodies; the relay handoff reuses
 those records too. RPC point-read products and transaction batch/output sizes
 now have admission budgets. The audit distinguishes these completed changes
-from native credit/rate policy, streaming range reads and verified execution handoff reuse.
+from native credit/rate policy, streaming range reads and concurrent transaction execution.
 
 The payload consolidation checkpoint follows C++ `Node::write_block` and its
 block/transaction indexes. Headers and transactions have separate immutable
@@ -58,3 +58,11 @@ crash, fork, purge and native consensus fixtures pass with the new layout. The
 temporary two-transaction journal fixture wrote 132,638 bytes versus 395,819
 with the former duplicate block/transaction payload writes (66.5% fewer). This
 is a bounded write-size comparison; mainnet throughput still needs measurement.
+
+Canonical-parent live admission and local signed production now retain one
+opaque verified execution handoff. Fork choice can publish its detached delta
+without a second body execution. The native store checks owner and publication
+generation before retaining or applying it; rollback/purge/another publication
+invalidate it. Same-hash-after-rewind and foreign-store regressions reject stale
+effects. Unselected-parent branches still use full replay. This is a bounded
+execution context, not a node-wide state cache.

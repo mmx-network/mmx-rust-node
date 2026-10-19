@@ -86,6 +86,21 @@ pub struct ChainState {
     headers: cache::Headers,
     bodies: Option<Arc<mmx_db::Store>>,
 }
+/// Opaque, fully validated live execution tied to an exact ledger snapshot.
+/// Wire records and header evidence alone cannot construct this capability.
+pub struct PreparedExtension {
+    block: Record,
+    parent: Hash,
+    height: u32,
+    state: ChainState,
+    evidence: mmx_consensus::transitions::VerifiedHeader,
+    points: Vec<VerifiedPoint>,
+}
+impl PreparedExtension {
+    pub fn record(&self) -> &Record {
+        &self.block
+    }
+}
 impl ChainState {
     pub fn memory(params: mmx::ChainParams) -> Self {
         Self {
@@ -249,6 +264,40 @@ impl ChainState {
     }
     pub fn append_sync(&mut self, candidate: &Record) -> ChainResult<block::Receipt> {
         self.append_mode(candidate, &[], ValidationMode::HistoricalSync)
+    }
+    /// Execute on a pinned parent without publishing ledger writes. The caller
+    /// may hand the result to ForkChain after signing/work off the owner lock.
+    pub fn prepare_extension(
+        &self,
+        block: &Record,
+        points: &[VerifiedPoint],
+    ) -> ChainResult<PreparedExtension> {
+        let parent = self
+            .tip()?
+            .ok_or_else(|| invalid("chain is not initialized"))?;
+        let points = mmx_consensus::vdf::link_block(block, &self.params, self, points)?
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let context = mmx_consensus::transitions::ProofContext::resolve(block, &self.params, self)?;
+        let evidence = mmx_consensus::transitions::verify_evidence(block, &self.params, &context)?;
+        let mut state = self.snapshot_at(parent.height)?;
+        state.append_evidence(block, &points, ValidationMode::Live, Some(&evidence))?;
+        Ok(PreparedExtension {
+            block: block.clone(),
+            parent: parent.hash.0,
+            height: parent.height + 1,
+            state,
+            evidence,
+            points,
+        })
+    }
+    fn adopt_extension(&mut self, extension: PreparedExtension) -> ChainResult<()> {
+        self.storage
+            .database_mut()
+            .replace_suffix(extension.height, extension.state.storage.database())?;
+        self.headers = extension.state.headers;
+        Ok(())
     }
     fn append_mode(
         &mut self,

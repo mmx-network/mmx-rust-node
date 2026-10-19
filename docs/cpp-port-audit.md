@@ -61,7 +61,7 @@ no live-ledger or plot scan is part of validation.
 | Header/space consensus: `Node_verify.cpp::verify_proof*`, `ProofOfSpace*`, `pos/verify*.cpp`, native header/hash implementations | `mmx-consensus/src/{proof,transitions,header,pos}.rs`; native proof/hash/difficulty/weight/challenge traces, proof ordering and malformed witnesses | No additional acceptance mismatch identified in this pass. Continue differential mutation coverage at fork boundaries; this is not an exhaustive proof. |
 | VDF consensus and scheduling: `Node_verify.cpp::verify_vdf*`, `Node_update.cpp::verify_vdfs` | `mmx-consensus/src/vdf.rs`, `mmx-node/src/vdf_worker.rs`; opaque work evidence rechecked against current history, native infusion/segment/continuation fixtures, two-job worker bound | C++ trust ranking of competing timelords and specialized CPU multi-lane SHA remain missing. |
 | Fork choice/sync: `Node.cpp::find_best_fork`, `fork_to`, `Node_update.cpp::on_sync_done`, `Router.cpp::process` | `mmx-execution/src/chain/{choice,forks,sync,voting}.rs`, `mmx-node/src/sync/peers*`; native fork/vote/root witnesses, three-observer socket tests, competing contents, timeout reassignment and deep reorg tests | Requested 3–8 observer policy is deliberately stricter than native completion. Every observed content is fetched once; no majority filter. Native transmit credits remain separate from body leases. |
-| Body/economics: `Node_validate.cpp::validate`, `execute`, native reward and fee helpers | `mmx-execution/src/{block,transaction}`, `mmx-consensus/src/authorization.rs`; native block/transaction/economics/NFT/multisig traces and rejection ordering | Independent transactions execute serially. Dependency locks and predecessor plans exist, but are not a concurrent executor. |
+| Body/economics: `Node_validate.cpp::validate`, `execute`, native reward and fee helpers | `mmx-execution/src/{block,transaction}`, `mmx-consensus/src/authorization.rs`; native block/transaction/economics/NFT/multisig traces and rejection ordering | Canonical-parent validation hands off one verified execution delta; independent transactions still execute serially. Dependency locks and predecessor plans exist, but are not a concurrent executor. |
 | Contract execution: `vm/Engine.cpp`, `vm/instr_t.cpp`, `vm_interface.cpp`, `vm/StorageCache.cpp`, `Node_validate.cpp::prepare_context` | `mmx-vm/src/engine*`, `mmx-execution/src/lib.rs`; all declared opcodes, gas, composite ownership, remote calls, hardfork setup, locks, failed-engine publication, recursion/copy/erase and input limits have fixtures | JavaScript compiler and remaining original contract suites are unported. Per-engine/per-transaction storage overlays are bounded by execution and are distinct from a broad node state cache. |
 | Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Block/transaction payload consolidation is complete for new writes; synchronous durability and range scan materialization below remain. No SQLite backend. |
 | Rollback/purge: C++ `Node` storage/apply/revert and versioned tables | `mmx-execution/src/chain/{mod,forks}.rs`, `mmx-db/src/native.rs`; every retained-height rollback, deep fork/restart, crash-safe collection, pinned snapshot and RPC floor tests | Purge necessarily rewrites retained live values during explicit collection. There is no automatic background migration or ledger scan. Rollback below the durable floor is refused; private consensus ancestry does not reappear through RPC. |
@@ -72,7 +72,7 @@ no live-ledger or plot scan is part of validation.
 
 ## Remaining work, in priority order
 
-1. **Live re-execution (CPU); block payload consolidation completed.**
+1. **Block payload consolidation and canonical-parent execution handoff completed.**
    New block headers and transaction records are written once in the fork
    archive. Selected-chain block entries are eight-byte references and
    transaction entries are 44-byte block/position locators. Independent header
@@ -88,9 +88,17 @@ no live-ledger or plot scan is part of validation.
    A small two-transaction write fixture wrote 132,638 journal bytes versus
    395,819 with the previous duplicated layout (66.5% fewer); this is a write
    size comparison, not a historical-sync throughput claim.
-   `admit_live` still previews a live body and selected replay executes it again.
-   Reuse a verified execution handoff only when its exact ledger base still
-   matches; header proof evidence does not authorize stale execution effects.
+   Canonical-parent live blocks and signed local candidates now pass an opaque,
+   fully validated execution handoff into fork choice. Only one pending handoff
+   is retained. Native database owner/generation checks run both at admission
+   and publication; rewind, purge or another selected publication invalidates
+   it. This also rejects a stale result when the parent hash/version returned
+   to the same values after rollback. The selected branch adopts its validated
+   delta without executing the body again. Remote blocks whose parent is on
+   an unselected branch still follow full branch replay; additional contexts
+   would require an explicit memory budget. Native witnesses, stale/foreign
+   snapshot tests and the existing production attack tests cover this path.
+   No broad ledger state cache is introduced.
 2. **Relay fairness and credits (public-peer defense and latency).**
    Port `Router`'s received/sent caches, `ReceiveNote` feedback, staged randomized
    sending, transaction cost/upload credits, priority congestion handling,
@@ -190,3 +198,8 @@ peers at height 5,530,444 and its canonical hash matched C++. A ten-second norma
 live sample observed approximately 0.015 MiB/s physical reads and 0.010 MiB/s
 physical writes. This is a quiet live sample, not a historical-sync benchmark.
 The remote Rust harvester stayed running and the C++ harvester stayed disabled.
+
+The execution-handoff checkpoint passed 308 workspace tests, one existing ignored
+test, strict Clippy, formatting and the optimized local build. Signed candidate
+validation remains off the ledger mutex; publication rechecks both the best
+verified proof and the exact ledger base. The handoff is consumed once.

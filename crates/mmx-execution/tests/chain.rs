@@ -1372,3 +1372,57 @@ fn legacy_payloads_reopen_without_migration_then_new_blocks_use_locators() {
         &steps[0],
     );
 }
+
+#[test]
+fn verified_live_execution_is_reused_and_foreign_or_rewound_bases_cannot_publish_it() {
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open_native(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    let root = block_hash(&g);
+    let block = record(&steps[0]["block"]);
+    let work = vdf::verify(&record(&steps[0]["vdf"]), &params(&g), chain.selected()).unwrap();
+    let prepared = chain
+        .selected()
+        .prepare_extension(&block, std::slice::from_ref(&work))
+        .unwrap();
+    let stale = chain
+        .selected()
+        .prepare_extension(&block, std::slice::from_ref(&work))
+        .unwrap();
+    let foreign_dir = tempfile::tempdir().unwrap();
+    let mut foreign = ForkChain::open_native(foreign_dir.path(), params(&g)).unwrap();
+    foreign.initialize(&assets(&g)).unwrap();
+    assert!(!foreign.admit_prepared(prepared).unwrap());
+    assert!(foreign.block(&block_hash(&steps[0])).unwrap().is_none());
+    let prepared = chain
+        .selected()
+        .prepare_extension(&block, std::slice::from_ref(&work))
+        .unwrap();
+    assert!(chain.admit_prepared(prepared).unwrap());
+    let update = chain.update_at(root, None, 100).unwrap();
+    assert!(update.reused_execution);
+    verify_step(chain.selected(), &steps[0]);
+    chain.rollback_to(0).unwrap();
+    // Same parent hash and version after rewind, but a different publication
+    // generation. An off-lock reply must not overwrite the intervening state.
+    assert_eq!(chain.selected().tip().unwrap().unwrap().hash.0, root);
+    assert!(!chain.admit_prepared(stale).unwrap());
+    let update = chain.update_at(root, None, 101).unwrap();
+    assert!(!update.reused_execution);
+    verify_step(chain.selected(), &steps[0]);
+    let block = record(&steps[1]["block"]);
+    let work = vdf::verify(&record(&steps[1]["vdf"]), &params(&g), chain.selected()).unwrap();
+    assert!(chain.admit_live(&block, &[work], 0).unwrap());
+    let update = chain.update_at(root, None, 102).unwrap();
+    assert!(update.reused_execution);
+    verify_step(chain.selected(), &steps[1]);
+    drop(chain);
+    verify_step(
+        ForkChain::open_native(dir.path(), params(&g))
+            .unwrap()
+            .selected(),
+        &steps[1],
+    );
+}

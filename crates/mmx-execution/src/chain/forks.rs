@@ -3,7 +3,8 @@
 use super::{
     bodies,
     choice::{self, Anchor, Candidate},
-    genesis, invalid, voting, ChainError, ChainResult, ChainState, ValidationMode,
+    genesis, invalid, voting, ChainError, ChainResult, ChainState, PreparedExtension,
+    ValidationMode,
 };
 use crate::{
     block,
@@ -39,6 +40,7 @@ pub struct Update {
     pub choice_time: Duration,
     pub lineage_time: Duration,
     pub replay_time: Duration,
+    pub reused_execution: bool,
 }
 struct Entry {
     block: Record,
@@ -70,6 +72,7 @@ pub struct ForkChain {
     connected: BTreeSet<Hash>,
     tip_limit: Option<u32>,
     headers: super::cache::Headers,
+    prepared: Option<PreparedExtension>,
 }
 impl ForkChain {
     pub fn memory(params: mmx::ChainParams) -> Self {
@@ -84,6 +87,7 @@ impl ForkChain {
             connected: BTreeSet::new(),
             tip_limit: None,
             headers: Default::default(),
+            prepared: None,
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
@@ -110,6 +114,7 @@ impl ForkChain {
             connected: BTreeSet::new(),
             tip_limit: None,
             headers: Default::default(),
+            prepared: None,
         };
         if chain.archive.version() != 0
             && chain.archive.get("fork_meta", b"params", None)?
@@ -151,6 +156,7 @@ impl ForkChain {
         if height < self.earliest_height() || height > tip.height {
             return Err(invalid("purge height outside retained selected chain"));
         }
+        self.prepared = None;
         // Each database publishes this policy marker with its collected files.
         // It also distinguishes a crash between selected/archive collection.
         let tag = 0x4D4D_5801_0000_0000 | u64::from(height);
@@ -284,6 +290,7 @@ impl ForkChain {
         if height < self.earliest_height() {
             return Err(invalid("rollback height was purged"));
         }
+        self.prepared = None;
         if height < tip.height {
             self.chain.revert(height + 1)?;
             self.voting.reset();
@@ -442,6 +449,7 @@ impl ForkChain {
             Err(_) => return Ok(false),
         };
         let mut preview = self.chain.snapshot_at(common.height)?;
+        let canonical_parent = parents.is_empty();
         for parent in parents {
             let record = self
                 .block(&parent)?
@@ -467,8 +475,51 @@ impl ForkChain {
             .map(|point| Record::from_generated(point.proof()))
             .collect::<mmx_consensus::Result<Vec<_>>>()?;
         self.retain(block, &work)?;
-        self.evidence.insert(id, evidence);
-        self.verified.insert(id, linked);
+        self.evidence.insert(id, evidence.clone());
+        self.verified.insert(id, linked.clone());
+        if canonical_parent {
+            preview.bodies = self.chain.bodies.clone();
+            self.prepared = Some(PreparedExtension {
+                block: block.clone(),
+                parent: parent_id,
+                height: common.height + 1,
+                state: preview,
+                evidence,
+                points: linked,
+            });
+        }
+        Ok(true)
+    }
+    /// Admit a signed off-lock execution result only if its exact ledger base
+    /// is still current. Keep one native-style execution handoff, not a state
+    /// cache. Fork choice remains mandatory before publication.
+    pub fn admit_prepared(&mut self, mut execution: PreparedExtension) -> ChainResult<bool> {
+        if execution.state.params != self.chain.params {
+            return Err(invalid("prepared execution parameter mismatch"));
+        }
+        if self.chain.hash_at(execution.height - 1)? != Some(execution.parent)
+            || !self
+                .chain
+                .storage
+                .database()
+                .can_replace_suffix(execution.height, execution.state.storage.database())?
+        {
+            return Ok(false);
+        }
+        let id = bytes::<32>(execution.block.field("hash")?)?;
+        if self.block(&id)?.is_some_and(|old| old != execution.block) {
+            return Err(invalid("prepared execution differs from archived body"));
+        }
+        let work = execution
+            .points
+            .iter()
+            .map(|p| Record::from_generated(p.proof()))
+            .collect::<mmx_consensus::Result<Vec<_>>>()?;
+        self.retain(&execution.block, &work)?;
+        execution.state.bodies = self.chain.bodies.clone();
+        self.evidence.insert(id, execution.evidence.clone());
+        self.verified.insert(id, execution.points.clone());
+        self.prepared = Some(execution);
         Ok(true)
     }
     /// Atomically retain a historical download window with no attached PoTs.
@@ -905,12 +956,33 @@ impl ForkChain {
                 Ok((block, work, validation, evidence))
             });
             let replay_started = Instant::now();
-            let replay = self
-                .chain
-                .reorganize_stream(common.height + 1, branch, false);
+            let reuse = if let Some(p) = self.prepared.as_ref().filter(|p| {
+                p.parent == common.hash.0
+                    && line.len() == 1
+                    && p.block.field("hash").ok().and_then(|v| bytes::<32>(v).ok()) == Some(best)
+            }) {
+                self.chain
+                    .storage
+                    .database()
+                    .can_replace_suffix(p.height, p.state.storage.database())?
+            } else {
+                false
+            };
+            let replay = if reuse {
+                for record in branch {
+                    record?;
+                }
+                let execution = self.prepared.take().unwrap();
+                self.chain.adopt_extension(execution).map(|()| Vec::new())
+            } else {
+                self.chain
+                    .reorganize_stream(common.height + 1, branch, false)
+            };
             out.replay_time += replay_started.elapsed();
             match replay {
                 Ok(_) => {
+                    self.prepared = None;
+                    out.reused_execution = reuse;
                     out.common_ancestor = Some(common.hash.0);
                     out.applied = line;
                     out.validated = validated;

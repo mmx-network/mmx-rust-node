@@ -729,6 +729,18 @@ impl Native {
             .collect::<Vec<_>>();
         self.publish(version, branch.local.version, self.state.floor, &changes)
     }
+    /// Cheap generation/owner check for an execution result prepared off-lock.
+    /// Publication still repeats these checks before writing anything.
+    pub fn can_replace_suffix(&self, version: u32, branch: &Snapshot) -> Result<bool> {
+        self.readable()?;
+        Ok(version >= self.state.floor
+            && version <= self.state.version
+            && !self.has_pending()
+            && !branch.local.has_pending()
+            && branch.cutoff == version
+            && Arc::ptr_eq(&self.context, &branch.context)
+            && self.state.generation == branch.base.generation)
+    }
     /// Discard older history, preserving state at version-1 and all later
     /// versions. Existing snapshots pin old files until they are released.
     pub fn purge_before(&mut self, version: u32) -> Result<PurgeReport> {

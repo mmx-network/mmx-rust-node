@@ -167,4 +167,21 @@ impl Store {
             _ => Err(Error::SnapshotMismatch),
         }
     }
+    /// Whether a detached execution result still belongs to this exact base.
+    pub fn can_replace_suffix(&self, version: u32, branch: &Self) -> Result<bool> {
+        match (&self.0, &branch.0) {
+            (Backend::Native(d), Backend::NativeSnapshot(b)) => d.can_replace_suffix(version, b),
+            (Backend::Memory(d), Backend::Memory(b)) => {
+                if d.has_pending()
+                    || b.has_pending()
+                    || version > d.version()
+                    || version > b.version()
+                {
+                    return Ok(false);
+                }
+                Ok(d.fork(version)?.tables == b.fork(version)?.tables)
+            }
+            _ => Ok(false),
+        }
+    }
 }
