@@ -182,6 +182,7 @@ fn main() -> Result<()> {
         })
         .collect();
     let mut state = Node::open(&options.data, &network)?;
+    state.configure_router(&config)?;
     if let Some(height) = options.rollback {
         state.rollback_to(height)?;
     }

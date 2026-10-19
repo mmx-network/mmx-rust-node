@@ -74,7 +74,7 @@ cursors prevent old transaction backlog from delaying new proofs, VDFs or blocks
 A real socket test holds both complete RPC replies and partial inbound frames
 while a verified outgoing proof still arrives. Shared record ownership and
 20,000-entry per-peer echo caches avoid additional payload queues/copies. Native
-credit accounting, early earned credits, staged fanout and peer authentication
+credit accounting, early earned credits and peer authentication
 remain separate tracked work.
 
 Public balance queries now follow C++ `table.h::find_range`: native sorted sources
@@ -137,7 +137,7 @@ do not refresh their FIFO age, and explicit rewind resets them. Tests cover
 actual receipt/RPC framing, suppression on the wire, cross-peer isolation,
 cache bounds, rollback/reacceptance and a socket barrier proving known proofs,
 blocks and votes stay out of the inbox. Native first-seen envelope deduplication,
-per-peer/global transaction cost accounting, earned early relay, staged fanout
+per-peer/global transaction cost accounting, earned early relay
 and full inbound identity/role lifecycle remain separate work.
 
 Purged-peer identity: legacy C++ Router exposes the genesis hash through
@@ -147,3 +147,17 @@ there, so authenticated qualification now falls back to the constant
 allowed on the peer surface. Unpurged C++ peers use the unchanged path, and a
 native temporary-database/socket test proves purged history stays unavailable
 while the peer authenticates and rejects the wrong network.
+
+Peer fanout now follows `Router::send_to`: shuffle connections once per
+publication, then assign distinct ranks spaced by `target / (N+1)`. The native
+`Router.relay_target_ms` setting is honored; the repository default is 2,000 ms.
+Receipt cursors run immediately, independent of body timing. Body selection can
+pass a deferred item to send ready consensus work behind it. A bounded sparse
+sequence set records completion independently of the evictable peer hash cache,
+so receipt floods cannot cause those out-of-order payloads to repeat. Selection
+examines at most 256 entries per class/tick and retains at most 4,096 completed
+out-of-order sequence numbers per class. Payloads remain shared; there is no
+new per-peer payload queue. Eight-connection rank/lifetime tests and native
+socket/production regressions pass. Whole-network bandwidth/latency comparisons
+remain open, along with native VDF-only new-connection replay, upload credits,
+earned early relay and inbound identity/role handling.

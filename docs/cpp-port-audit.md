@@ -57,7 +57,7 @@ no live-ledger or plot scan is part of validation.
 
 | Area and C++ paths inspected | Rust path and evidence | Remaining difference |
 | --- | --- | --- |
-| Block production: `Node_update.cpp::update`, `make_block`, `Node.cpp::fork_to`, voting, `Node_verify.cpp::add_proof`, `find_best_proof` | `mmx-node/src/production.rs`, `node.rs`; native chain, production and vote witnesses; asynchronous stale-result tests | Independent sending and consensus priority are implemented; native early relay credits and staged fanout below remain unported. Signed block tracking is transient as in C++. |
+| Block production: `Node_update.cpp::update`, `make_block`, `Node.cpp::fork_to`, voting, `Node_verify.cpp::add_proof`, `find_best_proof` | `mmx-node/src/production.rs`, `node.rs`; native chain, production and vote witnesses; asynchronous stale-result tests | Independent sending and consensus priority are implemented; native early relay credits and authenticated role handling below remain unported. Signed block tracking is transient as in C++. |
 | Header/space consensus: `Node_verify.cpp::verify_proof*`, `ProofOfSpace*`, `pos/verify*.cpp`, native header/hash implementations | `mmx-consensus/src/{proof,transitions,header,pos}.rs`; native proof/hash/difficulty/weight/challenge traces, proof ordering and malformed witnesses | No additional acceptance mismatch identified in this pass. Continue differential mutation coverage at fork boundaries; this is not an exhaustive proof. |
 | VDF consensus and scheduling: `Node_verify.cpp::verify_vdf*`, `Node_update.cpp::verify_vdfs` | `mmx-consensus/src/vdf.rs`, `mmx-node/src/vdf_worker.rs`; opaque work evidence rechecked against current history, native infusion/segment/continuation fixtures, two-job worker bound | C++ trust ranking of competing timelords and specialized CPU multi-lane SHA remain missing. |
 | Fork choice/sync: `Node.cpp::find_best_fork`, `fork_to`, `Node_update.cpp::on_sync_done`, `Router.cpp::process` | `mmx-execution/src/chain/{choice,forks,sync,voting}.rs`, `mmx-node/src/sync/peers*`; native fork/vote/root witnesses, three-observer socket tests, competing contents, timeout reassignment and deep reorg tests | Requested 3–8 observer policy is deliberately stricter than native completion. Every observed content is fetched once; no majority filter. Native transmit credits remain separate from body leases. |
@@ -65,7 +65,7 @@ no live-ledger or plot scan is part of validation.
 | Contract execution: `vm/Engine.cpp`, `vm/instr_t.cpp`, `vm_interface.cpp`, `vm/StorageCache.cpp`, `Node_validate.cpp::prepare_context` | `mmx-vm/src/engine*`, `mmx-execution/src/lib.rs`; all declared opcodes, gas, composite ownership, remote calls, hardfork setup, locks, failed-engine publication, recursion/copy/erase and input limits have fixtures | JavaScript compiler and remaining original contract suites are unported. Per-engine/per-transaction storage overlays are bounded by execution and are distinct from a broad node state cache. |
 | Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Block/transaction payload consolidation is complete for new writes; synchronous durability comparisons below remain. Public balance ranges use a streaming bounded merge. No SQLite backend. |
 | Rollback/purge: C++ `Node` storage/apply/revert and versioned tables | `mmx-execution/src/chain/{mod,forks}.rs`, `mmx-db/src/native.rs`; every retained-height rollback, deep fork/restart, crash-safe collection, pinned snapshot and RPC floor tests | Purge necessarily rewrites retained live values during explicit collection. There is no automatic background migration or ledger scan. Rollback below the durable floor is refused; private consensus ancestry does not reappear through RPC. |
-| Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native credits, rate policy, peer-role filtering and full inbound authenticated lifecycle remain incomplete. Balance scans and public validation run on pinned snapshots outside the ledger lock with two shared RPC slots; per-peer credit/rate fairness remains. REST/WebAPI parity is incomplete. |
+| Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,relay,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native credits, rate policy, peer-role filtering and full inbound authenticated lifecycle remain incomplete. Balance scans and public validation run on pinned snapshots outside the ledger lock with two shared RPC slots; per-peer credit/rate fairness remains. REST/WebAPI parity is incomplete. |
 | Farmer/wallet: `Farmer.cpp::{sign_block,sign_vote,handle}`, `Wallet.cpp`, `include/mmx/ECDSA_Wallet.h`, key derivation and spending | `mmx-farming/src/{farmer,wallet,spending,service}.rs`, `mmx-wallet`, `mmxwallet`; native keys/KDF/signatures, protected-key unlock verification, pending/reservation/fork/ambiguous-submit tests, real daemon RPC tests | Pool partial submission, reverse farmer RPC, complete wallet/history/offer/swap API and wallet query caches remain missing. Farm reports use bounded retention. |
 | Harvester/plots: `Harvester.cpp::{check_queue,lookup_task,reload}`, `pos/Prover.cpp`, `pos/verify_full.cpp` | `mmx-farming/src/{harvester,plot,encoding}.rs`, `mmx-tools/src/lib.rs`; bounded shared Rayon pool, immediate proof emission, native deadline, filter-before-full-proof, density-based park search, retained headers, positional park reads/reuse; stalled-plot test and live sample | Owned per-plot jobs allow overlapping challenges and reports; metadata-free/corrupt-quality paths still need additional slow-resource comparisons. Remote recompute remains missing. |
 | GPU and CLI/config: native OpenCL VDF code, CUDA recompute, `mmx.cpp`, native module config | `mmx-opencl`, consensus accelerator, `mmx-tools`, `mmxwallet`; GPU-only default discovery, bounded buffers, native CPU result checks/fallback, native config layering and CLI precedence tests, wallet CLI suites | Rust OpenCL F1 replaces CUDA for the implemented path. Static musl cannot load an ICD and falls back to CPU. Full C++ utility/compiler/timelord/service and configuration parity is not claimed. |
@@ -120,9 +120,17 @@ no live-ledger or plot scan is part of validation.
    duplicates do not refresh FIFO age, and explicit rollback resets it so work
    can be accepted again. Native first-seen envelope deduplication before full
    verification remains a distinct follow-up.
-   Still port transaction cost/upload accounting, earned farmer/timelord early-relay credits,
-   randomized staged fanout, peer-role filtering and authenticated incoming
-   lifecycle. Current bounds and verified-only relay are not equivalent to
+   Randomized staged fanout is now implemented: each publication shuffles live
+   connection tokens once and assigns native `target / (N+1)` ranks. The native
+   `Router.relay_target_ms` config is honored (repository default 2,000 ms).
+   Receipt notes have independent cursors and go out immediately; bodies use
+   shared records and timing metadata. A ready later consensus item can pass a
+   delayed earlier item. Bounded completed-sequence sets prevent retransmission
+   even if receipt traffic evicts the general per-peer hash cache. No additional
+   per-peer payload queue is introduced. New connections retain the previous
+   immediate replay behavior; native VDF-only connection replay remains open.
+   Still port transaction cost/upload accounting, earned farmer/timelord
+   early-relay credits, peer-role filtering and authenticated incoming lifecycle. Current bounds and verified-only relay are not equivalent to
    native per-peer fairness. Preserve transport deduplication separately from
    consensus acceptance; a claimed identity/height never earns relay credit.
 3. **Streaming balance RPC reads and snapshot validation completed.**
@@ -295,3 +303,18 @@ constant. Legacy C++ peers still use `get_block_hash(0)` without an extra call;
 wrong-genesis/self/identity checks remain mandatory. A native DB/socket test
 purges history, qualifies successfully and verifies old hashes/bodies stay
 hidden before and after qualification.
+
+Staged relay regressions check eight unique native delay ranks, connection-token
+retirement, immediate receipts, cancellation of pending payloads, zero-delay
+configuration, and ready work passing a deferred item without duplicate sends
+when the peer hash cache is evicted. Existing real socket tests for stalled RPC
+reads, partial frames, verified-only relay and stronger-proof production vetoes
+pass with the staged sender. This is routing/scheduling parity work; it changes
+no block acceptance or fork-choice rule.
+
+Staged relay validation: 334 workspace target tests plus the added receipt-only
+idle-activity regression pass (335 unique tests, one existing ignored test).
+Strict Clippy, formatting and the local optimized node build pass. Control-only
+receipt traffic refreshes the native receive-idle clock while absolute frame/RPC
+deadlines remain unchanged. The preceding receipt and purged-peer checkpoints
+also passed GitHub Actions.

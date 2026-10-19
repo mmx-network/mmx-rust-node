@@ -1453,6 +1453,9 @@ transactions for validation against the new selected state.
 Native receipt feedback suppresses redundant gossip per peer. A bounded cache of
 100,000 verified message IDs filters replays before ledger queue admission;
 receipt claims cannot seed it, and explicit rollback resets it.
+Receipt notes are immediate, while payload fanout follows randomized native
+stages (`Router.relay_target_ms`, normally 2,000 ms). Ready consensus work can
+pass older deferred messages without sending completed payloads twice.
 
 While synced, the producer combines CPU-verified VDF work and authenticated
 proof responses, assembles transactions against a pinned parent snapshot,

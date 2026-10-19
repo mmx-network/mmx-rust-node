@@ -104,6 +104,7 @@ pub struct Connection {
     relay_worker: Option<RelayWorker>,
     relay_receipts: Option<RelayPeer>,
     last_size: usize,
+    received_at: Instant,
 }
 struct Output {
     stream: TcpStream,
@@ -159,6 +160,7 @@ impl Connection {
             relay_worker: None,
             relay_receipts: None,
             last_size: 0,
+            received_at: Instant::now(),
         })
     }
     pub fn send(&mut self, value: &Record) -> Result<()> {
@@ -176,7 +178,7 @@ impl Connection {
         if self.relay_worker.is_some() {
             return Err(error("peer relay already started"));
         }
-        let mut sender = RelayPeer::default();
+        let mut sender = relay.attach()?;
         let receiver = sender.clone();
         let output = self.output.clone();
         let socket = self.stream.try_clone()?;
@@ -285,6 +287,7 @@ impl Connection {
         })?;
         let (record, size) = decode_frame_with_registry(&frame, &mut self.registry)?;
         self.last_size = size;
+        self.received_at = Instant::now();
         Ok(Some(record))
     }
     fn read_frame_bytes(&mut self, mut bytes: &mut [u8], end: Instant) -> std::io::Result<()> {
@@ -753,17 +756,15 @@ impl Server {
                             let run = || -> Result<()> {
                                 let mut connection = Connection::new(stream)?;
                                 let relay_peer = connection.start_relay(relay.clone())?;
-                                let mut received = Instant::now();
                                 while !stop.load(Ordering::Relaxed) {
                                     // Native Router's configured receive-idle
                                     // timeout also releases silent inbound slots.
-                                    if received.elapsed() > Duration::from_secs(180) {
+                                    if connection.received_at.elapsed() > Duration::from_secs(180) {
                                         return Err(error("peer receive idle timeout"));
                                     }
                                     if let Some(msg) =
                                         connection.receive(Duration::from_millis(200))?
                                     {
-                                        received = Instant::now();
                                         relay_peer.note(&msg)?;
                                         if msg.name == "mmx.Request" {
                                             respond_with(
@@ -1024,6 +1025,34 @@ mod tests {
         assert_eq!(reply.field("_ret_0").unwrap().uint().unwrap(), 17);
         // The acknowledged transaction payload must never appear on this wire.
         assert!(client.receive(Duration::from_secs(1)).is_err());
+        server.join().unwrap();
+    }
+    #[test]
+    fn receipt_only_activity_refreshes_receive_idle_time_without_resetting_frame_deadlines() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, finished) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut connection = Connection::new(listener.accept().unwrap().0).unwrap();
+            connection
+                .send(
+                    &Record::from_generated(&mmx_types::mmx::ReceiveNote {
+                        hash: [5; 32].into(),
+                        time: 0,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            let _ = finished.recv();
+        });
+        let mut connection = Connection::connect(&address.to_string()).unwrap();
+        let before = connection.received_at;
+        assert!(connection
+            .receive(Duration::from_millis(100))
+            .unwrap()
+            .is_none());
+        assert!(connection.received_at > before);
+        stop.send(()).unwrap();
         server.join().unwrap();
     }
 }

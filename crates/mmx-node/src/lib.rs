@@ -7,6 +7,7 @@ pub mod node;
 pub mod peer;
 mod peer_state;
 pub mod production;
+mod relay;
 pub mod rpc;
 pub mod sync;
 mod transactions;
