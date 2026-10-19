@@ -142,7 +142,8 @@ no live-ledger or plot scan is part of validation.
    Following C++ `Harvester::check_queue` / `lookup_task`, the daemon captures
    eligible immutable prover headers and releases the service mutex before
    dispatching plot I/O. Its 20 ms tick continues receiving challenges and
-   reporting farm information. Completed proofs publish immediately. One global
+   reporting farm information. Completed proofs publish immediately; each completed worker refills available
+   capacity directly without waiting for the service tick. One global
    Rayon pool, including nested F1 computation, remains limited by `--threads`.
    At most that many per-plot leases run, and at most eight contexts retain
    queued eligible plots; raw challenge admission retains its separate bound.
@@ -260,3 +261,10 @@ isolation at the actual node API. Legacy bodies remain readable in place, and
 purged headers remain hidden. This path also includes the portable RPC permit
 CI fix. Targeted execution/node suites, strict Clippy, formatting and the local
 optimized node build pass; no live ledger scan or rewrite was performed.
+
+Harvester refill follow-up: a one-worker/two-native-proof regression completes
+both queued jobs after a single service poll. Completion refills under a short
+shared scheduler lock, with no I/O or delivery callback while holding it.
+Newest-height, per-plot exclusion, expiry and context/worker bounds remain.
+The initial overlap deployment's slower adjacent live sample is recorded in
+`performance-parity.md`; a scheduling fix alone is not a performance claim.

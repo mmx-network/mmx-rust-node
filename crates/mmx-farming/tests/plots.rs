@@ -571,6 +571,10 @@ fn overlapping_challenges_keep_reporting_and_deliver_new_work_while_one_plot_is_
         }
         thread::sleep(Duration::from_millis(5));
     }
+    let until = Instant::now() + Duration::from_secs(1);
+    while scheduler.active() > 1 && Instant::now() < until {
+        thread::sleep(Duration::from_millis(1));
+    }
     let still_running = scheduler.active();
     let completed_before_release = reports.try_recv().is_ok();
     // Remove queued references to the FIFO before releasing the one blocked
@@ -617,4 +621,63 @@ fn overlapping_challenges_keep_reporting_and_deliver_new_work_while_one_plot_is_
         challenge.vdf_height,
     )
     .unwrap();
+}
+
+#[test]
+fn completing_lookup_refills_the_worker_without_waiting_for_a_service_tick() {
+    use mmx_farming::harvester::LookupScheduler;
+    use std::{
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let header = make_plot(&dir.path().join("fast.plot"), true, false);
+    let f = fixture();
+    let params = mmx::ChainParams::decode(&unhex(&f["proof"]["params"])).unwrap();
+    let mut challenge = mmx::Challenge {
+        vdf_height: f["proof"]["height"].as_u64().unwrap() as u32,
+        challenge: vnx::Fixed(unhex(&f["proof"]["challenge"]).try_into().unwrap()),
+        difficulty: 1,
+    };
+    let mut h = Harvester::new("refill fixture".into(), [header.farmer_key.0]).unwrap();
+    h.directories.insert(dir.path().to_path_buf());
+    h.reload();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let (sent, received) = mpsc::channel();
+    let emit = Arc::new(move |proof| {
+        let _ = sent.send(proof);
+    });
+    let mut scheduler = LookupScheduler::new(1).unwrap();
+    scheduler.submit(
+        h.lookup_job(&challenge, &params, Duration::from_secs(10))
+            .unwrap(),
+        emit.clone(),
+        Arc::new(|_| {}),
+    );
+    challenge.vdf_height += 1;
+    challenge.difficulty = 2;
+    scheduler.submit(
+        h.lookup_job(&challenge, &params, Duration::from_secs(10))
+            .unwrap(),
+        emit,
+        Arc::new(|_| {}),
+    );
+    pool.install(|| scheduler.poll()).unwrap();
+    // No second poll: the completed worker must claim the remaining job itself.
+    let first = received.recv_timeout(Duration::from_secs(3)).unwrap();
+    let second = received.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        first.field("vdf_height").unwrap().uint().unwrap(),
+        u64::from(challenge.vdf_height)
+    );
+    assert_eq!(
+        second.field("vdf_height").unwrap().uint().unwrap() + 1,
+        u64::from(challenge.vdf_height)
+    );
+    for proof in [first, second] {
+        assert!(mmx_consensus::response::is_valid(&proof).unwrap());
+    }
 }

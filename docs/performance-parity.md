@@ -108,3 +108,13 @@ A temporary native-database regression corrupts an archived transaction and
 checks that full block reads fail while lossless header/hash replies still work.
 Legacy complete-body records retain their in-place fallback; no migration occurs.
 Existing purge/RPC floor and native consensus tests pass on this path.
+
+The first t320 overlap build had a slower adjacent live sample: 27 lookups
+averaged 3,353 ms (maximum 4,719 ms), versus 1,899 ms across the preceding 30
+(maximum 3,032 ms). Both used the same 1,207 plots, 16 workers, CPU fallback and
+C++ harvesting disabled; challenges differed and caches were not flushed.
+Worker completion now refills capacity directly from the Rayon worker, retaining
+its local scheduling behavior instead of waiting for the 20 ms service tick.
+A regression queues two native-proof jobs on one worker and obtains both replies
+with a single service poll. This removes a definite scheduling wait; the follow-up
+live sample is required before attributing the observed slowdown to that wait.
