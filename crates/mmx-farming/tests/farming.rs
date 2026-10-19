@@ -288,6 +288,35 @@ fn challenge_queue_prioritizes_newest_height_deduplicates_and_expires_work() {
 }
 
 #[test]
+fn challenge_deadline_matches_native_network_parameters() {
+    use mmx_farming::harvester::{challenge_timeout, ChallengeQueue};
+    let mut params = mmx::ChainParams {
+        block_interval_ms: 10_000,
+        challenge_delay: 6,
+        ..Default::default()
+    };
+    let timeout = challenge_timeout(&params).unwrap();
+    assert_eq!(timeout, Duration::from_secs(60));
+    let mut queue = ChallengeQueue::new(timeout);
+    let challenge = mmx::Challenge {
+        challenge: [8; 32].into(),
+        difficulty: 1,
+        ..Default::default()
+    };
+    assert!(queue.push(challenge.clone(), Duration::from_secs(11)));
+    let (_, remaining) = queue.pop_with_remaining().unwrap();
+    assert!(remaining > Duration::from_secs(48));
+    assert!(!queue.push(mmx::Challenge::default(), Duration::from_secs(61)));
+    params.block_interval_ms = -1;
+    assert!(challenge_timeout(&params).is_err());
+    params.block_interval_ms = i64::MAX;
+    assert!(challenge_timeout(&params).is_err());
+    params.block_interval_ms = 10_000;
+    params.challenge_delay = 0;
+    assert!(challenge_timeout(&params).is_err());
+}
+
+#[test]
 fn remote_harvester_login_cannot_gain_signing_permissions() {
     use vnx::auth::{final_hash, password_hash, AuthenticationServer, User};
     let auth = AuthenticationServer::new();

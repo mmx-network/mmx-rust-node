@@ -16,6 +16,12 @@ protocol-version rules. The database's physical disk format is independent and
 does not need to match C++. Do not silently replace unsupported behavior with
 approximations.
 
+Performance is also a migration requirement across the node, database, wallet,
+farmer, harvester and utilities. Read the matching C++ execution strategy before
+porting, preserve its important optimizations, and verify comparable workloads.
+[Performance parity](docs/performance-parity.md) records the reference paths,
+regression checks and outstanding comparison gaps.
+
 ## Build and run
 
 Requires Rust 1.89 or newer and a C toolchain for Zstd. The disk
@@ -1447,9 +1453,13 @@ by ten missing X bits; the default remains 65536. `--log-lookups` reports proof
 counts, publications and elapsed time per challenge during farm testing. Native
 plot-size metadata is informational; reads use the actual file length and
 reject out-of-range or truncated parks.
+Eligible plots run concurrently on the worker pool selected by `--threads` or
+`Harvester.num_threads`; nested CPU proof computation shares that same bound.
+Each proof is published immediately when ready, independently of slower plots.
 Challenges use a bounded queue, prioritize the newest height, deduplicate work
-and expire after ten seconds; failures in one plot
-do not discard proofs from other plots. The node publishes its C++ challenge
+and expire after the native `challenge_delay * block_interval_ms` window
+(60 seconds on mainnet). The farmer uses the same forwarding deadline. Failed
+plots or individual qualities do not discard other completed proofs. The node publishes its C++ challenge
 window only while synced, and accepts signed farmer responses through its bounded
 inbox for the existing consensus checks.
 

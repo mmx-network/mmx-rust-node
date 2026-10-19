@@ -272,6 +272,139 @@ fn harvested_response_is_accepted_by_the_cpp_derived_consensus_verifier() {
     assert_eq!(responses.len(), 1);
     let p = responses[0].field("proof").unwrap().record().unwrap();
     proof::verify(p, &params, &challenge.challenge.0, 1, challenge.vdf_height).unwrap();
+    for workers in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap();
+        let result = pool
+            .install(|| harvester.lookup(&challenge, &params))
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].field("proof").unwrap().record().unwrap(), p);
+        assert!(mmx_consensus::response::is_valid(&result[0]).unwrap());
+        assert!(pool
+            .install(|| harvester.lookup_for(&challenge, &params, std::time::Duration::ZERO))
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_lookup_publishes_native_proof_before_a_stalled_plot_finishes() {
+    use std::{
+        os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let fast = dir.path().join("fast.plot");
+    let slow = dir.path().join("slow.plot");
+    let header = make_plot(&fast, true, false);
+    let mut slow_header = make_plot(&slow, true, false);
+    // Put the stalled plot first in the ID map, so the old sequential loop
+    // cannot deliver the valid proof until that plot has been released.
+    let f = fixture();
+    let params = mmx::ChainParams::decode(&unhex(&f["proof"]["params"])).unwrap();
+    let challenge = mmx::Challenge {
+        vdf_height: f["proof"]["height"].as_u64().unwrap() as u32,
+        challenge: vnx::Fixed(unhex(&f["proof"]["challenge"]).try_into().unwrap()),
+        difficulty: 1,
+    };
+    let mut identity = Record::decode(&unhex(&f["proof"]["wire"])).unwrap();
+    for seed in 0u64.. {
+        slow_header.seed.0[..8].copy_from_slice(&seed.to_le_bytes());
+        identity.fields.insert(
+            "seed".into(),
+            mmx_consensus::Value::Bytes(slow_header.seed.0.to_vec()),
+        );
+        slow_header.plot_id = proof::calc_plot_id(&identity).unwrap().into();
+        if slow_header.plot_id.0 < header.plot_id.0
+            && proof::check_plot_filter(
+                &challenge.challenge.0,
+                &slow_header.plot_id.0,
+                params.plot_filter,
+            )
+        {
+            break;
+        }
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&slow)
+        .unwrap()
+        .write_all(
+            &slow_header
+                .encode(&mmx_types::vnx_registry().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    let mut harvester = Harvester::new("parallel fixture".into(), [header.farmer_key.0]).unwrap();
+    harvester.directories.insert(dir.path().to_path_buf());
+    harvester.reload();
+    assert_eq!(harvester.plots().len(), 2);
+    fs::remove_file(&slow).unwrap();
+    let path = std::ffi::CString::new(slow.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = mpsc::channel();
+    let done = Arc::new(AtomicBool::new(false));
+    let finished = done.clone();
+    let expected_challenge = challenge.clone();
+    let expected_params = params.clone();
+    let worker = thread::spawn(move || {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            harvester.lookup_each(&challenge, &params, Duration::from_secs(30), |proof| {
+                assert_eq!(rayon::current_num_threads(), 2);
+                assert!(rayon::current_thread_index().is_some());
+                tx.send(proof).unwrap();
+            })
+        })
+        .unwrap();
+        finished.store(true, Ordering::Release);
+    });
+    let response = rx.recv_timeout(Duration::from_secs(5));
+    let published_before_finish = !done.load(Ordering::Acquire);
+    // Release the stalled open even when testing a sequential regression. A
+    // FIFO fails positional reads, exercising isolation of a failing plot too.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&slow)
+        {
+            Ok(file) => {
+                drop(file);
+                break;
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5))
+            }
+            Err(e) => panic!("cannot release stalled plot: {e}"),
+        }
+    }
+    worker.join().unwrap();
+    let response = response.expect("a stalled plot held up another plot's proof");
+    assert!(published_before_finish);
+    assert!(mmx_consensus::response::is_valid(&response).unwrap());
+    proof::verify(
+        response.field("proof").unwrap().record().unwrap(),
+        &expected_params,
+        &expected_challenge.challenge.0,
+        1,
+        expected_challenge.vdf_height,
+    )
+    .unwrap();
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]

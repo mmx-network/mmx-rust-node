@@ -799,11 +799,13 @@ name = "mmx-farming"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "libc",
  "mmx-consensus",
  "mmx-crypto",
  "mmx-types",
  "mmx-wallet",
  "rand",
+ "rayon",
  "sha2",
  "tempfile",
  "thiserror",

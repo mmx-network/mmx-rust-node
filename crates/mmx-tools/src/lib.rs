@@ -2,7 +2,7 @@ mod config;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use mmx_farming::{
     farmer::Farmer,
-    harvester::{ChallengeQueue, Harvester},
+    harvester::{challenge_timeout, ChallengeQueue, Harvester},
     service,
     wallet::Account,
     Result,
@@ -292,6 +292,7 @@ pub fn farmer_main() -> Result<()> {
     }
     let node = connect(&args.node, "Node")?;
     let params = params(&node, args.network.as_deref())?;
+    let challenge_window = challenge_timeout(&params)?;
     let wallet = connect(&args.wallet, "Wallet")?;
     if let (Some(username), Some(path)) = (&args.wallet_username, &args.wallet_password_file) {
         let mut password = zeroize::Zeroizing::new(String::new());
@@ -371,9 +372,12 @@ pub fn farmer_main() -> Result<()> {
     let mut updated = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         while let Some(sample) = challenges.try_recv()? {
-            if !sample.replay
-                && vnx::time::now_micros().saturating_sub(sample.recv_time) <= 10_000_000
-            {
+            let age = Duration::from_micros(
+                vnx::time::now_micros()
+                    .saturating_sub(sample.recv_time)
+                    .max(0) as u64,
+            );
+            if !sample.replay && age <= challenge_window {
                 runtime.publish("harvester.challenges", sample.value, false)?;
             }
         }
@@ -477,6 +481,7 @@ pub struct HarvesterArgs {
     opencl_device: i32,
     #[arg(long)]
     opencl_platform: Option<String>,
+    /// Maximum workers shared by parallel plot reads and proof computation.
     #[arg(long, default_value_t = 2)]
     threads: usize,
     /// Log each completed challenge's proof count and lookup time.
@@ -574,6 +579,7 @@ pub fn harvester_main() -> Result<()> {
     let node = connect(&args.farmer, "Node")?;
     login(&node)?;
     let params = params(&node, args.network.as_deref())?;
+    let challenge_window = challenge_timeout(&params)?;
     node.close();
     let farmer = connect(&args.farmer, "Farmer")?;
     login(&farmer)?;
@@ -619,7 +625,7 @@ pub fn harvester_main() -> Result<()> {
     let stop = stopping()?;
     let (mut reported, mut reloaded) = (Instant::now() - Duration::from_secs(10), Instant::now());
     let mut reload_retry = false;
-    let mut queue = ChallengeQueue::new(Duration::from_secs(10));
+    let mut queue = ChallengeQueue::new(challenge_window);
     while !stop.load(Ordering::Relaxed) {
         if reported.elapsed() >= Duration::from_secs(10) {
             let info = harvester
@@ -678,27 +684,29 @@ pub fn harvester_main() -> Result<()> {
         }
         if let Some((challenge, remaining)) = queue.pop_with_remaining() {
             let started = Instant::now();
+            let found = std::sync::atomic::AtomicUsize::new(0);
+            let published = std::sync::atomic::AtomicUsize::new(0);
             match harvester
                 .lock()
                 .map_err(|_| err("harvester lock poisoned"))?
-                .lookup_for(&challenge, &params, remaining)
-            {
-                Ok(proofs) => {
-                    let found = proofs.len();
-                    let mut published = 0;
-                    for proof in proofs {
-                        if started.elapsed() > remaining {
-                            eprintln!("Discarding late proof");
-                            break;
-                        }
-                        if let Err(e) = farmer.publish("harvester.proof", service::to_json(&proof)?)
-                        {
-                            eprintln!("Farmer proof delivery: {e}");
-                        } else {
-                            published += 1;
-                        }
+                .lookup_each(&challenge, &params, remaining, |proof| {
+                    found.fetch_add(1, Ordering::Relaxed);
+                    if started.elapsed() >= remaining {
+                        eprintln!("Discarding late proof");
+                        return;
                     }
+                    let result = service::to_json(&proof)
+                        .and_then(|value| Ok(farmer.publish("harvester.proof", value)?));
+                    if let Err(e) = result {
+                        eprintln!("Farmer proof delivery: {e}");
+                    } else {
+                        published.fetch_add(1, Ordering::Relaxed);
+                    }
+                }) {
+                Ok(()) => {
                     if args.log_lookups {
+                        let found = found.load(Ordering::Relaxed);
+                        let published = published.load(Ordering::Relaxed);
                         eprintln!(
                             "Lookup VDF {}: {found} proofs, {published} published, {} ms",
                             challenge.vdf_height,
