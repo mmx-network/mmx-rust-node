@@ -17,7 +17,7 @@ locators. Existing native payload records are read in place without migration.
 | Database | `src/DataBase.cpp`: buffered append log, sorted blocks, versioned rollback, flush thresholds | `crates/mmx-db/src/{native,journal,sorted}.rs`: append values once, index references, positional reads, bounded reader handles, batched checkpoints, historical versions. Rust synchronizes each published journal commit; compare durability and write throughput explicitly before changing this policy. |
 | Sync | `src/Router.cpp` height jobs and `src/Node.cpp`: random peer subsets, content-hash observations, unique body downloads, overlapping bounded jobs | `crates/mmx-node/src/sync/peers*`: 3–8 distinct authenticated peers, all observed content candidates, content deduplication and timeout reassignment, background peer refill and prefetch. Socket tests cover competing branches, duplicate providers and refill while syncing. Repeat throughput measurements after scheduling/storage changes. |
 | Proof/VDF work | `src/Node_verify.cpp`, `src/pos/verify*.cpp`: cheap checks, worker pools, SHA-NI/ARM/AVX batching and accelerated recompute | `crates/mmx-consensus` and `crates/mmx-opencl`: bounded work admission, parallel F1, GPU VDF/F1 kernels and CPU fallback with native witnesses. C++ specialized CPU VDF batching remains a performance comparison gap; the GPU path does not establish CPU fallback parity. |
-| Harvesting | `src/Harvester.cpp`, `src/pos/Prover.cpp`: concurrent plot jobs, publish each proof immediately, network challenge deadline, estimated Y park search, post-filter before full proof, retained headers | `crates/mmx-farming` and `crates/mmx-tools`: shared bounded Rayon workers for plot reads and nested F1, streaming proofs, `challenge_delay * block_interval_ms`, density-based Y search, positional reads, per-proof park reuse, retained headers and per-quality error isolation. A stalled-plot regression test verifies that another plot can publish first. The daemon still waits for a lookup batch before scheduling the next challenge; C++ can queue successive challenges while workers are busy. Compare this under slow-drive stress before large-farm migration. |
+| Harvesting | `src/Harvester.cpp`, `src/pos/Prover.cpp`: concurrent plot jobs, publish each proof immediately, network challenge deadline, estimated Y park search, post-filter before full proof, retained headers | `crates/mmx-farming` and `crates/mmx-tools`: shared bounded Rayon workers for plot reads and nested F1, streaming proofs, `challenge_delay * block_interval_ms`, density-based Y search, positional reads, per-proof park reuse, retained headers and per-quality error isolation. A stalled-plot regression test verifies that another plot can publish first. The daemon now dispatches owned per-plot jobs while its service loop handles later challenges/reports. Worker and queued-context bounds, original deadlines and per-plot leases isolate stalled reads; compare sustained slow-drive throughput before large-farm migration. |
 | Wallet/farmer | `src/Wallet.cpp`, `src/Farmer.cpp`: retained farmer identities, separate signing work, native key derivation and RPC | Rust retains farmer keys, uses a private signer and a restricted remote harvester listener, and tests native signatures and wallet spending through actual daemons. Large-wallet/history latency and signing under sustained harvester traffic still need comparative measurements. Pool partial submission and other unported RPCs remain listed in README. |
 
 The production follow-up compares `Node::update`, `Node::make_block`,
@@ -88,3 +88,15 @@ small temporary databases. Balance and public validation RPCs use pinned
 snapshots outside the ledger mutex; two slots bound expensive HTTP/VNX work.
 Lock-held query tests establish scheduling isolation, not production latency or
 throughput parity. Other bounded read methods still run under the node lock.
+
+Harvester scheduling now follows C++ `Harvester::check_queue`/`lookup_task` at
+per-plot granularity. The service loop owns at most eight queued contexts;
+completed/expired queue entries release immediately, independent of old running
+I/O. One global Rayon budget and per-plot leases cap concurrent reads and avoid
+reopening the same stalled plot for each challenge. Free workers choose newer
+heights first, retaining the original deadline. Farm reporting and snapshot
+creation take no plot I/O lock. Tests use a FIFO to block one actual open while
+a later challenge emits a native-verified proof and farm-info reads complete;
+queue/lease tests cover expiry, caps and completion. Plot reload metadata I/O
+itself is still synchronous. This establishes isolation; it does not claim
+whole-farm C++ throughput parity.

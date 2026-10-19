@@ -2,7 +2,7 @@ mod config;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use mmx_farming::{
     farmer::Farmer,
-    harvester::{challenge_timeout, ChallengeQueue, Harvester},
+    harvester::{challenge_timeout, ChallengeQueue, Harvester, LookupScheduler},
     service,
     wallet::Account,
     Result,
@@ -581,7 +581,7 @@ pub fn harvester_main() -> Result<()> {
     let params = params(&node, args.network.as_deref())?;
     let challenge_window = challenge_timeout(&params)?;
     node.close();
-    let farmer = connect(&args.farmer, "Farmer")?;
+    let farmer = Arc::new(connect(&args.farmer, "Farmer")?);
     login(&farmer)?;
     let keys: Vec<vnx::Fixed<u8, 33>> =
         serde_json::from_value(call(&farmer, "mmx.Farmer.get_farmer_keys", json!({}))?)?;
@@ -626,6 +626,7 @@ pub fn harvester_main() -> Result<()> {
     let (mut reported, mut reloaded) = (Instant::now() - Duration::from_secs(10), Instant::now());
     let mut reload_retry = false;
     let mut queue = ChallengeQueue::new(challenge_window);
+    let mut lookups = LookupScheduler::new(args.threads)?;
     while !stop.load(Ordering::Relaxed) {
         if reported.elapsed() >= Duration::from_secs(10) {
             let info = harvester
@@ -655,6 +656,7 @@ pub fn harvester_main() -> Result<()> {
                     h.farmer_keys = keys.into_iter().map(|k| k.0).collect();
                     h.reload();
                     queue.clear();
+                    lookups.clear_pending();
                     reloaded = Instant::now();
                     reload_retry = false;
                 }
@@ -683,40 +685,35 @@ pub fn harvester_main() -> Result<()> {
             }
         }
         if let Some((challenge, remaining)) = queue.pop_with_remaining() {
-            let started = Instant::now();
-            let found = std::sync::atomic::AtomicUsize::new(0);
-            let published = std::sync::atomic::AtomicUsize::new(0);
-            match harvester
+            let job = harvester
                 .lock()
                 .map_err(|_| err("harvester lock poisoned"))?
-                .lookup_each(&challenge, &params, remaining, |proof| {
-                    found.fetch_add(1, Ordering::Relaxed);
-                    if started.elapsed() >= remaining {
-                        eprintln!("Discarding late proof");
-                        return;
-                    }
-                    let result = service::to_json(&proof)
-                        .and_then(|value| Ok(farmer.publish("harvester.proof", value)?));
-                    if let Err(e) = result {
-                        eprintln!("Farmer proof delivery: {e}");
-                    } else {
-                        published.fetch_add(1, Ordering::Relaxed);
-                    }
-                }) {
-                Ok(()) => {
-                    if args.log_lookups {
-                        let found = found.load(Ordering::Relaxed);
-                        let published = published.load(Ordering::Relaxed);
-                        eprintln!(
-                            "Lookup VDF {}: {found} proofs, {published} published, {} ms",
-                            challenge.vdf_height,
-                            started.elapsed().as_millis()
-                        );
-                    }
+                .lookup_job(&challenge, &params, remaining);
+            match job {
+                Ok(job) => {
+                    let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let delivered = published.clone();
+                    let remote = farmer.clone();
+                    let stopping = stop.clone();
+                    let log = args.log_lookups;
+                    lookups.submit(job, Arc::new(move |proof| {
+                        if stopping.load(Ordering::Relaxed) { return; }
+                        let result = service::to_json(&proof)
+                            .and_then(|value| Ok(remote.publish("harvester.proof", value)?));
+                        if let Err(e) = result { eprintln!("Farmer proof delivery: {e}"); }
+                        else { delivered.fetch_add(1, Ordering::Relaxed); }
+                    }), Arc::new(move |report| {
+                        if log {
+                            eprintln!("Lookup VDF {}: {} proofs, {} published, {} ms, {} queued plots skipped",
+                                report.vdf_height, report.found, published.load(Ordering::Relaxed),
+                                report.elapsed.as_millis(), report.skipped);
+                        }
+                    }));
                 }
                 Err(e) => eprintln!("Plot lookup: {e}"),
             }
         }
+        lookups.poll()?;
         thread::sleep(Duration::from_millis(20));
     }
     farmer.close();

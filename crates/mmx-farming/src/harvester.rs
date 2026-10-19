@@ -1,3 +1,6 @@
+mod scheduler;
+pub use scheduler::{LookupReport, LookupScheduler};
+
 use crate::{error, plot::Prover, Result};
 use mmx_consensus::{pos, proof, response, Record, Value};
 use mmx_types::mmx;
@@ -6,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -198,122 +201,183 @@ impl Harvester {
         window: Duration,
         emit: impl Fn(Record) + Sync,
     ) -> Result<()> {
+        let job = self.lookup_job(request, params, window)?;
+        job.plots
+            .par_iter()
+            .for_each(|plot| job.context.lookup_plot(plot, &emit));
+        Ok(())
+    }
+    /// Snapshot eligible immutable plot handles while owning the service lock.
+    /// The returned job performs all plot I/O independently of that lock.
+    pub fn lookup_job(
+        &self,
+        request: &mmx::Challenge,
+        params: &mmx::ChainParams,
+        window: Duration,
+    ) -> Result<LookupJob> {
         if request.difficulty == 0 || params.plot_filter > 30 {
             return Err(error("invalid challenge difficulty or filter"));
         }
-        let hard_fork = request.vdf_height >= params.hardfork1_height;
         let started = Instant::now();
-        self.plots.par_iter().for_each(|(_, plot)| {
-            if started.elapsed() >= window {
-                return;
-            }
-            let h = &plot.header;
-            if h.ksize < params.min_ksize as i32
-                || h.ksize > params.max_ksize as i32
-                || !proof::check_plot_filter(&request.challenge.0, &h.plot_id.0, params.plot_filter)
-            {
-                return;
-            }
-            let one = (|| -> Result<()> {
-                let local = proof::plot_challenge(&request.challenge.0, &h.plot_id.0);
-                for quality in plot.qualities(&local, params.plot_filter, self.max_f1)? {
-                    if started.elapsed() >= window {
-                        break;
-                    }
-                    let index = quality.index;
-                    let one = (|| -> Result<()> {
-                        let mut quality = quality;
-                        if hard_fork
-                            && !pos::check_post_filter(&local, &quality.meta, params.post_filter)
-                        {
-                            return Ok(());
-                        }
-                        if hard_fork && quality.proof.is_empty() {
-                            quality = plot.full_proof(quality.index, self.max_f1)?;
-                        }
-                        if started.elapsed() >= window {
-                            return Ok(());
-                        }
-                        let mut p = Record::from_generated(&mmx::ProofOfSpaceOG {
-                            ksize: h.ksize as u8,
-                            seed: h.seed.clone(),
-                            plot_id: h.plot_id.clone(),
-                            farmer_key: h.farmer_key.clone(),
-                            challenge: request.challenge.clone(),
-                            difficulty: request.difficulty,
-                            proof_xs: quality.proof.clone(),
-                            ..Default::default()
-                        })?;
-                        if let Some(contract) = &h.contract {
-                            p.name = "mmx.ProofOfSpaceNFT".into();
-                            p.fields
-                                .insert("contract".into(), Value::Bytes(contract.0.to_vec()));
-                        }
-                        let target = if hard_fork {
-                            let mut local_proof = p.clone();
-                            local_proof
-                                .fields
-                                .insert("challenge".into(), Value::Bytes(local.to_vec()));
-                            proof::calc_proof_hash(&local_proof)?
-                        } else {
-                            pos::calc_quality(&local, &quality.meta)
-                        };
-                        if !proof::check_threshold(
-                            params,
-                            h.ksize as u8,
-                            &target,
-                            request.difficulty,
-                            hard_fork,
-                        )? {
-                            return Ok(());
-                        }
-                        if quality.proof.is_empty() {
-                            quality = plot.full_proof(quality.index, self.max_f1)?;
-                            p.fields.insert(
-                                "proof_xs".into(),
-                                Value::Sequence(
-                                    quality
-                                        .proof
-                                        .into_iter()
-                                        .map(|x| Value::Uint(x.into()))
-                                        .collect(),
-                                ),
-                            );
-                        }
-                        p.fields.insert(
-                            "score".into(),
-                            Value::Uint(proof::calc_proof_hash(&p)?[0].into()),
-                        );
-                        let mut r = Record::from_generated(&mmx::ProofResponse {
-                            vdf_height: request.vdf_height,
-                            harvester: self.name.clone(),
-                            lookup_time_ms: started.elapsed().as_millis().min(i64::MAX as u128)
-                                as i64,
-                            ..Default::default()
-                        })?;
-                        r.fields.insert("proof".into(), Value::Record(p));
-                        r.fields
-                            .insert("hash".into(), Value::Bytes(r.calc_hash(false, 0)?.to_vec()));
-                        r.fields.insert(
-                            "content_hash".into(),
-                            Value::Bytes(response::content_hash(&r)?.to_vec()),
-                        );
-                        if started.elapsed() < window {
-                            emit(r);
-                        }
-                        Ok(())
-                    })();
-                    if let Err(e) = one {
-                        eprintln!("Plot {} quality {index}: {e}", plot.path().display());
-                    }
+        let plots = self
+            .plots
+            .values()
+            .filter(|plot| {
+                let h = &plot.header;
+                h.ksize >= params.min_ksize as i32
+                    && h.ksize <= params.max_ksize as i32
+                    && proof::check_plot_filter(
+                        &request.challenge.0,
+                        &h.plot_id.0,
+                        params.plot_filter,
+                    )
+            })
+            .cloned()
+            .collect();
+        Ok(LookupJob {
+            context: Arc::new(LookupContext {
+                request: request.clone(),
+                params: params.clone(),
+                name: self.name.clone(),
+                max_f1: self.max_f1,
+                started,
+                window,
+            }),
+            plots,
+        })
+    }
+}
+/// Owned challenge data and immutable prover headers; no service mutex or open
+/// plot descriptor is retained. Scheduling uses one global Rayon worker budget.
+pub struct LookupJob {
+    context: Arc<LookupContext>,
+    plots: Vec<Prover>,
+}
+struct LookupContext {
+    request: mmx::Challenge,
+    params: mmx::ChainParams,
+    name: String,
+    max_f1: usize,
+    started: Instant,
+    window: Duration,
+}
+impl LookupContext {
+    fn expired(&self) -> bool {
+        self.started.elapsed() >= self.window
+    }
+    fn lookup_plot(&self, plot: &Prover, emit: &(impl Fn(Record) + Sync + ?Sized)) {
+        let request = &self.request;
+        let params = &self.params;
+        let started = self.started;
+        let window = self.window;
+        let hard_fork = request.vdf_height >= params.hardfork1_height;
+        if started.elapsed() >= window {
+            return;
+        }
+        let h = &plot.header;
+        if h.ksize < params.min_ksize as i32
+            || h.ksize > params.max_ksize as i32
+            || !proof::check_plot_filter(&request.challenge.0, &h.plot_id.0, params.plot_filter)
+        {
+            return;
+        }
+        let one = (|| -> Result<()> {
+            let local = proof::plot_challenge(&request.challenge.0, &h.plot_id.0);
+            for quality in plot.qualities(&local, params.plot_filter, self.max_f1)? {
+                if started.elapsed() >= window {
+                    break;
                 }
-                Ok(())
-            })();
-            if let Err(e) = one {
-                eprintln!("Plot {}: {e}", plot.path().display());
+                let index = quality.index;
+                let one = (|| -> Result<()> {
+                    let mut quality = quality;
+                    if hard_fork
+                        && !pos::check_post_filter(&local, &quality.meta, params.post_filter)
+                    {
+                        return Ok(());
+                    }
+                    if hard_fork && quality.proof.is_empty() {
+                        quality = plot.full_proof(quality.index, self.max_f1)?;
+                    }
+                    if started.elapsed() >= window {
+                        return Ok(());
+                    }
+                    let mut p = Record::from_generated(&mmx::ProofOfSpaceOG {
+                        ksize: h.ksize as u8,
+                        seed: h.seed.clone(),
+                        plot_id: h.plot_id.clone(),
+                        farmer_key: h.farmer_key.clone(),
+                        challenge: request.challenge.clone(),
+                        difficulty: request.difficulty,
+                        proof_xs: quality.proof.clone(),
+                        ..Default::default()
+                    })?;
+                    if let Some(contract) = &h.contract {
+                        p.name = "mmx.ProofOfSpaceNFT".into();
+                        p.fields
+                            .insert("contract".into(), Value::Bytes(contract.0.to_vec()));
+                    }
+                    let target = if hard_fork {
+                        let mut local_proof = p.clone();
+                        local_proof
+                            .fields
+                            .insert("challenge".into(), Value::Bytes(local.to_vec()));
+                        proof::calc_proof_hash(&local_proof)?
+                    } else {
+                        pos::calc_quality(&local, &quality.meta)
+                    };
+                    if !proof::check_threshold(
+                        params,
+                        h.ksize as u8,
+                        &target,
+                        request.difficulty,
+                        hard_fork,
+                    )? {
+                        return Ok(());
+                    }
+                    if quality.proof.is_empty() {
+                        quality = plot.full_proof(quality.index, self.max_f1)?;
+                        p.fields.insert(
+                            "proof_xs".into(),
+                            Value::Sequence(
+                                quality
+                                    .proof
+                                    .into_iter()
+                                    .map(|x| Value::Uint(x.into()))
+                                    .collect(),
+                            ),
+                        );
+                    }
+                    p.fields.insert(
+                        "score".into(),
+                        Value::Uint(proof::calc_proof_hash(&p)?[0].into()),
+                    );
+                    let mut r = Record::from_generated(&mmx::ProofResponse {
+                        vdf_height: request.vdf_height,
+                        harvester: self.name.clone(),
+                        lookup_time_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                        ..Default::default()
+                    })?;
+                    r.fields.insert("proof".into(), Value::Record(p));
+                    r.fields
+                        .insert("hash".into(), Value::Bytes(r.calc_hash(false, 0)?.to_vec()));
+                    r.fields.insert(
+                        "content_hash".into(),
+                        Value::Bytes(response::content_hash(&r)?.to_vec()),
+                    );
+                    if started.elapsed() < window {
+                        emit(r);
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = one {
+                    eprintln!("Plot {} quality {index}: {e}", plot.path().display());
+                }
             }
-        });
-        Ok(())
+            Ok(())
+        })();
+        if let Err(e) = one {
+            eprintln!("Plot {}: {e}", plot.path().display());
+        }
     }
 }
 

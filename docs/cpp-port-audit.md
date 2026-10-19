@@ -67,7 +67,7 @@ no live-ledger or plot scan is part of validation.
 | Rollback/purge: C++ `Node` storage/apply/revert and versioned tables | `mmx-execution/src/chain/{mod,forks}.rs`, `mmx-db/src/native.rs`; every retained-height rollback, deep fork/restart, crash-safe collection, pinned snapshot and RPC floor tests | Purge necessarily rewrites retained live values during explicit collection. There is no automatic background migration or ledger scan. Rollback below the durable floor is refused; private consensus ancestry does not reappear through RPC. |
 | Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native credits, rate policy, peer-role filtering and full inbound authenticated lifecycle remain incomplete. Balance scans and public validation run on pinned snapshots outside the ledger lock with two shared RPC slots; per-peer credit/rate fairness remains. REST/WebAPI parity is incomplete. |
 | Farmer/wallet: `Farmer.cpp::{sign_block,sign_vote,handle}`, `Wallet.cpp`, `include/mmx/ECDSA_Wallet.h`, key derivation and spending | `mmx-farming/src/{farmer,wallet,spending,service}.rs`, `mmx-wallet`, `mmxwallet`; native keys/KDF/signatures, protected-key unlock verification, pending/reservation/fork/ambiguous-submit tests, real daemon RPC tests | Pool partial submission, reverse farmer RPC, complete wallet/history/offer/swap API and wallet query caches remain missing. Farm reports use bounded retention. |
-| Harvester/plots: `Harvester.cpp::{check_queue,lookup_task,reload}`, `pos/Prover.cpp`, `pos/verify_full.cpp` | `mmx-farming/src/{harvester,plot,encoding}.rs`, `mmx-tools/src/lib.rs`; bounded shared Rayon pool, immediate proof emission, native deadline, filter-before-full-proof, density-based park search, retained headers, positional park reads/reuse; stalled-plot test and live sample | Batch scheduling still blocks subsequent challenges and reporting on a stuck drive. Metadata-free/corrupt-quality paths need additional slow-resource comparisons. Remote recompute remains missing. |
+| Harvester/plots: `Harvester.cpp::{check_queue,lookup_task,reload}`, `pos/Prover.cpp`, `pos/verify_full.cpp` | `mmx-farming/src/{harvester,plot,encoding}.rs`, `mmx-tools/src/lib.rs`; bounded shared Rayon pool, immediate proof emission, native deadline, filter-before-full-proof, density-based park search, retained headers, positional park reads/reuse; stalled-plot test and live sample | Owned per-plot jobs allow overlapping challenges and reports; metadata-free/corrupt-quality paths still need additional slow-resource comparisons. Remote recompute remains missing. |
 | GPU and CLI/config: native OpenCL VDF code, CUDA recompute, `mmx.cpp`, native module config | `mmx-opencl`, consensus accelerator, `mmx-tools`, `mmxwallet`; GPU-only default discovery, bounded buffers, native CPU result checks/fallback, native config layering and CLI precedence tests, wallet CLI suites | Rust OpenCL F1 replaces CUDA for the implemented path. Static musl cannot load an ICD and falls back to CPU. Full C++ utility/compiler/timelord/service and configuration parity is not claimed. |
 
 ## Remaining work, in priority order
@@ -138,15 +138,27 @@ no live-ledger or plot scan is part of validation.
    limits/balances, all-ones addresses, whole-request budgets and lock release.
    These are service bounds, not consensus limits. Other bounded block and
    transaction RPCs still use the ledger owner; there is no broad state cache.
-4. **Overlapping harvester scheduling (slow-drive isolation).**
-   C++ enqueues per-plot tasks and a completion task, then services the next
-   challenge. Rust publishes individual proofs promptly, but the daemon holds
-   its harvester lock until `lookup_each` completes. A hung drive can stall
-   later challenges, farm reports and reload RPCs despite idle workers. Introduce
-   owned immutable lookup jobs and bounded outstanding challenge work; avoid
-   holding the service mutex across I/O, preserve newest-challenge preference,
-   deadlines, immediate delivery and one global worker budget. Measure with
-   C++ harvesting disabled; include one stalled reader and overlapping arrivals.
+4. **Overlapping harvester scheduling completed.**
+   Following C++ `Harvester::check_queue` / `lookup_task`, the daemon captures
+   eligible immutable prover headers and releases the service mutex before
+   dispatching plot I/O. Its 20 ms tick continues receiving challenges and
+   reporting farm information. Completed proofs publish immediately. One global
+   Rayon pool, including nested F1 computation, remains limited by `--threads`.
+   At most that many per-plot leases run, and at most eight contexts retain
+   queued eligible plots; raw challenge admission retains its separate bound.
+   Newest queued heights receive free workers first. A busy plot waits in the
+   queue instead of starting another overlapping read of the same plot. Original
+   deadlines are never refreshed; expiry or queue eviction drops pending work,
+   while an old blocked OS read can retain only its one worker/context. A queued
+   batch does not occupy a worker waiting for all its plots to finish.
+   A real FIFO-backed stalled plot regression delivers a valid second challenge
+   proof and reads farm information before releasing the first blocked read.
+   Deterministic lease tests cover newest-first scheduling, duplicate-read
+   suppression, worker/context bounds, expiry and one completion per batch.
+   Unlike C++, Rust explicitly caps queued owned contexts and serializes reads
+   per plot. Normal filesystem reload itself remains synchronous, as in C++;
+   a lookup cannot hold the service lock during it. Native plot witnesses still
+   pass. Comparative slow-drive throughput and remote recompute remain open.
 5. **Concurrent transaction execution (busy-block throughput).**
    Port C++ dependency-aware worker execution using the already-produced lock
    plan; retain deterministic reservation, fee order, errors and overlay merge
@@ -233,3 +245,9 @@ ignored test), strict Clippy, formatting and the optimized local node build.
 Public query snapshots stay pinned across ledger advancement and release their
 shared worker slot on success or error. The preceding three storage/execution/
 relay checkpoints also passed GitHub Actions.
+
+The harvester overlap checkpoint passes 323 workspace/target tests (one existing
+ignored test), strict Clippy, formatting, the local static musl harvester release
+build and both CLI suites (28 tests each). The RPC CI follow-up replaces a newly
+deprecated atomic update helper with a minimum-version-compatible compare/
+exchange loop and checks contention from sixteen threads.

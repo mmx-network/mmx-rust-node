@@ -291,17 +291,14 @@ fn harvested_response_is_accepted_by_the_cpp_derived_consensus_verifier() {
 }
 
 #[cfg(unix)]
-#[test]
-fn parallel_lookup_publishes_native_proof_before_a_stalled_plot_finishes() {
-    use std::{
-        os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            mpsc, Arc,
-        },
-        thread,
-        time::{Duration, Instant},
-    };
+fn stalled_farm() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    Harvester,
+    mmx::ChainParams,
+    mmx::Challenge,
+) {
+    use std::os::unix::ffi::OsStrExt;
     let dir = tempfile::tempdir().unwrap();
     let fast = dir.path().join("fast.plot");
     let slow = dir.path().join("slow.plot");
@@ -351,6 +348,22 @@ fn parallel_lookup_publishes_native_proof_before_a_stalled_plot_finishes() {
     fs::remove_file(&slow).unwrap();
     let path = std::ffi::CString::new(slow.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    (dir, slow, harvester, params, challenge)
+}
+
+#[cfg(unix)]
+#[test]
+fn parallel_lookup_publishes_native_proof_before_a_stalled_plot_finishes() {
+    use std::{
+        os::unix::fs::OpenOptionsExt,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+    let (_dir, slow, harvester, params, challenge) = stalled_farm();
     let (tx, rx) = mpsc::channel();
     let done = Arc::new(AtomicBool::new(false));
     let finished = done.clone();
@@ -498,4 +511,110 @@ fn quality_ranges_include_duplicates_across_parks_and_the_short_final_park() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn overlapping_challenges_keep_reporting_and_deliver_new_work_while_one_plot_is_stalled() {
+    use mmx_farming::harvester::LookupScheduler;
+    use std::{
+        os::unix::fs::OpenOptionsExt,
+        sync::{mpsc, Arc, Mutex},
+        thread,
+        time::{Duration, Instant},
+    };
+    let (_dir, slow, harvester, params, mut challenge) = stalled_farm();
+    let harvester = Arc::new(Mutex::new(harvester));
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    let mut scheduler = LookupScheduler::new(2).unwrap();
+    let (proofs, responses) = mpsc::channel();
+    let (done, reports) = mpsc::channel();
+    let emit = Arc::new(move |proof| {
+        let _ = proofs.send(proof);
+    });
+    let report = Arc::new(move |info| {
+        let _ = done.send(info);
+    });
+    let job = harvester
+        .lock()
+        .unwrap()
+        .lookup_job(&challenge, &params, Duration::from_secs(30))
+        .unwrap();
+    scheduler.submit(job, emit.clone(), report.clone());
+    pool.install(|| scheduler.poll()).unwrap();
+    let first = responses.recv_timeout(Duration::from_secs(5));
+    // A second admitted challenge has a different difficulty. Both use the
+    // native valid proof witness; no production deduplication is bypassed.
+    challenge.vdf_height += 1;
+    challenge.difficulty = 2;
+    let started = Instant::now();
+    let (job, info) = {
+        let h = harvester.lock().unwrap();
+        (
+            h.lookup_job(&challenge, &params, Duration::from_secs(30))
+                .unwrap(),
+            h.farm_info().unwrap(),
+        )
+    };
+    let report_delay = started.elapsed();
+    scheduler.submit(job, emit, report);
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut second = None;
+    while Instant::now() < until {
+        pool.install(|| scheduler.poll()).unwrap();
+        if let Ok(proof) = responses.try_recv() {
+            second = Some(proof);
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let still_running = scheduler.active();
+    let completed_before_release = reports.try_recv().is_ok();
+    // Remove queued references to the FIFO before releasing the one blocked
+    // read, so a regression can fail without hanging the test runner.
+    scheduler.clear_pending();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&slow)
+        {
+            Ok(file) => {
+                drop(file);
+                break;
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) && Instant::now() < until => {
+                thread::sleep(Duration::from_millis(5))
+            }
+            Err(e) => panic!("cannot release stalled plot: {e}"),
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(5);
+    while scheduler.active() > 0 && Instant::now() < until {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(first.is_ok());
+    assert_eq!(info.plot_count.values().sum::<u32>(), 2);
+    assert!(report_delay < Duration::from_secs(1));
+    assert_eq!(still_running, 1);
+    assert!(!completed_before_release);
+    assert_eq!(scheduler.active(), 0);
+    let second = second.expect("new challenge proof waited for the old stalled plot");
+    assert_eq!(
+        second.field("vdf_height").unwrap().uint().unwrap(),
+        u64::from(challenge.vdf_height)
+    );
+    assert!(mmx_consensus::response::is_valid(&second).unwrap());
+    proof::verify(
+        second.field("proof").unwrap().record().unwrap(),
+        &params,
+        &challenge.challenge.0,
+        challenge.difficulty,
+        challenge.vdf_height,
+    )
+    .unwrap();
 }

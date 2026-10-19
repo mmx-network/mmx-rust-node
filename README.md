@@ -1375,6 +1375,13 @@ When using a C++ wallet that protects farmer keys, pass
 Keep the wallet endpoint on loopback or inside an SSH tunnel. Only the derived
 farmer identities are requested; wallet seed files stay on the wallet host.
 
+Harvester lookups run as owned per-plot jobs, so slow plot reads do not hold the
+service lock or delay receiving later challenges and farm-info reports. One
+shared `--threads` budget covers I/O and nested recomputation. Newer queued
+heights have priority; original deadlines, eight queued contexts and one active
+read per plot bound overlap. Proofs publish as soon as each lookup completes.
+Plot directory reload metadata I/O remains synchronous.
+
 For remote harvesters, enable native `allow_remote=true` on the farmer host.
 The restricted harvester listener defaults to `0.0.0.0:11333` (or the configured
 `endpoint` IP), while private signing moves to `127.0.0.1:11332`. Override them
