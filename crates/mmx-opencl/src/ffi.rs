@@ -66,6 +66,12 @@ api! {
     clEnqueueWriteBuffer: unsafe extern "system" fn(Handle, Handle, u32, usize, usize, *const c_void, u32, *const Handle, *mut Handle) -> i32,
     clEnqueueReadBuffer: unsafe extern "system" fn(Handle, Handle, u32, usize, usize, *mut c_void, u32, *const Handle, *mut Handle) -> i32,
     clEnqueueNDRangeKernel: unsafe extern "system" fn(Handle, Handle, u32, *const usize, *const usize, *const usize, u32, *const Handle, *mut Handle) -> i32,
+    clEnqueueMapBuffer: unsafe extern "system" fn(Handle, Handle, u32, u64, usize, usize, u32, *const Handle, *mut Handle, *mut i32) -> *mut c_void,
+    clEnqueueUnmapMemObject: unsafe extern "system" fn(Handle, Handle, *mut c_void, u32, *const Handle, *mut Handle) -> i32,
+    clWaitForEvents: unsafe extern "system" fn(u32, *const Handle) -> i32,
+    clGetEventProfilingInfo: unsafe extern "system" fn(Handle, u32, usize, *mut c_void, *mut usize) -> i32,
+    clReleaseEvent: Release,
+    clFlush: unsafe extern "system" fn(Handle) -> i32,
     clFinish: unsafe extern "system" fn(Handle) -> i32,
 }
 pub fn check(code: i32, operation: &str) -> Result<()> {

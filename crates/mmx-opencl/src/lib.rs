@@ -1,7 +1,9 @@
 //! Bounded OpenCL 1.2 work engines, loaded at runtime. This crate cannot create
 //! consensus evidence; callers must compare outputs and perform admission.
 mod ffi;
+mod pipeline;
 use ffi::{check, Api, Handle, Object};
+pub use pipeline::{MemoryOutput, MemoryPipeline, MemoryProfile, TimeSpan, MEMORY_PIPELINE_DEPTH};
 use std::{ffi::CString, ptr};
 
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +136,7 @@ struct Buffer {
 /// serialize calls (including kernel argument changes) through `&mut self`.
 pub struct OpenCl {
     pub device: DeviceInfo,
+    raw_device: Handle,
     vdf: Object,
     generate: Object,
     memory: Object,
@@ -244,6 +247,7 @@ impl OpenCl {
         })?;
         Ok(Self {
             device,
+            raw_device: raw,
             vdf: kernel("repeated_sha256")?,
             generate: kernel("generate_memory")?,
             memory: kernel("memory_hash")?,
@@ -255,6 +259,11 @@ impl OpenCl {
             _program: program,
             context,
         })
+    }
+    /// Three independent in-order queues and pinned host buffers for asynchronous
+    /// memory-hash batches. Existing synchronous APIs are unchanged.
+    pub fn into_memory_pipeline(self, profiling: bool) -> Result<MemoryPipeline> {
+        MemoryPipeline::new(self, profiling)
     }
     fn ensure(&self, buffer: &mut Option<Buffer>, size: usize) -> Result<()> {
         if buffer.as_ref().is_some_and(|b| b.capacity >= size) {
