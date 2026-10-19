@@ -100,3 +100,11 @@ a later challenge emits a native-verified proof and farm-info reads complete;
 queue/lease tests cover expiry, caps and completion. Plot reload metadata I/O
 itself is still synchronous. This establishes isolation; it does not claim
 whole-farm C++ throughput parity.
+
+Header and content-hash RPCs now mirror C++ `Node::get_header` /
+`get_block_ex(..., false)`: `get_header`, `get_header_at` and `get_block_hash_ex`
+read the compact archive header, never the new transaction payload records.
+A temporary native-database regression corrupts an archived transaction and
+checks that full block reads fail while lossless header/hash replies still work.
+Legacy complete-body records retain their in-place fallback; no migration occurs.
+Existing purge/RPC floor and native consensus tests pass on this path.

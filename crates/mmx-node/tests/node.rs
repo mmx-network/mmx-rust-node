@@ -2827,3 +2827,84 @@ fn production_announcements_cross_outgoing_peers_while_rpc_or_partial_frames_are
         server.join().unwrap();
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn header_and_content_hash_rpcs_do_not_read_transaction_payloads() {
+    use std::os::unix::fs::FileExt;
+    let (network, _, steps, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open_native(dir.path(), network.params.clone()).unwrap();
+    chain.initialize(&network.assets).unwrap();
+    let root = chain.selected().hash_at(0).unwrap().unwrap();
+    let block = wire(&steps[0]["block"]);
+    chain.admit(&block, &[wire(&steps[0]["vdf"])]).unwrap();
+    chain.update(root, None).unwrap();
+    let node = Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap();
+    let tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+        .record()
+        .unwrap();
+    let payload = tx.encode_compact().unwrap();
+    let path = dir.path().join("archive/native-data-0000000000000000.log");
+    let bytes = std::fs::read(&path).unwrap();
+    let positions: Vec<_> = bytes
+        .windows(payload.len())
+        .enumerate()
+        .filter(|(_, v)| *v == payload)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(positions.len(), 1);
+    let offset = positions[0] + payload.len() - 1;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .write_at(&[bytes[offset] ^ 1], offset as u64)
+        .unwrap();
+    let id = hash(&block, "hash").unwrap();
+    assert!(node
+        .call(&record(
+            "mmx.Node.get_block",
+            [("hash".into(), V::Bytes(id.to_vec()))]
+        ))
+        .is_err());
+    let mut expected = block.clone();
+    expected.name = "mmx.BlockHeader".into();
+    expected.fields.remove("tx_list");
+    for request in [
+        record(
+            "mmx.Node.get_header",
+            [("hash".into(), V::Bytes(id.to_vec()))],
+        ),
+        record("mmx.Node.get_header_at", [("height".into(), V::Uint(1))]),
+    ] {
+        assert_eq!(
+            node.call(&request)
+                .unwrap()
+                .field("_ret_0")
+                .unwrap()
+                .record()
+                .unwrap(),
+            &expected
+        );
+    }
+    let pair = node
+        .call(&record(
+            "mmx.Node.get_block_hash_ex",
+            [("height".into(), V::Uint(1))],
+        ))
+        .unwrap();
+    assert_eq!(
+        pair.field("_ret_0")
+            .unwrap()
+            .optional()
+            .unwrap()
+            .unwrap()
+            .seq()
+            .unwrap(),
+        &[
+            V::Bytes(id.to_vec()),
+            block.field("content_hash").unwrap().clone()
+        ]
+    );
+}

@@ -844,12 +844,19 @@ impl Node {
             }
             Ok(selected.transaction(id)?)
         };
-        let header_value = |b: Option<Record>| {
-            block_value(b.map(|mut b| {
-                b.name = "mmx.BlockHeader".into();
-                b.fields.remove("tx_list");
-                b
+        let visible_header = |hash: &Hash| -> Result<Option<Record>> {
+            Ok(self.chain.header(hash)?.filter(|h| {
+                number(h, "height").is_ok_and(|height| height >= self.earliest_height())
             }))
+        };
+        let header_at = |height| -> Result<Option<Record>> {
+            if height < self.earliest_height() {
+                return Ok(None);
+            }
+            match selected.hash_at(height)? {
+                Some(hash) => visible_header(&hash),
+                None => Ok(None),
+            }
         };
         let value = match request.name.as_str() {
             "mmx.Node.validate" => Value::Record(
@@ -865,8 +872,8 @@ impl Node {
             "mmx.Node.get_vdf_peak" => bytes(self.vdf_peak()?.1),
             "mmx.Node.get_block" => block_value(visible_block(&hash(request, "hash")?)?),
             "mmx.Node.get_block_at" => block_value(block_at(number(request, "height")?)?),
-            "mmx.Node.get_header" => header_value(visible_block(&hash(request, "hash")?)?),
-            "mmx.Node.get_header_at" => header_value(block_at(number(request, "height")?)?),
+            "mmx.Node.get_header" => block_value(visible_header(&hash(request, "hash")?)?),
+            "mmx.Node.get_header_at" => block_value(header_at(number(request, "height")?)?),
             "mmx.Node.get_block_hash" => {
                 let height = number(request, "height")?;
                 optional(if height < self.earliest_height() {
@@ -876,7 +883,7 @@ impl Node {
                 })
             }
             "mmx.Node.get_block_hash_ex" => optional(
-                block_at(number(request, "height")?)?
+                header_at(number(request, "height")?)?
                     .map(|b| {
                         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(Value::Sequence(vec![
                             bytes(hash(&b, "hash")?),

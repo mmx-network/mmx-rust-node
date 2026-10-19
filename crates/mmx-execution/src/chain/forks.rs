@@ -374,6 +374,9 @@ impl ForkChain {
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
         archive_block(&self.archive, hash)
     }
+    pub fn header(&self, hash: &Hash) -> ChainResult<Option<Record>> {
+        bodies::header_record(&self.archive, bodies::ARCHIVE, hash)
+    }
     pub fn block_snapshot(&self) -> ChainResult<BlockSnapshot> {
         Ok(BlockSnapshot {
             archive: self.archive.fork(self.archive.version())?,

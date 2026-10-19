@@ -251,3 +251,12 @@ ignored test), strict Clippy, formatting, the local static musl harvester releas
 build and both CLI suites (28 tests each). The RPC CI follow-up replaces a newly
 deprecated atomic update helper with a minimum-version-compatible compare/
 exchange loop and checks contention from sixteen threads.
+
+Header/hash RPC follow-up: native `get_header`, `get_header_at` and
+`get_block_hash_ex` now use the compact archive header directly. The hash-only
+sync observation path no longer reads/reconstructs every transaction just to
+return two hashes. A temporary corrupted-transaction regression proves component
+isolation at the actual node API. Legacy bodies remain readable in place, and
+purged headers remain hidden. This path also includes the portable RPC permit
+CI fix. Targeted execution/node suites, strict Clippy, formatting and the local
+optimized node build pass; no live ledger scan or rewrite was performed.

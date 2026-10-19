@@ -86,7 +86,7 @@ pub(super) fn writes(block: &Record, tables: Tables) -> ChainResult<Vec<Write>> 
     }
     Ok(writes)
 }
-fn header_record(db: &Store, tables: Tables, hash: &Hash) -> ChainResult<Option<Record>> {
+fn stored_header(db: &Store, tables: Tables, hash: &Hash) -> ChainResult<Option<Record>> {
     let Some(wire) = db.get(tables.headers, hash, None)? else {
         return Ok(None);
     };
@@ -96,15 +96,28 @@ fn header_record(db: &Store, tables: Tables, hash: &Hash) -> ChainResult<Option<
     }
     Ok(Some(header))
 }
+pub(super) fn header_record(
+    db: &Store,
+    tables: Tables,
+    hash: &Hash,
+) -> ChainResult<Option<Record>> {
+    if let Some(header) = stored_header(db, tables, hash)? {
+        return Ok(Some(header));
+    }
+    // Older native records contain the complete body. Read in place, without
+    // converting history or introducing payload writes during an RPC.
+    Ok(block(db, tables, hash)?.map(|mut block| {
+        block.name = "mmx.BlockHeader".into();
+        block.fields.remove("tx_list");
+        block
+    }))
+}
 pub(super) fn header(
     db: &Store,
     tables: Tables,
     hash: &Hash,
 ) -> ChainResult<Option<mmx::BlockHeader>> {
-    if let Some(header) = header_record(db, tables, hash)? {
-        return Ok(Some(block_header(&header)?));
-    }
-    block(db, tables, hash)?
+    header_record(db, tables, hash)?
         .as_ref()
         .map(block_header)
         .transpose()
@@ -115,7 +128,7 @@ pub(super) fn block(db: &Store, tables: Tables, hash: &Hash) -> ChainResult<Opti
     };
     let block = if let Some(n) = count(&wire)? {
         let mut header =
-            header_record(db, tables, hash)?.ok_or_else(|| invalid("missing block header"))?;
+            stored_header(db, tables, hash)?.ok_or_else(|| invalid("missing block header"))?;
         if header.field("tx_count")?.uint()? != u64::from(n) {
             return Err(invalid("block descriptor transaction count mismatch"));
         }
