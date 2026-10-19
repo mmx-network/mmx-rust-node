@@ -780,7 +780,15 @@ impl Node {
                 self.work_bytes += size;
                 self.work
                     .push_back((message.clone(), vnx::util::get_wall_time_millis(), size));
-                while self.work.len() > 32 {
+                // Native can retain a full max_vdf_count gap before a block,
+                // plus the uncommitted block window needed by competing forks.
+                // A fixed 32-item limit discards the start of a valid mainnet
+                // chain (max_vdf_count=100). Keep the independent byte bound.
+                let params = self.chain.selected().params();
+                let limit = (params.max_vdf_count as usize)
+                    .saturating_mul((params.commit_delay as usize).saturating_add(1))
+                    .clamp(32, 16_384);
+                while self.work.len() > limit {
                     if let Some((old, _, size)) = self.work.pop_front() {
                         self.work_bytes -= size;
                         self.verified_work.remove(&hash(&old, "content_hash")?);
@@ -1103,6 +1111,55 @@ mod work_queue_tests {
         assert!(node
             .verified_work
             .contains_key(&hash(&work, "content_hash").unwrap()));
+    }
+    #[test]
+    fn a_protocol_valid_vdf_gap_longer_than_thirty_two_records_remains_verifiable() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature};
+        use sha2::{Digest, Sha256};
+        let (mut node, mut work) = setup();
+        assert!(node.chain.selected().params().max_vdf_count >= 40);
+        let key = SigningKey::from_slice(&[222; 32]).unwrap();
+        for _ in 0..40 {
+            node.admit_message(&work).unwrap();
+            let next = mmx_consensus::vdf::output(&work).unwrap();
+            let start = mmx_consensus::vdf::end_iters(&work).unwrap();
+            let height = number(&work, "vdf_height").unwrap() + 1;
+            let initial = Sha256::digest([next.as_slice(), &hash(&work, "prev").unwrap()].concat());
+            let mut point: Hash =
+                Sha256::digest([initial.as_slice(), &hash(&work, "reward_addr").unwrap()].concat())
+                    .into();
+            let mut segments = vec![];
+            for _ in work.field("segments").unwrap().seq().unwrap() {
+                for _ in 0..work.field("segment_size").unwrap().uint().unwrap() {
+                    point = Sha256::digest(point).into();
+                }
+                segments.push(bytes(point));
+            }
+            work.fields.insert("input".into(), bytes(next));
+            work.fields.insert("start".into(), Value::Uint(start));
+            work.fields
+                .insert("vdf_height".into(), Value::Uint(height.into()));
+            work.fields
+                .insert("segments".into(), Value::Sequence(segments));
+            let id = work.calc_hash(false, 0).unwrap();
+            work.fields.insert("hash".into(), bytes(id));
+            let signature: Signature = key.sign_prehash(&id).unwrap();
+            work.fields.insert(
+                "timelord_key".into(),
+                bytes(key.verifying_key().to_encoded_point(true).as_bytes()),
+            );
+            work.fields
+                .insert("timelord_sig".into(), bytes(signature.to_bytes().to_vec()));
+            work.fields.insert(
+                "content_hash".into(),
+                bytes(mmx_consensus::vdf::calc_content_hash(&work).unwrap()),
+            );
+        }
+        assert_eq!(node.work.len(), 40);
+        node.tick().unwrap();
+        assert_eq!(node.verified_work.len(), 40);
+        assert_eq!(node.vdf_peak().unwrap().0, 40);
+        assert!(node.work_bytes < 32 * 1024 * 1024);
     }
     #[test]
     fn explicit_rewind_releases_verified_replay_suppression() {

@@ -236,8 +236,9 @@ window; promotion keeps fanout timing and sequence, replaces the early record
 with the owner's normalized verified record and never resends its body. Farmer
 and timelord key maps each have a deliberate 100,000-key bound; timelord eviction
 is FIFO, and farmer expiration follows verified progress. Explicit rewind clears
-credit and early payloads. Credits are transient across restart, as distinct
-from consensus state; persisted native timelord credits remain unported.
+credit and early payloads. Credits are transient across restart, as in C++.
+C++ writes diagnostic credit/trust text files but does not restore those maps;
+the Rust runtime does not add those periodic diagnostic writes.
 
 Native receipt timing now also follows `receive_msg_hash`: a newly authenticated
 envelope broadcasts its receipt before full work validation, even if it lacks
@@ -294,3 +295,14 @@ different key or envelope. A native VDF is re-signed with another valid key in
 the queue regression, and a blocked-worker test checks alias suppression after
 retention eviction. This avoids duplicate CPU/GPU work; native trust ranking and
 specialized CPU SHA lanes remain open.
+
+VDF retention now also respects native `max_vdf_count` instead of a fixed 32
+records. Mainnet's limit is 100; discarding the first work record after 32
+could permanently break an otherwise valid continuation from the selected tip.
+The item budget now covers `max_vdf_count * (commit_delay + 1)` for the gap and
+uncommitted window, clamped to 32–16,384 records; the existing 32 MiB heap/wire
+budget remains. A regression extends the native two-iteration fixture into 40
+correctly committed/signed VDFs, verifies the whole chain, and checks the peak
+advances to 40. No ledger writes are needed. This removes the artificial count
+restriction; exhaustion of service byte budgets remains explicit admission
+failure and is not evidence that a network proof fails consensus.
