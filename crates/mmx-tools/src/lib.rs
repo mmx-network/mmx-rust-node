@@ -473,7 +473,7 @@ pub struct HarvesterArgs {
     #[arg(long, default_value_t = 65536)]
     max_f1: usize,
     /// OpenCL GPU for compressed proof computation; -1 uses the CPU.
-    #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     opencl_device: i32,
     #[arg(long)]
     opencl_platform: Option<String>,

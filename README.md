@@ -997,9 +997,10 @@ against the current fork before becoming a verified point. Completed failures
 are cached only while their proofs remain in the bounded receive window. Direct
 embedded nodes retain synchronous admission unless background work is enabled.
 
-OpenCL is opt-in with `mmx-node --opencl-device 0` for VDF verification and
-`mmx-harvester --opencl-device 0` for compressed plot proof computation.
-`--opencl-device -1` selects CPU work. Native configuration keys
+OpenCL GPU 0 is the default for node VDF verification and harvester compressed
+plot proof computation, with automatic CPU fallback when a GPU is unavailable.
+`--opencl-device INDEX` selects another GPU; `--opencl-device -1` selects CPU work.
+Native configuration keys
 `Node.opencl_device`, `Harvester.opencl_device`, optional matching
 `Node.opencl_device_name` / `Harvester.opencl_device_name`, and the shared
 `opencl.platform` filter are supported. `--opencl-platform NAME` overrides that

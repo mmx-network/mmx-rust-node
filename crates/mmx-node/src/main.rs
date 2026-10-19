@@ -22,6 +22,7 @@ const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir 
 Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
   P2P 127.0.0.1:<network port>, VNX RPC 127.0.0.1:11331,
   HTTP JSON-RPC http://127.0.0.1:11380/rpc.
+OpenCL GPU 0 is used when available, with CPU fallback; --opencl-device -1 disables it.
 Historical sync uses configured native seed peers unless --peer is supplied.
 --offline serves the stored ledger without contacting peers.
 --sync-once exits after coordinated sync. Sync requires 3–8 distinct synced peers. --rollback-to keeps that height.
@@ -191,7 +192,7 @@ fn main() -> Result<()> {
     let device = options
         .opencl_device
         .or(config.read("Node.opencl_device")?)
-        .unwrap_or(-1);
+        .unwrap_or(0);
     let platform = options.opencl_platform.or(config.read("opencl.platform")?);
     let name: Option<String> = config.read("Node.opencl_device_name")?;
     if device < -1 {
