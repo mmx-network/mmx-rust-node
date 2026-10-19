@@ -34,7 +34,8 @@ use vnx::{
 #[derive(Default)]
 pub(crate) struct State {
     proofs: BTreeMap<Hash, BTreeMap<Hash, Record>>,
-    attempted: BTreeMap<Hash, u32>,
+    created_blocks: BTreeMap<Hash, u32>,
+    inflight: BTreeMap<Hash, u32>,
     voted: BTreeMap<Hash, (Hash, i64)>,
     pub(crate) broadcasts: VecDeque<(Hash, usize)>,
     bytes: usize,
@@ -45,7 +46,9 @@ impl State {
             proofs.retain(|_, r| number(r, "vdf_height").is_ok_and(|h| h > root_vdf_height));
             !proofs.is_empty()
         });
-        self.attempted.retain(|_, height| *height > root_vdf_height);
+        self.created_blocks
+            .retain(|_, height| *height > root_vdf_height);
+        self.inflight.retain(|_, height| *height > root_vdf_height);
     }
 }
 fn keep_best(proofs: &mut BTreeMap<Hash, Record>, hash: Hash, record: &Record) {
@@ -114,6 +117,15 @@ impl Node {
         now: i64,
         reward_vote: i8,
     ) -> Result<Option<Plan>> {
+        self.farming_plan_at(keys, now, reward_vote, false)
+    }
+    fn farming_plan_at(
+        &mut self,
+        keys: &BTreeSet<[u8; 33]>,
+        now: i64,
+        reward_vote: i8,
+        refreshed: bool,
+    ) -> Result<Option<Plan>> {
         if !self.is_synced() || keys.is_empty() {
             return Ok(None);
         }
@@ -142,11 +154,18 @@ impl Node {
         let mut parents = vec![];
         if tip.height > self.root {
             if let Some(p) = self.chain.get_header(&tip.prev.0)? {
-                parents.push(p);
+                // Node::update's replacement branch uses the *peak's*
+                // challenge, not a future extension's challenge at this height.
+                let current = tip
+                    .proof
+                    .first()
+                    .ok_or_else(|| error("missing peak proof"))?;
+                let challenge = hash(&crate::rpc::from_json_record(current)?, "challenge")?;
+                parents.push((p, Some(challenge)));
             }
         }
-        parents.push(tip.clone());
-        for parent in parents {
+        parents.push((tip.clone(), None));
+        for (parent, replacing) in parents {
             let next = vdf::next_points(
                 &self.chain,
                 self.chain.selected().params(),
@@ -166,14 +185,18 @@ impl Node {
                 &parent,
                 next.len().try_into()?,
             )?;
+            if replacing.is_some_and(|current| current != challenge) {
+                continue;
+            }
             let Some(proofs) = self.production.proofs.get(&challenge) else {
                 continue;
             };
             let Some((&best, first)) = proofs.first_key_value() else {
                 continue;
             };
-            if self.chain.best_proof(&challenge).is_some_and(|h| h != best)
-                || self.production.attempted.contains_key(&best)
+            if self.chain.best_proof(&challenge) != Some(best)
+                || self.production.created_blocks.contains_key(&best)
+                || self.production.inflight.contains_key(&best)
             {
                 continue;
             }
@@ -185,6 +208,14 @@ impl Node {
                 .try_into()?;
             if !keys.contains(&key) {
                 continue;
+            }
+            if !refreshed {
+                // Native production runs at the end of Node::update(), after
+                // proof announcements, block proofs and fork choice. Refresh
+                // only when there is actual signing work, then select again;
+                // network data queued since the periodic tick can veto it.
+                self.update()?;
+                return self.farming_plan_at(keys, now, reward_vote, true);
             }
             let mut selected = vec![];
             for record in proofs
@@ -224,12 +255,22 @@ impl Node {
                 now,
                 reward_vote,
             };
-            self.production.attempted.insert(best, height);
+            self.production.inflight.insert(best, height);
             return Ok(Some(plan));
         }
         Ok(None)
     }
     pub fn accept_produced(&mut self, candidate: &Candidate) -> Result<bool> {
+        let id = hash(&candidate.block, "proof_hash")?;
+        self.production.inflight.remove(&id);
+        // C++ records created_blocks only after successful signing. Remember
+        // even a now-stale signed result, so it cannot be signed again later.
+        self.production
+            .created_blocks
+            .insert(id, number(&candidate.block, "vdf_height")?);
+        // Building and signing run off-lock. Apply newly queued announcements
+        // and forks before allowing this asynchronous result onto the network.
+        self.update()?;
         let block = &candidate.block;
         if !self.synced
             || number(block, "height")? <= self.root
@@ -241,13 +282,10 @@ impl Node {
         {
             return Ok(false);
         }
-        if self
-            .chain
-            .best_proof(&hash(
-                block.field("proof")?.seq()?[0].record()?,
-                "challenge",
-            )?)
-            .is_some_and(|best| best != hash(block, "proof_hash").unwrap_or_default())
+        if self.chain.best_proof(&hash(
+            block.field("proof")?.seq()?[0].record()?,
+            "challenge",
+        )?) != Some(hash(block, "proof_hash")?)
         {
             return Ok(false);
         }
@@ -255,6 +293,16 @@ impl Node {
         self.update()?;
         self.broadcast(block)?;
         Ok(true)
+    }
+    /// Release a failed construction/signing attempt. C++ retries these while
+    /// created_blocks suppresses only proofs that have already been signed.
+    pub fn cancel_production(&mut self, plan: &Plan) -> Result<()> {
+        if let Some(proof) = plan.proofs.first() {
+            self.production
+                .inflight
+                .remove(&proof::calc_proof_hash(proof)?);
+        }
+        Ok(())
     }
     pub(crate) fn broadcast(&mut self, record: &Record) -> Result<()> {
         let id = hash(record, "content_hash")?;
@@ -289,7 +337,7 @@ impl Node {
             .tip()?
             .ok_or_else(|| error("missing vote tip"))?;
         let p = self.chain.selected().params();
-        let mut current = tip;
+        let mut current = tip.clone();
         let mut out = vec![];
         self.production.voted.retain(|_, (_, time)| {
             now.saturating_sub(*time) < p.block_interval_ms.saturating_mul(1000)
@@ -305,7 +353,7 @@ impl Node {
                     .production
                     .voted
                     .get(&current.prev.0)
-                    .is_none_or(|(h, t)| {
+                    .map_or(current.hash == tip.hash, |(h, t)| {
                         *h != current.hash.0 && now.saturating_sub(*t) > p.block_interval_ms
                     })
             {
@@ -701,10 +749,18 @@ impl Worker {
                                         .map_err(|_| error("node lock poisoned"))?
                                         .accept_produced(&candidate)?
                                     {
-                                        println!("Created and broadcast block at height {height}");
+                                        let block = candidate.record();
+                                        println!("Created and broadcast block at height {height}, VDF {}, score {}, hash {}, proof {}",
+                                            number(block, "vdf_height")?,
+                                            block.field("proof")?.seq()?[0].record()?.field("score")?.uint()?,
+                                            vnx::util::to_hex_string(&hash(block, "hash")?, false, false),
+                                            vnx::util::to_hex_string(&hash(block, "proof_hash")?, false, false));
                                     }
                                 }
-                                Err(e) => eprintln!("Block production failed: {e}"),
+                                Err(e) => {
+                                    node.lock().map_err(|_| error("node lock poisoned"))?.cancel_production(&plan)?;
+                                    eprintln!("Block production failed: {e}");
+                                }
                             }
                         }
                         let votes = node

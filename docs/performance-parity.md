@@ -17,6 +17,17 @@ their own recorded source revisions.
 | Harvesting | `src/Harvester.cpp`, `src/pos/Prover.cpp`: concurrent plot jobs, publish each proof immediately, network challenge deadline, estimated Y park search, post-filter before full proof, retained headers | `crates/mmx-farming` and `crates/mmx-tools`: shared bounded Rayon workers for plot reads and nested F1, streaming proofs, `challenge_delay * block_interval_ms`, density-based Y search, positional reads, per-proof park reuse, retained headers and per-quality error isolation. A stalled-plot regression test verifies that another plot can publish first. The daemon still waits for a lookup batch before scheduling the next challenge; C++ can queue successive challenges while workers are busy. Compare this under slow-drive stress before large-farm migration. |
 | Wallet/farmer | `src/Wallet.cpp`, `src/Farmer.cpp`: retained farmer identities, separate signing work, native key derivation and RPC | Rust retains farmer keys, uses a private signer and a restricted remote harvester listener, and tests native signatures and wallet spending through actual daemons. Large-wallet/history latency and signing under sustained harvester traffic still need comparative measurements. Pool partial submission and other unported RPCs remain listed in README. |
 
+The production follow-up compares `Node::update`, `Node::make_block`,
+`Node::add_proof`, `Node::find_best_proof`, and `Router::handle(ProofResponse)`.
+Verified proof announcements now relay before block creation, with unhashed
+harvester/address metadata removed and sender echoes suppressed. A full block
+requires ownership of the best verified full proof hash for its challenge.
+Planning refreshes queued announcements and fork choice before taking a ledger
+snapshot; asynchronous signatures are rechecked before publication. Peak
+replacement uses the peak's challenge, voting follows the native peak/orphan
+rules, and failed attempts can retry while signed proofs remain suppressed.
+The native stronger-proof fixture exercises both pre-build and in-flight vetoes.
+
 For each change, record the C++ paths inspected, relevant fixture/correctness
 checks, worker and memory bounds, duplicate work avoided, and representative
 latency/throughput/I/O measurements. Test failure and slow-resource cases too:

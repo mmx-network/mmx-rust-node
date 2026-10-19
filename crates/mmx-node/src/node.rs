@@ -564,6 +564,15 @@ impl Node {
                 Ok(proof) => {
                     self.chain.observe_proof(&proof);
                     self.remember_proof(&record, &proof)?;
+                    // Native verify() publishes node.verified_proof; Router
+                    // relays it before the VDF makes a full block possible.
+                    // These local fields are deliberately outside the hash.
+                    let mut public = record.clone();
+                    public
+                        .fields
+                        .insert("harvester".into(), Value::String(vec![]));
+                    public.fields.insert("farmer_addr".into(), Value::Uint(0));
+                    self.broadcast(&public)?;
                 }
                 Err(e) => eprintln!("Rejected farmer proof: {e}"),
             }
@@ -671,7 +680,9 @@ impl Node {
                     return Err(error("proof response too far ahead"));
                 }
                 let id = hash(message, "content_hash")?;
-                if self.responses.contains_key(&id) {
+                if self.responses.contains_key(&id)
+                    || self.production.broadcasts.iter().any(|(old, _)| *old == id)
+                {
                     return Ok(false);
                 }
                 if self.responses.len() >= 4096

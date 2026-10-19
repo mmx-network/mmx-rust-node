@@ -366,7 +366,7 @@ impl RelayPeer {
     pub fn note(&mut self, record: &Record) {
         if !matches!(
             record.name.as_str(),
-            "mmx.Transaction" | "mmx.Block" | "mmx.ValidatorVote"
+            "mmx.Transaction" | "mmx.Block" | "mmx.ValidatorVote" | "mmx.ProofResponse"
         ) {
             return;
         }

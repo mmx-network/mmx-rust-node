@@ -2039,6 +2039,254 @@ fn native_farming_response() -> Record {
         .unwrap();
     wire(&row["wire"])
 }
+
+fn stronger_native_response() -> Record {
+    let row: Value = serde_json::from_str(include_str!("fixtures/production.json")).unwrap();
+    assert_eq!(row["verified"], true);
+    wire(&row["response"])
+}
+
+fn ready_farming_node(network: &Network, genesis: &Value, step: &Value) -> Arc<Mutex<Node>> {
+    let n = node(network);
+    sync::synchronize_pipelined(
+        &mut MemorySource {
+            blocks: vec![wire(&genesis["block"])],
+            wrong: false,
+        },
+        &n,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    n.lock().unwrap().receive(&wire(&step["vdf"])).unwrap();
+    n
+}
+
+#[test]
+fn verified_proof_announcements_relay_before_block_production_without_local_metadata_or_echoes() {
+    let (network, genesis, steps, _) = fixture();
+    let n = ready_farming_node(&network, &genesis, &steps[0]);
+    let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
+    let address = server.address().to_string();
+    let mut sender = peer::Connection::connect(&address).unwrap();
+    let mut observer = peer::Connection::connect(&address).unwrap();
+    let original = native_farming_response();
+    let mut private = original.clone();
+    private
+        .fields
+        .insert("harvester".into(), V::String(b"private farm".to_vec()));
+    private.fields.insert("farmer_addr".into(), V::Uint(12345));
+    assert!(mmx_consensus::response::is_valid(&private).unwrap());
+    sender.send(&private).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#).unwrap()
+        ["result"]["queued_messages"]
+        == 0
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        observer
+            .receive(Duration::from_millis(50))
+            .unwrap()
+            .is_none(),
+        "unverified announcements must not relay"
+    );
+    n.lock().unwrap().tick().unwrap();
+    let public = observer.receive(Duration::from_secs(3)).unwrap().unwrap();
+    assert_eq!(public.name, "mmx.ProofResponse");
+    assert_eq!(
+        hash(&public, "content_hash").unwrap(),
+        hash(&original, "content_hash").unwrap()
+    );
+    assert!(public
+        .field("harvester")
+        .unwrap()
+        .text()
+        .unwrap()
+        .is_empty());
+    assert_eq!(public.field("farmer_addr").unwrap().uint().unwrap(), 0);
+    assert!(mmx_consensus::response::is_valid(&public).unwrap());
+    mmx_consensus::response::authenticate(&public).unwrap();
+    assert!(
+        sender
+            .receive(Duration::from_millis(100))
+            .unwrap()
+            .is_none(),
+        "proof must not echo to its sender"
+    );
+    assert_eq!(
+        n.lock()
+            .unwrap()
+            .chain()
+            .selected()
+            .tip()
+            .unwrap()
+            .unwrap()
+            .height,
+        0
+    );
+    sender.send(&public).unwrap();
+    std::thread::sleep(Duration::from_millis(60));
+    n.lock().unwrap().tick().unwrap();
+    assert!(observer
+        .receive(Duration::from_millis(100))
+        .unwrap()
+        .is_none());
+    server.shutdown();
+}
+
+#[test]
+fn stronger_native_peer_proof_vetoes_full_block_planning_and_an_inflight_signature() {
+    use mmx_farming::farmer::Farmer;
+    use mmx_wallet::Address;
+    let (network, genesis, steps, _) = fixture();
+    let weak = native_farming_response();
+    let strong = stronger_native_response();
+    let weak_hash =
+        mmx_consensus::proof::calc_proof_hash(weak.field("proof").unwrap().record().unwrap())
+            .unwrap();
+    let strong_hash =
+        mmx_consensus::proof::calc_proof_hash(strong.field("proof").unwrap().record().unwrap())
+            .unwrap();
+    assert!(strong_hash < weak_hash);
+    let key = farmer_scalar();
+    let keys = [key.public_key()].into();
+    for during_signing in [false, true] {
+        let n = ready_farming_node(&network, &genesis, &steps[0]);
+        n.lock().unwrap().receive(&weak).unwrap();
+        n.lock().unwrap().tick().unwrap();
+        let now = vnx::util::get_wall_time_millis();
+        let candidate = if during_signing {
+            let plan = n
+                .lock()
+                .unwrap()
+                .farming_plan(&keys, now, 0)
+                .unwrap()
+                .unwrap();
+            let unsigned = plan.build().unwrap();
+            let farmer = Farmer::new([farmer_scalar()], Some(Address([7; 32])));
+            let signed = farmer.sign_block(&unsigned, &network.params).unwrap();
+            Some(plan.with_signature(&unsigned, &signed).unwrap())
+        } else {
+            None
+        };
+        let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
+        let mut sender = peer::Connection::connect(&server.address().to_string()).unwrap();
+        sender.send(&strong).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#).unwrap()
+            ["result"]["queued_messages"]
+            == 0
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut state = n.lock().unwrap();
+        if let Some(candidate) = candidate {
+            assert!(!state.accept_produced(&candidate).unwrap());
+            assert!(state
+                .chain()
+                .block(&hash(candidate.record(), "hash").unwrap())
+                .unwrap()
+                .is_none());
+        } else {
+            assert!(state.farming_plan(&keys, now, 0).unwrap().is_none());
+        }
+        assert_eq!(state.chain().selected().tip().unwrap().unwrap().height, 0);
+        let challenge = hash(
+            strong.field("proof").unwrap().record().unwrap(),
+            "challenge",
+        )
+        .unwrap();
+        assert_eq!(state.chain().best_proof(&challenge), Some(strong_hash));
+        assert!(state.farming_plan(&keys, now, 0).unwrap().is_none());
+        // The best proof's owner can build; it includes both proofs in native
+        // full-hash order rather than selecting only that farmer's proofs.
+        let mut secret = [0; 32];
+        secret[31] = 2;
+        let winner = mmx_wallet::FarmerKey::from_bytes(&secret).unwrap();
+        let plan = state
+            .farming_plan(&[winner.public_key()].into(), now, 0)
+            .unwrap()
+            .unwrap();
+        let unsigned = plan.build().unwrap();
+        let proofs = unsigned.field("proof").unwrap().seq().unwrap();
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(
+            mmx_consensus::proof::calc_proof_hash(proofs[0].record().unwrap()).unwrap(),
+            strong_hash
+        );
+        assert_eq!(
+            mmx_consensus::proof::calc_proof_hash(proofs[1].record().unwrap()).unwrap(),
+            weak_hash
+        );
+        let signed = Farmer::new([winner], Some(Address([7; 32])))
+            .sign_block(&unsigned, &network.params)
+            .unwrap();
+        let candidate = plan.with_signature(&unsigned, &signed).unwrap();
+        assert!(state.accept_produced(&candidate).unwrap());
+        drop(state);
+        server.shutdown();
+    }
+}
+
+#[test]
+fn native_farming_votes_do_not_create_unsolicited_votes_for_ancestors() {
+    let (network, genesis, steps, _) = fixture();
+    let n = node(&network);
+    let mut blocks = vec![wire(&genesis["block"])];
+    blocks.extend(steps.iter().take(2).map(|step| wire(&step["block"])));
+    sync::synchronize_pipelined(
+        &mut MemorySource {
+            blocks,
+            wrong: false,
+        },
+        &n,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    let mut state = n.lock().unwrap();
+    let tip = state.chain().selected().tip().unwrap().unwrap();
+    assert!(tip.height > state.root_height() + 1);
+    let votes = state
+        .farming_votes(&[farmer_scalar().public_key()].into(), 1_000_000)
+        .unwrap();
+    assert_eq!(votes.len(), 1);
+    assert_eq!(hash(&votes[0], "hash").unwrap(), tip.hash.0);
+    assert!(state
+        .farming_votes(&[farmer_scalar().public_key()].into(), 1_100_000)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn native_production_retries_failed_attempts_but_never_resigns_a_created_block() {
+    use mmx_farming::farmer::Farmer;
+    use mmx_wallet::Address;
+    let (network, genesis, steps, _) = fixture();
+    let n = ready_farming_node(&network, &genesis, &steps[0]);
+    let keys = [farmer_scalar().public_key()].into();
+    let mut state = n.lock().unwrap();
+    state.receive(&native_farming_response()).unwrap();
+    state.tick().unwrap();
+    let now = vnx::util::get_wall_time_millis();
+    let first = state.farming_plan(&keys, now, 0).unwrap().unwrap();
+    assert!(state.farming_plan(&keys, now, 0).unwrap().is_none());
+    state.cancel_production(&first).unwrap();
+    let retry = state.farming_plan(&keys, now, 0).unwrap().unwrap();
+    let unsigned = retry.build().unwrap();
+    let signed = Farmer::new([farmer_scalar()], Some(Address([7; 32])))
+        .sign_block(&unsigned, &network.params)
+        .unwrap();
+    let candidate = retry.with_signature(&unsigned, &signed).unwrap();
+    assert!(state.accept_produced(&candidate).unwrap());
+    // A stale failure callback must not release an already created proof.
+    state.cancel_production(&first).unwrap();
+    assert!(state.farming_plan(&keys, now, 0).unwrap().is_none());
+}
 #[test]
 fn farming_candidate_matches_cpp_fields_uses_no_disk_writes_and_rejects_stale_signatures() {
     use mmx_farming::farmer::Farmer;
@@ -2150,7 +2398,7 @@ fn farming_candidate_matches_cpp_fields_uses_no_disk_writes_and_rejects_stale_si
     assert!(plan.with_signature(&unsigned, &changed).is_err());
     assert!(
         n.farming_plan(&keys, time, 0).unwrap().is_none(),
-        "one signing attempt per proof"
+        "one concurrent signing attempt per proof"
     );
     assert!(n.accept_produced(&candidate).unwrap());
     assert!(
