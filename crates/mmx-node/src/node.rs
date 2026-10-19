@@ -383,7 +383,7 @@ impl Node {
                     )
                     .is_ok()
                     {
-                        if let Some(cpu) = worker.proof(id, work)? {
+                        if let Some(cpu) = worker.proof(id, hash(work, "hash")?, work)? {
                             // The fork can move while work runs. Admission
                             // always rechecks authenticated current history.
                             if let Ok(point) =
@@ -750,11 +750,11 @@ impl Node {
                     return Err(error("invalid VDF content"));
                 }
                 mmx_consensus::vdf::authenticate(message)?;
-                let id = hash(message, "content_hash")?;
+                let work_id = hash(message, "hash")?;
                 if self
                     .work
                     .iter()
-                    .any(|(work, _, _)| hash(work, "content_hash").ok() == Some(id))
+                    .any(|(work, _, _)| hash(work, "hash").ok() == Some(work_id))
                 {
                     return Ok(false);
                 }
@@ -1067,6 +1067,42 @@ mod work_queue_tests {
         node.broadcast(&work).unwrap();
         assert_eq!(node.tx_pool.relay.sequence(), sequence);
         assert_eq!(node.production.broadcasts.len(), 128);
+    }
+    #[test]
+    fn resigning_a_native_vdf_with_another_key_cannot_duplicate_work_or_refresh_its_timeout() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature};
+        let (mut node, work) = setup();
+        let mut alias = work.clone();
+        let key = SigningKey::from_slice(&[222; 32]).unwrap();
+        let signature: Signature = key.sign_prehash(&hash(&work, "hash").unwrap()).unwrap();
+        alias.fields.insert(
+            "timelord_key".into(),
+            bytes(key.verifying_key().to_encoded_point(true).as_bytes()),
+        );
+        alias
+            .fields
+            .insert("timelord_sig".into(), bytes(signature.to_bytes().to_vec()));
+        alias.fields.insert(
+            "content_hash".into(),
+            bytes(mmx_consensus::vdf::calc_content_hash(&alias).unwrap()),
+        );
+        assert!(mmx_consensus::vdf::is_valid(&alias).unwrap());
+        mmx_consensus::vdf::authenticate(&alias).unwrap();
+        assert_ne!(
+            hash(&work, "content_hash").unwrap(),
+            hash(&alias, "content_hash").unwrap()
+        );
+        node.admit_message(&work).unwrap();
+        node.work[0].1 -= 10;
+        let before = (node.work[0].1, node.work_bytes);
+        assert!(!node.admit_message(&alias).unwrap());
+        assert_eq!(node.work.len(), 1);
+        assert_eq!((node.work[0].1, node.work_bytes), before);
+        node.tick().unwrap();
+        assert_eq!(node.verified_work.len(), 1);
+        assert!(node
+            .verified_work
+            .contains_key(&hash(&work, "content_hash").unwrap()));
     }
     #[test]
     fn explicit_rewind_releases_verified_replay_suppression() {

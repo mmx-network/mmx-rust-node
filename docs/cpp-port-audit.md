@@ -189,6 +189,12 @@ no live-ledger or plot scan is part of validation.
    beyond the former 16-response cutoff now vetoes production in the regression.
    The 4,096-response / 8 MiB queue and a 16-result completion channel bound work
    and buffering. Signature, root, height and space-work checks remain required.
+   VDF queues and active workers now deduplicate by native's unsigned work hash
+   as well as signed content ID. Re-signing identical committed work with a
+   different valid timelord key cannot duplicate CPU/GPU jobs, occupy another
+   queue slot or refresh the original timeout. In-flight work hashes survive
+   retention eviction until completion. Opaque completed evidence remains bound
+   to its original exact signed record. Timelord trust ordering remains open.
 3. **Streaming balance RPC reads and snapshot validation completed.**
    Following C++ `Node_api.cpp` balance queries and `table.h::find_range`, the
    native store now merges one visible key per input and resolves only winning

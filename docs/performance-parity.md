@@ -282,3 +282,15 @@ database tests cover every rollback/reopen and nested snapshots. A corruption
 test proves presence succeeds while an actual value read fails; the native
 header/RPC fixture also probes existence despite a corrupt transaction payload.
 This removes body I/O from those predicates without a ledger cache or new writes.
+
+VDF scheduling now also follows C++ `vdf_verify_pending`'s unsigned proof-hash
+deduplication. An authenticated second timelord signature over the same committed
+work cannot occupy another waiting queue slot or refresh the original deadline.
+The worker independently tracks both signed publication IDs and unsigned work
+hashes until completion, including when an in-flight proof leaves the retained
+queue. Its existing one-active / one-waiting bound remains. Completed evidence
+still belongs to its exact original signed record; it is never rebound to a
+different key or envelope. A native VDF is re-signed with another valid key in
+the queue regression, and a blocked-worker test checks alias suppression after
+retention eviction. This avoids duplicate CPU/GPU work; native trust ranking and
+specialized CPU SHA lanes remain open.
