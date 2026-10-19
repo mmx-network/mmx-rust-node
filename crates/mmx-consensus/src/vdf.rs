@@ -1,6 +1,6 @@
-//! Native timelord proof admission, portable CPU work verification and
+//! Native timelord proof admission, CPU/OpenCL work verification and
 //! Node::find_vdf_points output linkage. Hashes and signatures are independent
-//! stages; verified CPU evidence and current history admission are both required
+//! stages; verified work evidence and current history admission are both required
 //! to construct a `VerifiedPoint`.
 use crate::{
     hash, input,
@@ -168,12 +168,23 @@ pub fn verify_cpu(record: &Record) -> VdfResult<()> {
     Ok(())
 }
 
-/// Owns the exact CPU-checked proof. No caller can substitute unchecked fields
+/// Owns the exact work-checked proof. No caller can substitute unchecked fields
 /// or treat this as evidence that the proof belongs to the current fork.
-pub struct CpuVerifiedProof(Record);
-impl CpuVerifiedProof {
+pub struct WorkVerifiedProof(Record);
+/// Compatibility name for callers using the portable CPU constructor.
+pub type CpuVerifiedProof = WorkVerifiedProof;
+impl WorkVerifiedProof {
     pub fn verify(record: Record) -> VdfResult<Self> {
         verify_cpu(&record)?;
+        Ok(Self(record))
+    }
+    /// GPU checks the same independently supplied segment inputs as the CPU.
+    /// A driver error falls back to CPU; an incorrect segment is rejected.
+    pub fn verify_with(
+        record: Record,
+        accelerator: &crate::accelerator::Accelerator,
+    ) -> VdfResult<Self> {
+        verify_accelerated(&record, accelerator)?;
         Ok(Self(record))
     }
     pub fn admit<S: HeaderSource>(
@@ -186,7 +197,45 @@ impl CpuVerifiedProof {
     }
 }
 
-/// Immutable evidence of successful signature, history, shape and CPU checks.
+pub fn verify_accelerated(
+    record: &Record,
+    accelerator: &crate::accelerator::Accelerator,
+) -> VdfResult<()> {
+    supported(record)?;
+    let segments = record.seq("segments")?;
+    if segments.is_empty() {
+        return Err(invalid("VDF without segments"));
+    }
+    let size: u32 = record
+        .uint("segment_size")?
+        .try_into()
+        .map_err(|_| input("VDF segment size range"))?;
+    let outputs: Vec<Hash> = segments
+        .iter()
+        .map(|v| v.bytes()?.try_into().map_err(|_| input("VDF segment size")))
+        .collect::<Result<_>>()?;
+    let mut first = Sha256::new();
+    first.update(bytes::<32>(record, "input")?);
+    first.update(bytes::<32>(record, "prev")?);
+    let mut reward = Sha256::new();
+    reward.update(first.finalize());
+    reward.update(bytes::<32>(record, "reward_addr")?);
+    let initial: Hash = reward.finalize().into();
+    let inputs: Vec<_> = std::iter::once(initial)
+        .chain(outputs.iter().copied().take(outputs.len() - 1))
+        .collect();
+    let Some(actual) = accelerator.repeated_sha256(&inputs, size) else {
+        return verify_cpu(record);
+    };
+    for (i, (actual, expected)) in actual.iter().zip(&outputs).enumerate() {
+        if actual != expected {
+            return Err(invalid(format!("invalid output on segment {i}")));
+        }
+    }
+    Ok(())
+}
+
+/// Immutable evidence of successful signature, history, shape and work checks.
 /// A decoded VDF_Point alone cannot establish this evidence. Rebuild this type
 /// through `verify` when loading untrusted persisted/network records.
 #[derive(Clone, Debug)]
@@ -272,7 +321,7 @@ pub fn link_block<'a, S: HeaderSource>(
     Ok(out)
 }
 
-/// Native find_next_vdf_points. Points must be CPU verified; signed metadata
+/// Native find_next_vdf_points. Points must be work verified; signed metadata
 /// alone cannot extend a peak. Input order breaks equal receive-time ties.
 pub fn next_points<'a, S: HeaderSource>(
     source: &S,
@@ -354,7 +403,7 @@ mod next_tests {
                 ..Default::default()
             };
             // Synthetic already-verified points exercise the native selection policy;
-            // public callers can only create this capability via CPU verification.
+            // public callers can only create this capability via work verification.
             let points: Vec<_> = r["points"]
                 .as_array()
                 .unwrap()

@@ -1,24 +1,30 @@
-//! Bounded CPU-only VDF work. The ledger admits returned evidence against its
+//! Bounded CPU/OpenCL VDF work. The ledger admits returned evidence against its
 //! current authenticated history; a worker never owns a database snapshot.
 use crate::{error, Result};
-use mmx_consensus::{vdf::CpuVerifiedProof, Hash, Record};
+use mmx_consensus::{accelerator::Accelerator, vdf::WorkVerifiedProof, Hash, Record};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::mpsc::{self, Receiver, SyncSender, TrySendError},
+    sync::{
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+        Arc,
+    },
 };
 
 pub(crate) struct Worker {
     jobs: SyncSender<(Hash, Record)>,
-    results: Receiver<(Hash, mmx_consensus::vdf::VdfResult<CpuVerifiedProof>)>,
+    results: Receiver<(Hash, mmx_consensus::vdf::VdfResult<WorkVerifiedProof>)>,
     pending: BTreeSet<Hash>,
-    complete: BTreeMap<Hash, Option<CpuVerifiedProof>>,
+    complete: BTreeMap<Hash, Option<WorkVerifiedProof>>,
 }
 impl Worker {
-    pub fn new() -> Result<Self> {
-        Self::spawn(CpuVerifiedProof::verify)
+    pub fn new(accelerator: Option<Arc<Accelerator>>) -> Result<Self> {
+        Self::spawn(move |record| match &accelerator {
+            Some(a) => WorkVerifiedProof::verify_with(record, a),
+            None => WorkVerifiedProof::verify(record),
+        })
     }
     fn spawn(
-        verify: impl Fn(Record) -> mmx_consensus::vdf::VdfResult<CpuVerifiedProof> + Send + 'static,
+        verify: impl Fn(Record) -> mmx_consensus::vdf::VdfResult<WorkVerifiedProof> + Send + 'static,
     ) -> Result<Self> {
         let (jobs, receive) = mpsc::sync_channel::<(Hash, Record)>(1);
         let (send, results) = mpsc::channel();
@@ -43,14 +49,14 @@ impl Worker {
             self.pending.remove(&id);
             if retained.contains(&id) {
                 if let Err(error) = &result {
-                    eprintln!("Rejected VDF CPU proof: {error}");
+                    eprintln!("Rejected VDF work proof: {error}");
                 }
                 self.complete.insert(id, result.ok());
             }
         }
         self.complete.retain(|id, _| retained.contains(id));
     }
-    pub fn proof(&mut self, id: Hash, record: &Record) -> Result<Option<&CpuVerifiedProof>> {
+    pub fn proof(&mut self, id: Hash, record: &Record) -> Result<Option<&WorkVerifiedProof>> {
         if !self.complete.contains_key(&id) && !self.pending.contains(&id) && self.pending.len() < 2
         {
             match self.jobs.try_send((id, record.clone())) {
@@ -77,7 +83,7 @@ mod tests {
         let mut worker = Worker::spawn(move |record| {
             entered.send(()).unwrap();
             released.recv().unwrap();
-            CpuVerifiedProof::verify(record)
+            WorkVerifiedProof::verify(record)
         })
         .unwrap();
         let record = Record {

@@ -382,6 +382,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-node` | Executable, native Zstd peer protocol, historical download with ancestor discovery and native fork choice, live block/VDF/vote admission, durable rewind/restart, VNX public reads and HTTP JSON-RPC. |
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hashes/costs and authorization, header/vote/farmer-response authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
+| `mmx-opencl` | Runtime-loaded OpenCL 1.2 engines for recursive SHA256 and the native F1 memory hash; bounded reusable device buffers, no build-time OpenCL SDK requirement. |
 | `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
 | `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native network bootstrap, durable selected-chain state, orphan archives, native fork-choice policy and atomic branch replacement. |
 | `mmx-wallet` | Compatible recovery words/key files, address and farmer-key derivation, message signing, exact amounts and signed transfers with a native consensus bridge. |
@@ -582,8 +583,10 @@ ksize limits, CPU recomputation, quality threshold and proof score. `pos` ports
 the 4 KiB memory hash, SHA-512 leaf generation, eight matching tables, full
 metadata deduplication and canonical proof backtrace. It enforces the Y window,
 the original X ordering, and hardfork-1 post filtering/quality selection. Proofs
-contain 256 uncompressed X values; compressed plotting/proving and GPU/remote
-compute remain separate work.
+contain 256 uncompressed X values. The harvester expands compressed plot X
+prefixes and can accelerate the F1 memory hashes through OpenCL, retaining the
+same CPU matching tables and canonical backtrace. Consensus space verification
+continues to use the portable CPU path.
 
 `transitions::verify_header()` checks proof ordering/uniqueness, proof-chain
 commitments, VDF height and expected iteration totals, bounded time-difficulty
@@ -985,13 +988,40 @@ infusion, time difficulty, and validator membership checks at the boundary. The
 genesis identity hash remains available for network authentication. Forks whose
 common ancestor precedes HEIGHT require an unpurged database.
 
-The runtime verifies VDF CPU work outside the ledger mutex. One active proof
-and one queued proof bound the worker; independent segments use the shared Rayon
-pool, preserving first-failing-index reporting. Immutable CPU evidence owns the
+The runtime verifies VDF work outside the ledger mutex. One active proof
+and one queued proof bound the worker; independent segments use OpenCL when
+configured, otherwise the shared Rayon pool, preserving first-failing-index
+reporting. Immutable work evidence owns the
 exact checked record and must pass signature, shape, and history admission again
 against the current fork before becoming a verified point. Completed failures
 are cached only while their proofs remain in the bounded receive window. Direct
 embedded nodes retain synchronous admission unless background work is enabled.
+
+OpenCL is opt-in with `mmx-node --opencl-device 0` for VDF verification and
+`mmx-harvester --opencl-device 0` for compressed plot proof computation.
+`--opencl-device -1` selects CPU work. Native configuration keys
+`Node.opencl_device`, `Harvester.opencl_device`, optional matching
+`Node.opencl_device_name` / `Harvester.opencl_device_name`, and the shared
+`opencl.platform` filter are supported. `--opencl-platform NAME` overrides that
+filter. GPU indexes follow discovery order within the selected platform(s).
+The standard GNU binaries load the system OpenCL ICD dynamically; no SDK is
+required to build. The portable static musl binaries retain CPU fallback where
+dynamic driver loading is unavailable.
+
+Startup checks both GPU kernels against independent CPU outputs before enabling
+them. Missing devices, loader/compiler failures and runtime driver errors fall
+back to CPU; a driver error disables that engine for the process. Incorrect VDF
+outputs are rejected normally. Kernels are embedded in the binary and use
+OpenCL 1.2, unsigned wrapping arithmetic and explicit byte ordering. VDF launches
+run at most 2,500 iterations each. Proof work uses 4,096-entry batches and at most
+16 MiB of reusable device scratch memory. GPU work cannot bypass the existing
+signature, history, shape, plot-identity or proof-order checks.
+
+`MMX_OPENCL_TESTS=1 cargo test --workspace --all-targets --locked` requires a real
+GPU ICD and additionally checks the native VDF/space fixtures, batching and
+plot-to-proof/live-node admission paths. CI runs those kernels on POCL with
+`MMX_OPENCL_ALL_DEVICES=1`. A hardware check with CPU/GPU timings is available as
+`cargo run --release -p mmx-consensus --example opencl_check -- 0`.
 
 C++ `Node::write_block()` appends full bodies to a block file and stores their
 offsets in a separate index. Its `Table` implementation uses a write log and
@@ -1398,10 +1428,10 @@ sockets; spending/signing methods use separate VNX permission checks.
 The harvester discovers native `.plot` files with bounded recursion, ignores
 symlinks, rejects unknown farmer keys and duplicate plot IDs, and reuses unchanged
 plot headers on reload. It supports native HDD metadata parks, SSD proof lookups,
-delta-coded Y/PD parks, triangular X pairs and CPU X decompression. Park reads use
-`pread` on Unix, reuse parks within a lookup and do not write plot data. CPU work
+delta-coded Y/PD parks, triangular X pairs and CPU/OpenCL X decompression. Park reads use
+`pread` on Unix, reuse parks within a lookup and do not write plot data. F1 work
 is limited by `--max-f1`; compression that exceeds the configured expansion limit
-is rejected explicitly. There is no GPU or remote recompute path yet.
+is rejected explicitly. Remote recompute remains unimplemented.
 For C10 plots, `--max-f1 262144` permits the worst-case 256 prefixes expanded
 by ten missing X bits; the default remains 65536. `--log-lookups` reports proof
 counts, publications and elapsed time per challenge during farm testing. Native

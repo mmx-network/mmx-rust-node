@@ -1,0 +1,11 @@
+[package]
+name = "mmx-opencl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Runtime-loaded OpenCL kernels for MMX VDF and space proof work"
+
+[dependencies]
+libloading = "0.8.9"
+thiserror.workspace = true

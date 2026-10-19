@@ -135,10 +135,20 @@ fn make_plot(path: &Path, has_meta: bool, compressed: bool) -> mmx::PlotHeader {
 fn native_plot_parks_recover_cpp_quality_and_canonical_proof_for_hdd_ssd_and_compression() {
     let dir = tempfile::tempdir().unwrap();
     let f = fixture();
+    let accelerator = (std::env::var("MMX_OPENCL_TESTS").as_deref() == Ok("1")).then(|| {
+        std::sync::Arc::new(
+            mmx_consensus::accelerator::Accelerator::new(
+                0,
+                None,
+                std::env::var("MMX_OPENCL_ALL_DEVICES").as_deref() != Ok("1"),
+            )
+            .unwrap(),
+        )
+    });
     for (has_meta, compressed) in [(true, false), (false, false), (true, true)] {
         let path = dir.path().join(format!("{has_meta}-{compressed}.plot"));
         let h = make_plot(&path, has_meta, compressed);
-        let p = Prover::open(&path).unwrap();
+        let mut p = Prover::open(&path).unwrap();
         let mut challenge = [0; 32];
         challenge[..4].copy_from_slice(
             &(f["compute"]["entries"][0]["y"].as_u64().unwrap() as u32).to_le_bytes(),
@@ -150,6 +160,13 @@ fn native_plot_parks_recover_cpp_quality_and_canonical_proof_for_hdd_ssd_and_com
             unhex(&f["compute"]["entries"][0]["meta"])
         );
         let full = p.full_proof(0, 65536).unwrap();
+        if let Some(accelerator) = &accelerator {
+            p.set_accelerator(Some(accelerator.clone()));
+            let gpu = p.full_proof(0, 65536).unwrap();
+            assert_eq!(gpu.proof, full.proof);
+            assert_eq!(gpu.meta, full.meta);
+            assert!(accelerator.enabled());
+        }
         assert_eq!(full.meta, qualities[0].meta);
         assert_eq!(
             full.proof,

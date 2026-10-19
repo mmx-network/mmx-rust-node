@@ -107,6 +107,16 @@ pub fn compute_f1(x: u32, id: &Hash, ksize: u8) -> Result<(u32, [u32; N_META])> 
 /// Native compute(..., xbits=0), including deduplicated X input, metadata sorting,
 /// all eight match tables, final full-metadata deduplication and proof backtrace.
 pub fn compute(xs: &[u32], id: &Hash, ksize: u8) -> Result<Vec<Entry>> {
+    compute_with_accelerator(xs, id, ksize, None)
+}
+/// Accelerate independent F1 memory hashes while retaining native CPU matching,
+/// sorting, metadata deduplication and canonical proof backtracing.
+pub fn compute_with_accelerator(
+    xs: &[u32],
+    id: &Hash,
+    ksize: u8,
+    accelerator: Option<&crate::accelerator::Accelerator>,
+) -> Result<Vec<Entry>> {
     let kmask = mask(ksize)?;
     let xs: Vec<_> = xs
         .iter()
@@ -118,7 +128,30 @@ pub fn compute(xs: &[u32], id: &Hash, ksize: u8) -> Result<Vec<Entry>> {
     let mut entries = Vec::with_capacity(xs.len());
     // F1 inputs are independent. Indexed collection preserves native X order
     // before deterministic metadata sorting and proof backtracing.
-    let initial: Vec<_> = xs.par_iter().map(|x| compute_f1(*x, id, ksize)).collect();
+    let accelerated = accelerator.and_then(|accelerator| {
+        let keys: Vec<[u8; 64]> = xs
+            .par_iter()
+            .map(|x| {
+                let mut message = [0; 36];
+                message[..4].copy_from_slice(&x.to_le_bytes());
+                message[4..].copy_from_slice(id);
+                Sha512::digest(message).into()
+            })
+            .collect();
+        accelerator.memory_hashes(&keys).map(|hashes| {
+            keys.par_iter()
+                .zip(hashes.par_iter())
+                .map(|(key, memory)| {
+                    let mut message = [0; 192];
+                    message[..64].copy_from_slice(key);
+                    message[64..].copy_from_slice(memory);
+                    Ok(hash_meta(&message, kmask))
+                })
+                .collect::<Vec<Result<_>>>()
+        })
+    });
+    let initial: Vec<_> =
+        accelerated.unwrap_or_else(|| xs.par_iter().map(|x| compute_f1(*x, id, ksize)).collect());
     for (i, value) in initial.into_iter().enumerate() {
         let (y, m) = value?;
         entries.push((y, i));

@@ -79,6 +79,7 @@ pub struct Quality {
 }
 #[derive(Clone, Debug)]
 pub struct Prover {
+    accelerator: Option<std::sync::Arc<mmx_consensus::accelerator::Accelerator>>,
     path: PathBuf,
     pub header: mmx::PlotHeader,
     length: u64,
@@ -115,6 +116,7 @@ impl Prover {
         }
         let header: mmx::PlotHeader = vnx::serde_json::from_value(value)?;
         let out = Self {
+            accelerator: None,
             path,
             header,
             length,
@@ -422,13 +424,18 @@ impl Prover {
             .checked_shl(bits)
             .ok_or_else(|| error("proof work overflow"))?;
         if count > max_f1 {
-            return Err(error("compressed proof exceeds configured CPU work limit"));
+            return Err(error("compressed proof exceeds configured F1 work limit"));
         }
         let xs: Vec<u32> = prefixes
             .into_iter()
             .flat_map(|x| (0..(1u32 << bits)).map(move |i| (x << bits) | i))
             .collect();
-        let mut entries = pos::compute(&xs, &h.plot_id.0, h.ksize as u8)?;
+        let mut entries = pos::compute_with_accelerator(
+            &xs,
+            &h.plot_id.0,
+            h.ksize as u8,
+            self.accelerator.as_deref(),
+        )?;
         if entries.len() != 1 {
             return Err(error("expected exactly one proof"));
         }
@@ -438,6 +445,15 @@ impl Prover {
             meta: entry.meta,
             proof: entry.proof,
         })
+    }
+}
+
+impl Prover {
+    pub fn set_accelerator(
+        &mut self,
+        accelerator: Option<std::sync::Arc<mmx_consensus::accelerator::Accelerator>>,
+    ) {
+        self.accelerator = accelerator;
     }
 }
 

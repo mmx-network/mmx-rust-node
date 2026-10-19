@@ -145,11 +145,19 @@ impl Node {
     pub fn is_synced(&self) -> bool {
         self.synced
     }
-    /// Runtime CPU tasks must never hold the ledger mutex while hashing a VDF.
+    /// Runtime work tasks must never hold the ledger mutex while hashing a VDF.
     /// Embedded callers retain synchronous admission unless they opt in.
     pub fn enable_background_vdf(&mut self) -> Result<()> {
+        self.enable_background_vdf_with(None)
+    }
+    /// Keep device work outside the ledger mutex and recheck returned evidence
+    /// against current authenticated history before it can extend the VDF peak.
+    pub fn enable_background_vdf_with(
+        &mut self,
+        accelerator: Option<std::sync::Arc<mmx_consensus::accelerator::Accelerator>>,
+    ) -> Result<()> {
         if self.vdf_worker.is_none() {
-            self.vdf_worker = Some(crate::vdf_worker::Worker::new()?);
+            self.vdf_worker = Some(crate::vdf_worker::Worker::new(accelerator)?);
         }
         Ok(())
     }
@@ -310,7 +318,7 @@ impl Node {
                     .is_ok()
                     {
                         if let Some(cpu) = worker.proof(id, work)? {
-                            // The fork can move while CPU work runs. Admission
+                            // The fork can move while work runs. Admission
                             // always rechecks authenticated current history.
                             if let Ok(point) =
                                 cpu.admit(self.chain.selected().params(), &self.chain)

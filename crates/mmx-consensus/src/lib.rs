@@ -8,6 +8,7 @@
 //! proof-record hashes and plot identity checks. `pos` and `transitions` implement
 //! CPU space work and history-dependent header checks. `vdf` verifies timelord
 //! work and links verified outputs to headers. Ledger validation is separate.
+pub mod accelerator;
 pub mod authorization;
 mod encode;
 mod hash;

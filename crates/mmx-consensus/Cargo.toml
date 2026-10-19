@@ -9,6 +9,7 @@ description = "MMX native consensus hashing, static validation and signature aut
 [dependencies]
 mmx-types.workspace = true
 mmx-crypto.workspace = true
+mmx-opencl.workspace = true
 vnx.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

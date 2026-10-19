@@ -16,6 +16,7 @@ const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir 
   [--peer HOST[:PORT]]... [--offline] [--sync-once] [--rollback-to HEIGHT]
   [--purge-before HEIGHT]
   [--no-services] [--farmer ENDPOINT] [--reward-vote -1|0|1] [-c CONFIG]...
+  [--opencl-device INDEX|-1] [--opencl-platform NAME]
   [--p2p-listen HOST:PORT] [--rpc-listen HOST:PORT] [--http-listen HOST:PORT]
 
 Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
@@ -42,6 +43,8 @@ struct Options {
     p2p: Option<String>,
     rpc: String,
     http: String,
+    opencl_device: Option<i32>,
+    opencl_platform: Option<String>,
 }
 fn options() -> Result<Option<Options>> {
     let mut o = Options {
@@ -64,6 +67,8 @@ fn options() -> Result<Option<Options>> {
         p2p: None,
         rpc: "127.0.0.1:11331".into(),
         http: "127.0.0.1:11380".into(),
+        opencl_device: None,
+        opencl_platform: None,
     };
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
@@ -97,6 +102,8 @@ fn options() -> Result<Option<Options>> {
                     "--p2p-listen" => o.p2p = Some(value),
                     "--rpc-listen" => o.rpc = value,
                     "--http-listen" => o.http = value,
+                    "--opencl-device" => o.opencl_device = Some(value.parse()?),
+                    "--opencl-platform" => o.opencl_platform = Some(value),
                     _ => {
                         return Err(std::io::Error::other(format!(
                             "unknown option: {arg}\n{USAGE}"
@@ -181,7 +188,21 @@ fn main() -> Result<()> {
         state.purge_before(height)?;
         println!("Purged history before height {height}");
     }
-    state.enable_background_vdf()?;
+    let device = options
+        .opencl_device
+        .or(config.read("Node.opencl_device")?)
+        .unwrap_or(-1);
+    let platform = options.opencl_platform.or(config.read("opencl.platform")?);
+    let name: Option<String> = config.read("Node.opencl_device_name")?;
+    if device < -1 {
+        return Err(std::io::Error::other("--opencl-device must be -1 or a GPU index").into());
+    }
+    let accelerator = mmx_consensus::accelerator::Accelerator::configured(
+        device,
+        platform.as_deref(),
+        name.as_deref(),
+    );
+    state.enable_background_vdf_with(accelerator)?;
     let tip = state.chain().selected().tip()?.ok_or("missing tip")?;
     println!(
         "Opened {} at height {} / VDF {}, root {}",

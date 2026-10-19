@@ -472,6 +472,11 @@ pub struct HarvesterArgs {
     name: String,
     #[arg(long, default_value_t = 65536)]
     max_f1: usize,
+    /// OpenCL GPU for compressed proof computation; -1 uses the CPU.
+    #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+    opencl_device: i32,
+    #[arg(long)]
+    opencl_platform: Option<String>,
     #[arg(long, default_value_t = 2)]
     threads: usize,
     /// Log each completed challenge's proof count and lookup time.
@@ -486,6 +491,23 @@ pub fn harvester_main() -> Result<()> {
     let matches = HarvesterArgs::command().get_matches();
     let mut args = HarvesterArgs::from_arg_matches(&matches)?;
     let cfg = args.layers.load()?;
+    config::apply(
+        &matches,
+        &cfg,
+        "opencl_device",
+        "Harvester.opencl_device",
+        &mut args.opencl_device,
+    )?;
+    config::apply(
+        &matches,
+        &cfg,
+        "opencl_platform",
+        "opencl.platform",
+        &mut args.opencl_platform,
+    )?;
+    if args.opencl_device < -1 {
+        return Err(err("--opencl-device must be -1 or a GPU index"));
+    }
     config::apply(
         &matches,
         &cfg,
@@ -560,6 +582,12 @@ pub fn harvester_main() -> Result<()> {
     let mut harvester = Harvester::new(args.name, keys.into_iter().map(|k| k.0))?;
     harvester.directories = args.plot_dir.into_iter().collect();
     harvester.max_f1 = args.max_f1;
+    let device_name: Option<String> = cfg.read("Harvester.opencl_device_name")?;
+    harvester.set_accelerator(mmx_consensus::accelerator::Accelerator::configured(
+        args.opencl_device,
+        args.opencl_platform.as_deref(),
+        device_name.as_deref(),
+    ));
     if let Some(v) = cfg.read("Harvester.max_recursion")? {
         harvester.max_recursion = v;
     }

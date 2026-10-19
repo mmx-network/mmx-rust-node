@@ -19,6 +19,7 @@ pub struct Harvester {
     plots: BTreeMap<[u8; 32], Prover>,
     pub failures: Vec<(PathBuf, String)>,
     id: [u8; 32],
+    accelerator: Option<std::sync::Arc<mmx_consensus::accelerator::Accelerator>>,
 }
 impl Harvester {
     pub fn new(name: String, farmer_keys: impl IntoIterator<Item = [u8; 33]>) -> Result<Self> {
@@ -39,10 +40,20 @@ impl Harvester {
             plots: BTreeMap::new(),
             failures: Vec::new(),
             id,
+            accelerator: None,
         })
     }
     pub fn plots(&self) -> &BTreeMap<[u8; 32], Prover> {
         &self.plots
+    }
+    pub fn set_accelerator(
+        &mut self,
+        accelerator: Option<std::sync::Arc<mmx_consensus::accelerator::Accelerator>>,
+    ) {
+        for plot in self.plots.values_mut() {
+            plot.set_accelerator(accelerator.clone());
+        }
+        self.accelerator = accelerator;
     }
     fn files(&self, path: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
         if depth > self.max_recursion
@@ -93,7 +104,8 @@ impl Harvester {
                 None => Prover::open(&path),
             };
             match candidate {
-                Ok(plot) => {
+                Ok(mut plot) => {
+                    plot.set_accelerator(self.accelerator.clone());
                     if !self.farmer_keys.contains(&plot.header.farmer_key.0) {
                         failures.push((path, "unknown farmer key".into()));
                         continue;

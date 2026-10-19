@@ -1038,17 +1038,36 @@ fn continuing_native_stream_reuses_type_codes_and_preserves_tuple_bytes() {
 
 #[test]
 fn farmer_response_waits_for_verified_future_vdf_then_live_block_uses_the_same_evidence() {
-    live_vdf_evidence(false);
+    live_vdf_evidence(false, false);
 }
 #[test]
 fn background_vdf_releases_farmer_response_and_authenticates_the_live_block() {
-    live_vdf_evidence(true);
+    live_vdf_evidence(true, false);
 }
-fn live_vdf_evidence(background: bool) {
+#[test]
+fn opencl_vdf_releases_farmer_response_and_authenticates_the_live_block() {
+    if std::env::var("MMX_OPENCL_TESTS").as_deref() == Ok("1") {
+        live_vdf_evidence(true, true);
+    }
+}
+fn live_vdf_evidence(background: bool, gpu: bool) {
     let (network, g, steps, _) = fixture();
     let n = node(&network);
     if background {
-        n.lock().unwrap().enable_background_vdf().unwrap();
+        let accelerator = gpu.then(|| {
+            std::sync::Arc::new(
+                mmx_consensus::accelerator::Accelerator::new(
+                    0,
+                    None,
+                    std::env::var("MMX_OPENCL_ALL_DEVICES").as_deref() != Ok("1"),
+                )
+                .unwrap(),
+            )
+        });
+        n.lock()
+            .unwrap()
+            .enable_background_vdf_with(accelerator)
+            .unwrap();
     }
     let row: Value = include_str!("../../mmx-consensus/tests/fixtures/responses.jsonl")
         .lines()
