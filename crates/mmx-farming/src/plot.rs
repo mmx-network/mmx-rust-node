@@ -15,6 +15,62 @@ use std::{
 use vnx::binary::Reader;
 
 const MAX_PARK: usize = 4 * 1024 * 1024;
+// Locate the exact lower bound around a density estimate, widening the bracket
+// exponentially if necessary. Typical plots need only nearby header reads;
+// uneven distributions and repeated Y values retain binary-search correctness.
+fn lower_bound_near(
+    count: u64,
+    guess: u64,
+    target: u64,
+    mut read: impl FnMut(u64) -> Result<u64>,
+) -> Result<u64> {
+    if count == 0 {
+        return Ok(0);
+    }
+    let guess = guess.min(count - 1);
+    let (mut lo, mut hi);
+    let mut step = 1u64;
+    if read(guess)? >= target {
+        hi = guess;
+        loop {
+            if hi == 0 {
+                lo = 0;
+                break;
+            }
+            let probe = guess.saturating_sub(step);
+            if read(probe)? < target {
+                lo = probe + 1;
+                break;
+            }
+            hi = probe;
+            step = step.saturating_mul(2);
+        }
+    } else {
+        lo = guess + 1;
+        loop {
+            if lo == count {
+                hi = count;
+                break;
+            }
+            let probe = guess.saturating_add(step).min(count - 1);
+            if read(probe)? >= target {
+                hi = probe;
+                break;
+            }
+            lo = probe + 1;
+            step = step.saturating_mul(2);
+        }
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if read(mid)? < target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
+}
 #[derive(Clone, Debug)]
 pub struct Quality {
     pub index: u64,
@@ -218,24 +274,21 @@ impl Prover {
         let parks = h.num_entries_y.div_ceil(h.park_size_y as u64);
         // lower_bound(first Y >= begin), then include the preceding park. This
         // preserves matches that straddle parks, including repeated Y values.
-        let (mut lo, mut hi) = (0, parks);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let y = read_bits(
+        // Native Prover predicts the park from the uniform Y density. Bracket
+        // around that position rather than seeking across the entire plot.
+        let guess = ((u128::from(begin) * u128::from(h.num_entries_y)) >> h.ksize) as u64
+            / h.park_size_y as u64;
+        let lo = lower_bound_near(parks, guess, begin, |park| {
+            read_bits(
                 &self.read(
                     &file,
-                    Self::offset(h.table_offset_y, mid, h.park_bytes_y)?,
+                    Self::offset(h.table_offset_y, park, h.park_bytes_y)?,
                     4,
                 )?,
                 0,
                 h.ksize as usize,
-            )?;
-            if y < begin {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
+            )
+        })?;
         let mut result = Vec::new();
         let mut meta_park: Option<(u64, Vec<u8>)> = None;
         for park in lo.saturating_sub(1)..parks {
@@ -385,5 +438,48 @@ impl Prover {
             meta: entry.meta,
             proof: entry.proof,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn predicted_park_search_preserves_exact_lower_bounds_from_any_guess() {
+        for values in [
+            vec![],
+            vec![3],
+            vec![3; 50],
+            (0..200).map(|i| i / 7).collect(),
+        ] {
+            for target in 0..32 {
+                let expected = values.partition_point(|y| *y < target) as u64;
+                for guess in 0..=values.len() {
+                    assert_eq!(
+                        lower_bound_near(values.len() as u64, guess as u64, target, |i| {
+                            Ok(values[i as usize])
+                        })
+                        .unwrap(),
+                        expected,
+                        "target {target}, guess {guess}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accurate_density_estimates_avoid_global_random_seeks() {
+        let mut reads = 0;
+        assert_eq!(
+            lower_bound_near(1_000_000, 450_000, 900_000, |i| {
+                reads += 1;
+                Ok(i * 2)
+            })
+            .unwrap(),
+            450_000
+        );
+        assert_eq!(reads, 2);
     }
 }
