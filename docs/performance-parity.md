@@ -176,6 +176,11 @@ idle refill, independent peers, withheld/late/unrelated receipts and map bounds;
 a native socket fixture checks local versus foreign admission. This establishes
 transport behavior, not a whole-network bandwidth benchmark.
 
+The lazy upload refill clock is monotonic across contending sender threads.
+An earlier captured timestamp arriving after a later admission cannot roll the
+clock backward and refill the same interval twice. A controlled out-of-order
+two-peer regression checks the exact remaining shared credits.
+
 Peer framing now follows C++ `vnx.addons.MsgServer::on_read`: the production
 connection rejects compressed sizes above `Router.max_msg_size` (default 8 MiB)
 from the header before reading or allocating the body. Incoming and outgoing

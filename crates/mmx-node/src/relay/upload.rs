@@ -88,7 +88,9 @@ impl Budget {
     ) -> bool {
         let seconds = now.saturating_duration_since(self.updated).as_secs_f64();
         self.credits = (self.credits + self.capacity * seconds).min(self.capacity);
-        self.updated = now;
+        // Senders capture time before contending for the shared budget lock.
+        // Never move the refill clock backward when they acquire it out of order.
+        self.updated = self.updated.max(now);
         peer.decay(now);
         // Native checks existing debt before adding this transaction, allowing
         // one large transaction to cross the threshold, then waiting for notes.
@@ -184,6 +186,25 @@ mod tests {
             0.9
         ));
         assert_eq!(budget.credits, 49.);
+    }
+    #[test]
+    fn out_of_order_sender_clocks_do_not_refill_the_same_interval_twice() {
+        let at = Instant::now();
+        let mut budget = Budget::new(&params(), 2., 0.1, at).unwrap();
+        let mut a = peer(at);
+        let mut b = peer(at);
+        let now = at + Duration::from_secs(1);
+        assert!(budget.admit(&mut a, [1; 32], 20_000_000, now, 0.));
+        assert!(budget.admit(
+            &mut b,
+            [2; 32],
+            5_000_000,
+            at + Duration::from_millis(500),
+            0.
+        ));
+        assert!(budget.admit(&mut b, [3; 32], 5_000_000, now, 0.));
+        assert_eq!(budget.updated, now);
+        assert_eq!(budget.credits, 20.);
     }
     #[test]
     fn zero_upload_preserves_native_unlimited_behavior_and_zero_pending_stops_forwarding() {
