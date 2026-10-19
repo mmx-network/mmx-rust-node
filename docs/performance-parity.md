@@ -139,3 +139,11 @@ cache bounds, rollback/reacceptance and a socket barrier proving known proofs,
 blocks and votes stay out of the inbox. Native first-seen envelope deduplication,
 per-peer/global transaction cost accounting, earned early relay, staged fanout
 and full inbound identity/role lifecycle remain separate work.
+
+Purged-peer identity: legacy C++ Router exposes the genesis hash through
+`get_block_hash(0)`. A purged Rust node intentionally returns no historical hash
+there, so authenticated qualification now falls back to the constant
+`get_genesis_hash` only when height zero is absent. That cached identity read is
+allowed on the peer surface. Unpurged C++ peers use the unchanged path, and a
+native temporary-database/socket test proves purged history stays unavailable
+while the peer authenticates and rejects the wrong network.

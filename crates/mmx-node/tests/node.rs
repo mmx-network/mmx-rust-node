@@ -2950,3 +2950,55 @@ fn header_and_content_hash_rpcs_do_not_read_transaction_payloads() {
         ]
     );
 }
+
+#[test]
+fn purged_peer_authentication_uses_genesis_identity_without_revealing_history() {
+    let (network, g, steps, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let serving = Arc::new(Mutex::new(Node::open(dir.path(), &network).unwrap()));
+    sync::synchronize(
+        &mut MemorySource {
+            blocks: vec![
+                wire(&g["block"]),
+                wire(&steps[0]["block"]),
+                wire(&steps[1]["block"]),
+            ],
+            wrong: false,
+        },
+        &serving,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    serving.lock().unwrap().purge_before(1).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", serving).unwrap();
+    let mut receiving_chain = ForkChain::memory(network.params.clone());
+    receiving_chain.initialize(&network.assets).unwrap();
+    let receiving = Arc::new(Mutex::new(
+        Node::from_chain(receiving_chain, SigningKey::from_slice(&[2; 32]).unwrap()).unwrap(),
+    ));
+    let own: Hash = receiving
+        .lock()
+        .unwrap()
+        .call(&record("mmx.Router.get_id", []))
+        .unwrap()
+        .field("_ret_0")
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let mut client = peer::Client::connect(&server.address().to_string(), receiving).unwrap();
+    assert_eq!(client.hash_at(0).unwrap(), None);
+    assert_eq!(client.block_at(0).unwrap(), None);
+    let genesis = hash(&wire(&g["block"]), "hash").unwrap();
+    let (id, height) = client.qualify(genesis, own).unwrap();
+    assert_ne!(id, own);
+    assert_eq!(height, 2);
+    assert!(client.qualify([255; 32], own).is_err());
+    assert_eq!(client.hash_at(0).unwrap(), None);
+    assert_eq!(client.block_at(0).unwrap(), None);
+    assert!(client.block_at(1).unwrap().is_some());
+    drop(client);
+    server.shutdown();
+}

@@ -288,3 +288,10 @@ ignored test), strict Clippy, formatting, both CLI suites (28 tests each) and
 the local optimized node build. The header and harvester-refill checkpoints
 also passed GitHub Actions, including software OpenCL conformance and both CLI
 suites.
+
+Purged-peer follow-up: qualification can use the immutable genesis identity when
+height-zero history is unavailable. The peer RPC allowlist exports that cached
+constant. Legacy C++ peers still use `get_block_hash(0)` without an extra call;
+wrong-genesis/self/identity checks remain mandatory. A native DB/socket test
+purges history, qualifies successfully and verifies old hashes/bodies stay
+hidden before and after qualification.

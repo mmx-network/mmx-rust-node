@@ -366,6 +366,7 @@ fn respond_with(
                 | "mmx.Router.get_peers"
                 | "mmx.Node.get_height"
                 | "mmx.Node.get_synced_height"
+                | "mmx.Node.get_genesis_hash"
                 | "mmx.Node.get_block"
                 | "mmx.Node.get_block_at"
                 | "mmx.Node.get_block_hash"
@@ -555,7 +556,17 @@ impl Client {
         {
             return Err(error("peer identity verification failed"));
         }
-        if self.hash_at(0)? != Some(genesis) {
+        let peer_genesis = match self.hash_at(0)? {
+            Some(hash) => hash,
+            // A purged Rust peer hides height-zero history, but still exports
+            // its immutable network identity. Legacy C++ peers take the first
+            // path and need no additional method or compatibility exception.
+            None => self
+                .call(record("mmx.Node.get_genesis_hash", []))?
+                .bytes()?
+                .try_into()?,
+        };
+        if peer_genesis != genesis {
             return Err(error("peer genesis mismatch"));
         }
         let height = self
