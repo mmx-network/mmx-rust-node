@@ -1,7 +1,7 @@
 # C++ port audit, 2026-10-19
 
 Reference: `mmx-node` at `5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2`;
-VNX submodule at `beaddc66d23f1f010661f96d109d3e60d3910d60`.
+VNX submodule at `35be1ac0b4966e9e4686c87961e683a408b9ec2c`.
 This is a subsystem comparison of the implemented Rust runtime against the C++
 execution paths. Native fixtures establish the cases they exercise; they do not
 establish complete consensus, security or performance equivalence. Unimplemented
@@ -318,3 +318,8 @@ Strict Clippy, formatting and the local optimized node build pass. Control-only
 receipt traffic refreshes the native receive-idle clock while absolute frame/RPC
 deadlines remain unchanged. The preceding receipt and purged-peer checkpoints
 also passed GitHub Actions.
+
+VNX follow-up: the submodule advances to `35be1ac`, adding serialization and
+bytecode allocation/recursion/schema fuzz campaigns and the nightly array-chunk
+fix. The runtime crate tree is identical to `beaddc6`; this update adds test
+coverage without changing node wire or execution behavior.
