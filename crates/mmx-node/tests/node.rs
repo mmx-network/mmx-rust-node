@@ -2355,6 +2355,51 @@ fn malformed_vote_does_not_poison_replay_cache_and_replays_do_not_grow_pending_w
 }
 
 #[test]
+fn frozen_proof_context_rechecks_authentication_root_and_exact_height() {
+    use mmx_consensus::response;
+    let (network, genesis, steps, _) = fixture();
+    let n = ready_farming_node(&network, &genesis, &steps[0]);
+    let node = n.lock().unwrap();
+    let tip = node.chain().selected().tip().unwrap().unwrap();
+    let record = native_farming_response();
+    let height = record.field("vdf_height").unwrap().uint().unwrap() as u32;
+    let context =
+        response::Verification::new(node.chain(), &network.params, &tip, 0, height, 1000).unwrap();
+    let direct = response::verify(&record, &network.params, node.chain(), &tip, 0, 1000).unwrap();
+    assert_eq!(context.verify(&record).unwrap().hash(), direct.hash());
+    let different =
+        response::Verification::new(node.chain(), &network.params, &tip, 0, height + 1, 1000)
+            .unwrap();
+    assert_eq!(
+        different.verify(&record).unwrap_err().to_string(),
+        "proof challenge context height mismatch"
+    );
+    let old =
+        response::Verification::new(node.chain(), &network.params, &tip, height, height, 1000)
+            .unwrap();
+    assert_eq!(
+        old.verify(&record).unwrap_err().to_string(),
+        "proof too old"
+    );
+    let mut forged = record.clone();
+    forged
+        .fields
+        .insert("farmer_sig".into(), V::Bytes(vec![0; 64]));
+    forged.fields.insert(
+        "content_hash".into(),
+        V::Bytes(response::content_hash(&forged).unwrap().to_vec()),
+    );
+    assert!(response::is_valid(&forged).unwrap());
+    assert!(context.verify(&forged).is_err());
+    assert_eq!(
+        context.verify(&forged).unwrap_err().to_string(),
+        response::verify(&forged, &network.params, node.chain(), &tip, 0, 1000)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[test]
 fn stronger_native_peer_proof_vetoes_full_block_planning_and_an_inflight_signature() {
     use mmx_farming::farmer::Farmer;
     use mmx_wallet::Address;
@@ -2391,11 +2436,46 @@ fn stronger_native_peer_proof_vetoes_full_block_planning_and_an_inflight_signatu
         };
         let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
         let mut sender = peer::Connection::connect(&server.address().to_string()).unwrap();
+        let mut queued = 1;
+        if !during_signing {
+            // Place twenty authenticated but invalid space proofs before the
+            // stronger proof in the queue's content-hash order. Production must
+            // verify the entire eligible batch, not stop at the old 16 limit.
+            let strong_content = hash(&strong, "content_hash").unwrap();
+            for score in 1..1000 {
+                let mut invalid = weak.clone();
+                let mut proof = invalid.field("proof").unwrap().record().unwrap().clone();
+                proof.fields.insert("score".into(), V::Uint(score + 1000));
+                invalid.fields.insert("proof".into(), V::Record(proof));
+                let id = invalid.calc_hash(false, 0).unwrap();
+                invalid.fields.insert("hash".into(), V::Bytes(id.to_vec()));
+                invalid.fields.insert(
+                    "farmer_sig".into(),
+                    V::Bytes(farmer_scalar().sign(&id).unwrap().to_vec()),
+                );
+                let content = mmx_consensus::response::content_hash(&invalid).unwrap();
+                invalid
+                    .fields
+                    .insert("content_hash".into(), V::Bytes(content.to_vec()));
+                if content < strong_content {
+                    assert!(mmx_consensus::response::is_valid(&invalid).unwrap());
+                    mmx_consensus::response::authenticate(&invalid).unwrap();
+                    sender.send(&invalid).unwrap();
+                    queued += 1;
+                    if queued == 21 {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(queued, 21);
+        }
         sender.send(&strong).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#).unwrap()
             ["result"]["queued_messages"]
-            == 0
+            .as_u64()
+            .unwrap()
+            < queued
         {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));

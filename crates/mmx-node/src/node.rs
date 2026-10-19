@@ -13,6 +13,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Write},
     path::Path,
+    sync::Arc,
     time::Instant,
 };
 
@@ -623,45 +624,68 @@ impl Node {
         let height = self.vdf_peak()?.0;
         let mut pending = BTreeMap::new();
         self.response_bytes = 0;
-        let mut checks = 0;
+        let mut contexts = BTreeMap::new();
+        let mut jobs = Vec::new();
         for (id, (record, received, size)) in std::mem::take(&mut self.responses) {
             if now.wrapping_sub(received) > params.block_interval_ms.wrapping_mul(10) {
                 continue;
             }
-            if number(&record, "vdf_height")? >= height.wrapping_add(params.challenge_delay)
-                || checks >= 16
-            {
+            let proof_height = number(&record, "vdf_height")?;
+            if proof_height <= root.vdf_height {
+                eprintln!("Rejected farmer proof: proof too old");
+                continue;
+            }
+            if proof_height >= height.wrapping_add(params.challenge_delay) {
                 pending.insert(id, (record, received, size));
                 self.response_bytes += size;
                 continue;
             }
-            checks += 1;
-            match mmx_consensus::response::verify(
-                &record,
-                &params,
-                &self.chain,
-                &tip,
-                root.vdf_height,
-                1000,
-            ) {
-                Ok(proof) => {
-                    self.chain.observe_proof(&proof);
-                    self.remember_proof(&record, &proof)?;
-                    // Native verify() publishes node.verified_proof; Router
-                    // relays it before the VDF makes a full block possible.
-                    // These local fields are deliberately outside the hash.
-                    let mut public = record.clone();
-                    public
-                        .fields
-                        .insert("harvester".into(), Value::String(vec![]));
-                    public.fields.insert("farmer_addr".into(), Value::Uint(0));
-                    self.broadcast(&public)?;
-                }
+            // Envelopes have already passed validity/authentication at ingress.
+            // Resolve selected history once per height before starting workers;
+            // neither their CPU work nor their result queue performs ledger I/O.
+            let context = contexts.entry(proof_height).or_insert_with(|| {
+                mmx_consensus::response::Verification::new(
+                    &self.chain,
+                    &params,
+                    &tip,
+                    root.vdf_height,
+                    proof_height,
+                    1000,
+                )
+                .map(Arc::new)
+            });
+            match context {
+                Ok(context) => jobs.push((record, context.clone())),
                 Err(e) => eprintln!("Rejected farmer proof: {e}"),
             }
         }
         self.responses = pending;
-        Ok(())
+        crate::proof_batch::complete(
+            jobs,
+            |(record, context)| {
+                let result = context.verify(&record);
+                (record, result)
+            },
+            |(record, result)| {
+                match result {
+                    Ok(proof) => {
+                        self.chain.observe_proof(&proof);
+                        self.remember_proof(&record, &proof)?;
+                        // Native verify() publishes node.verified_proof; Router
+                        // relays it before the VDF makes a full block possible.
+                        // These local fields are deliberately outside the hash.
+                        let mut public = record.clone();
+                        public
+                            .fields
+                            .insert("harvester".into(), Value::String(vec![]));
+                        public.fields.insert("farmer_addr".into(), Value::Uint(0));
+                        self.broadcast(&public)?;
+                    }
+                    Err(e) => eprintln!("Rejected farmer proof: {e}"),
+                }
+                Ok(())
+            },
+        )
     }
     pub fn receive(&mut self, message: &Record) -> Result<()> {
         if self.admit_message(message)? {

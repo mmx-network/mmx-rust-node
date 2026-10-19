@@ -95,6 +95,11 @@ pub fn verify<S: HeaderSource>(
     root_vdf_height: u32,
     max_history: u32,
 ) -> Result<VerifiedProof> {
+    let height = verify_envelope(record, root_vdf_height)?;
+    let (challenge, diff) = challenge(source, params, peak, height, max_history)?;
+    verify_proof(record, params, height, challenge, diff)
+}
+fn verify_envelope(record: &Record, root_vdf_height: u32) -> Result<u32> {
     if !is_valid(record)? {
         return Err(Error::Invalid("invalid response"));
     }
@@ -103,7 +108,15 @@ pub fn verify<S: HeaderSource>(
     if height <= root_vdf_height {
         return Err(Error::Invalid("proof too old"));
     }
-    let (challenge, diff) = challenge(source, params, peak, height, max_history)?;
+    Ok(height)
+}
+fn verify_proof(
+    record: &Record,
+    params: &mmx::ChainParams,
+    height: u32,
+    challenge: Hash,
+    diff: u64,
+) -> Result<VerifiedProof> {
     Ok(proof::verify_evidence(
         record.field("proof")?.record()?,
         params,
@@ -111,4 +124,48 @@ pub fn verify<S: HeaderSource>(
         diff,
         height,
     )?)
+}
+
+/// Frozen challenge lookup for a batch at one selected-chain height. Resolve
+/// once on the chain owner, then share it across CPU workers without database
+/// reads. This is not verified proof evidence: each response still passes all
+/// envelope, signature, height and proof-of-space checks.
+pub struct Verification {
+    params: mmx::ChainParams,
+    root: u32,
+    height: u32,
+    challenge: Hash,
+    difficulty: u64,
+}
+impl Verification {
+    pub fn new<S: HeaderSource>(
+        source: &S,
+        params: &mmx::ChainParams,
+        peak: &mmx::BlockHeader,
+        root: u32,
+        height: u32,
+        max_history: u32,
+    ) -> Result<Self> {
+        let (challenge, difficulty) = challenge(source, params, peak, height, max_history)?;
+        Ok(Self {
+            params: params.clone(),
+            root,
+            height,
+            challenge,
+            difficulty,
+        })
+    }
+    pub fn verify(&self, record: &Record) -> Result<VerifiedProof> {
+        let height = verify_envelope(record, self.root)?;
+        if height != self.height {
+            return Err(Error::Invalid("proof challenge context height mismatch"));
+        }
+        verify_proof(
+            record,
+            &self.params,
+            height,
+            self.challenge,
+            self.difficulty,
+        )
+    }
 }

@@ -148,6 +148,12 @@ no live-ledger or plot scan is part of validation.
    and authenticated incoming lifecycle. Current bounds and verified-only relay are not equivalent to
    native per-peer fairness. Preserve transport deduplication separately from
    consensus acceptance; a claimed identity/height never earns relay credit.
+   ProofResponse CPU verification now runs all eligible work in parallel,
+   resolving history once per height and returning completed results immediately.
+   Native's full pre-production barrier is retained; a queued stronger proof
+   beyond the former 16-response cutoff now vetoes production in the regression.
+   The 4,096-response / 8 MiB queue and a 16-result completion channel bound work
+   and buffering. Signature, root, height and space-work checks remain required.
 3. **Streaming balance RPC reads and snapshot validation completed.**
    Following C++ `Node_api.cpp` balance queries and `table.h::find_range`, the
    native store now merges one visible key per input and resolves only winning

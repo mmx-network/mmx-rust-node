@@ -186,3 +186,22 @@ record larger than 8 MiB is still accepted as in C++. Local configuration above
 a body, cover both byte orders and a configured lower bound, and decode a valid
 record exceeding 8 MiB raw. Failed output encoding preserves connection schemas
 and sends no batch prefix. No ledger or plot reads are involved.
+
+ProofResponse verification now follows C++ `Node::verify_proofs` and
+`Node::verify(ProofResponse)`: all eligible, unexpired proofs run through the
+shared Rayon CPU budget, and the owner consumes completed results immediately.
+The full batch joins before block planning or accepting an asynchronous signature.
+This removes the former 16-response cutoff that could postpone a queued stronger
+proof. The existing 4,096-response / 8 MiB inbound bounds remain. Immutable
+challenge/difficulty contexts resolve selected history once per distinct height;
+workers perform no database reads, and still check every envelope, signature,
+root boundary, exact height and space proof. A 16-result channel provides
+backpressure without duplicating the whole queue. One temporary coordinator
+dispatches work; the owner applies results without a worker/ledger mutex.
+Embedded callers already inside Rayon use sequential outer dispatch to avoid
+pool starvation; nested space-proof computation still uses their pool.
+Tests hold one job while a later completion is consumed, join all work after an
+owner error, exercise a nested single-worker pool, reject frozen-context misuse,
+and put twenty authenticated invalid proofs before the valid stronger proof in
+the native production-veto fixture. These establish scheduling and safety;
+representative proof-batch throughput comparisons remain open.
