@@ -107,6 +107,27 @@ fn enumerate(
             )?;
         }
         for d in devices {
+            if gpu_only {
+                let mut device_type = 0u64;
+                // SAFETY: CL_DEVICE_TYPE is a cl_device_type bitfield (u64).
+                // Check the returned device itself as well as the discovery
+                // filter; CPU/accelerator ICDs must never enter a GPU-only list.
+                unsafe {
+                    check(
+                        (api.clGetDeviceInfo)(
+                            d,
+                            0x1000,
+                            size_of::<u64>(),
+                            (&mut device_type as *mut u64).cast(),
+                            ptr::null_mut(),
+                        ),
+                        "query device type",
+                    )?;
+                }
+                if device_type & (1 << 2) == 0 {
+                    continue;
+                }
+            }
             out.push((
                 DeviceInfo {
                     index: out.len(),
