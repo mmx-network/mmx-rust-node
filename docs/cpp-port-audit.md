@@ -118,8 +118,17 @@ no live-ledger or plot scan is part of validation.
    publications filters already-processed gossip before inbound queue admission.
    Receipt claims never seed this cache; payload eviction retains known IDs,
    duplicates do not refresh FIFO age, and explicit rollback resets it so work
-   can be accepted again. Native first-seen envelope deduplication before full
-   verification remains a distinct follow-up.
+   can be accepted again. First-seen envelope deduplication now precedes ledger
+   and space-work verification too. A separate 100,000-ID FIFO accepts each
+   authenticated envelope only once across simultaneous decoder workers. Body
+   commitments and native envelope signatures are checked before inserting a
+   new ID; unlike native's earlier insertion for some classes, a malformed or
+   unsigned claim cannot poison the cache. This cache never grants verified
+   status or relay credit, and explicit rewind resets it. Invalid envelopes
+   close their peer, independently of another peer's valid work. Queue eviction
+   does not reset first-seen age, matching native transport suppression.
+   Production's longer-lived verified cache now also prevents old VDFs from
+   being rebuilt and republished when the 128-payload relay window evicts them.
    Production frames now honor native `Router.max_msg_size` (default 8 MiB of
    compressed data), rejecting oversized headers before body reads/allocation.
    Rust retains its separate 64 MiB decoded limit; compressible records above

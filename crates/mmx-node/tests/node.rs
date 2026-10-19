@@ -1151,13 +1151,24 @@ fn peer_broadcast_io_continues_while_the_ledger_is_locked_then_validates_on_tick
         let (socket, _) = listener.accept().unwrap();
         let mut connection = peer::Connection::new(socket).unwrap();
         connection.send(&invalid).unwrap();
+        drop(connection);
+        let (socket, _) = listener.accept().unwrap();
+        let mut connection = peer::Connection::new(socket).unwrap();
         connection.send(&proof).unwrap();
     });
+    let mut bad_client = peer::Client::connect(&address.to_string(), n.clone()).unwrap();
     let mut client = peer::Client::connect(&address.to_string(), n.clone()).unwrap();
     let locked = n.lock().unwrap();
     let (done, complete) = mpsc::channel();
     let receiving = thread::spawn(move || {
-        client.poll().unwrap();
+        // Native rejects the malformed envelope at the peer boundary, without
+        // waiting for the ledger or affecting another peer's valid work.
+        assert!(bad_client
+            .poll()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid VDF"));
+        drop(bad_client);
         client.poll().unwrap();
         done.send(()).unwrap();
     });
@@ -2256,7 +2267,7 @@ fn foreign_live_blocks_work_and_accepted_votes_relay_after_verification_without_
     for message in [&vote, &vote, &unauthorized] {
         sender.send(message).unwrap();
     }
-    wait(3);
+    wait(2);
     n.lock().unwrap().tick().unwrap();
     assert_eq!(n.lock().unwrap().chain().pending_votes(), 2);
     assert!(observer

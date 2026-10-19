@@ -46,6 +46,8 @@ struct RelayState {
     entries: [RelayEntries; 2],
     ids: BTreeMap<[u8; 32], (usize, u64)>,
     verified: Seen,
+    envelopes: Seen,
+    params: Option<Arc<mmx_types::mmx::ChainParams>>,
     members: BTreeSet<u64>,
     next_member: u64,
     target: Duration,
@@ -58,6 +60,8 @@ impl Default for RelayState {
             entries: Default::default(),
             ids: Default::default(),
             verified: Default::default(),
+            envelopes: Default::default(),
+            params: None,
             members: Default::default(),
             next_member: 0,
             target: Duration::from_secs(2),
@@ -145,20 +149,96 @@ impl Relay {
         let Ok(id) = hash(record, "content_hash") else {
             return Ok(false);
         };
+        self.knows_hash(&id)
+    }
+    pub(crate) fn knows_hash(&self, id: &[u8; 32]) -> Result<bool> {
         Ok(self
             .state
             .lock()
             .map_err(|_| error("transaction relay poisoned"))?
             .verified
             .ids
-            .contains(&id))
+            .contains(id))
     }
     pub(crate) fn reset_verified(&self) -> Result<()> {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| error("transaction relay poisoned"))?
-            .verified = Seen::default();
+            .map_err(|_| error("transaction relay poisoned"))?;
+        state.verified = Seen::default();
+        state.envelopes = Seen::default();
         Ok(())
+    }
+    /// Native receive_msg_hash deduplication precedes expensive ledger/space
+    /// work. Authenticate commitments before remembering a new ID, so a fake
+    /// body or unsigned claim cannot suppress the real envelope from a peer.
+    pub(crate) fn admit_gossip(
+        &self,
+        record: Record,
+        size: usize,
+        inbox: &crate::inbox::Inbox,
+    ) -> Result<()> {
+        if !matches!(
+            record.name.as_str(),
+            "mmx.Block"
+                | "mmx.ProofOfTime"
+                | "mmx.ProofResponse"
+                | "mmx.ValidatorVote"
+                | "mmx.Transaction"
+        ) {
+            return Ok(());
+        }
+        let id = hash(&record, "content_hash")?;
+        let params = {
+            let state = self.state.lock().map_err(|_| error("relay poisoned"))?;
+            if state.verified.ids.contains(&id) || state.envelopes.ids.contains(&id) {
+                return Ok(());
+            }
+            state
+                .params
+                .clone()
+                .ok_or_else(|| error("missing peer chain parameters"))?
+        };
+        match record.name.as_str() {
+            "mmx.Block" => mmx_execution::block::prevalidate(&record, &params)?,
+            "mmx.ProofOfTime" => {
+                if !mmx_consensus::vdf::is_valid(&record)? {
+                    return Err(error("invalid VDF envelope"));
+                }
+                mmx_consensus::vdf::authenticate(&record)?;
+            }
+            "mmx.ProofResponse" => {
+                if !mmx_consensus::response::is_valid(&record)? {
+                    return Err(error("invalid proof envelope"));
+                }
+                mmx_consensus::response::authenticate(&record)?;
+            }
+            "mmx.ValidatorVote" => {
+                if !mmx_consensus::vote::is_valid(&record)? {
+                    return Err(error("invalid vote envelope"));
+                }
+            }
+            "mmx.Transaction" => {
+                if record.field("exec_result")?.optional()?.is_some()
+                    || !record.is_valid(&params.as_ref().into())?
+                {
+                    return Err(error("invalid transaction envelope"));
+                }
+            }
+            _ => unreachable!(),
+        }
+        {
+            let mut state = self.state.lock().map_err(|_| error("relay poisoned"))?;
+            // Two decoder workers may authenticate the same first publication
+            // concurrently. Only one can insert and hand it to the owner.
+            if state.verified.ids.contains(&id) || state.envelopes.ids.contains(&id) {
+                return Ok(());
+            }
+            state.envelopes.remember(id, MAX_VERIFIED_IDS);
+        }
+        // Queue admission never upgrades an envelope to verified work, nor
+        // earns any relay credit. Native first-seen age is not refreshed.
+        inbox.submit(record, size)
     }
     pub(crate) fn remove(&self, id: &[u8; 32]) -> Result<()> {
         let mut state = self
@@ -187,10 +267,9 @@ impl Relay {
         max_pending: f64,
     ) -> Result<()> {
         let budget = upload::Budget::new(params, max_upload, max_pending, Instant::now())?;
-        self.state
-            .lock()
-            .map_err(|_| error("relay poisoned"))?
-            .upload = Some(budget);
+        let mut state = self.state.lock().map_err(|_| error("relay poisoned"))?;
+        state.upload = Some(budget);
+        state.params = Some(Arc::new(params.clone()));
         Ok(())
     }
     pub(crate) fn set_compressed_limit(&self, limit: usize) -> Result<()> {
@@ -486,6 +565,100 @@ impl RelayPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn native_envelopes() -> (mmx_types::mmx::ChainParams, Vec<Record>) {
+        use mmx_types::VnxType;
+        use vnx::serde_json::{self, Value as Json};
+        let rows: Vec<Json> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let raw = |v: &Json| vnx::util::from_hex_string(v.as_str().unwrap()).unwrap();
+        let genesis = rows.iter().find(|r| r["name"] == "synthetic").unwrap();
+        let params = mmx_types::mmx::ChainParams::decode(&raw(&genesis["params"])).unwrap();
+        let steps = &rows.iter().find(|r| r["kind"] == "chain").unwrap()["steps"];
+        let block = Record::decode(&raw(&steps[1]["block"])).unwrap();
+        let vdf = Record::decode(&raw(&steps[0]["vdf"])).unwrap();
+        let row: Json = include_str!("../../mmx-consensus/tests/fixtures/responses.jsonl")
+            .lines()
+            .map(|s| serde_json::from_str::<Json>(s).unwrap())
+            .find(|r| r["name"] == "extensions1_0")
+            .unwrap();
+        let proof = Record::decode(&raw(&row["wire"])).unwrap();
+        let mut tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+            .record()
+            .unwrap()
+            .clone();
+        tx.fields
+            .insert("exec_result".into(), Value::Optional(None));
+        tx.fields.insert(
+            "static_cost".into(),
+            Value::Uint(tx.calc_cost(&(&params).into()).unwrap()),
+        );
+        tx.fields
+            .insert("content_hash".into(), bytes(tx.calc_hash(true, 0).unwrap()));
+        (params, vec![block, vdf, proof, tx])
+    }
+    #[test]
+    fn first_seen_cache_authenticates_commitments_without_promoting_or_poisoning_work() {
+        let (params, records) = native_envelopes();
+        for native in records {
+            let relay = Relay::default();
+            relay.configure_upload(&params, 0., 0.1).unwrap();
+            let inbox = crate::inbox::Inbox::default();
+            let mut forged = native.clone();
+            match native.name.as_str() {
+                "mmx.Block" => {
+                    let mut txs = native.field("tx_list").unwrap().seq().unwrap().to_vec();
+                    let mut tx = txs[0].record().unwrap().clone();
+                    tx.fields.insert("nonce".into(), Value::Uint(0));
+                    txs[0] = Value::Record(tx);
+                    forged.fields.insert("tx_list".into(), Value::Sequence(txs));
+                }
+                "mmx.ProofOfTime" => {
+                    forged.fields.insert("timelord_sig".into(), bytes([0; 64]));
+                }
+                "mmx.ProofResponse" => {
+                    forged.fields.insert("farmer_sig".into(), bytes([0; 64]));
+                }
+                "mmx.Transaction" => {
+                    forged.fields.insert("nonce".into(), Value::Uint(0));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                relay.admit_gossip(forged, 100, &inbox).is_err(),
+                "{}",
+                native.name
+            );
+            relay.admit_gossip(native.clone(), 100, &inbox).unwrap();
+            relay.admit_gossip(native.clone(), 100, &inbox).unwrap();
+            assert_eq!(inbox.stats().unwrap().messages, 1);
+            assert!(!relay.knows(&native).unwrap());
+            assert!(relay.since(0, 0).unwrap().1.is_empty());
+            relay.reset_verified().unwrap();
+            relay.admit_gossip(native, 100, &inbox).unwrap();
+            assert_eq!(inbox.stats().unwrap().messages, 2);
+        }
+    }
+    #[test]
+    fn simultaneous_connections_enqueue_only_one_authenticated_first_envelope() {
+        let (params, records) = native_envelopes();
+        let native = &records[1];
+        let relay = Relay::default();
+        relay.configure_upload(&params, 0., 0.1).unwrap();
+        let inbox = crate::inbox::Inbox::default();
+        let gate = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    gate.wait();
+                    relay.admit_gossip(native.clone(), 100, &inbox).unwrap();
+                });
+            }
+        });
+        assert_eq!(inbox.stats().unwrap().messages, 1);
+        assert!(!relay.knows(native).unwrap());
+    }
     fn message(id: u8) -> Arc<Record> {
         Arc::new(record(
             "mmx.ProofResponse",

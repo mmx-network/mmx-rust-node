@@ -205,3 +205,21 @@ owner error, exercise a nested single-worker pool, reject frozen-context misuse,
 and put twenty authenticated invalid proofs before the valid stronger proof in
 the native production-veto fixture. These establish scheduling and safety;
 representative proof-batch throughput comparisons remain open.
+
+First-seen gossip now follows C++ `receive_msg_hash` / `on_{block,vdf,proof,vote,
+transaction}` before ledger work. Decoders share a separate 100,000-ID FIFO;
+concurrent arrivals authenticate outside its short lock, then atomically admit
+only one copy to the inbox. Body commitments, transaction static validity and
+native envelope signatures precede first insertion. That deliberate ordering
+hardens C++ paths which insert before signature checks. Claimed IDs, receipts
+and first-seen envelopes never seed verified work or earn early relay credits.
+Replays do not refresh FIFO age; explicit rewind clears both caches. As in C++,
+queue eviction does not erase the first-seen record. Invalid unsolicited
+envelopes now terminate their peer before owner work. Tests mutate signed block
+transaction bodies, VDF/proof signatures and transaction nonces while retaining
+the real content ID, then accept the real envelope; eight simultaneous arrivals
+enqueue one copy. Lock-held native socket tests cover rejection and independent
+valid delivery. Verified IDs also guard VDF record construction/publication after
+the smaller retained-payload window has evicted old records, avoiding cyclic
+republication during a long wait for a block. There is no ledger I/O or state
+cache in the decoder path.

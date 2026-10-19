@@ -311,7 +311,7 @@ impl Node {
     }
     pub(crate) fn broadcast(&mut self, record: &Record) -> Result<()> {
         let id = hash(record, "content_hash")?;
-        if self.production.broadcasts.iter().any(|(old, _)| *old == id) {
+        if self.tx_pool.relay.knows(record)? {
             return Ok(());
         }
         let size = record.encode_compact()?.len();

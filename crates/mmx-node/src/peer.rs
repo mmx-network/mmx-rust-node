@@ -695,12 +695,9 @@ impl Client {
         self.relay_peer.note(&message)?;
         if message.name == "mmx.Request" {
             respond_with(&self.node, &self.peer_state, &mut self.connection, &message)
-        } else if !self.relay.knows(&message)? {
-            // Invalid unsolicited broadcasts do not abort an outstanding sync
-            // request; the same validation gates apply as to inbound peers.
-            self.inbox.submit(message, self.connection.last_size)
         } else {
-            Ok(())
+            self.relay
+                .admit_gossip(message, self.connection.last_size, &self.inbox)
         }
     }
     pub fn poll(&mut self) -> Result<()> {
@@ -795,8 +792,12 @@ impl Server {
                                                 &mut connection,
                                                 &msg,
                                             )?;
-                                        } else if !relay.knows(&msg)? {
-                                            inbox.submit(msg, connection.last_size)?;
+                                        } else {
+                                            relay.admit_gossip(
+                                                msg,
+                                                connection.last_size,
+                                                &inbox,
+                                            )?;
                                         }
                                     }
                                 }

@@ -411,7 +411,7 @@ impl Node {
                 &points,
             )? {
                 let id = point.proof().content_hash.0;
-                if !self.production.broadcasts.iter().any(|(old, _)| *old == id) {
+                if !self.tx_pool.relay.knows_hash(&id)? {
                     self.broadcast(&Record::from_generated(point.proof())?)?;
                 }
             }
@@ -831,9 +831,7 @@ impl Node {
                     return Err(error("proof response too far ahead"));
                 }
                 let id = hash(message, "content_hash")?;
-                if self.responses.contains_key(&id)
-                    || self.production.broadcasts.iter().any(|(old, _)| *old == id)
-                {
+                if self.responses.contains_key(&id) || self.tx_pool.relay.knows_hash(&id)? {
                     return Ok(false);
                 }
                 if self.responses.len() >= 4096
