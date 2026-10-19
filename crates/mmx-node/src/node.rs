@@ -114,6 +114,10 @@ impl Node {
             tip.height,
         )?;
         peer_state.set_earliest_height(chain.earliest_height());
+        let tx_pool = crate::transactions::Pool::default();
+        tx_pool
+            .relay
+            .configure_upload(chain.selected().params(), 2., 0.1)?;
         Ok(Self {
             chain,
             production: Default::default(),
@@ -133,7 +137,7 @@ impl Node {
             vdf_worker: None,
             responses: BTreeMap::new(),
             response_bytes: 0,
-            tx_pool: Default::default(),
+            tx_pool,
             inbox: Inbox::default(),
             peer_state,
             vote_ids: BTreeSet::new(),
@@ -213,7 +217,14 @@ impl Node {
             .unwrap_or(2000);
         self.tx_pool
             .relay
-            .set_target(std::time::Duration::from_millis(target.max(0) as u64))
+            .set_target(std::time::Duration::from_millis(target.max(0) as u64))?;
+        self.tx_pool.relay.configure_upload(
+            self.chain.selected().params(),
+            config.read::<f64>("Router.max_tx_upload")?.unwrap_or(2.),
+            config
+                .read::<f64>("Router.max_pending_cost")?
+                .unwrap_or(0.1),
+        )
     }
     pub fn pending_proofs(&self) -> usize {
         self.responses.len()
@@ -536,7 +547,7 @@ impl Node {
                         break;
                     };
                     for tx in block.field("tx_list")?.seq()? {
-                        let _ = self.add_transaction(tx.record()?, false);
+                        let _ = self.add_peer_transaction(tx.record()?);
                     }
                     old = hash(&block, "prev")?;
                 }
@@ -808,7 +819,7 @@ impl Node {
                 self.response_bytes += size;
             }
             "mmx.Transaction" if self.synced => {
-                self.add_transaction(message, false)?;
+                self.add_peer_transaction(message)?;
             }
             // Unrecognized broadcasts have no ledger effects.
             _ => (),

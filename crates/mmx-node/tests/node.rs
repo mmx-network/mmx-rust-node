@@ -60,10 +60,15 @@ fn fixture() -> (Network, Value, Vec<Value>, Vec<Value>) {
 fn node(network: &Network) -> Arc<Mutex<Node>> {
     let mut chain = ForkChain::memory(network.params.clone());
     chain.initialize(&network.assets).unwrap();
-    Arc::new(Mutex::new(
-        Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap(),
-    ))
+    let mut n = Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap();
+    // These functional transport tests need deterministic delivery. Credit
+    // probability and withholding are covered with controlled samples separately.
+    let config = vnx::config::Config::new();
+    config.set("Router.max_tx_upload", json!(0)).unwrap();
+    n.configure_router(&config).unwrap();
+    Arc::new(Mutex::new(n))
 }
+
 #[test]
 fn unsolicited_orphans_do_not_write_disk_and_valid_live_blocks_still_apply() {
     use mmx_farming::farmer::Farmer;
@@ -2233,16 +2238,14 @@ fn foreign_live_blocks_work_and_accepted_votes_relay_after_verification_without_
     sender.send(&wire(&steps[0]["vdf"])).unwrap();
     wait(1);
     n.lock().unwrap().tick().unwrap();
-    for expected in ["mmx.ProofOfTime", "mmx.Block"] {
-        assert_eq!(
-            observer
-                .receive(Duration::from_secs(3))
-                .unwrap()
-                .unwrap()
-                .name,
-            expected
-        );
-    }
+    // Native randomized fanout assigns a separate rank to each publication;
+    // verification order does not constrain their arrival order on this peer.
+    let initial = [
+        observer.receive(Duration::from_secs(3)).unwrap().unwrap(),
+        observer.receive(Duration::from_secs(3)).unwrap().unwrap(),
+    ];
+    assert!(initial.contains(&wire(&steps[0]["vdf"])));
+    assert!(initial.contains(&wire(&steps[0]["block"])));
     let block = wire(&steps[1]["block"]);
     let id = hash(&block, "hash").unwrap();
     let vote = signed_farming_vote(id, farmer_scalar());
@@ -3001,4 +3004,48 @@ fn purged_peer_authentication_uses_genesis_identity_without_revealing_history() 
     assert!(client.block_at(1).unwrap().is_some());
     drop(client);
     server.shutdown();
+}
+
+#[test]
+fn rpc_submission_and_peer_gossip_keep_native_reliable_upload_semantics() {
+    let (network, g, steps, _) = fixture();
+    let tx = pending_fixture_tx(&network, &steps[0]);
+    for local in [false, true] {
+        let n = ready_farming_node(&network, &g, &steps[0]);
+        let config = vnx::config::Config::new();
+        config.set("Router.relay_target_ms", json!(0)).unwrap();
+        config.set("Router.max_pending_cost", json!(0)).unwrap();
+        n.lock().unwrap().configure_router(&config).unwrap();
+        let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
+        let mut observer = peer::Connection::connect(&server.address().to_string()).unwrap();
+        assert_eq!(
+            observer
+                .receive(Duration::from_secs(3))
+                .unwrap()
+                .unwrap()
+                .name,
+            "mmx.ProofOfTime"
+        );
+        if local {
+            n.lock().unwrap().add_transaction(&tx, false).unwrap();
+        } else {
+            n.lock().unwrap().receive(&tx).unwrap();
+        }
+        assert_eq!(n.lock().unwrap().pending_transactions(), 1);
+        if local {
+            let sent = observer.receive(Duration::from_secs(3)).unwrap().unwrap();
+            assert_eq!(sent.name, "mmx.Transaction");
+            assert_eq!(
+                hash(&sent, "content_hash").unwrap(),
+                hash(&tx, "content_hash").unwrap()
+            );
+        } else {
+            assert!(observer
+                .receive(Duration::from_millis(200))
+                .unwrap()
+                .is_none());
+        }
+        drop(observer);
+        server.shutdown();
+    }
 }

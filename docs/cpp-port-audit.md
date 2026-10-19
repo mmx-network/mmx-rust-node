@@ -129,8 +129,18 @@ no live-ledger or plot scan is part of validation.
    even if receipt traffic evicts the general per-peer hash cache. No additional
    per-peer payload queue is introduced. New connections retain the previous
    immediate replay behavior; native VDF-only connection replay remains open.
-   Still port transaction cost/upload accounting, earned farmer/timelord
-   early-relay credits, peer-role filtering and authenticated incoming lifecycle. Current bounds and verified-only relay are not equivalent to
+   Transaction upload accounting now follows `Router::send_to` / `on_recv_note`:
+   forwarded transactions share a global static-cost budget and have independent
+   per-peer outstanding debt. Matching receipts release debt; unrelated receipts
+   cannot. Native cost units, admission order, probability, one-second refill
+   cap and pending-cost decay are preserved. Local RPC submissions are reliable
+   and bypass these limits; orphan-requeued transactions remain foreign.
+   Configuration honors `Router.max_tx_upload` and `Router.max_pending_cost`,
+   including native zero-value behavior. Rust refills lazily from elapsed time
+   rather than relying on timer invocations and additionally caps each peer's
+   unacknowledged transaction IDs at 20,000, including zero-cost entries.
+   Still port earned farmer/timelord early-relay credits, peer-role filtering
+   and authenticated incoming lifecycle. Current bounds and verified-only relay are not equivalent to
    native per-peer fairness. Preserve transport deduplication separately from
    consensus acceptance; a claimed identity/height never earns relay credit.
 3. **Streaming balance RPC reads and snapshot validation completed.**

@@ -159,5 +159,19 @@ examines at most 256 entries per class/tick and retains at most 4,096 completed
 out-of-order sequence numbers per class. Payloads remain shared; there is no
 new per-peer payload queue. Eight-connection rank/lifetime tests and native
 socket/production regressions pass. Whole-network bandwidth/latency comparisons
-remain open, along with native VDF-only new-connection replay, upload credits,
+remain open, along with native VDF-only new-connection replay,
 earned early relay and inbound identity/role handling.
+
+Transaction upload credits now follow C++ `Router::send_to`, `send`, `update`
+and `on_recv_note`. The global budget uses native static-cost/MMX conversion,
+probabilistic admission and a one-second refill cap. Per-peer pending cost uses
+the native pre-add threshold, matching-receipt release and 0.999/second decay.
+Local RPC submissions retain reliable-send bypass; foreign and orphan-requeued
+transactions use the limiter. No payload copies or disk reads are added.
+Elapsed-time lazy refill/decay replaces periodic accounting, and a deliberate
+20,000-ID bound prevents unacknowledged zero-cost messages growing the native
+pending map without limit. Native zero upload means no global limit; zero
+pending cost stops foreign forwarding. Controlled-time tests cover probability,
+idle refill, independent peers, withheld/late/unrelated receipts and map bounds;
+a native socket fixture checks local versus foreign admission. This establishes
+transport behavior, not a whole-network bandwidth benchmark.

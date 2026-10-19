@@ -1,11 +1,12 @@
 //! Native peer gossip scheduling, receipts and bounded verified replay IDs.
+mod upload;
 use crate::{
     error,
     node::{bytes, hash, record},
     Result,
 };
 use mmx_consensus::{Record, Value};
-use rand::seq::SliceRandom;
+use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -21,12 +22,18 @@ struct Item {
     size: usize,
     published: Instant,
     delays: BTreeMap<u64, Duration>,
+    reliable: bool,
 }
 const MAX_VERIFIED_IDS: usize = 100_000;
 const MAX_OUT_OF_ORDER: usize = 4096;
+struct Delivery {
+    seq: u64,
+    record: Arc<Record>,
+    reliable: bool,
+}
 struct Ready {
     cursor: u64,
-    records: Vec<(u64, Arc<Record>)>,
+    records: Vec<Delivery>,
     processed: Vec<u64>,
 }
 #[derive(Clone, Default)]
@@ -42,6 +49,7 @@ struct RelayState {
     members: BTreeSet<u64>,
     next_member: u64,
     target: Duration,
+    upload: Option<upload::Budget>,
 }
 impl Default for RelayState {
     fn default() -> Self {
@@ -52,6 +60,7 @@ impl Default for RelayState {
             members: Default::default(),
             next_member: 0,
             target: Duration::from_secs(2),
+            upload: None,
         }
     }
 }
@@ -72,6 +81,15 @@ impl Drop for Member {
 }
 impl Relay {
     pub(crate) fn publish(&self, id: [u8; 32], record: Arc<Record>, size: usize) -> Result<()> {
+        self.publish_with_origin(id, record, size, false)
+    }
+    pub(crate) fn publish_with_origin(
+        &self,
+        id: [u8; 32],
+        record: Arc<Record>,
+        size: usize,
+        reliable: bool,
+    ) -> Result<()> {
         let mut state = self
             .state
             .lock()
@@ -106,6 +124,7 @@ impl Relay {
                 size,
                 published: Instant::now(),
                 delays,
+                reliable,
             },
         );
         self.latest.store(seq, Ordering::Release);
@@ -158,6 +177,38 @@ impl Relay {
             .map_err(|_| error("relay poisoned"))?
             .target = target;
         Ok(())
+    }
+    pub(crate) fn configure_upload(
+        &self,
+        params: &mmx_types::mmx::ChainParams,
+        max_upload: f64,
+        max_pending: f64,
+    ) -> Result<()> {
+        let budget = upload::Budget::new(params, max_upload, max_pending, Instant::now())?;
+        self.state
+            .lock()
+            .map_err(|_| error("relay poisoned"))?
+            .upload = Some(budget);
+        Ok(())
+    }
+    fn admit_upload(
+        &self,
+        peer: &mut upload::Pending,
+        record: &Record,
+        now: Instant,
+        sample: f64,
+    ) -> Result<bool> {
+        let mut state = self.state.lock().map_err(|_| error("relay poisoned"))?;
+        let Some(budget) = &mut state.upload else {
+            return Ok(true);
+        };
+        Ok(budget.admit(
+            peer,
+            hash(record, "content_hash")?,
+            record.field("static_cost")?.uint()?,
+            now,
+            sample,
+        ))
     }
     pub(crate) fn attach(&self) -> Result<RelayPeer> {
         let mut state = self.state.lock().map_err(|_| error("relay poisoned"))?;
@@ -240,7 +291,11 @@ impl Relay {
                 break;
             }
             bytes += item.size;
-            out.push((*seq, item.record.clone()));
+            out.push(Delivery {
+                seq: *seq,
+                record: item.record.clone(),
+                reliable: item.reliable,
+            });
         }
         Ok(Ready {
             cursor: next,
@@ -253,7 +308,7 @@ impl Relay {
         let ready = self.for_peer(cursor, class, None, &Seen::default(), &BTreeSet::new())?;
         Ok((
             ready.cursor,
-            ready.records.into_iter().map(|(_, r)| r).collect(),
+            ready.records.into_iter().map(|d| d.record).collect(),
         ))
     }
     pub(crate) fn sequence(&self) -> u64 {
@@ -282,7 +337,12 @@ pub(crate) struct RelayPeer {
     acknowledgements: [u64; 2],
     completed: [BTreeSet<u64>; 2],
     member: Option<Arc<Member>>,
-    received: Arc<Mutex<Seen>>,
+    received: Arc<Mutex<PeerCache>>,
+}
+#[derive(Default)]
+struct PeerCache {
+    seen: Seen,
+    uploads: upload::Pending,
 }
 #[derive(Default)]
 struct Seen {
@@ -321,7 +381,10 @@ impl RelayPeer {
                 .received
                 .lock()
                 .map_err(|_| error("peer relay cache poisoned"))?;
-            seen.remember(id, 20_000);
+            seen.seen.remember(id, 20_000);
+            if record.name == "mmx.ReceiveNote" {
+                seen.uploads.acknowledge(&id, Instant::now());
+            }
         }
         Ok(())
     }
@@ -353,7 +416,7 @@ impl RelayPeer {
                     self.cursors[class],
                     class,
                     self.member.as_ref().map(|m| m.id),
-                    &known,
+                    &known.seen,
                     &self.completed[class],
                 )?
             };
@@ -363,18 +426,33 @@ impl RelayPeer {
                     .into_iter()
                     .filter(|seq| *seq > ready.cursor),
             );
-            for (seq, r) in ready.records {
-                // A receipt can arrive after selection and before the write.
-                if !self
-                    .received
-                    .lock()
-                    .map_err(|_| error("peer relay cache poisoned"))?
-                    .ids
-                    .contains(&hash(&r, "content_hash")?)
-                {
+            for delivery in ready.records {
+                let seq = delivery.seq;
+                let r = delivery.record;
+                let should_send = {
+                    let mut peer = self
+                        .received
+                        .lock()
+                        .map_err(|_| error("peer relay cache poisoned"))?;
+                    if peer.seen.ids.contains(&hash(&r, "content_hash")?) {
+                        false
+                    } else if r.name == "mmx.Transaction" && !delivery.reliable {
+                        relay.admit_upload(
+                            &mut peer.uploads,
+                            &r,
+                            Instant::now(),
+                            rand::thread_rng().gen(),
+                        )?
+                    } else {
+                        true
+                    }
+                };
+                if should_send {
                     send(&r)?;
                     self.note(&r)?;
                 }
+                // Native drops unreliable messages refused by upload credits.
+                // A new publication or local RPC submission is a separate event.
                 if seq > ready.cursor {
                     self.completed[class].insert(seq);
                 }
@@ -394,6 +472,75 @@ mod tests {
             "mmx.ProofResponse",
             [("content_hash".into(), bytes([id; 32]))],
         ))
+    }
+    fn transaction(id: u8) -> Arc<Record> {
+        Arc::new(record(
+            "mmx.Transaction",
+            [
+                ("content_hash".into(), bytes([id; 32])),
+                ("static_cost".into(), Value::Uint(20_000)),
+            ],
+        ))
+    }
+    #[test]
+    fn local_submissions_and_consensus_bypass_forwarded_transaction_upload_limits() {
+        let relay = Relay::default();
+        relay
+            .configure_upload(&mmx_types::mmx::ChainParams::default(), 0., 0.)
+            .unwrap();
+        relay
+            .publish_with_origin([1; 32], transaction(1), 100, false)
+            .unwrap();
+        relay
+            .publish_with_origin([2; 32], transaction(2), 100, true)
+            .unwrap();
+        relay.publish([3; 32], message(3), 100).unwrap();
+        let mut peer = RelayPeer::default();
+        let mut payloads = Vec::new();
+        peer.flush(&relay, |r| {
+            if r.name != "mmx.ReceiveNote" {
+                payloads.push(hash(r, "content_hash")?);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(payloads, vec![[3; 32], [2; 32]]);
+        peer.flush(&relay, |_| panic!("credit-refused messages must not retry"))
+            .unwrap();
+    }
+    #[test]
+    fn receipt_releases_only_matching_pending_upload_cost_for_future_messages() {
+        let relay = Relay::default();
+        relay
+            .configure_upload(&mmx_types::mmx::ChainParams::default(), 0., 0.00004)
+            .unwrap();
+        for id in [1, 2] {
+            relay.publish([id; 32], transaction(id), 100).unwrap();
+        }
+        let mut peer = RelayPeer::default();
+        let mut payloads = Vec::new();
+        peer.flush(&relay, |r| {
+            if r.name != "mmx.ReceiveNote" {
+                payloads.push(hash(r, "content_hash")?);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(payloads, vec![[1; 32]]);
+        peer.note(&record(
+            "mmx.ReceiveNote",
+            [("hash".into(), bytes([1; 32]))],
+        ))
+        .unwrap();
+        relay.publish([3; 32], transaction(3), 100).unwrap();
+        peer.flush(&relay, |r| {
+            if r.name != "mmx.ReceiveNote" {
+                payloads.push(hash(r, "content_hash")?);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(payloads, vec![[1; 32], [3; 32]]);
     }
     #[test]
     fn fanout_has_one_unique_native_rank_per_live_connection_and_retires_members() {
@@ -451,7 +598,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![[2; 32]]
         );
-        *peer.received.lock().unwrap() = Seen::default();
+        peer.received.lock().unwrap().seen = Seen::default();
         peer.flush(&relay, |_| {
             panic!("not due and already sent work must not repeat")
         })

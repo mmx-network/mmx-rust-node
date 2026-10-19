@@ -87,6 +87,17 @@ impl Node {
     /// Native add_transaction: reset execution receipts before admission;
     /// pre-validation rejects dynamic failures for local wallet submissions.
     pub fn add_transaction(&mut self, tx: &Record, pre_validate: bool) -> Result<bool> {
+        self.admit_transaction(tx, pre_validate, true)
+    }
+    pub(crate) fn add_peer_transaction(&mut self, tx: &Record) -> Result<bool> {
+        self.admit_transaction(tx, false, false)
+    }
+    fn admit_transaction(
+        &mut self,
+        tx: &Record,
+        pre_validate: bool,
+        reliable: bool,
+    ) -> Result<bool> {
         if !self.synced {
             return Err(error("not synced"));
         }
@@ -182,7 +193,9 @@ impl Node {
             return Err(error("transaction pool full"));
         }
         let tx = Arc::new(tx);
-        self.tx_pool.relay.publish(id, tx.clone(), size)?;
+        self.tx_pool
+            .relay
+            .publish_with_origin(id, tx.clone(), size, reliable)?;
         self.tx_pool.entries.insert(
             id,
             PoolEntry {
