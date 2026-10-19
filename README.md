@@ -1402,6 +1402,11 @@ delta-coded Y/PD parks, triangular X pairs and CPU X decompression. Park reads u
 `pread` on Unix, reuse parks within a lookup and do not write plot data. CPU work
 is limited by `--max-f1`; compression that exceeds the configured expansion limit
 is rejected explicitly. There is no GPU or remote recompute path yet.
+For C10 plots, `--max-f1 262144` permits the worst-case 256 prefixes expanded
+by ten missing X bits; the default remains 65536. `--log-lookups` reports proof
+counts, publications and elapsed time per challenge during farm testing. Native
+plot-size metadata is informational; reads use the actual file length and
+reject out-of-range or truncated parks.
 Challenges use a bounded queue, prioritize the newest height, deduplicate work
 and expire after ten seconds; failures in one plot
 do not discard proofs from other plots. The node publishes its C++ challenge

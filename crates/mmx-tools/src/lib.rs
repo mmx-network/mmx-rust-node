@@ -474,6 +474,9 @@ pub struct HarvesterArgs {
     max_f1: usize,
     #[arg(long, default_value_t = 2)]
     threads: usize,
+    /// Log each completed challenge's proof count and lookup time.
+    #[arg(long)]
+    log_lookups: bool,
     #[arg(long, default_value_t = 3600)]
     reload_interval: u64,
     #[arg(long)]
@@ -653,6 +656,8 @@ pub fn harvester_main() -> Result<()> {
                 .lookup_for(&challenge, &params, remaining)
             {
                 Ok(proofs) => {
+                    let found = proofs.len();
+                    let mut published = 0;
                     for proof in proofs {
                         if started.elapsed() > remaining {
                             eprintln!("Discarding late proof");
@@ -661,7 +666,16 @@ pub fn harvester_main() -> Result<()> {
                         if let Err(e) = farmer.publish("harvester.proof", service::to_json(&proof)?)
                         {
                             eprintln!("Farmer proof delivery: {e}");
+                        } else {
+                            published += 1;
                         }
+                    }
+                    if args.log_lookups {
+                        eprintln!(
+                            "Lookup VDF {}: {found} proofs, {published} published, {} ms",
+                            challenge.vdf_height,
+                            started.elapsed().as_millis()
+                        );
                     }
                 }
                 Err(e) => eprintln!("Plot lookup: {e}"),
