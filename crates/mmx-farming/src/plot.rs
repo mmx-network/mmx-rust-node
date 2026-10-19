@@ -136,9 +136,9 @@ impl Prover {
         {
             return Err(error("plot park capacity mismatch"));
         }
-        if h.plot_size != self.length {
-            return Err(error("plot size does not match header"));
-        }
+        // Native Prover treats plot_size as informational. Existing plots can
+        // carry stale size metadata; every actual park read is instead bounded
+        // by the opened file's length, including overflow and truncation checks.
         for (offset, bytes) in std::iter::once((h.table_offset_x, h.park_bytes_x))
             .chain(std::iter::once((h.table_offset_y, h.park_bytes_y)))
             .chain(h.table_offset_pd.iter().map(|o| (*o, h.park_bytes_pd)))

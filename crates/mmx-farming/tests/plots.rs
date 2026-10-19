@@ -177,6 +177,34 @@ fn native_plot_parks_recover_cpp_quality_and_canonical_proof_for_hdd_ssd_and_com
     }
 }
 #[test]
+fn stale_plot_size_metadata_and_trailing_padding_preserve_native_proofs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("size-metadata.plot");
+    let mut header = make_plot(&path, true, false);
+    let expected = Prover::open(&path).unwrap().full_proof(0, 65536).unwrap();
+    let length = fs::metadata(&path).unwrap().len();
+    for declared in [0, length - 4096, length + 4096] {
+        header.plot_size = declared;
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(&header.encode(&mmx_types::vnx_registry().unwrap()).unwrap())
+            .unwrap();
+        let prover = Prover::open(&path).unwrap();
+        assert_eq!(prover.length(), length);
+        let proof = prover.full_proof(0, 65536).unwrap();
+        assert_eq!(proof.meta, expected.meta);
+        assert_eq!(proof.proof, expected.proof);
+    }
+    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len(length + 4096).unwrap();
+    let prover = Prover::open(&path).unwrap();
+    assert_eq!(prover.length(), length + 4096);
+    assert_eq!(prover.full_proof(0, 65536).unwrap().proof, expected.proof);
+    // Metadata never permits reading beyond the real file, even if it claims
+    // a larger size. Cutting the last required park must still be rejected.
+    file.set_len(length - 1).unwrap();
+    assert!(Prover::open(&path).is_err());
+}
+#[test]
 fn discovery_deduplicates_ids_rejects_unknown_keys_and_does_not_follow_symlinks() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("one.plot");
