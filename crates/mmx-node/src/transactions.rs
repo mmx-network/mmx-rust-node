@@ -12,11 +12,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
 };
 
 type BalanceRows = BTreeMap<([u8; 32], [u8; 32]), u128>;
+type RelayEntries = BTreeMap<u64, ([u8; 32], Arc<Record>, usize)>;
 
 const MAX_POOL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_POOL_ITEMS: usize = 4096;
@@ -25,11 +26,12 @@ const MAX_RELAY_TX_BYTES: usize = 256 * 1024;
 pub(crate) struct Relay {
     state: Arc<Mutex<RelayState>>,
     latest: Arc<AtomicU64>,
+    wake: Arc<(Mutex<()>, Condvar)>,
 }
 #[derive(Default)]
 struct RelayState {
-    entries: BTreeMap<u64, ([u8; 32], Arc<Record>, usize)>,
-    ids: BTreeMap<[u8; 32], u64>,
+    entries: [RelayEntries; 2],
+    ids: BTreeMap<[u8; 32], (usize, u64)>,
 }
 impl Relay {
     pub(crate) fn publish(&self, id: [u8; 32], record: Arc<Record>, size: usize) -> Result<()> {
@@ -37,17 +39,25 @@ impl Relay {
             .state
             .lock()
             .map_err(|_| error("transaction relay poisoned"))?;
-        if let Some(seq) = state.ids.remove(&id) {
-            state.entries.remove(&seq);
+        if let Some((class, seq)) = state.ids.remove(&id) {
+            state.entries[class].remove(&seq);
         }
         let seq = self
             .latest
             .load(Ordering::Relaxed)
             .checked_add(1)
             .ok_or_else(|| error("transaction relay sequence overflow"))?;
-        state.ids.insert(id, seq);
-        state.entries.insert(seq, (id, record, size));
+        let class = usize::from(record.name == "mmx.Transaction");
+        state.ids.insert(id, (class, seq));
+        state.entries[class].insert(seq, (id, record, size));
         self.latest.store(seq, Ordering::Release);
+        drop(state);
+        let _guard = self
+            .wake
+            .0
+            .lock()
+            .map_err(|_| error("relay notification poisoned"))?;
+        self.wake.1.notify_all();
         Ok(())
     }
     pub(crate) fn remove(&self, id: &[u8; 32]) -> Result<()> {
@@ -55,12 +65,12 @@ impl Relay {
             .state
             .lock()
             .map_err(|_| error("transaction relay poisoned"))?;
-        if let Some(seq) = state.ids.remove(id) {
-            state.entries.remove(&seq);
+        if let Some((class, seq)) = state.ids.remove(id) {
+            state.entries[class].remove(&seq);
         }
         Ok(())
     }
-    pub fn since(&self, cursor: u64) -> Result<(u64, Vec<Arc<Record>>)> {
+    pub fn since(&self, cursor: u64, class: usize) -> Result<(u64, Vec<Arc<Record>>)> {
         let latest = self.latest.load(Ordering::Acquire);
         if latest == cursor {
             return Ok((cursor, vec![]));
@@ -73,7 +83,7 @@ impl Relay {
         let mut bytes = 0;
         // Publish updates the sequence while holding this mutex.
         let mut next = self.latest.load(Ordering::Acquire);
-        for (seq, (_, record, size)) in state.entries.range((
+        for (seq, (_, record, size)) in state.entries[class].range((
             std::ops::Bound::Excluded(cursor),
             std::ops::Bound::Unbounded,
         )) {
@@ -85,6 +95,25 @@ impl Relay {
             out.push(record.clone());
         }
         Ok((next, out))
+    }
+    pub(crate) fn sequence(&self) -> u64 {
+        self.latest.load(Ordering::Acquire)
+    }
+    pub(crate) fn wait(&self, observed: u64) -> Result<()> {
+        let guard = self
+            .wake
+            .0
+            .lock()
+            .map_err(|_| error("relay notification poisoned"))?;
+        if self.sequence() == observed {
+            drop(
+                self.wake
+                    .1
+                    .wait_timeout(guard, std::time::Duration::from_millis(20))
+                    .map_err(|_| error("relay notification poisoned"))?,
+            );
+        }
+        Ok(())
     }
 }
 pub(crate) struct PoolEntry {
@@ -359,14 +388,18 @@ impl Node {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RelayPeer {
-    cursor: u64,
-    seen: BTreeSet<[u8; 32]>,
+    cursors: [u64; 2],
+    received: Arc<Mutex<Seen>>,
+}
+#[derive(Default)]
+struct Seen {
+    ids: BTreeSet<[u8; 32]>,
     order: std::collections::VecDeque<[u8; 32]>,
 }
 impl RelayPeer {
-    pub fn note(&mut self, record: &Record) {
+    pub fn note(&self, record: &Record) -> Result<()> {
         if !matches!(
             record.name.as_str(),
             "mmx.Transaction"
@@ -375,30 +408,46 @@ impl RelayPeer {
                 | "mmx.ProofResponse"
                 | "mmx.ProofOfTime"
         ) {
-            return;
+            return Ok(());
         }
         if let Ok(id) = hash(record, "content_hash") {
-            if self.seen.insert(id) {
-                self.order.push_back(id);
-                if self.order.len() > 4096 {
-                    self.seen.remove(&self.order.pop_front().unwrap());
+            let mut seen = self
+                .received
+                .lock()
+                .map_err(|_| error("peer relay cache poisoned"))?;
+            if seen.ids.insert(id) {
+                seen.order.push_back(id);
+                if seen.order.len() > 20_000 {
+                    let old = seen.order.pop_front().unwrap();
+                    seen.ids.remove(&old);
                 }
             }
         }
+        Ok(())
     }
     pub fn flush(
         &mut self,
         relay: &Relay,
         mut send: impl FnMut(&Record) -> Result<()>,
     ) -> Result<()> {
-        let (next, records) = relay.since(self.cursor)?;
-        for r in records {
-            if !self.seen.contains(&hash(&r, "content_hash")?) {
-                send(&r)?;
-                self.note(&r);
+        // Independent cursors keep a transaction backlog from hiding a newly
+        // completed proof, VDF or block. No cache lock is held across socket I/O.
+        for class in 0..2 {
+            let (next, records) = relay.since(self.cursors[class], class)?;
+            for r in records {
+                let known = self
+                    .received
+                    .lock()
+                    .map_err(|_| error("peer relay cache poisoned"))?
+                    .ids
+                    .contains(&hash(&r, "content_hash")?);
+                if !known {
+                    send(&r)?;
+                    self.note(&r)?;
+                }
             }
+            self.cursors[class] = next;
         }
-        self.cursor = next;
         Ok(())
     }
 }
@@ -409,6 +458,44 @@ mod tests {
     use crate::node::record;
 
     #[test]
+    fn consensus_relay_precedes_a_transaction_backlog_without_dropping_transactions() {
+        let relay = Relay::default();
+        for i in 1..=64u8 {
+            let tx = Arc::new(record(
+                "mmx.Transaction",
+                [("content_hash".into(), Value::Bytes(vec![i; 32]))],
+            ));
+            relay.publish([i; 32], tx, 65536).unwrap();
+        }
+        let proof = Arc::new(record(
+            "mmx.ProofResponse",
+            [("content_hash".into(), Value::Bytes(vec![200; 32]))],
+        ));
+        relay.publish([200; 32], proof, 100).unwrap();
+        let mut peer = RelayPeer::default();
+        let mut sent = Vec::new();
+        peer.flush(&relay, |r| {
+            sent.push(r.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sent[0].name, "mmx.ProofResponse");
+        assert_eq!(sent.len(), 5);
+        for _ in 0..20 {
+            peer.flush(&relay, |r| {
+                sent.push(r.clone());
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(sent.len(), 65);
+        assert_eq!(
+            sent.iter().filter(|r| r.name == "mmx.Transaction").count(),
+            64
+        );
+    }
+
+    #[test]
     fn relay_deduplicates_echoes_and_retries_failed_sends_without_copying_bodies() {
         let relay = Relay::default();
         let tx = Arc::new(record(
@@ -416,7 +503,7 @@ mod tests {
             [("content_hash".into(), Value::Bytes(vec![1; 32]))],
         ));
         relay.publish([2; 32], tx.clone(), 100).unwrap();
-        assert!(Arc::ptr_eq(&relay.since(0).unwrap().1[0], &tx));
+        assert!(Arc::ptr_eq(&relay.since(0, 1).unwrap().1[0], &tx));
         let mut peer = RelayPeer::default();
         assert!(peer.flush(&relay, |_| Err(error("disconnected"))).is_err());
         let mut count = 0;
@@ -432,10 +519,10 @@ mod tests {
         .unwrap();
         assert_eq!(count, 1);
         let mut echo = RelayPeer::default();
-        echo.note(&tx);
+        echo.note(&tx).unwrap();
         echo.flush(&relay, |_| panic!("must not echo incoming content"))
             .unwrap();
         relay.remove(&[2; 32]).unwrap();
-        assert!(relay.since(0).unwrap().1.is_empty());
+        assert!(relay.since(0, 1).unwrap().1.is_empty());
     }
 }

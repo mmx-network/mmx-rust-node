@@ -2753,3 +2753,77 @@ fn public_rpc_rejects_multiplicative_balance_work_and_oversized_transaction_batc
     let good = rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":3,"method":"get_height"}"#).unwrap();
     assert_eq!(good["result"], 0);
 }
+
+#[test]
+fn production_announcements_cross_outgoing_peers_while_rpc_or_partial_frames_are_blocked() {
+    for partial_frame in [false, true] {
+        let (network, genesis, steps, _) = fixture();
+        let n = ready_farming_node(&network, &genesis, &steps[0]);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (entered, request_received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap().0;
+            let mut raw = stream.try_clone().unwrap();
+            let mut connection = peer::Connection::new(stream).unwrap();
+            let request = loop {
+                let message = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
+                if message.name == "mmx.Request" {
+                    break message;
+                }
+                assert_eq!(message.name, "mmx.ProofOfTime");
+            };
+            assert_eq!(
+                request.field("method").unwrap().record().unwrap().name,
+                "mmx.Node.get_height"
+            );
+            let reply = record(
+                "mmx.Return",
+                [
+                    ("id".into(), request.field("id").unwrap().clone()),
+                    (
+                        "result".into(),
+                        V::Record(record(
+                            "mmx.Node.get_height.return",
+                            [("_ret_0".into(), V::Uint(0))],
+                        )),
+                    ),
+                ],
+            );
+            let frame = peer::encode_frame(&reply).unwrap();
+            if partial_frame {
+                raw.write_all(&frame[..1]).unwrap();
+            }
+            entered.send(()).unwrap();
+            let start = std::time::Instant::now();
+            loop {
+                let message = connection.receive(Duration::from_secs(2)).unwrap().unwrap();
+                if message.name == "mmx.ProofResponse" {
+                    assert!(mmx_consensus::response::is_valid(&message).unwrap());
+                    assert!(start.elapsed() < Duration::from_secs(2));
+                    break;
+                }
+                assert_eq!(message.name, "mmx.ProofOfTime");
+            }
+            // Neither a deliberately withheld reply nor a trickled frame can
+            // hold up completed outgoing work on this same connection.
+            if partial_frame {
+                raw.write_all(&frame[1..]).unwrap();
+            } else {
+                connection.send(&reply).unwrap();
+            }
+        });
+        let mut client = peer::Client::connect(&address.to_string(), n.clone()).unwrap();
+        let request = std::thread::spawn(move || client.height().unwrap());
+        request_received
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        n.lock()
+            .unwrap()
+            .receive(&native_farming_response())
+            .unwrap();
+        n.lock().unwrap().tick().unwrap();
+        assert_eq!(request.join().unwrap(), 0);
+        server.join().unwrap();
+    }
+}

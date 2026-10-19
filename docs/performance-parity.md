@@ -66,3 +66,13 @@ generation before retaining or applying it; rollback/purge/another publication
 invalidate it. Same-hash-after-rewind and foreign-store regressions reject stale
 effects. Unselected-parent branches still use full replay. This is a bounded
 execution context, not a node-wide state cache.
+
+Peer gossip now has a sender independent of the RPC/frame receive loop, with one
+shared ordered encoder for each connection. Publication wakes its bounded sender
+and the native 20 ms tick handles remaining batches. Separate consensus/transaction
+cursors prevent old transaction backlog from delaying new proofs, VDFs or blocks.
+A real socket test holds both complete RPC replies and partial inbound frames
+while a verified outgoing proof still arrives. Shared record ownership and
+20,000-entry per-peer echo caches avoid additional payload queues/copies. Native
+credit feedback, early earned credits, staged fanout and peer authentication
+remain separate tracked work.

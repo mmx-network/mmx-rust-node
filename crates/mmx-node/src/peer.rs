@@ -100,8 +100,36 @@ fn decode_frame_with_registry(
 pub struct Connection {
     stream: TcpStream,
     registry: vnx::Registry,
-    outbound: mmx_consensus::StreamEncoder,
+    output: Arc<Mutex<Output>>,
+    relay_worker: Option<RelayWorker>,
     last_size: usize,
+}
+struct Output {
+    stream: TcpStream,
+    outbound: mmx_consensus::StreamEncoder,
+}
+struct RelayWorker {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+impl Output {
+    fn send_batch(&mut self, values: &[Record]) -> Result<()> {
+        let mut outbound = self.outbound.clone();
+        let mut batch = Vec::new();
+        for value in values {
+            let frame = frame_bytes(&outbound.encode(value)?)?;
+            if batch.len().saturating_add(frame.len()) > MAX_FRAME + 8 {
+                return Err(error("peer write batch exceeds limit"));
+            }
+            batch.extend_from_slice(&frame);
+        }
+        if let Err(e) = self.stream.write_all(&batch) {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            return Err(e.into());
+        }
+        self.outbound = outbound;
+        Ok(())
+    }
 }
 impl Connection {
     pub fn connect(address: &str) -> Result<Self> {
@@ -119,10 +147,15 @@ impl Connection {
     pub fn new(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        let output = Output {
+            stream: stream.try_clone()?,
+            outbound: Default::default(),
+        };
         Ok(Self {
             stream,
             registry: vnx::Registry::new(),
-            outbound: Default::default(),
+            output: Arc::new(Mutex::new(output)),
+            relay_worker: None,
             last_size: 0,
         })
     }
@@ -130,23 +163,48 @@ impl Connection {
         self.send_batch(std::slice::from_ref(value))
     }
     fn send_batch(&mut self, values: &[Record]) -> Result<()> {
-        // Encoding, frame limits and I/O can all fail. Only successful writes
-        // may announce schemas to this connection's subsequent frames.
-        let mut outbound = self.outbound.clone();
-        let mut batch = Vec::new();
-        for value in values {
-            let frame = frame_bytes(&outbound.encode(value)?)?;
-            if batch.len().saturating_add(frame.len()) > MAX_FRAME + 8 {
-                return Err(error("peer write batch exceeds limit"));
-            }
-            batch.extend_from_slice(&frame);
+        // Gossip and replies share one ordered schema/output state. The reader
+        // owns its independent decoder and never holds this mutex across reads.
+        self.output
+            .lock()
+            .map_err(|_| error("peer output poisoned"))?
+            .send_batch(values)
+    }
+    fn start_relay(&mut self, relay: Relay) -> Result<RelayPeer> {
+        if self.relay_worker.is_some() {
+            return Err(error("peer relay already started"));
         }
-        if let Err(e) = self.stream.write_all(&batch) {
-            let _ = self.stream.shutdown(std::net::Shutdown::Both);
-            return Err(e.into());
-        }
-        self.outbound = outbound;
-        Ok(())
+        let mut sender = RelayPeer::default();
+        let receiver = sender.clone();
+        let output = self.output.clone();
+        let socket = self.stream.try_clone()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let thread = thread::Builder::new()
+            .name("mmx-peer-send".into())
+            .spawn(move || {
+                let mut run = || -> Result<()> {
+                    while !stopping.load(Ordering::Relaxed) {
+                        let observed = relay.sequence();
+                        sender.flush(&relay, |record| {
+                            output
+                                .lock()
+                                .map_err(|_| error("peer output poisoned"))?
+                                .send_batch(std::slice::from_ref(record))
+                        })?;
+                        relay.wait(observed)?;
+                    }
+                    Ok(())
+                };
+                if let Err(error) = run() {
+                    if !stopping.load(Ordering::Relaxed) {
+                        eprintln!("Peer relay closed: {error}");
+                    }
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                }
+            })?;
+        self.relay_worker = Some(RelayWorker { stop, thread });
+        Ok(receiver)
     }
     /// None means idle before the first frame byte. Partial-frame timeouts close
     /// the connection, so a later read can never mistake payload for a header.
@@ -246,6 +304,16 @@ impl Connection {
         Ok(())
     }
 }
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if let Some(worker) = self.relay_worker.take() {
+            worker.stop.store(true, Ordering::Relaxed);
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            let _ = worker.thread.join();
+        }
+    }
+}
+
 pub fn respond(
     node: &Arc<Mutex<Node>>,
     connection: &mut Connection,
@@ -319,7 +387,6 @@ pub struct Client {
     inbox: Inbox,
     backpressure_retries: u64,
     peer_state: PeerState,
-    relay: Relay,
     relay_peer: RelayPeer,
 }
 impl Client {
@@ -328,15 +395,16 @@ impl Client {
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
             (local.inbox(), local.peer_state(), local.transaction_relay())
         };
+        let mut connection = Connection::connect(address)?;
+        let relay_peer = connection.start_relay(relay)?;
         Ok(Self {
-            connection: Connection::connect(address)?,
+            connection,
             node,
             next_id: 1,
             inbox,
             backpressure_retries: 0,
             peer_state,
-            relay,
-            relay_peer: Default::default(),
+            relay_peer,
         })
     }
     pub fn call(&mut self, method: Record) -> Result<Value> {
@@ -345,8 +413,6 @@ impl Client {
             .ok_or_else(|| error("missing peer result"))
     }
     fn call_many(&mut self, methods: Vec<Record>) -> Result<Vec<Value>> {
-        self.relay_peer
-            .flush(&self.relay, |r| self.connection.send(r))?;
         let mut pending = std::collections::BTreeMap::new();
         let mut results = vec![None; methods.len()];
         let mut queued: std::collections::VecDeque<_> = (0..methods.len()).collect();
@@ -566,7 +632,7 @@ impl Client {
             .collect()
     }
     fn handle(&mut self, message: Record) -> Result<()> {
-        self.relay_peer.note(&message);
+        self.relay_peer.note(&message)?;
         if message.name == "mmx.Request" {
             respond_with(&self.node, &self.peer_state, &mut self.connection, &message)
         } else {
@@ -576,8 +642,6 @@ impl Client {
         }
     }
     pub fn poll(&mut self) -> Result<()> {
-        self.relay_peer
-            .flush(&self.relay, |r| self.connection.send(r))?;
         if let Some(message) = self.connection.receive(Duration::from_millis(500))? {
             self.handle(message)?;
         }
@@ -651,7 +715,7 @@ impl Server {
                         workers.push(thread::spawn(move || {
                             let run = || -> Result<()> {
                                 let mut connection = Connection::new(stream)?;
-                                let mut relay_peer = RelayPeer::default();
+                                let relay_peer = connection.start_relay(relay)?;
                                 let mut received = Instant::now();
                                 while !stop.load(Ordering::Relaxed) {
                                     // Native Router's configured receive-idle
@@ -659,12 +723,11 @@ impl Server {
                                     if received.elapsed() > Duration::from_secs(180) {
                                         return Err(error("peer receive idle timeout"));
                                     }
-                                    relay_peer.flush(&relay, |r| connection.send(r))?;
                                     if let Some(msg) =
                                         connection.receive(Duration::from_millis(200))?
                                     {
                                         received = Instant::now();
-                                        relay_peer.note(&msg);
+                                        relay_peer.note(&msg)?;
                                         if msg.name == "mmx.Request" {
                                             respond_with(
                                                 &node,

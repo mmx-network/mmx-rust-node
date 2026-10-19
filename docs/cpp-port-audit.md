@@ -57,7 +57,7 @@ no live-ledger or plot scan is part of validation.
 
 | Area and C++ paths inspected | Rust path and evidence | Remaining difference |
 | --- | --- | --- |
-| Block production: `Node_update.cpp::update`, `make_block`, `Node.cpp::fork_to`, voting, `Node_verify.cpp::add_proof`, `find_best_proof` | `mmx-node/src/production.rs`, `node.rs`; native chain, production and vote witnesses; asynchronous stale-result tests | Native early relay credits and transmit scheduling below remain unported. Signed block tracking is transient as in C++. |
+| Block production: `Node_update.cpp::update`, `make_block`, `Node.cpp::fork_to`, voting, `Node_verify.cpp::add_proof`, `find_best_proof` | `mmx-node/src/production.rs`, `node.rs`; native chain, production and vote witnesses; asynchronous stale-result tests | Independent sending and consensus priority are implemented; native early relay credits and staged fanout below remain unported. Signed block tracking is transient as in C++. |
 | Header/space consensus: `Node_verify.cpp::verify_proof*`, `ProofOfSpace*`, `pos/verify*.cpp`, native header/hash implementations | `mmx-consensus/src/{proof,transitions,header,pos}.rs`; native proof/hash/difficulty/weight/challenge traces, proof ordering and malformed witnesses | No additional acceptance mismatch identified in this pass. Continue differential mutation coverage at fork boundaries; this is not an exhaustive proof. |
 | VDF consensus and scheduling: `Node_verify.cpp::verify_vdf*`, `Node_update.cpp::verify_vdfs` | `mmx-consensus/src/vdf.rs`, `mmx-node/src/vdf_worker.rs`; opaque work evidence rechecked against current history, native infusion/segment/continuation fixtures, two-job worker bound | C++ trust ranking of competing timelords and specialized CPU multi-lane SHA remain missing. |
 | Fork choice/sync: `Node.cpp::find_best_fork`, `fork_to`, `Node_update.cpp::on_sync_done`, `Router.cpp::process` | `mmx-execution/src/chain/{choice,forks,sync,voting}.rs`, `mmx-node/src/sync/peers*`; native fork/vote/root witnesses, three-observer socket tests, competing contents, timeout reassignment and deep reorg tests | Requested 3–8 observer policy is deliberately stricter than native completion. Every observed content is fetched once; no majority filter. Native transmit credits remain separate from body leases. |
@@ -100,17 +100,23 @@ no live-ledger or plot scan is part of validation.
    snapshot tests and the existing production attack tests cover this path.
    No broad ledger state cache is introduced.
 2. **Relay fairness and credits (public-peer defense and latency).**
-   Port `Router`'s received/sent caches, `ReceiveNote` feedback, staged randomized
-   sending, transaction cost/upload credits, priority congestion handling,
-   peer-role filtering and authenticated incoming lifecycle. Current bounds
-   protect memory and only verified data relays, but are not equivalent to
-   native per-peer fairness. Signed junk from a connected peer can still consume
-   admission/CPU slots; the eight authenticated sync providers do not authenticate
-   every inbound gossip connection. Preserve the distinction between transport
-   deduplication and consensus proof acceptance. Native early block/VDF relay
-   spends one earned farmer/timelord credit; never add an unbounded bypass based
-   solely on a claimed identity or height. Add adversarial multi-peer latency
-   tests before changing this policy.
+   Independent consensus sending and transaction/consensus scheduling are now
+   implemented. Each owned connection has one sender, sharing an ordered encoder
+   with replies and independent of the receive decoder. Publication wakes it;
+   the native 20 ms interval bounds remaining batching waits. A trickled inbound
+   frame or withheld RPC reply cannot delay outgoing completed work. Consensus
+   and transactions have independent bounded cursors, so a transaction backlog
+   cannot hide proofs/VDFs/blocks. Records stay shared; no additional payload
+   queue is introduced. Sent/received echo suppression has the native 20,000-ID
+   bound and no cache lock is held while a socket writes. C++ uses its network
+   event loop; Rust currently uses one sender thread per already-bounded
+   connection. Socket tests cover both delayed-reply and partial-frame cases.
+   Still port `Router`'s global received cache, `ReceiveNote` feedback,
+   transaction cost/upload credits, earned farmer/timelord early-relay credits,
+   randomized staged fanout, peer-role filtering and authenticated incoming
+   lifecycle. Current bounds and verified-only relay are not equivalent to
+   native per-peer fairness. Preserve transport deduplication separately from
+   consensus acceptance; a claimed identity/height never earns relay credit.
 3. **Streaming RPC range reads (memory and ledger latency).**
    C++ balance `find_range(..., limit)` stops in the table. Rust's unwhitelisted
    `all_balances` materializes the address prefix with `scan` before applying
@@ -203,3 +209,8 @@ The execution-handoff checkpoint passed 308 workspace tests, one existing ignore
 test, strict Clippy, formatting and the optimized local build. Signed candidate
 validation remains off the ledger mutex; publication rechecks both the best
 verified proof and the exact ledger base. The handoff is consumed once.
+
+The independent relay scheduling checkpoint passes 310 workspace tests (one
+existing ignored test). Peer frame limits, incremental public reads, schema
+publication ordering, RPC/body deadlines and shared sync body leases remain
+enforced. A failed partial write closes the socket before schema state advances.
