@@ -61,12 +61,21 @@ pub const METHODS: &[&str] = &[
 struct ReadPermit(Arc<AtomicUsize>);
 impl ReadPermit {
     fn acquire(workers: &Arc<AtomicUsize>) -> Result<Self> {
-        workers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 2).then_some(n + 1)
-            })
-            .map_err(|_| error("node RPC workers busy"))?;
-        Ok(Self(workers.clone()))
+        let mut current = workers.load(Ordering::Acquire);
+        loop {
+            if current >= 2 {
+                return Err(error("node RPC workers busy"));
+            }
+            match workers.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self(workers.clone())),
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 impl Drop for ReadPermit {
@@ -368,6 +377,30 @@ mod tests {
     use mmx_consensus::Value as N;
     use mmx_execution::chain::{forks::ForkChain, genesis::Assets};
     use mmx_types::{mmx, VnxType};
+
+    #[test]
+    fn concurrent_rpc_permits_never_overbook_and_always_release() {
+        let workers = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let active = Arc::new(AtomicUsize::new(0));
+        thread::scope(|scope| {
+            for _ in 0..16 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..128 {
+                        if let Ok(permit) = ReadPermit::acquire(&workers) {
+                            assert!(active.fetch_add(1, Ordering::AcqRel) < 2);
+                            thread::yield_now();
+                            active.fetch_sub(1, Ordering::AcqRel);
+                            drop(permit);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(workers.load(Ordering::Acquire), 0);
+        assert_eq!(active.load(Ordering::Acquire), 0);
+    }
 
     fn fixture() -> (Arc<Mutex<Node>>, Record, Record) {
         let rows: Vec<Value> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
