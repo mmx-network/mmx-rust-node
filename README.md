@@ -1256,6 +1256,8 @@ Build the tools with `cargo build --locked -p mmx-tools -p mmxwallet`. CI releas
 archives include `mmx`, `mmx-wallet`, `mmxwallet`, `mmx-farmer`, `mmx-harvester`
 and `mmx-node` from the same source revision, with `mmx_node`, `mmx_farmer` and
 `mmx_harvester` executable aliases.
+The `linux-x86_64-musl` archive contains static binaries for older Linux hosts;
+the regular Linux archive targets the CI runner's glibc version.
 
 On Linux, the node can start its sibling wallet, farmer and harvester binaries
 from existing VNX configuration layers, including parent inheritance and local
