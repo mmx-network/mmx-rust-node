@@ -197,6 +197,11 @@ expanding containers, including zero-width elements and nested fixed arrays;
 each record has a 128 MiB decoded allocation budget. Compact values within that
 budget retain their native byte representation and cost regardless of expansion
 ratio.
+Public peer frames and HTTP bodies use `safe_read`-style reads in chunks of at
+most 16 KiB, growing their buffers only after bytes arrive. Lossless MMX
+containers likewise grow only after an element has decoded. The pinned VNX
+runtime applies incremental reads and aggregate allocation/schema limits to VNX
+services and metadata, including remote farmer/harvester connections.
 
 Unsolicited live blocks wait in RAM, limited to 256 blocks / 32 MiB, within
 1,000 heights of the selected tip and for at most ten block intervals. They enter

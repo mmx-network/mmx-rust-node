@@ -51,6 +51,7 @@ impl Prover {
                 max_string_bytes: 65536,
                 max_value_bytes: 1024 * 1024,
                 max_schemas,
+                ..Default::default()
             });
         let value = reader.read()?;
         if value["__type"] != "mmx.PlotHeader" {

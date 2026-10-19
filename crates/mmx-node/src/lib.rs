@@ -2,6 +2,7 @@
 //! peer path; RPC presentation is separate from validation and persistence.
 mod http;
 mod inbox;
+mod io;
 pub mod node;
 pub mod peer;
 mod peer_state;

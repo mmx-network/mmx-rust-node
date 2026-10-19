@@ -200,25 +200,30 @@ impl Connection {
             return Err(error("invalid peer frame size"));
         }
         let mut frame = Vec::from(header);
-        frame.resize(size as usize + 8, 0);
-        self.read_frame_bytes(&mut frame[8..], end)?;
+        crate::io::safe_read(&mut frame, size as usize, |part| {
+            self.read_frame_bytes(part, end)
+        })?;
         let (record, size) = decode_frame_with_registry(&frame, &mut self.registry)?;
         self.last_size = size;
         Ok(Some(record))
     }
-    fn read_frame_bytes(&mut self, mut bytes: &mut [u8], end: Instant) -> Result<()> {
+    fn read_frame_bytes(&mut self, mut bytes: &mut [u8], end: Instant) -> std::io::Result<()> {
         while !bytes.is_empty() {
             let remaining = end.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "peer frame timed out",
-                )
-                .into());
+                ));
             }
             self.stream.set_read_timeout(Some(remaining))?;
             match self.stream.read(bytes) {
-                Ok(0) => return Err(error("peer disconnected during frame")),
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "peer disconnected during frame",
+                    ))
+                }
                 Ok(count) => {
                     self.quick_ack();
                     bytes = &mut bytes[count..];
@@ -233,10 +238,9 @@ impl Connection {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "peer frame timed out",
-                    )
-                    .into());
+                    ));
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         }
         Ok(())

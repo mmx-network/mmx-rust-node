@@ -264,7 +264,7 @@ impl<'a> Parser<'a> {
             Code::Object => {
                 let count = self.count(big)?;
                 self.allocate(count, std::mem::size_of::<V>() + 32)?;
-                let mut out = Vec::with_capacity(count);
+                let mut out = Vec::new();
                 for _ in 0..count {
                     let n = self.count(big)?;
                     self.allocate(n, 1)?;
@@ -275,7 +275,7 @@ impl<'a> Parser<'a> {
                         Code::Dynamic
                     };
                     let value = self.value(&dynamic, owner, depth + 1)?;
-                    out.push((key, value));
+                    push_decoded(&mut out, (key, value), count)?;
                 }
                 V::Object(out)
             }
@@ -314,12 +314,27 @@ impl<'a> Parser<'a> {
             return Err(input("decoded allocation limit"));
         }
         self.allocate(n, std::mem::size_of::<V>())?;
-        let mut values = Vec::with_capacity(n);
+        let mut values = Vec::new();
         for _ in 0..n {
-            values.push(self.value(code, owner, depth + 1)?);
+            let value = self.value(code, owner, depth + 1)?;
+            push_decoded(&mut values, value, n)?;
         }
         Ok(V::Sequence(values))
     }
+}
+// A length header is not evidence that its elements exist. Grow only after
+// decoding an element, and keep spare capacity within the charged count.
+fn push_decoded<T>(values: &mut Vec<T>, value: T, count: usize) -> Result<()> {
+    if values.len() == values.capacity() {
+        let capacity = (values.len() + 1)
+            .max(values.capacity().saturating_mul(2))
+            .min(count);
+        values
+            .try_reserve_exact(capacity - values.len())
+            .map_err(|_| input("decoded allocation limit"))?;
+    }
+    values.push(value);
+    Ok(())
 }
 // Lower bound including inline Value slots. Preflight nested fixed arrays so a
 // zero-width payload cannot force a partial expansion up to the whole budget.

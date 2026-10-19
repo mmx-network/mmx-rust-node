@@ -154,10 +154,7 @@ fn request(input: &mut BufReader<Deadline>) -> HttpResult<Vec<u8>> {
             if size > MAX_BODY - body.len() {
                 return Err((413, "body exceeds 1 MiB"));
             }
-            let start = body.len();
-            body.resize(start + size, 0);
-            input
-                .read_exact(&mut body[start..])
+            crate::io::safe_read(&mut body, size, |part| input.read_exact(part))
                 .map_err(|_| (408, "HTTP body deadline or disconnect"))?;
             let mut end = [0; 2];
             input
@@ -169,10 +166,10 @@ fn request(input: &mut BufReader<Deadline>) -> HttpResult<Vec<u8>> {
         }
         return Err((400, "too many HTTP chunks"));
     }
-    body.resize(length.unwrap_or(0), 0);
-    input
-        .read_exact(&mut body)
-        .map_err(|_| (408, "HTTP body deadline or disconnect"))?;
+    crate::io::safe_read(&mut body, length.unwrap_or(0), |part| {
+        input.read_exact(part)
+    })
+    .map_err(|_| (408, "HTTP body deadline or disconnect"))?;
     Ok(body)
 }
 fn serve(stream: TcpStream, node: &Arc<Mutex<Node>>, timeout: Duration) -> Result<()> {
