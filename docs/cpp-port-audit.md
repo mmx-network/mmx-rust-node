@@ -153,10 +153,24 @@ no live-ledger or plot scan is part of validation.
    including native zero-value behavior. Rust refills lazily from elapsed time
    rather than relying on timer invocations and additionally caps each peer's
    unacknowledged transaction IDs at 20,000, including zero-cost entries.
-   Still port earned farmer/timelord early-relay credits, peer-role filtering
-   and authenticated incoming lifecycle. Current bounds and verified-only relay are not equivalent to
-   native per-peer fairness. Preserve transport deduplication separately from
-   consensus acceptance; a claimed identity/height never earns relay credit.
+   Earned early relay now follows native's distinct farmer/timelord permissions:
+   a verified space proof grants one block relay for its farmer and VDF height;
+   verified VDF work replenishes one timelord relay. Blocks and receipt claims
+   earn neither. Farmer pruning uses the previous verified VDF height, keeping
+   the new height's better proof credit. Old signed block/VDF replays use the
+   native commit-delay cutoff, and `Router.max_vdf_segments` limits early VDFs.
+   Final ledger/space/VDF validation remains independent of early forwarding.
+   Early payloads share ownership with the inbox, have a separate 128-item /
+   32 MiB bound, and promote without duplicate forwarding or new fanout delays.
+   Each credit key map has a deliberate 100,000-key safety bound; timelord keys
+   evict in FIFO order, while farmer permissions expire with verified progress.
+   Authenticated first receipt now broadcasts `ReceiveNote` before final
+   validation, even without early credit, releasing native transaction debt.
+   Receipt IDs have a shared 100,000-item bound, retain consensus priority, and
+   are not replayed to new connections. Oversized decoded records fail before
+   first-seen insertion; verified promotion drops early unhashed padding and
+   relay/pool byte budgets charge heap footprint as well as compact encoding.
+   Still port peer-role filtering and authenticated incoming lifecycle.
    ProofResponse CPU verification now runs all eligible work in parallel,
    resolving history once per height and returning completed results immediately.
    Native's full pre-production barrier is retained; a queued stronger proof

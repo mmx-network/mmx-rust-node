@@ -12,9 +12,9 @@ const MAX_MESSAGES: usize = 16_384;
 pub(crate) struct Inbox(Arc<Mutex<Queue>>);
 #[derive(Default)]
 struct Queue {
-    messages: VecDeque<(Record, usize)>,
+    messages: VecDeque<(Arc<Record>, usize)>,
     bytes: usize,
-    transactions: VecDeque<(Record, usize)>,
+    transactions: VecDeque<(Arc<Record>, usize)>,
     transaction_bytes: usize,
     dropped: u64,
 }
@@ -26,6 +26,9 @@ pub(crate) struct Stats {
 }
 impl Inbox {
     pub fn submit(&self, record: Record, wire_bytes: usize) -> Result<()> {
+        self.submit_shared(Arc::new(record), wire_bytes)
+    }
+    pub fn submit_shared(&self, record: Arc<Record>, wire_bytes: usize) -> Result<()> {
         if !matches!(
             record.name.as_str(),
             "mmx.Block"
@@ -70,7 +73,7 @@ impl Inbox {
         queue.bytes += wire_bytes;
         Ok(())
     }
-    pub fn take(&self) -> Result<VecDeque<(Record, usize)>> {
+    pub fn take(&self) -> Result<VecDeque<(Arc<Record>, usize)>> {
         let mut queue = self.0.lock().map_err(|_| error("peer inbox poisoned"))?;
         let mut messages = VecDeque::new();
         // Bound signature checks and malformed-message logging per ledger tick.
@@ -164,7 +167,7 @@ mod tests {
                 .take()
                 .unwrap()
                 .into_iter()
-                .map(|(r, _)| r.name)
+                .map(|(r, _)| r.name.clone())
                 .collect::<Vec<_>>(),
             ["mmx.ValidatorVote", "mmx.Block"]
         );

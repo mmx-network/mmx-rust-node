@@ -224,6 +224,11 @@ impl Node {
                 .read::<u32>("Router.max_msg_size")?
                 .map_or(crate::peer::DEFAULT_COMPRESSED_LIMIT, |v| v as usize),
         )?;
+        self.tx_pool.relay.set_max_vdf_segments(
+            config
+                .read::<u32>("Router.max_vdf_segments")?
+                .unwrap_or(65536) as usize,
+        )?;
         self.tx_pool.relay.configure_upload(
             self.chain.selected().params(),
             config.read::<f64>("Router.max_tx_upload")?.unwrap_or(2.),
@@ -1043,6 +1048,25 @@ mod work_queue_tests {
             Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap(),
             Record::decode(&raw(work)).unwrap(),
         )
+    }
+    #[test]
+    fn an_evicted_vdf_payload_is_not_rebuilt_as_other_publications_cycle_the_window() {
+        let (mut node, work) = setup();
+        node.broadcast(&work).unwrap();
+        let id = hash(&work, "content_hash").unwrap();
+        for n in 0..130u64 {
+            let mut vote = mmx::ValidatorVote::default();
+            let mut content = [0; 32];
+            content[..8].copy_from_slice(&n.to_le_bytes());
+            vote.content_hash = content.into();
+            node.broadcast(&Record::from_generated(&vote).unwrap())
+                .unwrap();
+        }
+        assert!(!node.production.broadcasts.iter().any(|(old, _)| *old == id));
+        let sequence = node.tx_pool.relay.sequence();
+        node.broadcast(&work).unwrap();
+        assert_eq!(node.tx_pool.relay.sequence(), sequence);
+        assert_eq!(node.production.broadcasts.len(), 128);
     }
     #[test]
     fn explicit_rewind_releases_verified_replay_suppression() {

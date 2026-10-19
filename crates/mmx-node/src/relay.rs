@@ -1,4 +1,5 @@
 //! Native peer gossip scheduling, receipts and bounded verified replay IDs.
+mod credits;
 mod upload;
 use crate::{
     error,
@@ -44,6 +45,7 @@ pub(crate) struct Relay {
 }
 struct RelayState {
     entries: [RelayEntries; 2],
+    notices: [BTreeMap<u64, [u8; 32]>; 2],
     ids: BTreeMap<[u8; 32], (usize, u64)>,
     verified: Seen,
     envelopes: Seen,
@@ -53,11 +55,16 @@ struct RelayState {
     target: Duration,
     upload: Option<upload::Budget>,
     compressed_limit: usize,
+    credits: credits::Credits,
+    early: BTreeMap<u64, ([u8; 32], usize)>,
+    early_bytes: usize,
+    max_segments: usize,
 }
 impl Default for RelayState {
     fn default() -> Self {
         Self {
             entries: Default::default(),
+            notices: Default::default(),
             ids: Default::default(),
             verified: Default::default(),
             envelopes: Default::default(),
@@ -67,6 +74,31 @@ impl Default for RelayState {
             target: Duration::from_secs(2),
             upload: None,
             compressed_limit: crate::peer::DEFAULT_COMPRESSED_LIMIT,
+            credits: Default::default(),
+            early: Default::default(),
+            early_bytes: 0,
+            max_segments: 65536,
+        }
+    }
+}
+impl RelayState {
+    fn notice(&mut self, class: usize, seq: u64, content: [u8; 32]) {
+        self.notices[class].insert(seq, content);
+        if self.notices[0].len() + self.notices[1].len() > MAX_VERIFIED_IDS {
+            let oldest = if self.notices[0]
+                .first_key_value()
+                .map(|(s, _)| *s)
+                .unwrap_or(u64::MAX)
+                < self.notices[1]
+                    .first_key_value()
+                    .map(|(s, _)| *s)
+                    .unwrap_or(u64::MAX)
+            {
+                0
+            } else {
+                1
+            };
+            self.notices[oldest].pop_first();
         }
     }
 }
@@ -96,12 +128,59 @@ impl Relay {
         size: usize,
         reliable: bool,
     ) -> Result<()> {
+        self.publish_kind(id, record, size, reliable, true)
+    }
+    fn publish_kind(
+        &self,
+        id: [u8; 32],
+        record: Arc<Record>,
+        size: usize,
+        reliable: bool,
+        verified: bool,
+    ) -> Result<()> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| error("transaction relay poisoned"))?;
         let content = hash(&record, "content_hash")?;
-        state.verified.remember(content, MAX_VERIFIED_IDS);
+        let notify =
+            !state.verified.ids.contains(&content) && !state.envelopes.ids.contains(&content);
+        if verified {
+            if state.params.is_some() && !state.verified.ids.contains(&content) {
+                state.credits.verified(&record)?;
+            }
+            state.verified.remember(content, MAX_VERIFIED_IDS);
+            // Promote an existing early publication without resetting its
+            // native fanout timing or retransmitting its payload.
+            if let Some((class, seq)) = state.ids.get(&id).copied() {
+                if let Some((_, early_size)) = state.early.remove(&seq) {
+                    state.early_bytes -= early_size;
+                    if let Some(item) = state.entries[class].get_mut(&seq) {
+                        // Keep the verified owner's normalized public record,
+                        // dropping any unhashed padding from the early copy.
+                        item.size = size;
+                        item.record = record;
+                    }
+                    return Ok(());
+                }
+            }
+        } else {
+            let max_segments = state.max_segments;
+            if size > 32 * 1024 * 1024
+                || state.verified.ids.contains(&content)
+                || !state.credits.consume(&record, max_segments)?
+            {
+                return Ok(());
+            }
+            // Early publications can fail final verification. Bound them
+            // independently of the owner's verified relay retention window.
+            while state.early.len() >= 128 || state.early_bytes + size > 32 * 1024 * 1024 {
+                let (seq, (id, size)) = state.early.pop_first().unwrap();
+                state.entries[0].remove(&seq);
+                state.ids.remove(&id);
+                state.early_bytes -= size;
+            }
+        }
         if let Some((class, seq)) = state.ids.remove(&id) {
             state.entries[class].remove(&seq);
         }
@@ -111,7 +190,14 @@ impl Relay {
             .checked_add(1)
             .ok_or_else(|| error("transaction relay sequence overflow"))?;
         let class = usize::from(record.name == "mmx.Transaction");
+        if notify {
+            state.notice(class, seq, content);
+        }
         state.ids.insert(id, (class, seq));
+        if !verified {
+            state.early.insert(seq, (id, size));
+            state.early_bytes += size;
+        }
         let mut members: Vec<_> = state.members.iter().copied().collect();
         members.shuffle(&mut rand::thread_rng());
         // Native Router::send_to shuffles once, then spaces all ranks within
@@ -135,6 +221,9 @@ impl Relay {
         );
         self.latest.store(seq, Ordering::Release);
         drop(state);
+        self.notify()
+    }
+    fn notify(&self) -> Result<()> {
         let _guard = self
             .wake
             .0
@@ -167,6 +256,14 @@ impl Relay {
             .map_err(|_| error("transaction relay poisoned"))?;
         state.verified = Seen::default();
         state.envelopes = Seen::default();
+        state.credits = credits::Credits::default();
+        let early = std::mem::take(&mut state.early);
+        for (seq, (id, _)) in early {
+            state.entries[0].remove(&seq);
+            state.ids.remove(&id);
+        }
+        state.early_bytes = 0;
+        state.notices = Default::default();
         Ok(())
     }
     /// Native receive_msg_hash deduplication precedes expensive ledger/space
@@ -194,11 +291,27 @@ impl Relay {
             if state.verified.ids.contains(&id) || state.envelopes.ids.contains(&id) {
                 return Ok(());
             }
-            state
+            let params = state
                 .params
                 .clone()
-                .ok_or_else(|| error("missing peer chain parameters"))?
+                .ok_or_else(|| error("missing peer chain parameters"))?;
+            if state.credits.too_old(&record, params.commit_delay)? {
+                return Ok(());
+            }
+            params
         };
+        let size = size.max(record.memory_size());
+        let limit = match record.name.as_str() {
+            "mmx.ProofResponse" => 64 * 1024,
+            "mmx.ValidatorVote" => 4096,
+            "mmx.Transaction" => 256 * 1024,
+            _ => 32 * 1024 * 1024,
+        };
+        // Unhashed padding/schema overhead can preserve a real content ID.
+        // Never remember a record the bounded owner/inbox cannot retain.
+        if size > limit {
+            return Err(error("peer envelope exceeds retention limit"));
+        }
         match record.name.as_str() {
             "mmx.Block" => mmx_execution::block::prevalidate(&record, &params)?,
             "mmx.ProofOfTime" => {
@@ -235,10 +348,22 @@ impl Relay {
                 return Ok(());
             }
             state.envelopes.remember(id, MAX_VERIFIED_IDS);
+            let seq = self
+                .latest
+                .load(Ordering::Relaxed)
+                .checked_add(1)
+                .ok_or_else(|| error("relay sequence overflow"))?;
+            state.notice(usize::from(record.name == "mmx.Transaction"), seq, id);
+            self.latest.store(seq, Ordering::Release);
         }
+        // Native recv_notify acknowledges authenticated receipt immediately,
+        // independently of expensive final validation or permission to relay.
+        self.notify()?;
         // Queue admission never upgrades an envelope to verified work, nor
         // earns any relay credit. Native first-seen age is not refreshed.
-        inbox.submit(record, size)
+        let record = Arc::new(record);
+        self.publish_kind(id, record.clone(), size, false, false)?;
+        inbox.submit_shared(record, size)
     }
     pub(crate) fn remove(&self, id: &[u8; 32]) -> Result<()> {
         let mut state = self
@@ -247,6 +372,9 @@ impl Relay {
             .map_err(|_| error("transaction relay poisoned"))?;
         if let Some((class, seq)) = state.ids.remove(id) {
             state.entries[class].remove(&seq);
+            if let Some((_, size)) = state.early.remove(&seq) {
+                state.early_bytes -= size;
+            }
         }
         Ok(())
     }
@@ -280,6 +408,13 @@ impl Relay {
             .lock()
             .map_err(|_| error("relay poisoned"))?
             .compressed_limit = limit;
+        Ok(())
+    }
+    pub(crate) fn set_max_vdf_segments(&self, limit: usize) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| error("relay poisoned"))?
+            .max_segments = limit;
         Ok(())
     }
     pub(crate) fn compressed_limit(&self) -> Result<usize> {
@@ -317,6 +452,7 @@ impl Relay {
         let id = state.next_member;
         state.members.insert(id);
         Ok(RelayPeer {
+            acknowledgements: [self.latest.load(Ordering::Acquire); 2],
             member: Some(Arc::new(Member {
                 id,
                 state: Arc::downgrade(&self.state),
@@ -328,7 +464,7 @@ impl Relay {
         let state = self.state.lock().map_err(|_| error("relay poisoned"))?;
         let mut next = self.latest.load(Ordering::Acquire);
         let mut out = Vec::new();
-        for (seq, item) in state.entries[class].range((
+        for (seq, content) in state.notices[class].range((
             std::ops::Bound::Excluded(cursor),
             std::ops::Bound::Unbounded,
         )) {
@@ -336,7 +472,7 @@ impl Relay {
                 next = seq - 1;
                 break;
             }
-            out.push(item.content);
+            out.push(*content);
         }
         Ok((next, out))
     }
@@ -578,6 +714,7 @@ mod tests {
         let steps = &rows.iter().find(|r| r["kind"] == "chain").unwrap()["steps"];
         let block = Record::decode(&raw(&steps[1]["block"])).unwrap();
         let vdf = Record::decode(&raw(&steps[0]["vdf"])).unwrap();
+        let next_vdf = Record::decode(&raw(&steps[1]["vdf"])).unwrap();
         let row: Json = include_str!("../../mmx-consensus/tests/fixtures/responses.jsonl")
             .lines()
             .map(|s| serde_json::from_str::<Json>(s).unwrap())
@@ -596,7 +733,111 @@ mod tests {
         );
         tx.fields
             .insert("content_hash".into(), bytes(tx.calc_hash(true, 0).unwrap()));
-        (params, vec![block, vdf, proof, tx])
+        (params, vec![block, vdf, proof, tx, next_vdf])
+    }
+    #[test]
+    fn early_vdf_uses_earned_credit_shares_the_inbox_body_and_promotes_without_resending() {
+        let (params, records) = native_envelopes();
+        let (previous, next) = (&records[1], &records[4]);
+        let relay = Relay::default();
+        relay.configure_upload(&params, 0., 0.1).unwrap();
+        let previous_id = hash(previous, "content_hash").unwrap();
+        relay
+            .publish(previous_id, Arc::new(previous.clone()), 100)
+            .unwrap();
+        relay.remove(&previous_id).unwrap();
+        let id = hash(next, "content_hash").unwrap();
+        let inbox = crate::inbox::Inbox::default();
+        let mut padded = next.clone();
+        padded
+            .fields
+            .insert("padding".into(), Value::Bytes(vec![0; 4096]));
+        relay.admit_gossip(padded.clone(), 100, &inbox).unwrap();
+        let sequence = relay.sequence();
+        assert!(!relay.knows(next).unwrap());
+        let queued = inbox.take().unwrap().pop_front().unwrap().0;
+        assert!(Arc::ptr_eq(
+            &queued,
+            &relay.state.lock().unwrap().entries[0]
+                .last_key_value()
+                .unwrap()
+                .1
+                .record
+        ));
+        let mut peer = RelayPeer::default();
+        let mut payloads = vec![];
+        peer.flush(&relay, |r| {
+            if r.name != "mmx.ReceiveNote" {
+                payloads.push(r.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(payloads.as_slice(), std::slice::from_ref(&padded));
+        relay
+            .publish(id, Arc::new(next.clone()), next.memory_size())
+            .unwrap();
+        assert!(relay.knows(next).unwrap());
+        assert_eq!(relay.sequence(), sequence);
+        assert!(relay.state.lock().unwrap().early.is_empty());
+        assert!(!relay.state.lock().unwrap().entries[0]
+            .last_key_value()
+            .unwrap()
+            .1
+            .record
+            .fields
+            .contains_key("padding"));
+        peer.flush(&relay, |_| {
+            panic!("verified promotion retransmitted an early publication")
+        })
+        .unwrap();
+    }
+    #[test]
+    fn failed_early_work_has_separate_count_byte_and_rewind_bounds() {
+        let (params, records) = native_envelopes();
+        let relay = Relay::default();
+        relay.configure_upload(&params, 0., 0.1).unwrap();
+        for n in 0..200u64 {
+            let mut early = records[1].clone();
+            let mut id = [0; 32];
+            id[..8].copy_from_slice(&n.to_le_bytes());
+            early.fields.insert("content_hash".into(), bytes(id));
+            relay
+                .state
+                .lock()
+                .unwrap()
+                .credits
+                .verified(&records[1])
+                .unwrap();
+            relay
+                .publish_kind(id, Arc::new(early), 100, false, false)
+                .unwrap();
+        }
+        assert_eq!(relay.state.lock().unwrap().early.len(), 128);
+        for n in 200..250u64 {
+            let mut early = records[1].clone();
+            let mut id = [0; 32];
+            id[..8].copy_from_slice(&n.to_le_bytes());
+            early.fields.insert("content_hash".into(), bytes(id));
+            relay
+                .state
+                .lock()
+                .unwrap()
+                .credits
+                .verified(&records[1])
+                .unwrap();
+            relay
+                .publish_kind(id, Arc::new(early), 1024 * 1024, false, false)
+                .unwrap();
+        }
+        let state = relay.state.lock().unwrap();
+        assert_eq!(state.early.len(), 32);
+        assert_eq!(state.early_bytes, 32 * 1024 * 1024);
+        drop(state);
+        relay.reset_verified().unwrap();
+        let state = relay.state.lock().unwrap();
+        assert_eq!(state.early_bytes, 0);
+        assert!(state.entries[0].is_empty() && state.ids.is_empty());
     }
     #[test]
     fn first_seen_cache_authenticates_commitments_without_promoting_or_poisoning_work() {
@@ -604,6 +845,7 @@ mod tests {
         for native in records {
             let relay = Relay::default();
             relay.configure_upload(&params, 0., 0.1).unwrap();
+            let mut peer = relay.attach().unwrap();
             let inbox = crate::inbox::Inbox::default();
             let mut forged = native.clone();
             match native.name.as_str() {
@@ -635,6 +877,22 @@ mod tests {
             assert_eq!(inbox.stats().unwrap().messages, 1);
             assert!(!relay.knows(&native).unwrap());
             assert!(relay.since(0, 0).unwrap().1.is_empty());
+            let mut receipts = vec![];
+            peer.flush(&relay, |record| {
+                receipts.push(record.clone());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].name, "mmx.ReceiveNote");
+            assert_eq!(
+                hash(&receipts[0], "hash").unwrap(),
+                hash(&native, "content_hash").unwrap()
+            );
+            peer.flush(&relay, |_| {
+                panic!("a repeated envelope refreshed its receipt")
+            })
+            .unwrap();
             relay.reset_verified().unwrap();
             relay.admit_gossip(native, 100, &inbox).unwrap();
             assert_eq!(inbox.stats().unwrap().messages, 2);
@@ -658,6 +916,25 @@ mod tests {
         });
         assert_eq!(inbox.stats().unwrap().messages, 1);
         assert!(!relay.knows(native).unwrap());
+    }
+    #[test]
+    fn oversized_unhashed_padding_cannot_poison_a_real_response_or_spend_credits() {
+        let (params, records) = native_envelopes();
+        let response = &records[2];
+        let relay = Relay::default();
+        relay.configure_upload(&params, 0., 0.1).unwrap();
+        let inbox = crate::inbox::Inbox::default();
+        let mut padded = response.clone();
+        padded
+            .fields
+            .insert("padding".into(), Value::Bytes(vec![0; 64 * 1024]));
+        assert!(mmx_consensus::response::is_valid(&padded).unwrap());
+        mmx_consensus::response::authenticate(&padded).unwrap();
+        assert!(relay.admit_gossip(padded, 100, &inbox).is_err());
+        assert!(relay.state.lock().unwrap().envelopes.ids.is_empty());
+        relay.admit_gossip(response.clone(), 100, &inbox).unwrap();
+        assert_eq!(inbox.stats().unwrap().messages, 1);
+        assert!(!relay.knows(response).unwrap());
     }
     fn message(id: u8) -> Arc<Record> {
         Arc::new(record(
@@ -686,7 +963,9 @@ mod tests {
         relay
             .publish_with_origin([2; 32], transaction(2), 100, true)
             .unwrap();
-        relay.publish([3; 32], message(3), 100).unwrap();
+        let mut consensus = message(3).as_ref().clone();
+        consensus.name = "mmx.ValidatorVote".into();
+        relay.publish([3; 32], Arc::new(consensus), 100).unwrap();
         let mut peer = RelayPeer::default();
         let mut payloads = Vec::new();
         peer.flush(&relay, |r| {
@@ -859,8 +1138,9 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(sent.len(), 2);
-        assert_eq!(sent[1].name, "mmx.ProofResponse");
+        // Newly attached peers do not receive historical receipt broadcasts.
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].name, "mmx.ProofResponse");
     }
     #[test]
     fn verified_replay_ids_survive_payload_eviction_and_ignore_receipt_claims() {

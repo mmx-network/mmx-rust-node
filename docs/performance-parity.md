@@ -223,3 +223,33 @@ valid delivery. Verified IDs also guard VDF record construction/publication afte
 the smaller retained-payload window has evicted old records, avoiding cyclic
 republication during a long wait for a block. There is no ledger I/O or state
 cache in the decoder path.
+
+Earned early relay now follows C++ `Router::handle` / `on_block` / `on_vdf`:
+verified ProofResponses grant one permission for their farmer and VDF height;
+verified VDFs replenish one permission for their timelord. Blocks never earn
+credit. Farmer pruning uses the previous verified VDF height, preserving better
+proof credit at the new height. Native commit-delay replay cutoffs and strict
+`segments < Router.max_vdf_segments` apply before early forwarding. Credits do
+not bypass final verification or seed the verified-ID cache. Unverified early
+records share one Arc with the inbox and have a separate 128-item / 32 MiB
+window; promotion keeps fanout timing and sequence, replaces the early record
+with the owner's normalized verified record and never resends its body. Farmer
+and timelord key maps each have a deliberate 100,000-key bound; timelord eviction
+is FIFO, and farmer expiration follows verified progress. Explicit rewind clears
+credit and early payloads. Credits are transient across restart, as distinct
+from consensus state; persisted native timelord credits remain unported.
+
+Native receipt timing now also follows `receive_msg_hash`: a newly authenticated
+envelope broadcasts its receipt before full work validation, even if it lacks
+early-forwarding permission. A shared 100,000-ID metadata window keeps independent
+consensus/transaction cursors; new connections skip historical receipts. These
+notes remain transport claims, never verified evidence or credit grants. Decoded
+per-record retention limits precede first-seen insertion, preventing unhashed
+padding from suppressing the smaller real envelope. Relay and pool byte budgets
+now charge decoded heap footprint as well as compact bytes. Tests hold the ledger
+while an earned block is forwarded, refuse a second signed same-height block,
+exercise exact key/height/segment/replay/pruning boundaries, verify shared payload
+ownership and promotion without retransmission, bound failed early work, reject
+padding-cache poisoning and check immediate receipt-only delivery. All storage
+checks remain on temporary data. This establishes defenses and scheduling;
+whole-network latency and bandwidth comparisons remain open.

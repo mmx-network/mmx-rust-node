@@ -128,7 +128,7 @@ impl Node {
                 Value::Bytes(tx.calc_hash(true, 0)?.to_vec()),
             );
         }
-        let size = tx.encode_compact()?.len();
+        let size = tx.memory_size().max(tx.encode_compact()?.len());
         if size > params.max_block_size as usize || size > MAX_RELAY_TX_BYTES {
             return Err(error("transaction exceeds pool size limit"));
         }

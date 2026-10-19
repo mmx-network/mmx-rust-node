@@ -314,7 +314,7 @@ impl Node {
         if self.tx_pool.relay.knows(record)? {
             return Ok(());
         }
-        let size = record.encode_compact()?.len();
+        let size = record.memory_size().max(record.encode_compact()?.len());
         if size > 32 * 1024 * 1024 {
             return Err(error("broadcast exceeds queue bound"));
         }

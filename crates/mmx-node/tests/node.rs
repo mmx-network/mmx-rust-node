@@ -2366,6 +2366,83 @@ fn malformed_vote_does_not_poison_replay_cache_and_replays_do_not_grow_pending_w
 }
 
 #[test]
+fn a_verified_farmer_proof_earns_one_early_block_relay_without_accepting_its_ledger_effects() {
+    use mmx_farming::farmer::Farmer;
+    use mmx_wallet::Address;
+    let (network, genesis, steps, _) = fixture();
+    let response = native_farming_response();
+    let producer = ready_farming_node(&network, &genesis, &steps[0]);
+    producer.lock().unwrap().receive(&response).unwrap();
+    producer.lock().unwrap().tick().unwrap();
+    let keys = [farmer_scalar().public_key()].into();
+    let plan = producer
+        .lock()
+        .unwrap()
+        .farming_plan(&keys, vnx::util::get_wall_time_millis(), 0)
+        .unwrap()
+        .unwrap();
+    let unsigned = plan.build().unwrap();
+    let first = Farmer::new([farmer_scalar()], Some(Address([7; 32])))
+        .sign_block(&unsigned, &network.params)
+        .unwrap();
+    let second = Farmer::new([farmer_scalar()], Some(Address([8; 32])))
+        .sign_block(&unsigned, &network.params)
+        .unwrap();
+    assert_ne!(
+        hash(&first, "content_hash").unwrap(),
+        hash(&second, "content_hash").unwrap()
+    );
+    for earned in [false, true] {
+        let node = ready_farming_node(&network, &genesis, &steps[0]);
+        let config = vnx::config::Config::new();
+        config.set("Router.relay_target_ms", json!(0)).unwrap();
+        node.lock().unwrap().configure_router(&config).unwrap();
+        let mut server = peer::Server::bind("127.0.0.1:0", node.clone()).unwrap();
+        let mut sender = peer::Connection::connect(&server.address().to_string()).unwrap();
+        let mut observer = peer::Connection::connect(&server.address().to_string()).unwrap();
+        for peer in [&mut sender, &mut observer] {
+            assert_eq!(
+                peer.receive(Duration::from_secs(3)).unwrap().unwrap().name,
+                "mmx.ProofOfTime"
+            );
+        }
+        if earned {
+            node.lock().unwrap().receive(&response).unwrap();
+            node.lock().unwrap().tick().unwrap();
+            for peer in [&mut sender, &mut observer] {
+                assert_eq!(
+                    peer.receive(Duration::from_secs(3)).unwrap().unwrap().name,
+                    "mmx.ProofResponse"
+                );
+            }
+        }
+        let owner = node.lock().unwrap();
+        sender.send(&first).unwrap();
+        if earned {
+            assert_eq!(
+                observer.receive(Duration::from_secs(3)).unwrap().unwrap(),
+                first
+            );
+        } else {
+            assert!(observer
+                .receive(Duration::from_millis(150))
+                .unwrap()
+                .is_none());
+        }
+        // Same key and height, different fully signed content: spending the
+        // permission on the first block must prevent a second early relay.
+        sender.send(&second).unwrap();
+        assert!(observer
+            .receive(Duration::from_millis(150))
+            .unwrap()
+            .is_none());
+        assert_eq!(owner.chain().selected().tip().unwrap().unwrap().height, 0);
+        drop(owner);
+        server.shutdown();
+    }
+}
+
+#[test]
 fn frozen_proof_context_rechecks_authentication_root_and_exact_height() {
     use mmx_consensus::response;
     let (network, genesis, steps, _) = fixture();
