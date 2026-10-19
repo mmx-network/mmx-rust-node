@@ -26,6 +26,8 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 // authenticated pools to fill a complete body-request pipeline as well.
 const MAX_GROUP_CONTENTS: usize = 32;
 type Missing = BTreeSet<(u32, Hash)>;
+type QualifiedPeer = (Hash, u32, Client, Vec<String>);
+mod connect;
 mod metadata;
 mod prefetch;
 
@@ -618,9 +620,18 @@ pub fn synchronize_peers<S: PeerSource>(
     pool: &mut PeerPool<S>,
     node: &Arc<Mutex<Node>>,
     stop: &AtomicBool,
-    mut report: impl FnMut(&Progress),
+    report: impl FnMut(&Progress),
 ) -> Result<Progress> {
-    let result = prefetch::with_pool(pool, node, stop, |source| {
+    synchronize_maintained(pool, node, stop, report, |_| Ok(()))
+}
+fn synchronize_maintained<S: PeerSource>(
+    pool: &mut PeerPool<S>,
+    node: &Arc<Mutex<Node>>,
+    stop: &AtomicBool,
+    mut report: impl FnMut(&Progress),
+    maintain: impl FnMut(&mut PeerPool<S>) -> Result<()> + Send,
+) -> Result<Progress> {
+    let result = prefetch::with_maintenance(pool, node, stop, maintain, |source| {
         synchronize_inner(source, node, stop, &mut report)
     });
     node.lock()
@@ -965,101 +976,87 @@ pub fn run(
     let mut pool = PeerPool::<Client>::new(vec![]);
     let mut connected = BTreeMap::<Hash, String>::new();
     let mut retry_at = BTreeMap::<String, Instant>::new();
+    let mut connections = connect::Connections::<QualifiedPeer>::new();
     let mut changed = Instant::now();
     let mut last_height = 0;
-    while !stop.load(Ordering::Relaxed) {
+    let mut reported_peers = 0;
+    let mut maintain = |pool: &mut PeerPool<Client>| -> Result<()> {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         pool.remove_failed();
-        node.lock()
-            .map_err(|_| error("node lock poisoned"))?
-            .sync_peers = pool.len();
         connected.retain(|id, _| pool.ids().contains(id));
+        for (address, result) in connections.finished() {
+            retry_at.insert(address.clone(), Instant::now() + Duration::from_secs(30));
+            match result {
+                Ok((id, height, client, discovered)) => {
+                    if pool.add(id, client) {
+                        println!(
+                            "Sync peer {address}: authenticated {}, synced height {height}",
+                            vnx::util::to_hex_string(&id[..8], true, false)
+                        );
+                        connected.insert(id, address);
+                    }
+                    for address in discovered {
+                        if addresses.len() >= 512 {
+                            break;
+                        }
+                        // Native discovery returns numeric IP addresses.
+                        if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+                            let endpoint = std::net::SocketAddr::new(ip, port).to_string();
+                            if !addresses.contains(&endpoint) {
+                                addresses.push(endpoint);
+                            }
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Sync peer {address}: {e}"),
+            }
+        }
+        let connect_node = node.clone();
+        connections.refill(
+            pool.len(),
+            &addresses,
+            &connected,
+            &mut retry_at,
+            move |address| {
+                let mut client = Client::connect(address, connect_node.clone())?;
+                let (id, height) = client.qualify(genesis, own_id)?;
+                let discovered = client.known_peers().unwrap_or_default();
+                Ok((id, height, client, discovered))
+            },
+        )?;
+        // Avoid the ledger mutex on ordinary prefetch windows, so network I/O
+        // continues to overlap block validation when the pool is unchanged.
+        if reported_peers != pool.len() {
+            reported_peers = pool.len();
+            node.lock()
+                .map_err(|_| error("node lock poisoned"))?
+                .sync_peers = reported_peers;
+            if reported_peers >= MIN_PEERS {
+                println!("Sync using {reported_peers} distinct peers (minimum {MIN_PEERS}, maximum {MAX_PEERS})");
+            }
+        }
+        Ok(())
+    };
+    while !stop.load(Ordering::Relaxed) {
+        maintain(&mut pool)?;
         if pool.len() < MIN_PEERS {
             node.lock()
                 .map_err(|_| error("node lock poisoned"))?
                 .begin_resync();
-            let mut candidates: Vec<_> = addresses
-                .iter()
-                .filter(|address| {
-                    !connected.values().any(|a| a == *address)
-                        && retry_at
-                            .get(*address)
-                            .is_none_or(|deadline| Instant::now() >= *deadline)
-                })
-                .cloned()
-                .collect();
-            candidates.shuffle(&mut rand::thread_rng());
-            candidates.truncate(MAX_PEERS - pool.len());
-            for address in &candidates {
-                retry_at.insert(address.clone(), Instant::now() + Duration::from_secs(30));
-            }
-            let connections = thread::scope(|scope| {
-                let jobs: Vec<_> = candidates
-                    .into_iter()
-                    .map(|address| {
-                        scope.spawn(move || {
-                            let result = (|| {
-                                let mut client = Client::connect(&address, node.clone())?;
-                                let (id, height) = client.qualify(genesis, own_id)?;
-                                let discovered = client.known_peers().unwrap_or_default();
-                                Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-                                    id, height, client, discovered,
-                                ))
-                            })();
-                            (address, result)
-                        })
-                    })
-                    .collect();
-                jobs.into_iter()
-                    .map(|j| {
-                        j.join()
-                            .map_err(|_| error("peer connection worker panicked"))
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })?;
-            for (address, result) in connections {
-                match result {
-                    Ok((id, height, client, discovered)) => {
-                        if pool.add(id, client) {
-                            println!(
-                                "Sync peer {address}: authenticated {}, synced height {height}",
-                                vnx::util::to_hex_string(&id[..8], true, false)
-                            );
-                            connected.insert(id, address);
-                        }
-                        for address in discovered {
-                            if addresses.len() >= 512 {
-                                break;
-                            }
-                            // Native discovery returns numeric IP addresses.
-                            if let Ok(ip) = address.parse::<std::net::IpAddr>() {
-                                let endpoint = std::net::SocketAddr::new(ip, port).to_string();
-                                if !addresses.contains(&endpoint) {
-                                    addresses.push(endpoint);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("Sync peer {address}: {e}"),
-                }
-            }
-            if pool.len() < MIN_PEERS {
-                eprintln!(
-                    "Sync waiting for peers: {} / {MIN_PEERS} minimum",
-                    pool.len()
-                );
-                pool.poll()?;
-                for _ in 0..10 {
-                    if stop.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-                continue;
-            }
-            println!(
-                "Sync using {} distinct peers (minimum {MIN_PEERS}, maximum {MAX_PEERS})",
+            eprintln!(
+                "Sync waiting for peers: {} / {MIN_PEERS} minimum",
                 pool.len()
             );
+            pool.poll()?;
+            for _ in 0..10 {
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            continue;
         }
         let attempt = (|| -> Result<()> {
             if !node
@@ -1067,12 +1064,18 @@ pub fn run(
                 .map_err(|_| error("node lock poisoned"))?
                 .is_synced()
             {
-                synchronize_peers(&mut pool, node, stop, |p| {
-                    println!("Sync: {} / {}, candidates {} since root {}, {:.1} candidates/s; download wait {:.3}s (hashes {:.3}s bodies {:.3}s, {} body requests, {} retries, {} busy retries) archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
+                synchronize_maintained(
+                    &mut pool,
+                    node,
+                    stop,
+                    |p| {
+                        println!("Sync: {} / {}, candidates {} since root {}, {:.1} candidates/s; download wait {:.3}s (hashes {:.3}s bodies {:.3}s, {} body requests, {} retries, {} busy retries) archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
                         p.selected, p.target, p.downloaded, p.common,
                         f64::from(p.downloaded) / p.elapsed.as_secs_f64(), p.download_time.as_secs_f64(), p.hash_time.as_secs_f64(), p.body_time.as_secs_f64(), p.body_requests, p.body_retries, p.backpressure_retries,
                         p.archive_time.as_secs_f64(), p.update_time.as_secs_f64(), p.verification_time.as_secs_f64(), p.replay_time.as_secs_f64());
-                })?;
+                    },
+                    &mut maintain,
+                )?;
                 if once
                     && node
                         .lock()

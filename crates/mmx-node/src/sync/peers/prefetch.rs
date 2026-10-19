@@ -91,10 +91,20 @@ impl WindowSource for Producer<'_> {
         Ok(window)
     }
 }
+#[cfg(test)]
 pub(super) fn with_pool<S: PeerSource, T>(
     pool: &mut PeerPool<S>,
     node: &Arc<Mutex<Node>>,
     stop: &AtomicBool,
+    work: impl FnOnce(&mut Producer<'_>) -> Result<T>,
+) -> Result<T> {
+    with_maintenance(pool, node, stop, |_| Ok(()), work)
+}
+pub(super) fn with_maintenance<S: PeerSource, T>(
+    pool: &mut PeerPool<S>,
+    node: &Arc<Mutex<Node>>,
+    stop: &AtomicBool,
+    mut maintain: impl FnMut(&mut PeerPool<S>) -> Result<()> + Send,
     work: impl FnOnce(&mut Producer<'_>) -> Result<T>,
 ) -> Result<T> {
     thread::scope(|scope| {
@@ -102,11 +112,13 @@ pub(super) fn with_pool<S: PeerSource, T>(
         let (outgoing, replies) = sync_channel(1);
         let worker = scope.spawn(move || {
             while let Ok(command) = incoming.recv() {
+                let maintenance = maintain(pool);
                 let reply = match command {
-                    Command::Refresh => Reply::Refresh(pool.refresh()),
-                    Command::Window(start, count, context) => {
-                        Reply::Window(pool.prepared_window(start, count, *context, node, stop))
-                    }
+                    Command::Refresh => Reply::Refresh(maintenance.and_then(|_| pool.refresh())),
+                    Command::Window(start, count, context) => Reply::Window(
+                        maintenance
+                            .and_then(|_| pool.prepared_window(start, count, *context, node, stop)),
+                    ),
                 };
                 if outgoing.send(reply).is_err() {
                     break;

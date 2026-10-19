@@ -51,7 +51,8 @@ cargo build --release -p mmx-node --locked
 ./target/release/mmx-node --mmx-root ../mmx-node --network mainnet \
   --data-dir ./mmx-data
 # Supply seed candidates with --peer HOST[:PORT]; otherwise use native seed config.
-# Discovery fills a random pool of 3–8 distinct authenticated synced full nodes.
+# Discovery maintains eight random distinct authenticated synced full nodes.
+# Sync requires at least three while unavailable slots refill in the background.
 # Serve stored state without network access:
 ./target/release/mmx-node --mmx-root ../mmx-node --offline
 # Keep a chosen height before resuming sync (all later orphans remain archived):
@@ -76,9 +77,17 @@ curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
 ```
 
 One coordinator owns historical download jobs. It selects a random pool of
-3–8 synced full nodes, verifies each native signed node ID and genesis, and
+up to eight synced full nodes, verifies each native signed node ID and genesis, and
 rejects duplicate identities and self-connections. Native peer discovery fills
 the pool; sync waits when fewer than three qualified peers are available.
+The coordinator continuously refills toward eight, including when three through
+seven healthy peers remain, including between windows during historical sync.
+Connection/authentication/discovery attempts run in
+the background, with active peers plus pending attempts capped at eight and
+per-address retries delayed 30 seconds. Slow or unavailable seeds do not block
+the existing pool. The seed/candidate list is independent of that active limit;
+normal startup reads the native `Router.seed_peers` and learns more addresses
+through authenticated peers (up to 512 discovery candidates).
 For every height, `get_block_hash_ex` collects `(block hash, content hash)` from
 at least three distinct peers. Every unique content hash is fetched once with
 `get_block(hash)` and recomputed/authenticated before archival. Hashes are not

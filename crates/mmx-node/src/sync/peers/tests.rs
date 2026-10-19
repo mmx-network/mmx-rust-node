@@ -211,6 +211,124 @@ fn requires_three_distinct_hash_responses_before_any_body_download() {
     );
 }
 #[test]
+fn healthy_three_peer_pool_refills_to_eight_without_waiting_for_slow_connections() {
+    use std::sync::mpsc;
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = peers(&blocks, &events);
+    let mut connected: BTreeMap<_, _> = (1..=3u8).map(|id| ([id; 32], id.to_string())).collect();
+    let mut addresses: Vec<String> = (1..=12u8).map(|id| id.to_string()).collect();
+    addresses.extend(addresses.clone()); // duplicate endpoints cannot occupy slots
+    let mut retry_at = BTreeMap::new();
+    let mut pending = connect::Connections::new();
+    // Drop the release sender before pending jobs if an assertion fails, so
+    // even failing tests release every deliberately blocked connection worker.
+    let (release, released) = mpsc::channel();
+    let released = Arc::new(Mutex::new(released));
+    let (entered, started) = mpsc::channel();
+    let worker_blocks = blocks.clone();
+    let worker_events = events.clone();
+    pending
+        .refill(
+            pool.len(),
+            &addresses,
+            &connected,
+            &mut retry_at,
+            move |address| {
+                entered.send(address.to_owned()).unwrap();
+                let _ = released.lock().unwrap().recv();
+                let id: u8 = address.parse().unwrap();
+                Ok(([id; 32], Fake::new(id, &worker_blocks, &worker_events)))
+            },
+        )
+        .unwrap();
+    for _ in 0..5 {
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+    pending
+        .refill(pool.len(), &addresses, &connected, &mut retry_at, |_| {
+            panic!("active plus connecting peers already fill all eight slots")
+        })
+        .unwrap();
+    assert!(pending.finished().is_empty());
+    let window = pool.window(1, 1, &node, &AtomicBool::new(false)).unwrap();
+    assert_eq!(window.heights, vec![vec![blocks[1].clone()]]);
+    assert_eq!(window.body_requests, 1);
+    for _ in 0..5 {
+        release.send(()).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while pool.len() < MAX_PEERS {
+        for (address, result) in pending.finished() {
+            let (id, source) = result.unwrap();
+            assert!(pool.add(id, source));
+            connected.insert(id, address);
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(pool.ids().into_iter().collect::<BTreeSet<_>>().len(), 8);
+    // Losing one connection must also trigger refill, despite remaining well
+    // above the minimum needed for independent content observations.
+    pool.peers[0].active = false;
+    pool.remove_failed();
+    connected.retain(|id, _| pool.ids().contains(id));
+    let worker_blocks = blocks.clone();
+    let worker_events = events.clone();
+    pending
+        .refill(
+            pool.len(),
+            &addresses,
+            &connected,
+            &mut retry_at,
+            move |address| {
+                let id: u8 = address.parse().unwrap();
+                Ok(([id; 32], Fake::new(id, &worker_blocks, &worker_events)))
+            },
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while pool.len() < MAX_PEERS {
+        for (_, result) in pending.finished() {
+            let (id, source) = result.unwrap();
+            assert!(pool.add(id, source));
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(pool.len(), 8);
+}
+#[test]
+fn connections_are_admitted_during_historical_sync_in_the_window_owner() {
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut pool = peers(&blocks, &events);
+    let mut calls = 0;
+    let progress = synchronize_maintained(
+        &mut pool,
+        &node,
+        &AtomicBool::new(false),
+        |_| {},
+        |pool| {
+            calls += 1;
+            // Simulate dial completion after the initial refresh, once historical
+            // sync has begun. Waiting until the whole sync returns leaves only three.
+            if calls == 2 {
+                for id in 4..=8 {
+                    assert!(pool.add([id; 32], Fake::new(id, &blocks, &events)));
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(calls >= 2);
+    assert_eq!(pool.len(), 8);
+    assert_eq!(progress.selected, 2);
+    assert!(node.lock().unwrap().is_synced());
+    assert_eq!(counts(&events).values().sum::<usize>(), 2);
+}
+#[test]
 fn matching_claims_download_once_and_restart_reuses_exact_archived_content() {
     let (_, node, blocks) = fixture();
     let events = Arc::new(Mutex::new(vec![]));
