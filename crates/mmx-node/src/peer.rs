@@ -102,6 +102,7 @@ pub struct Connection {
     registry: vnx::Registry,
     output: Arc<Mutex<Output>>,
     relay_worker: Option<RelayWorker>,
+    relay_receipts: Option<RelayPeer>,
     last_size: usize,
 }
 struct Output {
@@ -156,6 +157,7 @@ impl Connection {
             registry: vnx::Registry::new(),
             output: Arc::new(Mutex::new(output)),
             relay_worker: None,
+            relay_receipts: None,
             last_size: 0,
         })
     }
@@ -204,6 +206,7 @@ impl Connection {
                 }
             })?;
         self.relay_worker = Some(RelayWorker { stop, thread });
+        self.relay_receipts = Some(receiver.clone());
         Ok(receiver)
     }
     /// None means idle before the first frame byte. Partial-frame timeouts close
@@ -221,7 +224,26 @@ impl Connection {
         }
     }
     fn receive_until(&mut self, idle: Duration, end: Instant) -> Result<Option<Record>> {
-        let result = self.receive_frame_until(idle, end);
+        let result = (|| {
+            loop {
+                let Some(record) = self.receive_frame_until(idle, end)? else {
+                    return Ok(None);
+                };
+                if record.name != "mmx.ReceiveNote" {
+                    return Ok(Some(record));
+                }
+                // Native receipt control frames can precede an RPC response or
+                // gossip. Share their suppression state with the independent
+                // sender; neither the ledger nor socket output lock is needed.
+                crate::node::hash(&record, "hash")?;
+                if let Some(receipts) = &self.relay_receipts {
+                    receipts.note(&record)?;
+                }
+                if Instant::now() >= end {
+                    return Err(error("peer receipt stream timed out"));
+                }
+            }
+        })();
         if result.is_err() {
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
         }
@@ -388,6 +410,7 @@ pub struct Client {
     backpressure_retries: u64,
     peer_state: PeerState,
     relay_peer: RelayPeer,
+    relay: Relay,
 }
 impl Client {
     pub fn connect(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
@@ -396,7 +419,7 @@ impl Client {
             (local.inbox(), local.peer_state(), local.transaction_relay())
         };
         let mut connection = Connection::connect(address)?;
-        let relay_peer = connection.start_relay(relay)?;
+        let relay_peer = connection.start_relay(relay.clone())?;
         Ok(Self {
             connection,
             node,
@@ -405,6 +428,7 @@ impl Client {
             backpressure_retries: 0,
             peer_state,
             relay_peer,
+            relay,
         })
     }
     pub fn call(&mut self, method: Record) -> Result<Value> {
@@ -635,10 +659,12 @@ impl Client {
         self.relay_peer.note(&message)?;
         if message.name == "mmx.Request" {
             respond_with(&self.node, &self.peer_state, &mut self.connection, &message)
-        } else {
+        } else if !self.relay.knows(&message)? {
             // Invalid unsolicited broadcasts do not abort an outstanding sync
             // request; the same validation gates apply as to inbound peers.
             self.inbox.submit(message, self.connection.last_size)
+        } else {
+            Ok(())
         }
     }
     pub fn poll(&mut self) -> Result<()> {
@@ -715,7 +741,7 @@ impl Server {
                         workers.push(thread::spawn(move || {
                             let run = || -> Result<()> {
                                 let mut connection = Connection::new(stream)?;
-                                let relay_peer = connection.start_relay(relay)?;
+                                let relay_peer = connection.start_relay(relay.clone())?;
                                 let mut received = Instant::now();
                                 while !stop.load(Ordering::Relaxed) {
                                     // Native Router's configured receive-idle
@@ -735,7 +761,7 @@ impl Server {
                                                 &mut connection,
                                                 &msg,
                                             )?;
-                                        } else {
+                                        } else if !relay.knows(&msg)? {
                                             inbox.submit(msg, connection.last_size)?;
                                         }
                                     }
@@ -947,5 +973,46 @@ mod tests {
             drop(connection);
             server.join().unwrap();
         }
+    }
+    #[test]
+    fn native_receipts_are_consumed_during_reads_and_update_the_shared_sender() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut connection = Connection::new(listener.accept().unwrap().0).unwrap();
+            let mut sender = RelayPeer::default();
+            connection.relay_receipts = Some(sender.clone());
+            let query = connection.receive(Duration::from_secs(2)).unwrap().unwrap();
+            assert_eq!(query.name, "mmx.Node.get_height");
+            let relay = Relay::default();
+            let mut tx = Record::from_generated(&mmx_types::mmx::Transaction::default()).unwrap();
+            tx.fields
+                .insert("content_hash".into(), Value::Bytes(vec![42; 32]));
+            relay.publish([1; 32], Arc::new(tx), 100).unwrap();
+            sender.flush(&relay, |r| connection.send(r)).unwrap();
+            connection
+                .send(&record(
+                    "mmx.Node.get_height.return",
+                    [("_ret_0".into(), Value::Uint(17))],
+                ))
+                .unwrap();
+        });
+        let mut client = Connection::connect(&address.to_string()).unwrap();
+        client
+            .send_batch(&[
+                Record::from_generated(&mmx_types::mmx::ReceiveNote {
+                    hash: [42; 32].into(),
+                    time: 1,
+                })
+                .unwrap(),
+                record("mmx.Node.get_height", []),
+            ])
+            .unwrap();
+        let reply = client.receive(Duration::from_secs(3)).unwrap().unwrap();
+        assert_eq!(reply.name, "mmx.Node.get_height.return");
+        assert_eq!(reply.field("_ret_0").unwrap().uint().unwrap(), 17);
+        // The acknowledged transaction payload must never appear on this wire.
+        assert!(client.receive(Duration::from_secs(1)).is_err());
+        server.join().unwrap();
     }
 }

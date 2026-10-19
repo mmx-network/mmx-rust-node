@@ -74,7 +74,7 @@ cursors prevent old transaction backlog from delaying new proofs, VDFs or blocks
 A real socket test holds both complete RPC replies and partial inbound frames
 while a verified outgoing proof still arrives. Shared record ownership and
 20,000-entry per-peer echo caches avoid additional payload queues/copies. Native
-credit feedback, early earned credits, staged fanout and peer authentication
+credit accounting, early earned credits, staged fanout and peer authentication
 remain separate tracked work.
 
 Public balance queries now follow C++ `table.h::find_range`: native sorted sources
@@ -118,3 +118,24 @@ its local scheduling behavior instead of waiting for the 20 ms service tick.
 A regression queues two native-proof jobs on one worker and obtains both replies
 with a single service poll. This removes a definite scheduling wait; the follow-up
 live sample is required before attributing the observed slowdown to that wait.
+
+The refill deployment's first 30 t320 lookups averaged 1,549.9 ms (maximum
+3,403 ms), with no queued plots skipped. The same 1,207 plots and 16 CPU workers
+remained active and C++ harvesting stayed disabled. These are adjacent live
+samples with different challenges, not a controlled same-challenge comparison.
+The source-level refill regression proves removal of the scheduling wait;
+these samples support keeping the corrected deployment under observation.
+
+Native `Router::recv_notify`/`on_recv_note` feedback now works across Rust peers
+and C++ peers. Receipt control frames are consumed during RPC reads using the
+same absolute frame deadline; they update the shared 20,000-ID peer cache without
+ledger/output locks. Verified relay publications acknowledge before forwarding.
+A receipt suppresses only that peer's payload and never earns consensus credit.
+A separate 100,000-ID verified-publication cache drops known gossip before
+queueing it for the ledger. Payload eviction does not erase these IDs, replays
+do not refresh their FIFO age, and explicit rewind resets them. Tests cover
+actual receipt/RPC framing, suppression on the wire, cross-peer isolation,
+cache bounds, rollback/reacceptance and a socket barrier proving known proofs,
+blocks and votes stay out of the inbox. Native first-seen envelope deduplication,
+per-peer/global transaction cost accounting, earned early relay, staged fanout
+and full inbound identity/role lifecycle remain separate work.

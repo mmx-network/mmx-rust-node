@@ -22,6 +22,7 @@ type RelayEntries = BTreeMap<u64, ([u8; 32], Arc<Record>, usize)>;
 const MAX_POOL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_POOL_ITEMS: usize = 4096;
 const MAX_RELAY_TX_BYTES: usize = 256 * 1024;
+const MAX_VERIFIED_IDS: usize = 100_000;
 #[derive(Clone, Default)]
 pub(crate) struct Relay {
     state: Arc<Mutex<RelayState>>,
@@ -32,6 +33,7 @@ pub(crate) struct Relay {
 struct RelayState {
     entries: [RelayEntries; 2],
     ids: BTreeMap<[u8; 32], (usize, u64)>,
+    verified: Seen,
 }
 impl Relay {
     pub(crate) fn publish(&self, id: [u8; 32], record: Arc<Record>, size: usize) -> Result<()> {
@@ -39,6 +41,9 @@ impl Relay {
             .state
             .lock()
             .map_err(|_| error("transaction relay poisoned"))?;
+        state
+            .verified
+            .remember(hash(&record, "content_hash")?, MAX_VERIFIED_IDS);
         if let Some((class, seq)) = state.ids.remove(&id) {
             state.entries[class].remove(&seq);
         }
@@ -58,6 +63,27 @@ impl Relay {
             .lock()
             .map_err(|_| error("relay notification poisoned"))?;
         self.wake.1.notify_all();
+        Ok(())
+    }
+    /// Only ledger/proof-verified publications seed this cache. A claimed hash
+    /// or ReceiveNote cannot poison another peer's validation/admission path.
+    pub(crate) fn knows(&self, record: &Record) -> Result<bool> {
+        let Ok(id) = hash(record, "content_hash") else {
+            return Ok(false);
+        };
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| error("transaction relay poisoned"))?
+            .verified
+            .ids
+            .contains(&id))
+    }
+    pub(crate) fn reset_verified(&self) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| error("transaction relay poisoned"))?
+            .verified = Seen::default();
         Ok(())
     }
     pub(crate) fn remove(&self, id: &[u8; 32]) -> Result<()> {
@@ -521,9 +547,22 @@ struct Seen {
     ids: BTreeSet<[u8; 32]>,
     order: std::collections::VecDeque<[u8; 32]>,
 }
+impl Seen {
+    fn remember(&mut self, id: [u8; 32], limit: usize) {
+        if self.ids.insert(id) {
+            self.order.push_back(id);
+            if self.order.len() > limit {
+                let old = self.order.pop_front().unwrap();
+                self.ids.remove(&old);
+            }
+        }
+    }
+}
 impl RelayPeer {
     pub fn note(&self, record: &Record) -> Result<()> {
-        if !matches!(
+        let id = if record.name == "mmx.ReceiveNote" {
+            Some(hash(record, "hash")?)
+        } else if matches!(
             record.name.as_str(),
             "mmx.Transaction"
                 | "mmx.Block"
@@ -531,20 +570,16 @@ impl RelayPeer {
                 | "mmx.ProofResponse"
                 | "mmx.ProofOfTime"
         ) {
-            return Ok(());
-        }
-        if let Ok(id) = hash(record, "content_hash") {
+            hash(record, "content_hash").ok()
+        } else {
+            None
+        };
+        if let Some(id) = id {
             let mut seen = self
                 .received
                 .lock()
                 .map_err(|_| error("peer relay cache poisoned"))?;
-            if seen.ids.insert(id) {
-                seen.order.push_back(id);
-                if seen.order.len() > 20_000 {
-                    let old = seen.order.pop_front().unwrap();
-                    seen.ids.remove(&old);
-                }
-            }
+            seen.remember(id, 20_000);
         }
         Ok(())
     }
@@ -558,12 +593,22 @@ impl RelayPeer {
         for class in 0..2 {
             let (next, records) = relay.since(self.cursors[class], class)?;
             for r in records {
+                let id = hash(&r, "content_hash")?;
+                // Only verified relay publications generate feedback. A note
+                // acknowledges receipt, not consensus acceptance by the peer.
+                send(&record(
+                    "mmx.ReceiveNote",
+                    [
+                        ("hash".into(), bytes(id)),
+                        ("time".into(), Value::Int(vnx::time::now_micros())),
+                    ],
+                ))?;
                 let known = self
                     .received
                     .lock()
                     .map_err(|_| error("peer relay cache poisoned"))?
                     .ids
-                    .contains(&hash(&r, "content_hash")?);
+                    .contains(&id);
                 if !known {
                     send(&r)?;
                     self.note(&r)?;
@@ -579,6 +624,83 @@ impl RelayPeer {
 mod tests {
     use super::*;
     use crate::node::record;
+
+    #[test]
+    fn verified_replay_ids_survive_payload_eviction_and_ignore_receipt_claims() {
+        let relay = Relay::default();
+        let tx = Arc::new(record(
+            "mmx.Transaction",
+            [("content_hash".into(), bytes([7; 32]))],
+        ));
+        let peer = RelayPeer::default();
+        peer.note(&record(
+            "mmx.ReceiveNote",
+            [("hash".into(), bytes([7; 32]))],
+        ))
+        .unwrap();
+        assert!(!relay.knows(&tx).unwrap());
+        relay.publish([8; 32], tx.clone(), 100).unwrap();
+        relay.remove(&[8; 32]).unwrap();
+        assert!(relay.knows(&tx).unwrap());
+        relay.reset_verified().unwrap();
+        assert!(!relay.knows(&tx).unwrap());
+        let mut seen = Seen::default();
+        for n in 0..=MAX_VERIFIED_IDS {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            seen.remember(id, MAX_VERIFIED_IDS);
+            if n < MAX_VERIFIED_IDS {
+                seen.remember([0; 32], MAX_VERIFIED_IDS);
+            }
+        }
+        assert_eq!(seen.ids.len(), MAX_VERIFIED_IDS);
+        assert_eq!(seen.order.len(), MAX_VERIFIED_IDS);
+        assert!(!seen.ids.contains(&[0; 32]));
+    }
+
+    #[test]
+    fn native_receipts_suppress_only_the_acknowledging_peers_payload() {
+        let relay = Relay::default();
+        let tx = Arc::new(record(
+            "mmx.Transaction",
+            [("content_hash".into(), bytes([7; 32]))],
+        ));
+        relay.publish([8; 32], tx.clone(), 100).unwrap();
+        let mut receiver = RelayPeer::default();
+        let note = Record::from_generated(&mmx_types::mmx::ReceiveNote {
+            hash: [7; 32].into(),
+            time: 42,
+        })
+        .unwrap();
+        receiver.note(&note).unwrap();
+        let mut sent = Vec::new();
+        receiver
+            .flush(&relay, |r| {
+                sent.push(r.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].name, "mmx.ReceiveNote");
+        assert_eq!(hash(&sent[0], "hash").unwrap(), [7; 32]);
+        // Receipt claims are per peer and never grant global/consensus credit.
+        let mut other = RelayPeer::default();
+        let mut sent = Vec::new();
+        other
+            .flush(&relay, |r| {
+                sent.push(r.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[1], tx.as_ref());
+        assert!(receiver
+            .note(&record(
+                "mmx.ReceiveNote",
+                [("hash".into(), bytes([0; 31]))]
+            ))
+            .is_err());
+    }
 
     fn balance_query(owners: Vec<[u8; 32]>, currencies: Vec<[u8; 32]>, limit: i64) -> Record {
         record(
@@ -671,7 +793,9 @@ mod tests {
         let mut peer = RelayPeer::default();
         let mut sent = Vec::new();
         peer.flush(&relay, |r| {
-            sent.push(r.clone());
+            if r.name != "mmx.ReceiveNote" {
+                sent.push(r.clone());
+            }
             Ok(())
         })
         .unwrap();
@@ -679,7 +803,9 @@ mod tests {
         assert_eq!(sent.len(), 5);
         for _ in 0..20 {
             peer.flush(&relay, |r| {
-                sent.push(r.clone());
+                if r.name != "mmx.ReceiveNote" {
+                    sent.push(r.clone());
+                }
                 Ok(())
             })
             .unwrap();
@@ -703,21 +829,24 @@ mod tests {
         let mut peer = RelayPeer::default();
         assert!(peer.flush(&relay, |_| Err(error("disconnected"))).is_err());
         let mut count = 0;
-        peer.flush(&relay, |_| {
-            count += 1;
+        peer.flush(&relay, |r| {
+            count += usize::from(r.name != "mmx.ReceiveNote");
             Ok(())
         })
         .unwrap();
-        peer.flush(&relay, |_| {
-            count += 1;
+        peer.flush(&relay, |r| {
+            count += usize::from(r.name != "mmx.ReceiveNote");
             Ok(())
         })
         .unwrap();
         assert_eq!(count, 1);
         let mut echo = RelayPeer::default();
         echo.note(&tx).unwrap();
-        echo.flush(&relay, |_| panic!("must not echo incoming content"))
-            .unwrap();
+        echo.flush(&relay, |r| {
+            assert_eq!(r.name, "mmx.ReceiveNote");
+            Ok(())
+        })
+        .unwrap();
         relay.remove(&[2; 32]).unwrap();
         assert!(relay.since(0, 1).unwrap().1.is_empty());
     }

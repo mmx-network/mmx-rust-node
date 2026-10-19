@@ -111,8 +111,16 @@ no live-ledger or plot scan is part of validation.
    bound and no cache lock is held while a socket writes. C++ uses its network
    event loop; Rust currently uses one sender thread per already-bounded
    connection. Socket tests cover both delayed-reply and partial-frame cases.
-   Still port `Router`'s global received cache, `ReceiveNote` feedback,
-   transaction cost/upload credits, earned farmer/timelord early-relay credits,
+   Native `ReceiveNote` feedback is now consumed as transport control, including
+   while waiting for RPC responses. Verified publications send acknowledgements
+   before payload forwarding; a peer's receipt suppresses only its own copy.
+   The 20,000-ID per-peer bound remains. A separate 100,000-ID cache of verified
+   publications filters already-processed gossip before inbound queue admission.
+   Receipt claims never seed this cache; payload eviction retains known IDs,
+   duplicates do not refresh FIFO age, and explicit rollback resets it so work
+   can be accepted again. Native first-seen envelope deduplication before full
+   verification remains a distinct follow-up.
+   Still port transaction cost/upload accounting, earned farmer/timelord early-relay credits,
    randomized staged fanout, peer-role filtering and authenticated incoming
    lifecycle. Current bounds and verified-only relay are not equivalent to
    native per-peer fairness. Preserve transport deduplication separately from
@@ -268,3 +276,15 @@ shared scheduler lock, with no I/O or delivery callback while holding it.
 Newest-height, per-plot exclusion, expiry and context/worker bounds remain.
 The initial overlap deployment's slower adjacent live sample is recorded in
 `performance-parity.md`; a scheduling fix alone is not a performance claim.
+
+Receipt/replay tests cover real interleaved receipt/RPC frames, suppression of
+an acknowledged payload on the wire, isolation from another peer/global cache,
+100,000-ID FIFO eviction, explicit rewind/reacceptance and a socket barrier that
+checks verified proof replays never enter the ledger inbox. Notes carry no
+consensus authority or earned farmer/timelord credit.
+
+The receipt/replay checkpoint passes 329 workspace target tests (one existing
+ignored test), strict Clippy, formatting, both CLI suites (28 tests each) and
+the local optimized node build. The header and harvester-refill checkpoints
+also passed GitHub Actions, including software OpenCL conformance and both CLI
+suites.

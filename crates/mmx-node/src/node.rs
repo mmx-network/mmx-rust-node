@@ -259,6 +259,7 @@ impl Node {
             self.tx_pool.relay.remove(id)?;
         }
         self.production = Default::default();
+        self.tx_pool.relay.reset_verified()?;
         self.vote_ids.clear();
         self.vote_order.clear();
         self.inbox.clear()?;
@@ -995,6 +996,20 @@ mod work_queue_tests {
             Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap(),
             Record::decode(&raw(work)).unwrap(),
         )
+    }
+    #[test]
+    fn explicit_rewind_releases_verified_replay_suppression() {
+        let (mut node, work) = setup();
+        node.synced = true;
+        node.receive(&work).unwrap();
+        node.tick().unwrap();
+        assert!(node.tx_pool.relay.knows(&work).unwrap());
+        node.rollback_to(0).unwrap();
+        assert!(!node.tx_pool.relay.knows(&work).unwrap());
+        node.synced = true;
+        node.receive(&work).unwrap();
+        node.tick().unwrap();
+        assert!(node.tx_pool.relay.knows(&work).unwrap());
     }
     #[test]
     fn waiting_vdf_expires_without_refresh_but_verified_work_lives_until_root_advances() {

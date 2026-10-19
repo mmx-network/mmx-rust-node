@@ -2138,6 +2138,29 @@ fn verified_proof_announcements_relay_before_block_production_without_local_meta
         0
     );
     sender.send(&public).unwrap();
+    // A following request is a transport barrier: the duplicate was decoded
+    // without driving the ledger tick or letting it drain the input queue.
+    sender
+        .send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(881)),
+                (
+                    "method".into(),
+                    V::Record(record("mmx.Node.get_height", [])),
+                ),
+            ],
+        ))
+        .unwrap();
+    let reply = sender.receive(Duration::from_secs(3)).unwrap().unwrap();
+    assert_eq!(reply.name, "mmx.Return");
+    assert_eq!(reply.field("id").unwrap().uint().unwrap(), 881);
+    assert_eq!(
+        rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#).unwrap()
+            ["result"]["queued_messages"],
+        0
+    );
+
     std::thread::sleep(Duration::from_millis(60));
     n.lock().unwrap().tick().unwrap();
     assert!(observer
@@ -2254,7 +2277,26 @@ fn foreign_live_blocks_work_and_accepted_votes_relay_after_verification_without_
     for message in [&vote, &block, &wire(&steps[1]["vdf"])] {
         sender.send(message).unwrap();
     }
-    wait(3);
+    sender
+        .send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(882)),
+                (
+                    "method".into(),
+                    V::Record(record("mmx.Node.get_height", [])),
+                ),
+            ],
+        ))
+        .unwrap();
+    let reply = sender.receive(Duration::from_secs(3)).unwrap().unwrap();
+    assert_eq!(reply.name, "mmx.Return");
+    assert_eq!(reply.field("id").unwrap().uint().unwrap(), 882);
+    assert_eq!(
+        rpc::json_request(&n, br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#).unwrap()
+            ["result"]["queued_messages"],
+        0
+    );
     n.lock().unwrap().tick().unwrap();
     assert!(observer
         .receive(Duration::from_millis(100))
