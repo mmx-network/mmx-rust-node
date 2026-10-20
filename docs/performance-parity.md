@@ -349,5 +349,32 @@ alternating rounds of 100 preparations) measured median us/block:
 The last case exposes roughly 6 us of scheduling overhead for tiny cached work.
 These are bounded old-Rust/new-Rust comparisons, not full-node C++ or disk
 throughput claims. Run the ignored release `benchmark_parallel_contract_blocks`
-test to reproduce. Production candidate selection still needs ordered acceptance
-and cancellation before it can use this parallel scheduler safely.
+test to reproduce. Production candidate selection now uses ordered acceptance and cancellation
+with the same bounded scheduler, as recorded below.
+
+Production selection checkpoint: normalize and execute independent candidates on
+workers, but reserve fees/inputs and accept effects in fee/ID order. Running and
+completed-but-unaccepted candidates together occupy at most the configured pool
+width. Rejected candidates never enter the shared VM overlay; successors start
+only after the preceding selection decision, including a rejection. Absolute
+deadlines stop starting new jobs; fatal storage/normalization errors cancel
+further work, and scoped in-flight jobs finish before returning. This preserves
+the previous Rust accepted-effects-only behavior rather than copying C++'s
+broader speculative context before final filtering. All 120 fixture-derived
+candidate sets match the retained serial path byte-for-byte; assembled blocks
+pass independent validation. A multi-sender aggregate-fee rejection regression
+checks that the skipped call cannot change the funded successor's mint/state.
+Expired deadlines retain no candidates and change no ledger state.
+
+The same bounded four-worker RAM-only release benchmark measured median us/set:
+
+| Eight candidate transactions | Original serial | Ordered dependency pool | Speedup |
+| --- | ---: | ---: | ---: |
+| Eight independent contracts | 3,843 | 1,945 | 1.98x |
+| Two interleaved contract chains | 3,830 | 2,974 | 1.29x |
+| One contended contract (serial path) | 3,769 | 3,743 | 1.01x |
+| Cached-signature transfers | 72.9 | 70.4 | 1.04x |
+
+These five alternating 100-set rounds compare Rust scheduling on native-derived
+work, without disk writes. They do not establish complete C++ throughput parity.
+The ignored release `benchmark_parallel_candidate_selection` test reproduces it.

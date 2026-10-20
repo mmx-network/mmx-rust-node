@@ -16,7 +16,7 @@ use std::{
     time::Instant,
 };
 
-pub fn transactions<S: Storage, P: std::borrow::Borrow<Record>>(
+pub fn transactions<S: Storage + Sync, P: std::borrow::Borrow<Record>>(
     storage: &S,
     params: &mmx::ChainParams,
     height: u32,
@@ -40,29 +40,25 @@ pub fn transactions<S: Storage, P: std::borrow::Borrow<Record>>(
         params: params.clone(),
         locked_contracts: None,
     };
-    let mut reserved = BTreeMap::new();
-    let mut ids = BTreeSet::new();
-    let mut out = vec![];
-    let mut static_cost = 0u64;
-    let mut total_cost = 0u64;
+    let mut selection = Selection::default();
+    if ordered.len() > 1
+        && rayon::current_thread_index().is_none()
+        && rayon::current_num_threads() > 1
+    {
+        let originals: Vec<_> = ordered.iter().map(|(_, _, tx)| *tx).collect();
+        super::parallel::select(storage, &context, &originals, deadline, |tx, result| {
+            selection.accept(storage, params, tx, result)
+        })?;
+        return Ok(selection.out);
+    }
     for (_, id, original) in ordered {
         if Instant::now() >= deadline {
             break;
         }
-        if ids.contains(&id) {
+        if selection.ids.contains(&id) {
             continue;
         }
-        let mut tx = original.clone();
-        tx.fields
-            .insert("exec_result".into(), Value::Optional(None));
-        tx.fields.insert(
-            "static_cost".into(),
-            Value::Uint(tx.calc_cost(&params.into())?),
-        );
-        tx.fields.insert(
-            "content_hash".into(),
-            Value::Bytes(tx.calc_hash(true, 0)?.to_vec()),
-        );
+        let tx = reset(original, params)?;
         let build = (|| {
             context.locked_contracts = Some(transaction::locks(storage, &context, &tx)?);
             transaction::build(
@@ -81,15 +77,62 @@ pub fn transactions<S: Storage, P: std::borrow::Borrow<Record>>(
             }
             Err(_) => continue,
         };
-        let tx = transaction::with_result(&tx, &result, params)?;
-        let next_static = static_cost
+        if selection.accept(storage, params, &tx, &result)? {
+            execution.absorb_vm(&effects)?;
+        }
+    }
+    Ok(selection.out)
+}
+
+pub(super) fn reset(
+    original: &Record,
+    params: &mmx::ChainParams,
+) -> Result<Record, ValidationError> {
+    let mut tx = original.clone();
+    tx.fields
+        .insert("exec_result".into(), Value::Optional(None));
+    tx.fields.insert(
+        "static_cost".into(),
+        Value::Uint(tx.calc_cost(&params.into())?),
+    );
+    tx.fields.insert(
+        "content_hash".into(),
+        Value::Bytes(tx.calc_hash(true, 0)?.to_vec()),
+    );
+    Ok(tx)
+}
+
+#[derive(Default)]
+struct Selection {
+    reserved: BTreeMap<([u8; 32], [u8; 32]), u128>,
+    ids: BTreeSet<[u8; 32]>,
+    out: Vec<Record>,
+    static_cost: u64,
+    total_cost: u64,
+}
+impl Selection {
+    fn accept<S: Storage>(
+        &mut self,
+        storage: &S,
+        params: &mmx::ChainParams,
+        tx: &Record,
+        result: &transaction::TransactionResult,
+    ) -> Result<bool, ValidationError> {
+        let id = bytes::<32>(tx.field("id")?)?;
+        if self.ids.contains(&id) {
+            return Ok(false);
+        }
+        let tx = transaction::with_result(tx, result, params)?;
+        let next_static = self
+            .static_cost
             .checked_add(uint(&tx, "static_cost")?)
             .ok_or_else(|| ValidationError::Static("block static cost overflow".into()))?;
-        let next_total = total_cost
+        let next_total = self
+            .total_cost
             .checked_add(result.total_cost.into())
             .ok_or_else(|| ValidationError::Static("block cost overflow".into()))?;
         if next_static > params.max_block_size || next_total > params.max_block_cost {
-            continue;
+            return Ok(false);
         }
         let sender = bytes(
             tx.field("sender")?
@@ -105,7 +148,7 @@ pub fn transactions<S: Storage, P: std::borrow::Borrow<Record>>(
         }
         let mut next_reserved = keys
             .into_iter()
-            .filter_map(|key| reserved.get(&key).map(|n| (key, *n)))
+            .filter_map(|key| self.reserved.get(&key).map(|n| (key, *n)))
             .collect();
         let funds = (|| {
             reserve(
@@ -130,19 +173,18 @@ pub fn transactions<S: Storage, P: std::borrow::Borrow<Record>>(
             Ok::<_, ValidationError>(())
         })();
         if funds.is_err() {
-            continue;
+            return Ok(false);
         }
-        let mut refs: Vec<_> = out.iter().collect();
+        let mut refs: Vec<_> = self.out.iter().collect();
         refs.push(&tx);
         if minimum_fees(params, &refs).is_err() {
-            continue;
+            return Ok(false);
         }
-        execution.absorb_vm(&effects)?;
-        reserved.extend(next_reserved);
-        static_cost = next_static;
-        total_cost = next_total;
-        ids.insert(id);
-        out.push(tx);
+        self.reserved.extend(next_reserved);
+        self.static_cost = next_static;
+        self.total_cost = next_total;
+        self.ids.insert(id);
+        self.out.push(tx);
+        Ok(true)
     }
-    Ok(out)
 }

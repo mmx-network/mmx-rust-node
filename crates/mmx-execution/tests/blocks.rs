@@ -287,6 +287,183 @@ fn parallel_and_original_serial_execution_match_every_native_block_fixture() {
         assert!(!b.database().has_pending());
     }
 }
+
+#[test]
+fn parallel_candidate_selection_matches_serial_fees_and_atomic_vm_handoffs() {
+    use std::time::{Duration, Instant};
+    let serial = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for line in include_str!("fixtures/blocks.jsonl").lines() {
+        let trace: Value = serde_json::from_str(line).unwrap();
+        let ctx = context(&trace);
+        let candidate = record(&trace["block"]);
+        let pending: Vec<_> = candidate
+            .field("tx_list")
+            .unwrap()
+            .seq()
+            .unwrap()
+            .iter()
+            .map(|v| v.record().unwrap().clone())
+            .collect();
+        let mut db = StorageDb::memory();
+        setup(&mut db, &trace);
+        let run = || {
+            block::assemble::transactions(
+                &db,
+                &ctx.params,
+                ctx.previous.height + 1,
+                &pending,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .map(|txs| {
+                txs.into_iter()
+                    .map(|tx| tx.encode().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|e| e.to_string())
+        };
+        assert_eq!(run(), serial.install(run), "{}", trace["name"]);
+        assert!(!db.database().has_pending());
+        assert!(block::assemble::transactions(
+            &db,
+            &ctx.params,
+            ctx.previous.height + 1,
+            &pending,
+            Instant::now()
+        )
+        .unwrap()
+        .is_empty());
+    }
+}
+
+#[test]
+fn reservation_rejected_candidate_does_not_change_a_later_funded_contract_call() {
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+    use mmx_consensus::Value as N;
+    let trace = seed("parallel_groups_2_v1");
+    let ctx = context(&trace);
+    let original = record(&trace["block"]);
+    let txs = original.field("tx_list").unwrap().seq().unwrap();
+    let mut db = StorageDb::memory();
+    setup(&mut db, &trace);
+    let payer: Address = txs[0]
+        .record()
+        .unwrap()
+        .field("sender")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let base_cost = txs[0]
+        .record()
+        .unwrap()
+        .field("exec_result")
+        .unwrap()
+        .optional()
+        .unwrap()
+        .unwrap()
+        .record()
+        .unwrap()
+        .field("total_cost")
+        .unwrap()
+        .uint()
+        .unwrap();
+    db.set_balance(&payer, &[0; 32], (base_cost * 4 + 5000).into())
+        .unwrap();
+    let mut pending = Vec::new();
+    for (i, source) in [0usize, 2, 4, 1].into_iter().enumerate() {
+        let mut scalar = [0; 32];
+        scalar[31] = if i < 2 { 1 } else { 2 };
+        let key = SigningKey::from_slice(&scalar).unwrap();
+        let public: [u8; 33] = key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        let sender = mmx_crypto_address(&public);
+        if i >= 2 {
+            db.set_balance(&sender, &[0; 32], 100_000_000).unwrap();
+        }
+        let mut tx = txs[source].record().unwrap().clone();
+        tx.fields.insert(
+            "sender".into(),
+            N::Optional(Some(Box::new(N::Bytes(sender.to_vec())))),
+        );
+        tx.fields.insert("nonce".into(), N::Uint(100 + i as u64));
+        tx.fields
+            .insert("fee_ratio".into(), N::Uint((4 - i as u64) * 1024));
+        tx.fields.insert("exec_result".into(), N::Optional(None));
+        let id = tx.calc_hash(false, 0).unwrap();
+        tx.fields.insert("id".into(), N::Bytes(id.to_vec()));
+        let signature: Signature = key.sign_prehash(&id).unwrap();
+        let mut solution = tx.field("solutions").unwrap().seq().unwrap()[0]
+            .record()
+            .unwrap()
+            .clone();
+        solution
+            .fields
+            .insert("pubkey".into(), N::Bytes(public.to_vec()));
+        solution
+            .fields
+            .insert("signature".into(), N::Bytes(signature.to_bytes().to_vec()));
+        tx.fields
+            .insert("solutions".into(), N::Sequence(vec![N::Record(solution)]));
+        tx.fields.insert(
+            "static_cost".into(),
+            N::Uint(tx.calc_cost(&(&ctx.params).into()).unwrap()),
+        );
+        tx.fields.insert(
+            "content_hash".into(),
+            N::Bytes(tx.calc_hash(true, 0).unwrap().to_vec()),
+        );
+        pending.push(tx);
+    }
+    db.database_mut().commit(11).unwrap();
+    let selected = block::assemble::transactions(
+        &db,
+        &ctx.params,
+        ctx.previous.height + 1,
+        &pending,
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 3);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|tx| tx.field("fee_ratio").unwrap().uint().unwrap())
+            .collect::<Vec<_>>(),
+        vec![4096, 2048, 1024]
+    );
+    let result = mmx_execution::transaction::TransactionResult::from_record(
+        selected[1]
+            .field("exec_result")
+            .unwrap()
+            .optional()
+            .unwrap()
+            .unwrap()
+            .record()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!result.did_fail);
+    assert_eq!(
+        result.outputs[0].amount, 3,
+        "the rejected middle call must not mint an extra state increment"
+    );
+    assert!(!db.database().has_pending());
+}
+fn mmx_crypto_address(key: &[u8; 33]) -> Address {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(key).into()
+}
 #[test]
 fn block_prepare_abort_durable_commit_reopen_and_fork() {
     let trace = seed("shared_state_v1");
@@ -616,6 +793,14 @@ fn assembled_candidates_pass_independent_block_validation_across_cpp_cases() {
 #[test]
 #[ignore = "bounded CPU-only throughput comparison; run with --release --ignored --nocapture"]
 fn benchmark_parallel_contract_blocks_against_original_serial_execution() {
+    benchmark_transaction_pipeline(false);
+}
+#[test]
+#[ignore = "bounded CPU-only candidate throughput comparison"]
+fn benchmark_parallel_candidate_selection_against_original_serial_execution() {
+    benchmark_transaction_pipeline(true);
+}
+fn benchmark_transaction_pipeline(assembly: bool) {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
@@ -631,10 +816,29 @@ fn benchmark_parallel_contract_blocks_against_original_serial_execution() {
         let candidate = record(&trace["block"]);
         let mut db = StorageDb::memory();
         setup(&mut db, &trace);
+        let pending: Vec<_> = candidate
+            .field("tx_list")
+            .unwrap()
+            .seq()
+            .unwrap()
+            .iter()
+            .map(|v| v.record().unwrap().clone())
+            .collect();
         let run = |db: &mut StorageDb| {
             let start = std::time::Instant::now();
             for _ in 0..100 {
-                drop(block::prepare(db, &ctx, &candidate).unwrap());
+                if assembly {
+                    block::assemble::transactions(
+                        db,
+                        &ctx.params,
+                        ctx.previous.height + 1,
+                        &pending,
+                        std::time::Instant::now() + std::time::Duration::from_secs(10),
+                    )
+                    .unwrap();
+                } else {
+                    drop(block::prepare(db, &ctx, &candidate).unwrap());
+                }
             }
             start.elapsed().as_secs_f64() * 10_000.0
         };
@@ -653,7 +857,8 @@ fn benchmark_parallel_contract_blocks_against_original_serial_execution() {
         serial.sort_by(f64::total_cmp);
         parallel.sort_by(f64::total_cmp);
         eprintln!(
-            "BENCH {} threads={} serial_us={:.2} parallel_us={:.2} speedup={:.3}",
+            "BENCH {} {} threads={} serial_us={:.2} parallel_us={:.2} speedup={:.3}",
+            if assembly { "assemble" } else { "validate" },
             name,
             rayon::current_num_threads(),
             serial[2],

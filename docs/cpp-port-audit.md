@@ -265,7 +265,7 @@ no live-ledger or plot scan is part of validation.
    per plot. Normal filesystem reload itself remains synchronous, as in C++;
    a lookup cannot hold the service lock during it. Native plot witnesses still
    pass. Comparative slow-drive throughput and remote recompute remain open.
-5. **Concurrent block transaction execution completed; production selection next.**
+5. **Concurrent block transaction execution and candidate selection completed.**
    Native body reservation, fee order and lock preparation still run in block
    order. Independent transactions now execute on the shared bounded Rayon pool;
    ready jobs never occupy workers waiting on predecessors. The owner merges
@@ -288,8 +288,25 @@ no live-ledger or plot scan is part of validation.
    (1.18x), and 3,708 to 3,612 us for one contended chain (serial fast path).
    Seven cached-signature transfers cost 42.6 versus 48.6 us (6 us scheduler
    overhead); these small fixtures do not establish full C++ throughput parity.
-   Production candidate selection remains serial pending the same dependency
-   scheduler with ordered reservation/acceptance and deadline cancellation.
+   Production candidate selection now uses the same bounded dependency pool,
+   with completed candidates accepted strictly in fee/ID order. At most one
+   pool-width of running or completed-but-not-yet-accepted candidates is retained;
+   records are normalized in workers rather than copied for the whole mempool.
+   Reservations, fee bands and block gas/size limits decide acceptance before VM
+   effects are merged and dependent candidates released. Rejected/skipped work
+   cannot contaminate a later funded call. Deadlines stop new CPU jobs; fatal
+   snapshot/normalization errors cancel further execution and return no candidate
+   set. Already running gas-bounded jobs finish before the scoped pool returns.
+   This deliberately keeps the existing Rust accepted-effects-only behavior
+   rather than C++'s broader speculative context before final filtering.
+   All 120 fixture-derived candidate sets compare byte-for-byte with the retained
+   serial selector; independent body validation still accepts assembled blocks.
+   A separate multi-sender reservation regression rejects a valid middle call
+   while proving the later funded call observes only accepted VM writes. Expired
+   deadlines produce no candidates or ledger writes. A four-worker RAM-only
+   release median measured 3,843 to 1,945 us for eight independent contracts
+   (1.98x), 3,830 to 2,974 us for two chains (1.29x), 3,769 to 3,743 us for one
+   chain, and 72.9 to 70.4 us for seven cached-signature transfers.
 6. **CPU VDF batching and competing-work priority.**
    C++ uses SHA-NI/ARM two-lane recursion and AVX2 eight-lane SHA plus timelord
    trust ordering. Rust's SHA dispatch and Rayon segments are not that execution

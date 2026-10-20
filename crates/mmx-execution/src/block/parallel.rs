@@ -4,6 +4,8 @@ use super::*;
 use mmx_vm::{storage, value::FLAG_KEY, Var};
 use std::sync::{mpsc, RwLock};
 
+type CandidateOutcome =
+    Result<Option<(Record, TransactionResult, TransactionBatch)>, (ValidationError, bool)>;
 type Outcome = Result<(TransactionResult, TransactionBatch), transaction::Rejected>;
 type Cell = (Address, u64, Option<u64>);
 #[derive(Default)]
@@ -109,7 +111,7 @@ impl<S: Storage> Storage for View<'_, S> {
 /// At most the configured Rayon width runs or awaits completion. Ready tasks
 /// have block-index priority; no queued task consumes a worker waiting on a DAG
 /// predecessor. The owner observes each completion before starting dependents.
-fn schedule<T: Send>(
+fn schedule<T: Send, const ORDERED: bool>(
     predecessors: &[BTreeSet<usize>],
     run: impl Fn(usize) -> T + Sync,
     mut complete: impl FnMut(usize, &mut T),
@@ -132,8 +134,9 @@ fn schedule<T: Send>(
     rayon::in_place_scope(|scope| {
         let mut active = 0;
         let mut done = 0;
+        let mut retired = 0;
         while done < results.len() {
-            while active < width {
+            while active + if ORDERED { done - retired } else { 0 } < width {
                 let Some(index) = ready.pop_first() else {
                     break;
                 };
@@ -150,18 +153,31 @@ fn schedule<T: Send>(
             }
             assert!(active != 0, "block dependency graph cannot make progress");
             let (index, value) = receive.recv().expect("execution workers disconnected");
-            let mut value = match value {
+            let value = match value {
                 Ok(value) => value,
                 Err(panic) => std::panic::resume_unwind(panic),
             };
-            complete(index, &mut value);
             results[index] = Some(value);
             active -= 1;
             done += 1;
-            for &next in &successors[index] {
-                waiting[next] -= 1;
-                if waiting[next] == 0 {
-                    ready.insert(next);
+            if ORDERED {
+                while retired < results.len() && results[retired].is_some() {
+                    complete(retired, results[retired].as_mut().unwrap());
+                    for &next in &successors[retired] {
+                        waiting[next] -= 1;
+                        if waiting[next] == 0 {
+                            ready.insert(next);
+                        }
+                    }
+                    retired += 1;
+                }
+            } else {
+                complete(index, results[index].as_mut().unwrap());
+                for &next in &successors[index] {
+                    waiting[next] -= 1;
+                    if waiting[next] == 0 {
+                        ready.insert(next);
+                    }
                 }
             }
         }
@@ -194,7 +210,7 @@ pub(super) fn execute<S: Storage + Sync>(
         backend: storage,
         state: RwLock::new(State::default()),
     };
-    let outcomes = schedule(
+    let outcomes = schedule::<_, false>(
         &plan.predecessors,
         |index| {
             let mut context = context.clone();
@@ -256,6 +272,117 @@ pub(super) fn execute<S: Storage + Sync>(
     Ok((results, batch))
 }
 
+/// Candidate execution is speculative, but acceptance and VM publication use
+/// fee order. A refused candidate must never affect any following candidate.
+pub(super) fn select<S: Storage + Sync>(
+    storage: &S,
+    context: &TransactionContext,
+    originals: &[&Record],
+    deadline: std::time::Instant,
+    mut accept: impl FnMut(&Record, &TransactionResult) -> Result<bool, ValidationError>,
+) -> Result<(), ValidationError> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut records = Vec::new();
+    let mut plan = ExecutionPlan::default();
+    let mut last = BTreeMap::new();
+    for &tx in originals {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let locks = match transaction::locks(storage, context, tx) {
+            Ok(locks) => locks,
+            Err(error)
+                if error.is_unsupported() || matches!(error, ValidationError::Storage(_)) =>
+            {
+                return Err(error)
+            }
+            Err(_) => continue,
+        };
+        let index = records.len();
+        let predecessors = locks
+            .iter()
+            .filter_map(|address| last.insert(*address, index))
+            .collect();
+        records.push(tx);
+        plan.locks.push(locks);
+        plan.predecessors.push(predecessors);
+    }
+    let view = View {
+        backend: storage,
+        state: RwLock::new(State::default()),
+    };
+    let cancelled = AtomicBool::new(false);
+    let mut failure = None;
+    let run = |index: usize| {
+        if cancelled.load(Ordering::Acquire) || std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let tx = super::assemble::reset(records[index], &context.params).map_err(|e| (e, true))?;
+        let mut context = context.clone();
+        context.locked_contracts = Some(plan.locks[index].clone());
+        let (result, batch) = transaction::build(
+            storage,
+            &view,
+            &context,
+            &tx,
+            &mut ErrorInfo::default(),
+            &mut 0,
+        )
+        .map_err(|e| (e, false))?;
+        Ok(Some((tx, result, batch)))
+    };
+    let mut complete = |_: usize, outcome: &mut CandidateOutcome| {
+        // Free completed candidate buffers immediately after ordered acceptance.
+        let outcome = std::mem::replace(outcome, Ok(None));
+        if failure.is_some() {
+            return;
+        }
+        let result = (|| {
+            match outcome {
+                Ok(Some((tx, result, mut batch))) => {
+                    if accept(&tx, &result)? {
+                        view.absorb(&mut batch)?;
+                    }
+                }
+                Err((error, fatal))
+                    if fatal
+                        || error.is_unsupported()
+                        || matches!(error, ValidationError::Storage(_)) =>
+                {
+                    return Err(error)
+                }
+                _ => (),
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            failure = Some(error);
+            cancelled.store(true, Ordering::Release);
+        }
+    };
+    if records.len() < 2
+        || rayon::current_thread_index().is_some()
+        || rayon::current_num_threads() == 1
+        || plan
+            .predecessors
+            .iter()
+            .enumerate()
+            .skip(1)
+            .all(|(index, p)| p.contains(&(index - 1)))
+    {
+        for index in 0..records.len() {
+            let mut result = run(index);
+            complete(index, &mut result);
+        }
+    } else {
+        schedule::<_, true>(&plan.predecessors, run, complete);
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 fn serial<S: Storage>(
     storage: &S,
     context: &TransactionContext,
@@ -312,7 +439,7 @@ mod tests {
         let visible = merged.clone();
         let coordinator = std::thread::spawn(move || {
             let plan = [BTreeSet::new(), BTreeSet::new(), BTreeSet::from([1])];
-            schedule(
+            schedule::<_, false>(
                 &plan,
                 |index| {
                     if index == 0 {
@@ -354,7 +481,7 @@ mod tests {
         let (done, wait) = mpsc::channel();
         let coordinator = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| {
-                schedule(
+                schedule::<_, false>(
                     &[BTreeSet::new(), BTreeSet::new()],
                     |i| {
                         assert_ne!(i, 0, "deliberate worker panic");
