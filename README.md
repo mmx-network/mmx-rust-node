@@ -1,1583 +1,308 @@
 # MMX Rust node
 
-A Rust port of [`mmx-node`](https://github.com/madMAx43v3r/mmx-node), starting
-with the smart contract engine and versioned database. The workspace now includes
-a node executable with native peer sync, durable fork handling, native VNX read
-RPC and HTTP JSON-RPC, compatible wallet tools, wallet/farmer/harvester VNX
-services, native block production and validator scheduling. Local and remote
-solo harvesting are connected end to end; pool partials remain to be ported.
+Run an MMX full node, serve RPC requests, and farm existing MMX plots with Rust.
+This repository includes the node, wallet, farmer, local and remote harvester,
+timelord, and command-line tools.
 
-The behavioral reference is `../mmx-node` (`~/workspace/mmx-node`), currently at
-`5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2`. Port consensus behavior from the
-reference implementation and its tests, including protocol-specific differences.
-Consensus compatibility is required: identical transaction/block acceptance,
-execution results, state transitions, gas and limits, failure behavior, and
-protocol-version rules. The database's physical disk format is independent and
-does not need to match C++. Do not silently replace unsupported behavior with
-approximations.
+Mainnet sync and solo farming are implemented. The port is still under
+active development; review the [current limitations](#current-limitations)
+before switching an existing installation.
 
-Performance is also a migration requirement across the node, database, wallet,
-farmer, harvester and utilities. Read the matching C++ execution strategy before
-porting, preserve its important optimizations, and verify comparable workloads.
-[Performance parity](docs/performance-parity.md) records the reference paths,
-regression checks and outstanding comparison gaps. The [C++ port audit](docs/cpp-port-audit.md)
-covers consensus, defenses, I/O, scheduling and remaining migration work.
+## Build
 
-## Build and run
+Use Linux with Rust **1.89 or newer**, Git, and a C build toolchain. On
+Debian/Ubuntu, the build dependencies are `build-essential` and `pkg-config`.
+The database needs a local filesystem with Unix file locking and sync support.
+A GPU is optional; install its vendor's OpenCL runtime to enable acceleration.
 
-Requires Rust 1.89 or newer and a C toolchain for Zstd. The disk
-backend currently targets Unix filesystems with file locking, directory sync,
-and file sync support.
-
-Clone with `git clone --recurse-submodules`, or initialize the VNX dependency in
-an existing checkout:
+Clone both repositories side by side. The C++ repository supplies the public
+network configuration and genesis assets; you do not need to build C++.
 
 ```sh
-git submodule update --init --recursive
+git clone --recurse-submodules https://github.com/mmx-network/mmx-rust-node.git
+git clone --depth 1 https://github.com/mmx-network/mmx-node.git
+cd mmx-rust-node
+
+CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 \
+  cargo build --release --locked --jobs 2 -p mmx-node -p mmx-tools -p mmxwallet
+
+export PATH="$PWD/target/release:$PATH"
 ```
 
-Normal builds use the checked-in VNI declarations and the Rust VNX submodule;
-they do not need the C++ checkout, CMake, or a C++ compiler.
+For an existing checkout, run `git submodule update --init --recursive` before
+building. Keep the binaries together: the node starts configured services from
+its own executable directory.
 
-```sh
-cargo test --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo fmt --all --check
-
-# Run repeatedly to increment a contract counter in a persistent database.
-cargo run -p mmx-vm --example counter -- ./tmp/counter-db
-
-# Initialize/reopen genesis using the original network configuration/assets.
-cargo run -p mmx-execution --example bootstrap -- ../mmx-node mainnet ./tmp/mainnet-db
-```
-
-Build and start the node using the original public network assets:
-
-```sh
-cargo build --release -p mmx-node --locked
-./target/release/mmx-node --mmx-root ../mmx-node --network mainnet \
-  --data-dir ./mmx-data
-# Supply seed candidates with --peer HOST[:PORT]; otherwise use native seed config.
-# Discovery maintains eight random distinct authenticated synced full nodes.
-# Sync requires at least three while unavailable slots refill in the background.
-# Serve stored state without network access:
-./target/release/mmx-node --mmx-root ../mmx-node --offline
-# Keep a chosen height before resuming sync (all later orphans remain archived):
-./target/release/mmx-node --mmx-root ../mmx-node --rollback-to 1000
-```
-
-Default listeners are local: native peers on the configured network port
-(mainnet 11337), VNX service `Node` at `127.0.0.1:11331`, and HTTP JSON-RPC at
-`http://127.0.0.1:11380/rpc`. Override with `--p2p-listen`, `--rpc-listen` and
-`--http-listen`. `--sync-once` exits after coordinated sync. Ctrl-C stops the
-servers and sync workers; each selected batch is already durable.
-
-Use `--data-dir` to place the unpruned ledger and archive on a fast local disk.
-Sync performs fully synchronous publication, so contention from other disk
-workloads can dominate validation time. The data path may also be a symlink.
-
-```sh
-curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"get_status"}'
-curl http://127.0.0.1:11380/rpc -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"get_block_hash","params":{"height":100}}'
-```
-
-One coordinator owns historical download jobs. It selects a random pool of
-up to eight synced full nodes, verifies each native signed node ID and genesis, and
-rejects duplicate identities and self-connections. Native peer discovery fills
-the pool; sync waits when fewer than three qualified peers are available.
-The coordinator continuously refills toward eight, including when three through
-seven healthy peers remain, including between windows during historical sync.
-Connection/authentication/discovery attempts run in
-the background, with active peers plus pending attempts capped at eight and
-per-address retries delayed 30 seconds. Slow or unavailable seeds do not block
-the existing pool. The seed/candidate list is independent of that active limit;
-normal startup reads the native `Router.seed_peers` and learns more addresses
-through authenticated peers (up to 512 discovery candidates).
-For every height, `get_block_hash_ex` collects `(block hash, content hash)` from
-at least three distinct peers. Every unique content hash is fetched once with
-`get_block(hash)` and recomputed/authenticated before archival. Hashes are not
-majority-voted: two lying peers cannot hide the third peer's valid candidate.
-A second provider is tried only after the original 15-second request lease
-expires. Restart, rewind and tip probes reuse matching archived content.
-
-This ports the height-job approach in native `Router::process()` and
-`Node::sync_result()`, with the requested minimum of three. Upstream declares
-two in `modules/Router.vni` and configures five in `config/default/Router.json`.
-In the inspected C++ revision
-[`ca6438b`](https://github.com/mmx-network/mmx-node/blob/ca6438b37c08007106d58efe4a990f6ecb276649/src/Router.cpp#L586),
-each height job queries a random subset of up to `min_sync_peers + 3` synced
-connections. Replies contain both the chain ID and content commitment; body
-requests use the chain ID, while completed bodies and outstanding leases are
-keyed by content hash. One body therefore satisfies all matching claimants.
-The native body lease is `fetch_timeout_ms / 8` (22.5 seconds with its default
-configuration), although exceptions and disconnects can release it early.
-Native completion counts failed/empty replies together with successful
-claimants and can finish while other requests remain outstanding. Rust instead
-requires three fresh successful hash-window responses before downloading and
-processes every distinct content observed in that window. It retains the full
-15-second body lease after unsuccessful responses. The native setting of eight
-limits outgoing synced connections; Rust caps its coordinator pool at eight
-distinct authenticated identities.
-All candidates reach native fork choice, CPU proof checks and ledger
-validation; a rejected candidate does not discard another peer's valid block.
-Unknown parents trigger bounded backwards discovery above genesis, including
-peer reorganizations inside a hash window. Their expected heights guard the
-fork-choice root while ancestors are published; recovery never lowers the root
-to force acceptance of a peer branch. Native lookahead and strict future-timestamp
-bounds also apply. The active view includes the selected
-tip and downloaded prefix; retained future orphans are not automatically selected
-after an offline rewind. Tests cover holding each requested height across timer
-updates/restarts, then replaying when sync resumes.
-
-Each connection correlates reordered native returns while serving peer requests,
-with at most 32 body requests outstanding. A shared group contains at most 32
-contents across all providers, independent of pool size, so smaller pools can
-fill a complete pipeline while retaining the previous eight-peer maximum.
-Common content is fetched from its
-fastest successful hash claimant; a slower provider is tried only after the request
-lease expires. Hash requests fan out to available pool members. Each height window
-completes after at least three independent replies, including other replies already
-ready at that point, matching native job completion without majority voting. Later
-replies restore their connection owner and update status, but cannot count toward
-another window. A connection owns at most one metadata operation; every outstanding
-owner is joined before the pool closes. Whole frames share a ten-second deadline
-across header and payload reads, also bounded by the client's fifteen-second RPC
-deadline. Trickling bytes cannot extend either deadline; failed frames close the
-connection.
-
-In adjacent mainnet samples with six peers, filling 32-content groups reduced
-body-download time from 2.25 to 1.53 ms per block; the wider-group live sample
-averaged 183 blocks/s with HTTP status p95 of 0.49 s. Peer and host load affect
-these observations. The isolated loopback comparisons were nearly flat in both
-binary orders, and all runs retained one body download per missing content.
-Scheduler tests exercise full common-content batches and 36 competing contents
-split across three providers without exceeding the shared bound.
-Each connection retains independent input/output type state. Outgoing dynamic
-classes are declared once, as in native `TypeOutput`; queued RPCs share a bounded
-TCP write while retaining separate native compressed frames. A representative
-hash-query frame shrinks from 296 to 45 bytes after its first declaration.
-Schema state advances only after the whole batch is sent. Encoding/frame-limit
-failures send no prefix and retain the previous state; partial writes close the
-connection. Reconnecting announces the schemas again.
-Download windows retain up to 128
-heights and target 8 MiB, including competing candidates, in an atomic archive
-transaction. A connection has at most 128 metadata requests outstanding, so a
-full height window can be sent before waiting for replies. Progress logs separate
-hash queries, bodies, archive publication,
-proofs and ledger replay. A final multi-peer tip probe runs after publication;
-a changing valid tip keeps the node in historical mode. Heights containing only
-consensus-rejected candidates do not extend the sync peak. Any queued successor
-window is drained into the archive without advancing the active view, and fresh
-tip-probe candidates pass the same CPU and ledger checks before live mode starts.
-Incomplete ancestry remains eligible for backwards recovery. HTTP status includes `sync_peers`.
-Unsupported implementation features remain errors, not consensus rejections.
-Other claimants of the same content are tried after the normal lease expires
-before reporting such an error, so a malformed counterfeit cannot hide a body
-that an honest provider can supply.
-
-One bounded producer downloads the next window while the current one validates.
-It captures an owned archive snapshot and chain parameters while registering
-pending heights, using the existing root's lookahead. Both hash and body requests
-then run without the ledger mutex; restart/rewind reuse checks read that snapshot.
-The reader is released before durable archival so it does not pin the archive WAL
-during publication. The producer joins before those clients are reused on error
-or cancellation. Missing ancestors and empty tip windows suspend prefetch.
-HTTP status also counts body
-requests and timeout reassignments; logs distinguish network stages from the
-remaining download wait after overlap.
-Completed prefetched bodies are retained before the producer replies, including
-on cancellation. Reopening the node reuses those bodies after fresh peer hash
-queries; their presence alone does not advance the selected chain.
-Native `OverflowException` replies indicate that a request was rejected before
-dispatch. The client drains successful replies, backs off and resends only the
-rejected requests with fresh IDs, reducing the affected batch's request window.
-These busy retries have a separate status counter; they do not fetch successful
-bodies again or discard an otherwise healthy peer.
-Peer identity, published height/sync status, genesis and unavailable future-height
-queries do not take the ledger mutex. A height/status pair is published atomically
-after validation and reset on rewind, so slow disk publication cannot hold up
-native peer heartbeats or identity challenges.
-The single-source pipelined helper remains available for fixtures and local
-snapshot tooling; the production executable always uses the peer coordinator.
-
-Peer broadcasts enter a bounded FIFO without taking the ledger mutex, so proof
-validation does not interrupt socket reads. The node update drains and validates
-the queue; embedded callers must drive `Node::tick()`. The queue retains at most
-32 MiB and 16,384 entries, charging the larger of decoded heap usage and wire
-bytes and dropping oldest entries when full. Each update takes at most 256
-consensus messages and four transactions. HTTP status exposes queued messages,
-bytes and the dropped-message count. Lossless decoding charges allocations before
-expanding containers, including zero-width elements and nested fixed arrays;
-each record has a 128 MiB decoded allocation budget. Compact values within that
-budget retain their native byte representation and cost regardless of expansion
-ratio.
-Public peer frames and HTTP bodies use `safe_read`-style reads in chunks of at
-most 16 KiB, growing their buffers only after bytes arrive. Lossless MMX
-containers likewise grow only after an element has decoded. The pinned VNX
-runtime applies incremental reads and aggregate allocation/schema limits to VNX
-services and metadata, including remote farmer/harvester connections.
-
-Unsolicited live blocks wait in RAM, limited to 256 blocks / 32 MiB, within
-1,000 heights of the selected tip and for at most ten block intervals. They enter
-the durable archive only after connected-history, space/VDF and full ledger
-validation on a temporary snapshot. Missing VDF work does not consume the
-per-update ledger-validation budget. Disconnected headers cannot register best
-proofs or validator eligibility. Historical multi-peer downloads retain their
-separate backward-recovery path.
-
-Farmer response envelopes authenticate before deferral. Replays do not refresh
-their lifetime or use additional entries. The queue holds at most 4,096 responses
-/ 8 MiB, with a 64 KiB decoded/wire limit per response, a tip-relative future
-height window and a ten-block-interval lifetime. Each update checks at most 16
-space proofs. Production retains the best 128 verified proofs per challenge,
-replacing the worst when a stronger proof arrives, and prunes committed work
-even without a local farmer.
-
-The peer socket accepts only the C++ Router request allow-list: identity, info,
-peer discovery, height/sync status, blocks, headers, block hashes and transaction
-IDs. Other methods return `vnx.NoSuchMethod` before ledger dispatch. Public
-VNX/HTTP APIs retain their own method access. HTTP JSON-RPC permits eight active
-connections, with a five-second absolute socket deadline covering headers,
-bodies and response writes. Headers/trailers are limited to 16 KiB / 64 fields
-and bodies to 1 MiB; chunked requests are supported, ambiguous framing is
-rejected, and shutdown cancels incomplete socket reads and writes.
-
-Immutable header caches are shared across validator/challenge walks. Speculative
-replay retains only cached headers below its replacement height and publishes its
-new cache after the database transaction succeeds. Wire descriptor declarations
-are cached independently of record payloads. Neither cache establishes proof work.
-Difficulty walks also share ancestor headers instead of copying space-proof
-payloads at every step. History and VDF eligibility are resolved before CPU header
-checks run on up to eight workers. Outcomes and votes are applied in archive order;
-fork choice and ledger publication remain serial. Proof evidence remains bound to
-the exact header, parameters and ancestry context.
-New ledger/archive writes retain each complete block and derive its full header
-when needed, avoiding another disk copy of all space proofs. Existing separate
-header rows remain readable. Admission/publication warms the immutable cache only
-after its transaction succeeds. Cold reads and replacement tests preserve legacy
-unhashed fields even when a replacement block has the same ID.
-Stored blocks and transaction records use a versioned descriptor-free payload:
-class identities resolve against the exact checked-in schema, while raw Variant
-bytes remain untouched. Unknown identities, truncation and trailing data fail.
-The reader also accepts earlier self-describing database rows. Peer decoding
-continues to require native stream descriptors; storage lookup is a separate API.
-The compact form round-trips all 824 native serialization fixtures.
-
-Proof-validation benchmarks use native peer blocks and leave the source ledger unchanged:
-
-```sh
-cargo run --release -p mmx-consensus --example bench_pos -- 100
-cargo run --release -p mmx-consensus --example bench_pos -- 200 /tmp/block.vnx
-cargo run --release -p mmx-node --example bench_validation -- \
-  --peer 127.0.0.1:12337 --blocks 128 --rounds 20
-```
-
-`bench_pos` accepts both native wire blocks and versioned `MMXR` archive records.
-It checks complete proof results while comparing single calls, batches, and eight
-ordinary header threads sharing a global F1 pool. Each pool-size trial runs in a
-fresh child process, retaining serial match tables on the caller threads as in
-the node. To measure one pool size directly:
-
-```sh
-RAYON_NUM_THREADS=8 cargo run --release -p mmx-consensus --example bench_pos -- \
-  --header-workers 100 /tmp/block.vnx
-```
-
-Release builds retain overflow checks and use portable ThinLTO with one codegen
-unit. Two 2,000-block socket comparisons, reversing binary order, measured
-75.2→78.2 and 74.6→80.2 blocks/s. RPC p95 changed from 1.41→1.30 and 1.37→1.31 s.
-All four reached the same hash with exactly 2,000 body downloads and no timeout
-reassignments. CPU-specific code generation was also tested; the portable build
-won both full replays despite some faster isolated proof measurements.
-
-`bench_validation` profiles cached bodies from a running local node. It reports
-first-pass and warm farmer authentication, static validity, typed-header
-conversion, validator/history lookup, CPU space work and wire encoding as JSON
-lines. It loads preceding headers for the ancestry-dependent measurements.
-Set `MMX_PROFILE_REPLAY=1` when launching the node to sample replay's context,
-history, execution and private-publication costs every 128 heights. It also logs
-proof-evidence reuse and each durable suffix replacement's deletion, row-copy
-and commit times. Updates applying at least 64 blocks also report node
-preparation, archive/header loading, proof checks, fork selection, ancestry
-lookup, replay and root-policy costs, so update overhead can be attributed
-before changing consensus or storage paths. Body-request samples include the
-authenticated peer ID, requested/returned counts, metadata-window latency,
-body-response latency and explicitly unexecuted backpressure retries.
-On Linux, native peer reads refresh the transient `TCP_QUICKACK` hint. This
-avoids delayed acknowledgements holding small response tails behind a peer's
-Nagle buffering. A baseline/candidate/baseline comparison against the local
-C++ peer measured median 32-body responses of 47.7/8.1/48.2 ms; candidate p95 was
-11.9 ms versus about 51.3 ms for the baselines. The socket hint uses the Rust
-1.89 standard-library API and leaves frame validation and deadlines intact.
-The native Router inherits `tcp_no_delay = false` from
-`vnx-addons/modules/TcpServer.vni`. `TcpServer::main()` copies that setting to
-its listener endpoint, whose `accept()` applies it to incoming peer sockets.
-`MsgServer::send_to()` submits each compressed frame immediately. Although the
-standalone native `TcpEndpoint` defaults to no-delay for outgoing connections,
-that is not the Router listener's default. This accounts for the observed Nagle
-buffering on responses from an unmodified native listener; Rust also enables
-`TCP_NODELAY` on its own peer sockets.
-
-Two local mainnet replays of heights 4000–6000 compared 64-height and 128-height
-windows, reversing binary order for the second run. The 64-height binary reached
-39.5 and 55.2 blocks/s; the 128-height binary reached 56.6 and 58.9 blocks/s.
-Host contention affected the size of the gain. RPC p95 was 1.26/0.88 s with 64
-heights and 1.72/1.62 s with 128: larger atomic publications trade RPC latency
-for sync throughput. All four runs downloaded exactly 2,000 bodies without
-timeout retries and reached
-`0A0C01D81EE4F036D2B2EBF576039E44D8E72879D24F2CC2E995E65EDF137726`.
-
-CPU proof recomputation parallelizes independent F1 inputs while preserving the
-native canonical proof order. `RAYON_NUM_THREADS` can bound the worker pool.
-Fork admission retains immutable space/transition evidence bound to every header
-field (including legacy unhashed fields), exact parameters and resolved ancestry.
-Replay rechecks that binding, header authentication, VDF linkage and full ledger
-execution; stale evidence falls back to work verification. It never bypasses
-body validation, and deep-prefix replay still re-verifies space work.
-
-Generated header conversion first checks the complete compiled wire layout,
-including integer widths, optional fields and fixed arrays, then copies fixed
-fields directly. It preserves legacy unhashed fields and the complete dynamic
-proof view; unusual dynamic proof values retain the general VNX reader path.
-A cached native benchmark measured 209 versus 71 microseconds per conversion.
-VDF payout walks share immutable ancestor headers instead of copying proof
-payloads, while retaining native address counts and the oldest ancestor's tie
-salt. A final 2,000-block socket comparison measured 63.9 versus 72.7 blocks/s.
-Both reached the same hash with exactly 2,000 body downloads and no timeout
-reassignments. Earlier comparisons reversing binary order showed smaller
-3–4.5% gains; overall throughput depends on host and peer load.
-
-The read API supports parameters, heights/sync status, genesis/VDF hashes,
-blocks/headers by hash/height, transaction lookup/height/block IDs, contracts and
-balances. HTTP accepts bare names or `mmx.Node.*`; `get_status` adds node status.
-Other HTTP methods use the generated VNX field representations (fixed byte arrays
-and little-endian uint128 bytes), and method parameters are named objects.
-Header and content-hash RPCs read compact headers directly; new block formats do
-not require transaction payload reads for hash observation or header lookup.
-Balance scans stop at the native per-owner row limit and share request-wide
-work/byte budgets (100,000 key/index operations, 32 MiB, 10,000 scanned rows).
-Budget exhaustion returns an error rather than a partial total. Balance queries
-and public transaction validation run on pinned snapshots outside the ledger
-lock, with two expensive RPC slots shared by HTTP and VNX. Saturation returns
-`node RPC workers busy`; cheap status and height calls remain available.
-Unsupported methods return explicit errors. These public RPC listeners expose
-reads only. Native compressed peer requests carry lossless block records.
-
-Socket integration tests download the native fixture chain, switch a deep fork,
-query the resulting ledger over VNX and HTTP, rewind to genesis, reopen and replay.
-A full mainnet run caught up and passed the sustained Live gate at height
-5,518,797: 314 seconds and 32 new blocks, with five to six authenticated sync
-peers and matching C++ canonical hashes. It crossed both hard forks at 1,000,000
-and 5,050,000, with no timeout body reassignments in the final sync/reopen runs.
-The initial Live transition exposed synchronous VDF work blocking RPC; bounded
-background verification fixed it. Live monitor RPC samples ranged from 2 ms to
-740 ms during the verified window.
-The C++ CLI also read heights, headers, full blocks and balances through the
-running node's native VNX RPC service.
-The node uses a native append-only backend with every
-historical version retained. Sync throughput and remaining peer services are
-still being improved.
-
-`tools/watch_sync.py` continuously checks a Rust node against a native C++
-WebAPI, recording JSON lines with canonical hash parity, peer counts, RPC
-latency, throughput and mainnet hard-fork boundary checks. Its live check needs
-five minutes near the native tip and at least three newly selected blocks;
-a synced flag or frozen height alone cannot satisfy it. Three consecutive
-observation failures stop the monitor for inspection. For separate Rust/native
-listeners on the same machine:
-
-```sh
-python3 tools/watch_sync.py --rpc http://127.0.0.1:12380/rpc \
-  --native-wapi http://127.0.0.1:11380/wapi --output sync-watch.jsonl
-python3 -m unittest discover -s tools -p test_watch_sync.py -v
-```
-
-The example executes MMX instructions, charges gas, stages contract state, and
-commits it to disk. Running it again reopens the database and increments the same
-counter. It does not require the C++ repository or a running MMX node.
-
-## Workspace
-
-| Crate | Implemented |
+| Command | Purpose |
 | --- | --- |
-| `mmx-db` | Named versioned tables, size-first key ordering, inclusive historical reads, snapshot scans, atomic batches, rollback, and a native append-only backend plus an in-memory reference. Exclusive writer locking and atomic rollback/replacement protect persistent state. |
-| `mmx-node` | Executable, native Zstd peer protocol, historical download with ancestor discovery and native fork choice, live block/VDF/vote admission, durable rewind/restart, VNX public reads and HTTP JSON-RPC. |
-| `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
-| `mmx-consensus` | Native hashes/costs and authorization, header/vote/farmer-response authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
-| `mmx-opencl` | Runtime-loaded OpenCL 1.2 engines for recursive SHA256 and the native F1 memory hash; bounded reusable device buffers, no build-time OpenCL SDK requirement. |
-| `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`; runtime-dispatched SHA-NI/ARM SHA2/AVX2 recursive VDF kernels. |
-| `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native network bootstrap, durable selected-chain state, orphan archives, native fork-choice policy and atomic branch replacement. |
-| `mmx-wallet` | Compatible recovery words/key files, address and farmer-key derivation, message signing, exact amounts and signed transfers with a native consensus bridge. |
-| `mmxwallet` | Standalone HTTP(S) wallet CLI, private file storage, recovery/import/export, queries, prepared transfers, validation and explicit broadcast. |
-| `mmx-farming` | Wallet locking and native RPC, farmer response/header/vote signing, farm reports, native HDD/SSD/C1+ park reads, bounded CPU decompression and challenge scheduling. |
-| `mmx-timelord` | Bounded native interval scheduling, dedicated single-chain SHA-NI/ARM SHA2 hashing, persistent native signing identity and automatic Intel efficiency-core placement. |
-| `mmx-tools` | `mmx`, `mmx-wallet`, `mmx-farmer`, `mmx-harvester`, `mmx-timelord` and the native `mmx_timelord` alias. |
-| `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
+| `mmx-node` | Full node, peer sync, and RPC server |
+| `mmx-wallet` | Private wallet service for balances, spending, and farmer keys |
+| `mmx-farmer` | Farmer signing service and harvester connections |
+| `mmx-harvester` | Read plot files and submit proofs to a farmer |
+| `mmx-timelord` | Compute and publish VDF proofs |
+| `mmx` | Query native RPC services; `mmx wallet` runs the wallet CLI |
+| `mmxwallet` | Standalone wallet CLI, also available as `mmx wallet` |
 
-The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
-branches and local calls, unsigned 256-bit arithmetic, comparisons, logical and
-bitwise operations, shifts, type/size queries, string/binary concatenation and
-slicing, arrays/maps and entry access, conversions, SHA-256, secp256k1 signature
-verification, transfers, balances, events, logs, cross-contract hooks, and explicit
-failures.
-Multiplication preserves both the legacy overflow rule and the protocol-version-1
-fix.
+Run any command with `--help` for its options.
 
-Heap references, arrays, maps, and nested collections execute with allocation,
-reference counting, aliasing, entry mutation, lazy storage loads, and recursive
-cleanup. `COPY`, `CLR`, `SIZE`, and `CONCAT` include their collection paths.
-`CLONE` allocates a copied value and returns a reference; references inside a
-collection keep their aliases rather than being recursively deep-cloned.
+## Start a node
 
-`CONV` includes native integer parsing/wrapping, bases, byte order, and MMX
-Bech32m address presentation. Address decoding retains the reference's accepted
-HRPs, uppercase encoding, and unused padding bits. `VERIFY` uses Rust `k256`,
-including compact signature validation and high-S rejection. The native signature
-cache's initially zero tuple and its eviction behavior are preserved and tested;
-changing that upstream quirk requires an agreed consensus change.
-
-`SEND`, `MINT`, and `BALANCE` use a private per-currency balance cache and stage
-transaction outputs with raw byte memos. `StorageDb` supports versioned balance
-snapshots. The VM stages debits and outputs; `mmx-execution` applies contract
-balance debits together with state and returns outputs for the node's settlement
-layer. `Engine::outputs()` exposes staged transfers only after successful execution, and refuses them after failure.
-
-`Engine::run_with_host()` supplies `LOG`, `EVENT`, `RCALL`, and `CREAD` through the
-`Host` trait. Callbacks can read VM values, charge gas, execute child bytecode, and
-write return values. Remote calls enforce frame, argument, and recursion limits,
-then clean up arguments while preserving the return slot. With no host, logs and
-events skip their values, while remote calls and contract reads fail as in C++.
-Hosts must stage their own effects and discard them on transaction failure. The
-`mmx-execution` crate supplies contract loading, dependency resolution, and a
-shared transaction overlay behind these hooks.
-
-New heap objects are reclaimed when their last reference is released. Objects
-loaded from storage stay pinned, matching C++; copying stored maps and erasing
-stored collection descriptors remain errors in the reference VM. Read-only
-execution protects loaded state but can allocate temporary objects; publishing
-new persistent state still fails. A failed execution or commit cannot publish
-state through that engine instance. Opcode coverage alone does not establish
-full consensus compatibility.
-
-## Database and execution semantics
-
-Writes belong to the **current** version. `commit(next_version)` persists an
-atomic batch across all tables, then advances the current version. For example,
-writes at version 0 followed by `commit(1)` are visible in historical reads at
-version 0. `revert(v)` discards writes at versions **greater than or equal to**
-`v`, along with staged writes. This matches the C++ `Table` convention.
-
-`Engine::run()` changes only its private memory. `Engine::commit()` first clears
-stack references and reclaims unreachable new heap objects, then checks the
-entire persistence gas cost before applying one atomic batch to its storage
-backend. `storage.database_mut().commit(next_version)` then makes the staged
-changes durable. The low-level APIs keep this split; `chain::ChainState` combines
-validated block effects, archives and tip updates into one durable commit. Use a
-fresh engine per invocation and serialize access to each storage backend.
-
-`Store::commit_batch(next_version, writes)` validates and commits additional
-writes with the original pending batch. Validation failures preserve pending and
-committed state. Failed persistent writes poison the writer until reopen, which
-resolves whether the complete sealed frame reached disk.
-
-`Store::fork(version)` creates a detached view before that version. Native views
-share immutable files and keep speculative writes in RAM; `replace_suffix()`
-publishes the validated suffix atomically. Identity and generation checks reject
-stale or foreign snapshots. Historical reads, tombstones, version gaps, and
-replacements larger than 64 MiB remain supported. `Database::memory()` supplies
-the in-memory reference and speculative branch implementation.
-
-`mmx_execution::prepare()` runs a batch of already authenticated and funded
-invocations against a disposable overlay. It loads native VNX contract records,
-checks public/constructor methods and dependency locks, sets transaction/caller
-externals, handles deposits, and copies nested arguments and return values between
-engines. Setup timing follows the configured hardfork-2 height. Contract read
-costs come from the chain index, independently of repository caching or disk I/O.
-Raw metadata strings, method names, and dependency names retain non-UTF-8 bytes.
-
-A `PreparedExecution` holds exclusive backend access while the node checks dynamic
-fees and execution inputs/outputs. `batch_mut()` lets it add settlement and fee
-writes; `commit()` publishes the entire batch atomically. Dropping the prepared
-execution discards it. `execute()` is a convenience that prepares and commits
-immediately. A later operation's failure discards earlier child commits, balance
-changes, and deployments while preserving pre-existing pending database writes.
-The caller still advances the database version separately.
-
-Outputs follow native child-before-parent ordering and are not credited as
-deposits for later invocations in the same transaction. Native const methods skip
-their own storage commit; they do not force child engines into read-only mode.
-Non-const commits clear their return slot, matching the reference executor.
-Child gas is added only after successful execution and return copying; outer VM
-costs are clamped on failure as in `Node::execute`.
-
-The invocation API expects transaction authentication, static contract/dependency
-validity and deposit funding checks to have succeeded. Its `Receipt::total_cost`
-includes supplied initial cost, contract reads and execution, before execution
-input/output costs. The `mmx_execution::transaction` API combines these steps.
-
-`transaction::prepare(&mut storage, &context, &transaction)` checks native static
-validity, the active transaction version, duplicate IDs, sender authorization,
-fee funding, expiry, explicit inputs/outputs, deployment validity/dependencies and
-per-operation user authorization. It runs constructors and calls at their native
-positions, accounts for deposits and contract spending, creates execution inputs
-and outputs, applies implicit-deposit rules, checks dynamic fees, and validates
-any supplied execution result. Version 0 retains the reference's GCC/libstdc++
-unordered-map iteration order for implicit deposits, including bucket collisions
-and rehashes; version 1 sorts currencies.
-
-`PreparedTransaction::result()` exposes success or a charged execution failure.
-Rejections return an error and publish nothing. On commit, failed transactions
-publish only their fee debit and transaction index; successful transactions
-publish VM state, deployments, settlement balances and the index together.
-Settlement credits all outputs before clamping input debits, matching native
-single-transaction block application. Ledger validation uses the original
-balance snapshot independently of the VM's deposit/spending cache. `LedgerStorage`
-is an explicit backend capability requiring index queries and atomic publication
-of every batch field; `StorageDb` implements it.
-
-Dropping a prepared transaction aborts it. `transaction::execute()` prepares and
-commits immediately, and `transaction::with_result()` attaches a computed result
-while recalculating static cost and the content hash. The caller separately
-advances the database version. Transaction index height and deployment read cost
-survive reopen and rollback, including read costs for failed deployments whose
-contract record is absent. Error codes, addresses and operation indexes are
-enforced when matching results; diagnostic line/message fields retain the native
-consensus exemption.
-
-Sequentially committing transactions through the single-transaction API does not
-implement native block validation. Use `mmx_execution::block::prepare()` for a
-post-genesis block body, after the chain layer verifies proof work and transitions.
-`BlockContext` supplies the verified parent corresponding to the backend snapshot and the
-expected VDF payout. The body API checks parent linkage/height, transaction
-content hashes, the native binary-tree root, cost/fee/count commitments and
-limits, transaction activation, duplicate IDs, descending fee ratios and the
-size-dependent minimum fee tiers. It also checks header static validity, header
-and content hashes, the farmer signature, timestamp delta bounds, space-fork
-length and difficulty minima before executing transactions.
-
-Before execution, the body API reserves every transaction fee and successful
-transaction's explicit inputs against the original ledger snapshot. It computes
-native dependency locks and predecessor sets, then executes serially in block
-order, a valid schedule for the native dependency graph. VM state and spending
-caches carry forward between successful transactions. Authorization, explicit
-funding and contract metadata continue to read the chain snapshot: earlier block
-outputs cannot fund later validation or VM spending, and new deployments remain
-unavailable to other transactions until block application.
-
-`PreparedBlock::receipt()` exposes the validated results, execution plan, ordered
-block inputs/outputs and supply deltas. A rejected block publishes nothing,
-including earlier successful transactions. Dropping the preparation aborts it;
-commit publishes VM state, deployments, all settlement balances, transaction
-indexes and supply counters together. Settlement credits every block output,
-including VDF, farmer and project rewards, before applying clamped input debits.
-Native total-supply accounting clamps each currency's net issuance to zero
-before adding it to the persisted counter. `BlockStorage` requires supply queries
-and atomic publication in addition to the ledger capability; `StorageDb`
-implements it. The caller separately advances the database version.
-
-The body API checks reward activation, fee buffers, project address continuity,
-reward votes/adjustments, reward amounts and VDF payout cadence. Public
-`block::economics` helpers preserve native rounding/wrapping and select the VDF
-winner from authenticated ancestors, including tie-breaking with the oldest
-visited ancestor's proof hash. A successful body validation requires the chain
-layer's proof work and transitions before block acceptance. `ChainState` supplies
-that integration; fork choice and node services remain separate.
-
-`mmx_consensus::header` exposes exact header hash serialization, hash/content-hash
-calculation, static validity, farmer authentication and contextual scalar checks.
-The hash preimage retains the actual wire type identity: native `Block` and
-`BlockHeader` hash differently even with identical fields. Slicing a signed Block
-to a BlockHeader preserves the stored hash while changing its preimage. The
-preimage includes `proof_chain` starting at hardfork 2, signed reward fields and
-raw 128-bit weights. Static validity and `authenticate()` remain separate, as in
-C++; authentication verifies
-the supplied hash using the first proof's farmer key and the shared crypto cache.
-
-OG/NFT proof records support `Record::calc_hash()` and `proof::is_valid()`.
-`proof::calc_proof_hash()` hashes the challenge and little-endian 32-bit proof
-coordinates, and `calc_plot_id()`/`validate_plot_id()` implement the native OG/NFT
-identity domains. Header static validity checks proof shape and does not call
-plot identity validation or verify proof work. The chain layer must perform
-those separate stages before block acceptance.
-
-`proof::verify()` implements native OG/NFT space-proof verification in its
-original order: shape, expected challenge/difficulty, plot identity, plot filter,
-ksize limits, CPU recomputation, quality threshold and proof score. `pos` ports
-the 4 KiB memory hash, SHA-512 leaf generation, eight matching tables, full
-metadata deduplication and canonical proof backtrace. It enforces the Y window,
-the original X ordering, and hardfork-1 post filtering/quality selection. Proofs
-contain 256 uncompressed X values. The harvester expands compressed plot X
-prefixes and can accelerate the F1 memory hashes through OpenCL, retaining the
-same CPU matching tables and canonical backtrace. Consensus space verification
-continues to use the portable CPU path.
-
-`transitions::verify_header()` checks proof ordering/uniqueness, proof-chain
-commitments, VDF height and expected iteration totals, bounded time-difficulty
-changes, challenge infusion (including hardfork-2 forced infusion), space
-difficulty/fork counters, weight and cumulative weight, then every space proof.
-`ProofContext::resolve()` derives its expected challenge, difficulty and infusion
-iteration counts through an authenticated `history::HeaderSource`. The lookup
-rules retain native challenge delay, skipped VDF heights, pre-genesis challenges
-and commit-delay clamping; missing non-genesis ancestors cause an error.
-
-`block::prepare_with_proofs()` combines these checks with header authentication
-and prepared body settlement, requiring the same trusted parent in both contexts.
-Header hashes and the farmer signature are checked before CPU space work. The
-lower-level `block::prepare()` continues to expect separately verified space
-proofs/transitions. These two APIs require separately verified VDF work/output
-linkage before accepting a block; iteration counts alone do not establish VDF
-work. Every body preparation API checks NFT reward targets against the original
-ledger snapshot.
-
-`mmx_consensus::vdf` ports ProofOfTime and VDF_Point hash serialization and static
-validity, timelord authentication, history-dependent admission and portable CPU
-work verification. Admission checks the infused block's committed time difficulty,
-iteration count, segment size and segment count in native order. CPU verification
-mixes the input, infused block hash and reward address, then checks each recursive
-SHA-256 segment. `vdf::verify()` combines these stages and constructs an immutable
-`VerifiedPoint`; decoding a point or checking its metadata hash does not establish
-verified work. The signed proof remains available through `VerifiedPoint::proof()`.
-
-`vdf::link_block()` follows verified outputs backward through the expected
-infusions and iteration counts, requiring the final input to equal the trusted
-parent's output. Equal-output candidates retain insertion order. It preserves
-native consensus exemptions: linkage does not check signed point start/height
-metadata or compare block reward addresses with point reward addresses.
-`block::prepare_with_vdf()` authenticates the header, resolves its proof context
-from trusted history, links admitted VDF points, verifies space proofs/transitions
-and prepares atomic body settlement. Supply points verified with the same chain
-parameters. Its caller supplies the ancestor-derived VDF payout winner and
-trusted history; `ChainState` derives those inputs from its persisted tip.
-
-`mmx_execution::nft::target()` implements native Plot NFT reward resolution. It
-falls back to the contract address when the executable, binary or
-`mmx_reward_target` method is absent. Otherwise it calls that method using the
-ledger peak's height and protocol version, a canonical address string or null
-farmer argument, null user/transaction ID, the contract address and chain network.
-It uses `max_tx_cost` without charging contract metadata reads. Method visibility
-and constructor flags do not restrict this native call; the method's const flag
-controls storage immutability, and every call discards writes and transfers.
-Remote calls and contract-read callbacks remain unavailable in this path, as in
-C++. The return conversion preserves native VNX behavior, including invalid
-address strings becoming zero and byte lists being truncated or zero-padded.
-All list elements are read before conversion, including those beyond byte 32.
-
-Block validation requires `reward_contract` to match the first NFT proof only
-when `reward_addr` is present, resolves the target with `reward_account`, and
-checks the result before transaction execution. It uses the parent's height:
-an NFT unlocking at the candidate's height remains locked during that block's
-reward validation. Calls cannot observe transactions or new deployments in the
-candidate block, and their temporary writes never enter the settlement batch.
-
-`mmx_execution::chain::genesis::build()` reproduces native genesis construction
-from a trusted `genesis::Assets` manifest. Its nine transactions are ordered as
-offer, swap, token, plot NFT, NFT, template, escrow, time lock and relay. Mainnet
-prepends the testnet rewards transaction and validates a separate project-relay
-transaction to obtain `project_addr`; that relay is not deployed at genesis.
-Other networks use the reference testnet project address. The VDF/challenge
-domains, nonce, initial difficulties, timestamp casts, transaction commitments
-and header hashes retain native rules. Bootstrap transactions receive native
-genesis checks rather than normal transaction validation, and constructors and
-operations do not execute.
-
-`chain::network::Network::load(root, configuration)` reads the original
-`config/<configuration>` tree through VNX, including parent inheritance, namespace
-JSON files, leaf overrides and array appends. The configured `chain.params.network`
-selects `data/<network>`; configuration overlays can have different directory
-names. `Network::from_config()` accepts an already layered configuration with
-caller overrides. Both return the generated parameters and lossless bootstrap
-records for `ChainState::initialize()`.
-
-The loader reads all nine binaries in native order and mainnet's rewards JSON
-and separate project relay. Text conversion preserves MMX addresses, native
-integer casts/defaults, enum names and 128-bit decimal/hex amounts, including
-the native permissive digit parser and overflow behavior. The shared VNX parser
-retains native string escapes, including literal `u0041` for `\u0041`. Binary
-files use the strict consensus reader. Loading reports file paths on errors and
-does not publish state; genesis checks remain in `genesis::build`/`initialize`.
-Files are bounded to 64 MiB. Text support covers the shipped distribution and
-its input/output/execution-result records; floating-point integer conversions
-and non-null polymorphic contract/operation/solution JSON payloads fail explicitly.
-General native text/schema migration remains separate work.
-
-`chain::ChainState` owns the storage backend and exposes read-only ledger access.
-`initialize()` applies genesis balances, deployments, read-cost indexes and
-supply. `append()` authenticates the header, derives challenges/infusions and the
-VDF payout from stored history, links independently verified VDF points, verifies
-space work/transitions, resolves NFT targets and validates the body. It commits
-VM writes, balances, deployments, transaction indexes, supply, lossless records,
-height indexes and the selected tip in one durable database transaction. Block height `h` writes
-at version `h` and commits version `h + 1`. Reopen checks the exact stored chain
-parameters and the tip/height/version relationship. Headers have their own table
-and retain the signed Block's stored hash when sliced to BlockHeader.
-
-```rust
-let mut chain = mmx_execution::chain::ChainState::open(path, params)?;
-chain.initialize(&assets)?; // once, on a fresh chain
-let point = mmx_consensus::vdf::verify(&time_proof, chain.params(), &chain)?;
-chain.append(&candidate_block, &[point])?;
-```
-
-`revert(h)` durably removes selected blocks and ledger effects at heights `>= h`;
-`revert(0)` also removes genesis. A replacement branch can then be verified and
-appended explicitly. Selected block/header/transaction archives rewind with the
-ledger. `reorganize(first_height, &blocks_with_verified_work)` validates the
-replacement on a detached ledger and publishes it with `replace_suffix` only
-after every block succeeds. Genesis cannot be replaced. Failed execution or
-database I/O cannot expose a partially reverted chain.
-
-`chain::forks::ForkChain` adds a separate durable archive, independent of selected
-ledger rollback. `admit()` checks native block commitments and farmer signatures,
-retains disconnected blocks and ordered signed VDF proofs, and merges later
-work without changing the first block's arrival order. The archive writes ahead
-of selected state and binds exact chain parameters and genesis. Reopen does not
-trust saved proof-verification flags: VDF work and space proofs are checked again.
-
-`update(selected_root_hash, lowest_pending_sync_height)` resolves the native
-fork-choice policy, replays the winning branch against its actual ancestor
-snapshot, and atomically switches the ledger, transaction indexes, archives and
-tip. Losing blocks remain available through `ForkChain::block()`. Missing parents
-or work leave candidates waiting; invalid bodies are excluded and selection
-continues with another candidate. Alternate-root branches wait for backwards
-sync when native policy requires it and replay the prefix below the old root
-before switching. That historical prefix rechecks space proofs and full execution
-without old PoTs, matching native `fork_to`; live blocks above the root still
-require VDF evidence. The node preserves its current root while downloading
-competing branches and updates the root hash only after branch selection.
-Replacements stream records and discard intermediate receipts during node replay,
-so a deep fork does not accumulate complete block bodies/results in RAM.
-
-The standalone `chain::choice::select()` ports native proof/invalid propagation,
-wrapping cumulative votes, root/peak weight comparisons, height/hash tie-breaks
-and the backwards-sync guard. It accepts already authenticated vote counts.
-`ForkChain::admit_vote()` authenticates native vote content/signatures and queues
-votes until the referenced block's proof is verified. `update_at()` supplies an
-explicit clock for deterministic processing; `update()` uses wall time. Validator
-membership is selected once at proof verification, starting with the unclamped
-commit-delay ancestor, then scanning at most `max_history` headers for distinct
-first-proof farmer keys. The default history limit is the native 1,000 headers.
-
-New votes require the best known proof for that challenge and a key in the
-block's validator set. Each key counts once per block. Accepted votes retain
-their count when stronger proofs arrive and do not expire; pending votes time
-out after three block intervals, using the native strict boundary. The proof
-pool accepts additional `proof::VerifiedProof` evidence. Votes, eligibility and
-proof-ranking caches reset on restart, matching the native process; durable
-ledger/orphan state remains intact. Invalid vote content short-circuits signature
-parsing, and signature verification shares the VM/authorization cache.
-
-`ForkChain::rollback_to(height)` keeps that selected block and durably removes
-every later ledger/index version while retaining every archived branch. Any
-selected height, including genesis, is supported; no root/checkpoint introduces
-an irreversible state cutoff. Reopen and subsequent fork selection can replay
-the retained branches. Specialized wallet/trading indexes, archive compaction
-and remaining node services are separate port stages.
-
-`audit_native_storage` opens a native selected-state database and compares visible
-VM cell and container-entry values with a running C++ node's historical storage API.
-Stop the Rust writer before running it; the exclusive writer lock prevents a
-concurrent open. The auditor uses historical RAM views and leaves the tip intact. It
-checks the canonical genesis and selected-tip hashes, then reads each sampled
-key at the pinned tip and immediately before/at its latest write. Native RPC
-omits VM flags and reference counts; this comparison checks the serialized
-values. It does not compare balance tables or every older write to each key.
-The default is 128 keys per table; a larger sample limit can cover every key.
+From the Rust repository directory:
 
 ```sh
-cargo run -p mmx-node --example audit_native_storage -- \
-  --source-dir ./mmx-data --native-rpc 127.0.0.1:11330 --samples 100000
+mmx-node --mmx-root ../mmx-node --network mainnet \
+  --data-dir ./mmx-data --no-services
 ```
 
-All 990 VM keys across 161 contracts matched C++ at height 1,124,592, including
-2,970 historical reads. A separate pinned view of the running node at height
-2,151,672 matched all 1,010 keys across 166 contracts in 3,030 reads. The C++ CLI
-also returned identical contract output for all nine genesis binaries through
-the native and Rust VNX RPC servers. After crossing the second hard fork,
-height 5,055,440 matched all 3,337 VM keys across 435 contracts in 10,011
-historical reads. After full catch-up, height 5,518,783 matched all 3,349 keys
-across 438 contracts in 10,047 historical reads.
+Choose `--data-dir` on a fast local disk with room for the growing ledger.
+**Use a separate directory from the C++ node:** the on-disk formats differ.
+Existing wallet keys and plot files are compatible and can be reused.
 
-`audit_native_rpc` compares complete immutable VNX RPC results with C++ at fixed
-heights: blocks, headers, both hash forms, transaction bodies and height/ID
-indexes, parameters and genesis. It also checks missing IDs and batched duplicate
-IDs, then rechecks each canonical hash. By default it checks genesis and a point
-24 blocks below the lower tip; repeat `--height` for hard-fork boundaries or
-transaction-bearing blocks. Mutable balances/contracts and live status require
-separate checks at matching tips.
+The node discovers peers from the network configuration and syncs from genesis.
+It targets eight distinct authenticated peers and needs at least three to sync.
+If discovery needs help, add `--peer HOST[:PORT]`; supplied peers replace the
+configured seed list, and discovery can find more peers from them.
 
-For mutable state, stop the Rust writer and export a small immutable sample from
-the native database, then restart it and compare both RPC servers at that sample's
-synced height and canonical hash:
+Check progress from another terminal:
 
 ```sh
-cargo run -p mmx-node --example audit_native_rpc -- \
-  --export-state ./mmx-data --output ./tmp/state-audit.json --samples 128
-# Restart the node, then run while both nodes still match the exported height.
-cargo run -p mmx-node --example audit_native_rpc -- \
-  --state-from ./tmp/state-audit.json --samples 128
+curl -sS http://127.0.0.1:11380/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_status","params":{}}'
 ```
 
-Both servers must match the exported tip before and after comparison. A moving or
-unsynced tip rejects the mutable check. Samples cover evenly spaced visible keys;
-balance checks include full 128-bit amounts and currency, and contracts use both
-native lookup methods. The export refuses an active writer. No database copies
-or additional storage backend are required.
-Local TCP tests cover matching values, divergent servers, two servers agreeing
-on an incorrect balance, zero balances and tip movement. At the matching stable
-mainnet tip 5,518,783, 434 native comparisons passed, including 128 sampled
-balance keys, 128 contracts through both lookup methods, and immutable block/tx
-results. This is sampled balance/contract parity; every known VM storage key was
-checked separately. Moving-tip attempts were rejected rather than counted.
+The result includes the current height, `synced`, `sync_peers`, and
+`earliest_height`. Farming starts receiving challenges once the node is synced.
+Press Ctrl-C for a clean shutdown; restart with the same data directory to resume.
+
+All node listeners bind to loopback by default:
+
+| Interface | Default address | Override |
+| --- | --- | --- |
+| Peer connections | `127.0.0.1:11337` on mainnet | `--p2p-listen` |
+| Native VNX RPC | `127.0.0.1:11331` | `--rpc-listen` |
+| HTTP JSON-RPC | `http://127.0.0.1:11380/rpc` | `--http-listen` |
+
+To accept incoming mainnet peers, use `--p2p-listen 0.0.0.0:11337` and allow
+TCP port 11337 through your firewall. Keep wallet and signing endpoints private.
+
+## Wallet and solo farming
+
+An existing C++ `wallet.dat` and existing `.plot` files can be used directly.
+To create a new wallet, choose a private location and back up its recovery words:
 
 ```sh
-cargo run -p mmx-node --example audit_native_rpc -- \
-  --native-rpc 127.0.0.1:11330 --rust-rpc 127.0.0.1:12331 \
-  --height 0 --height 999999 --height 1000000 --height 1000001
+mmx wallet create --file /path/to/private/wallet.dat
+mmx wallet address --file /path/to/private/wallet.dat
 ```
 
-The native genesis RPC exposed unsigned defaults rewritten in generated VNX
-metadata (`-1` became `4294967295` or `65535`), causing the strict client registry
-to close its connection. The generator now preserves native descriptor defaults;
-omitted fields apply unsigned casts when constructing values. Captured native
-transaction/input/error descriptors guard this compatibility alongside range
-checks for explicit caller values. After the fix, 80 comparisons across six
-heights through 3,100,000 matched all 12 immutable read methods. Another 50
-comparisons passed at four transaction-bearing blocks near height 3,200,000.
-The 3.5-million, 4-million and 4.5-million milestones each added 68 passing
-comparisons at six heights, including four recent transaction-bearing blocks,
-while the node continued downloading.
-The second-hard-fork crossing added 86 passing comparisons at eight heights,
-including 5,049,999 through 5,050,002 and four recent transaction-bearing blocks.
+Wallet files contain the seed in plaintext. A wallet passphrase changes key
+derivation; it does not encrypt the file. Keep key files and recovery words
+private, and supply secrets through interactive prompts or `--input-stdin`.
 
-The live node admits signed farmer `ProofResponse` envelopes only after native
-hash, plot identity, signature, selected-history challenge/difficulty and CPU space
-work checks. Pending responses wait for VDF progress and expire after ten block
-intervals. Harvester identity, lookup time and farmer routing metadata are excluded
-from hashing as in C++. VDF peak reads extend the block tip only through verified
-CPU evidence with matching infusion, iterations and input paths; raw metadata
-cannot extend it. Additional oracles cover 80 response mutations and 240 native
-next-VDF graphs. Active fork proofs and CPU work are cached transiently, rebound
-to the configured chain before use and reset on restart. Fork updates read the
-active archive range and lazily resolve older headers; retained history is intact.
-
-Historical block download uses explicit `append_sync()` / `update_sync_at()`
-entry points. As in native `!is_synced`, only VDF linkage is omitted; space work,
-signatures, header transitions and complete ledger execution still apply.
-Already verified sync proofs remain eligible when switching to live mode, while
-new live blocks require verified VDF points. These flags reset on restart.
-`chain::sync::Policy` ports native proof-density root advancement, including weak
-fork delays, sync positions, pending jobs and integer widths. Soft roots never
-remove rollback history. Its oracle compares 262 native commit schedules.
-
-```rust
-let mut forks = mmx_execution::chain::forks::ForkChain::open(path, params)?;
-forks.initialize(&assets)?; // once
-let root = forks.selected().hash_at(0)?.unwrap();
-forks.admit(&candidate_block, &[signed_time_proof])?;
-let update = forks.update(root, None)?;
-```
-
-`mmx_consensus::Record::decode()` reads original VNX bytes without a JSON
-conversion. `calc_hash(full_hash, hash_version)` implements native MMX hashing;
-transactions select their own hash version, and solution/result hashes retain
-the native version-0 rules. `hash_serialize()` exposes the exact transaction
-preimage. Transaction IDs omit solution indices and input flags; content hashes
-include them, signatures, static cost and execution results. Execution-result
-input flags/solution indices remain excluded even from content hashes.
-
-`is_valid(&ValidationParams)` and `calc_cost()` port the native static checks,
-including version-1 duplicate/unused solution rejection, memo/message limits,
-JSON metadata restrictions, contract/method flags and wrapped cost arithmetic.
-Contract validity is exposed separately: native `Transaction::is_valid()` does
-not validate the deployment itself. These checks do not authenticate signatures,
-enforce the active transaction version at a height, check balances or authorize
-execution. `mmx_execution::transaction` combines them with those checks.
-
-`mmx_consensus::authorization` ports `Contract::validate()` and the sender,
-input and operation-user signature selection rules. `authorize_sender()` always
-uses solution 0 and a PubKey at the sender address. `authorize_input()` performs
-a contract lookup only when `IS_EXEC` is set. `authorize_operation_user()` reads
-the user's contract and falls back to PubKey when it is absent; anonymous calls
-perform no lookup. Execute and Deposit use the same user authentication rules.
-
-Run these steps at their native positions after static validation: sender
-authentication precedes fee debiting, input authentication follows its balance
-check, and user authentication follows the target-executable check. The lookup
-callback must use chain contract records and charge the native read cost at the
-appropriate transaction/engine gas meter. Eagerly authenticating all operations
-would change failure order and gas. These functions do not check balances or
-fees, run bytecode, or publish state; `mmx_execution::transaction` connects these
-steps to execution and settlement. The lower-level `mmx_execution::prepare()`
-continues to accept authenticated, funded invocations.
-
-Version 0 multisig validation ignores the declared threshold, non-owner entries
-and non-PubKey owner solutions. Version 1 requires the declared threshold to
-match, rejects non-owners and rejects non-PubKey owner solutions. Every relevant
-signature is checked even after the required count has been reached. Typed errors
-preserve native static-failure versus ordinary execution-failure classification;
-all sender authentication errors reject the transaction. Signature/public-key
-parsing failures remain distinct from a signature that verifies false.
-
-The consensus reader currently accepts the checked-in schema versions only;
-older schema conversion/default insertion and exotic VNX dynamic forms are
-explicit errors. Hashing supports MMX JSON values plus the covered native
-opaque/typed scalar arrays; typed composite Variant array elements are not yet
-supported. Strings retain raw bytes, signed and unsigned dynamic integers retain
-their tags, and non-native Variant types retain their original payload.
-`Record::from_generated()` is convenient for generated declarations, but their
-JSON-backed Variant fields cannot represent every native distinction. Use
-original bytes for consensus inputs.
-`Record::encode()` emits self-contained current-schema VNX records while preserving
-original Variant bytes and raw strings, declaring repeated dynamic classes once
-within the value. `StreamEncoder` retains declarations across continuing peer
-frames. Standalone encoding is used to persist deployments without a JSON
-round trip. It remains distinct from hash serialization.
-
-All persistent opens use `Store::open()` / `Store::open_native()` and
-`ForkChain::open()` / `ForkChain::open_native()`: append-only value segments,
-immutable sorted reference indexes, and a checksummed atomic manifest. The
-SQLite and original standalone journal backends, import utilities, and layout
-rewriters have been removed. Unsupported old directories are rejected; start a
-fresh native sync. No conversion or deletion of existing data occurs at startup.
-Point reads, size-first ranges, prefix scans, inclusive historical reads, detached
-forks, and atomic suffix replacement share the in-memory reference's semantics.
-
-New blocks store their header and each transaction once in the fork archive.
-The selected chain commits eight-byte block references and 44-byte transaction
-locators with its ledger changes. Header/transaction reads fetch only their
-component, using native positional reads. Snapshots pin the immutable archive
-files across rollback and purge. Earlier native full-body records remain readable
-without conversion; only newly written blocks use this layout. A temporary
-two-transaction fixture reduced journal bytes from 395,819 to 132,638.
-
-
-The `Binaries` GitHub workflow builds the node on Ubuntu 24.04, checks
-`mmx-node --help`, and uploads a Linux x86-64 archive with its source commit and
-SHA-256 checksum. It runs manually or when the `node-build` branch advances.
-
-`cargo run -p mmx-db --example bench_delta --locked` measures a small native
-4 MiB replay using Linux process I/O counters, then verifies every historical
-value, reopen, and rollback through genesis. Speculative staging uses RAM;
-persistent publication appends payloads and checkpoints reference indexes.
-
-The new `mmx_db::sorted` foundation writes immutable sorted files sequentially,
-with one resident 64-bit offset per distinct table/key. Versions descend within
-each key. Reopen reads the header and offset index; snapshots and independent
-cursors share the immutable file. Header, index, key metadata and values have
-checksums, and a complete file is synced before atomic publication. The builder
-reuses its index directly rather than reading the new file back. Native defaults
-use a 4 MiB reference memtable, 64 MiB value segments, merge factor four, and a
-64-reader descriptor cache. Rollback caps a run's readable versions instead of
-rewriting that file. Retired indexes stay pinned by existing snapshots.
-
-Sorted-file merging streams one record per input file, honors rollback cutoffs
-without first rewriting those files, and resolves equal-version entries in favor
-of the newer input. Its optional retention boundary keeps every newer version
-and the latest preceding value or tombstone per key. Native database collection
-uses this same streaming iterator with a durable retention floor.
-
-`mmx_db::journal` streams atomic replacement frames and returns 24-byte value
-references containing a file ID, offset, size, and checksum. Values are appended
-once; sorted runs and their compaction can move these references instead of
-rewriting block payloads. A cross-layer test keeps two 1 MiB values in their
-original log while both sorted indexes stay below 1 KiB. Reopen can lazily read
-a sealed file without replaying its values. Recovery starts at a supplied
-checkpoint, verifies checksums and commit seals, and truncates only a physically
-incomplete final frame. Failed I/O/recovery requires reopening the writer.
-Generation, version, and retention-floor transitions are included in each frame.
-`Store` combines these primitives with atomic manifest checkpoints and recovery
-of only the uncheckpointed active tail. Process-death tests cover speculative,
-published, checkpointed, and purged suffixes followed by rollback/reopen. Fault-injected
-checkpoint failure preserves durable values, poisons the writer, and cleans its
-unpublished index at reopen. New-directory socket tests also exercise native
-storage through sync, fork switches, rollback, reopen, VNX, and HTTP RPC.
-
-Native databases support optional startup maintenance with `--purge-before HEIGHT`.
-The block and ledger state at HEIGHT remain available; earlier rollback targets
-are rejected, including after restart. The default retains all history. For example:
+For farming, restart the node with the private farmer endpoint configured:
 
 ```sh
-cargo run --release -p mmx-node -- --mmx-root ../mmx-node --data-dir ./mmx-data \
-  --purge-before 5000000
+mmx-node --mmx-root ../mmx-node --network mainnet \
+  --data-dir ./mmx-data --no-services --farmer 127.0.0.1:11333
 ```
 
-Purging publishes the retention floor before collection, streams retained values
-into bounded append-only segments, and atomically installs their reference index.
-Expired values are skipped without reading their payloads. Old files are unlinked
-after existing snapshots release them; cached readers are closed too. Interrupted
-collection preserves the durable floor and can be retried after reopening. The
-completion marker prevents repeated startup purges at the same height from
-copying retained data again, including when recovery must finish only one of the
-selected/archive databases. The operation temporarily needs space for retained values while the old files are
-still in use, and runs before RPC/peer listeners start.
-
-Block/header reads by height or hash, block hashes/content pairs, transaction
-lookups and batches, transaction heights, and per-block transaction lists hide
-everything before HEIGHT on HTTP, VNX, and peer RPC. JSON-RPC `get_status` reports
-`earliest_height`. Current balances, contracts, VM state, and transaction duplicate
-protection remain intact. A private bounded ancestry window remains for challenge,
-infusion, time difficulty, and validator membership checks at the boundary. The
-genesis identity hash remains available for network authentication. Forks whose
-common ancestor precedes HEIGHT require an unpurged database.
-
-The runtime verifies VDF work outside the ledger mutex. One active proof
-and one queued proof bound the worker; independent segments use OpenCL when
-configured, otherwise the shared Rayon pool, preserving first-failing-index
-reporting. Immutable work evidence owns the
-exact checked record and must pass signature, shape, and history admission again
-against the current fork before becoming a verified point. Completed failures
-are cached only while their proofs remain in the bounded receive window. Direct
-embedded nodes retain synchronous admission unless background work is enabled.
-
-OpenCL GPU 0 is the default for node VDF verification and harvester compressed
-plot proof computation, with automatic CPU fallback when a GPU is unavailable.
-`--opencl-device INDEX` selects another GPU; `--opencl-device -1` selects CPU work.
-Native configuration keys
-`Node.opencl_device`, `Harvester.opencl_device`, optional matching
-`Node.opencl_device_name` / `Harvester.opencl_device_name`, and the shared
-`opencl.platform` filter are supported. `--opencl-platform NAME` overrides that
-filter. GPU indexes follow discovery order within the selected platform(s).
-The standard GNU binaries load the system OpenCL ICD dynamically; no SDK is
-required to build. The portable static musl binaries retain CPU fallback where
-dynamic driver loading is unavailable.
-
-Startup checks both GPU kernels against independent CPU outputs before enabling
-them. Missing devices, loader/compiler failures and runtime driver errors fall
-back to CPU; a driver error disables that engine for the process. Incorrect VDF
-outputs are rejected normally. Kernels are embedded in the binary and use
-OpenCL 1.2, unsigned wrapping arithmetic and explicit byte ordering. VDF launches
-run at most 2,500 iterations each. Proof work uses 4,096-entry batches and at most
-16 MiB of reusable device scratch memory. GPU work cannot bypass the existing
-signature, history, shape, plot-identity or proof-order checks.
-
-`MMX_OPENCL_TESTS=1 cargo test --workspace --all-targets --locked` requires a real
-GPU ICD and additionally checks the native VDF/space fixtures, batching and
-plot-to-proof/live-node admission paths. CI runs those kernels on POCL with
-`MMX_OPENCL_ALL_DEVICES=1`. A hardware check with CPU/GPU timings is available as
-`cargo run --release -p mmx-consensus --example opencl_check -- 0`.
-
-C++ `Node::write_block()` appends full bodies to a block file and stores their
-offsets in a separate index. Its `Table` implementation uses a write log and
-sorted runs with offset indexes. The Rust native backend likewise keeps payloads
-in append-only segments and compacts references.
-
-Bounded header caches avoid repeated historical decoding; selected-chain caches
-are cleared on rewind/replacement. The checked-in type registry is parsed once,
-with independent registries returned for each native stream. Historical sync
-ignores unrelated live block broadcasts, and a periodic update coalesces queued
-proof/vote processing as in C++.
-
-Node identity creation and manifests use atomic file publication. Tests compare
-native storage with the RAM reference across pending writes, deletes, ranges,
-historical reads, every rewind, nested snapshots, reopen, injected write failures,
-abrupt process exit before/after publication, and a 65 MiB branch replacement.
-Uncommitted writes are discarded on reopen. Complete records with invalid
-checksums are reported as corruption; only a physically incomplete final frame
-is truncated during recovery. The format is independent of C++ files.
-
-MMX-specific value and instruction encodings target the little-endian reference
-format. Contract storage preserves the original 20-byte contract prefix and
-big-endian cell/entry addresses; value-index keys use the full 32-byte contract
-address. Address presentation uses the consensus Bech32m codec in `mmx_vm::address`.
-
-## VNX integration
-
-[VNX Rust](https://github.com/mmx-network/vnx-rust) is included as the pinned
-[`vendor/vnx-rust`](vendor/vnx-rust) Git submodule. Workspace path dependencies
-use its `vnx` runtime and `vnx-codegen` generator. The contract loader retains
-original wire bytes; the runtime's opt-in byte-string view is used only for stream
-inspection, so non-UTF-8 data never passes through a lossy execution value.
-Update the gitlink deliberately
-and run the compatibility tests when adopting a new revision.
-
-`mmx-types` compiles the declarations in [`schema`](schema) at build time and
-exports `mmx`, `vnx`, `vnx_registry()`, and the `VnxType` trait. The snapshot
-contains MMX declarations and the VNX/VNX-addons declarations needed to resolve
-their dependencies; source revisions are recorded in
-[`schema/origin.json`](schema/origin.json). The VM uses the generated native error
-codes, and tests carry an MMX contract binary through VNX serialization into VM
-execution.
-
-VNX provides serialization, reflection, runtime, RPC and transport. MMX's `var_t`
-and symbol-compressed `instr_t` formats remain application-specific in `mmx-vm`.
-Generated declarations do not implement native MMX validation, transaction
-hashing, consensus, or node services; `mmx-consensus` supplies the static MMX
-behavior separately. VNX wire serialization must not be used as
-a substitute for MMX's consensus hash serialization. Fixed byte arrays retain
-their declared wire layout; address presentation, amount arithmetic and crypto
-operations belong to the MMX port.
-
-To refresh the schema snapshot and native identity fixtures from the reference:
+The node retries the farmer connection until the signer is available. Start each
+service below in a separate terminal:
 
 ```sh
-python3 tools/update_schemas.py --source ~/workspace/mmx-node
+mmx-wallet --key-file /path/to/private/wallet.dat \
+  --node 127.0.0.1:11331 --listen 127.0.0.1:11335
 ```
 
-This copies protocol declarations and reads generated C++ type metadata without
-running or linking C++; review schema and fixture changes together.
-
-## Tests and compatibility
-
-Rust tests port the applicable cases from `test/test_database.cpp`,
-`test/test_engine.cpp`, `test/vm/engine_tests.cpp`, and
-`test/vm/storage_tests.cpp`. The checked-in fixtures also compare **10,632 C++
-execution cases**, including successful-execution gas, plus value encodings in
-all four metadata modes and compressed instruction bytes. Ordinary tests use
-these fixtures without a C++ build dependency.
-
-An additional **21,933 C++ composite trace steps** exercise heap ownership, all
-ten scenarios from `test/vm/storage_tests.cpp`, collection instructions, nested
-state, rollback, limits, and failures. Traces compare returned values, allocated
-addresses, gas, error codes/locations, and every successful persistence write.
-Each relevant operation is replayed with gas just below, at, and above its
-reference cost; compound operations also sweep intermediate gas limits.
-
-An additional **26,343** C++ trace steps cover the remaining nine opcodes:
-type/format conversion matrices, address edge cases, signature scalar limits and
-cache eviction, transfers and memos, cached balances, callback effects, remote
-return values and stack cleanup, indirect operand ordering, and gas boundaries.
-Tests also execute real child bytecode through the host interface, verify that
-failed executions hide transfers, and reopen/roll back balance snapshots.
-
-These fixtures validate the covered VM behavior, not complete consensus
-compatibility. Extend coverage to transaction/block execution as those layers
-are ported. Storage implementation changes must preserve the
-same logical reads, state updates, and VM gas independently of physical I/O or
-cache behavior.
-
-The execution layer adds **3,710 native C++ execution traces**, comparing complete
-state writes, balances, output ordering, spend maps, gas, operation/PC/error codes,
-and line information. They cover both sides of hardfork 2, constructors, child
-failures, multi-operation rollback, visibility/locks, stored-map copy rejection,
-copy recursion, non-UTF-8 names/arguments, metadata conversion, and gas boundaries.
-The original `engine_tests.js` and `compiler_tests.js` suites are compiled by the
-native compiler during fixture regeneration and then run successfully in Rust,
-with matching costs and persisted state. Normal Rust tests need no native tools.
-Additional tests cover reopen/forks, deferred commit/abort, atomic multi-table
-validation, and dependency depth/width limits.
-
-The consensus layer adds **824 native C++ cases** comparing transaction preimage
-bytes, both hash versions and full-hash modes, static validity, costs, contract
-sizes and overflow failures. They cover all concrete contracts/operations/
-solutions, execution results, signed integers, non-UTF-8 strings, alternate byte
-order, opaque floats/tuples, JSON/copy recursion boundaries, memo limits and
-500 deterministic transaction combinations. Further tests reject truncated or
-forged schemas and verify the different coverage of IDs and content hashes.
-
-Authentication adds **1,232 native C++ cases** covering all contract validation
-paths, both multisig versions, signature selection, missing/invalid solutions,
-failure reasons/classes, lookup order and injected read-cost boundaries. A further
-**418 native crypto cases** compare addresses, verification, scalar/key parsing,
-high-S rejection, wrong messages/signatures and zero-cache eviction. Separate
-integration binaries prove cache sharing in both directions between authorization
-and VM `VERIFY`; signed PubKey and multisig transactions also pass static and
-signature checks together.
-
-The transaction layer adds **2,016 native C++ comparisons**. Its generator extracts
-the original `Node::validate` and both `Node::execute` methods into a harness with
-test storage/indexes. Cases compare acceptance/rejection, failure classes, costs,
-fees, execution inputs/outputs, error locations, every VM write, stored contracts,
-deployment index costs and settled balances. They include hardfork boundaries,
-signature parsing/failure order, fee/read budgets, constructor/child rollback,
-deposits, wrapped 128-bit amounts, raw memos/arguments, legacy currency order, and
-supplied-result mutations (including ignored diagnostics/input solution indexes).
-Additional tests cover prepare/abort, durable commit, reopen, duplicate checks and
-rollback of transaction indexes. Consensus fixtures also round-trip losslessly
-through the byte-preserving VNX encoder.
-
-Block processing adds **114 native block comparisons**, **468 economic cases**
-and **80 VDF winner cases**. The oracle compiles the original block validator,
-dependency preparation and transaction methods with serial task scheduling.
-Cases compare reservations, dependency/predecessor sets, shared state/spending,
-child rollback, deposits, deployment visibility, forged isolated-state results,
-fee tiers, body commitments, rewards, every VM write, ordered inputs/outputs,
-settled balances and supply counters. Arithmetic cases include 64-bit wrapping,
-fee rounding, vote thresholds and reward bounds. VDF cases cover counts, ties,
-the oldest hash salt and short history. Durable tests cover whole-block abort,
-reopen, index/supply rollback and preservation of pre-existing pending writes.
-
-Header processing adds **570 native header comparisons** and **100 OG/NFT proof
-record comparisons**. Header cases compare exact preimages, hashes, content
-hashes, static validity, farmer signature errors and contextual scalar checks.
-They include hardfork boundaries, actual/sliced type identities, genesis,
-signed/128-bit fields, timestamp boundaries, malformed signatures/keys, null and
-duplicate proofs, and the distinction between proof shape and plot identity.
-Proof cases check coordinate endianness, size limits, plot IDs and identity
-corruption. Integration tests prove header tampering and invalid farmer
-signatures publish no block state.
-
-Space work adds **612 native comparisons** covering memory/leaf vectors at k8,
-k16, k29 and k32; accepted/rejected CPU space proofs; OG/NFT verification;
-production plot/post-filter settings; transition mutations; difficulty and
-quality arithmetic boundaries; ancestor lookup and complete context resolution.
-Integration cases run authenticated, proof-aware block preparation and reject
-signature/weight tampering without publishing state. Accepted witnesses use
-small k8 plots with overridden minimum ksize so fixture generation stays cheap;
-production k29/k32 leaf arithmetic is compared separately. The oracle calls the
-original native CPU verifier and copied Node verification/ancestor methods.
-
-VDF work adds **452 native comparisons**: 205 proof/admission/CPU cases, 184
-output-linkage cases and 63 combined VDF/space-proof block cases. They compare
-exact proof/point preimages and hashes, signatures and failure order, zero/odd
-segment counts, production segment size, chunk boundaries, corruption, iteration
-wrapping, commit-delay history, signed metadata exemptions and multi-step output
-chains. CPU cases run both native hardware dispatch and its fallback. Combined
-cases prepare or reject empty block bodies without publishing state on rejection
-or abort.
-
-NFT rewards add **212 native comparisons**: 185 target-resolution calls and 27
-authenticated block reward-field cases. They execute the original Plot NFT
-contract at lock/unlock and hardfork boundaries, compare fallback and return
-conversion rules, lookup/failure order, method flags, gas boundaries, ignored
-transfers and stored collection failures. Block cases check target/contract
-mismatches and parent height at unlock. Tests verify that target calls and
-rejected/aborted blocks preserve the ledger snapshot.
-
-Chain fixtures compare **16 native genesis cases** and a **three-block extension
-sequence** with two competing blocks at height 2. Genesis includes the actual
-mainnet and testnet13 assets, relay failures, network/content mutations, timestamp
-and difficulty wrapping, successful/failed result settlement and native
-bootstrap exemptions. Extensions combine
-original CPU space/VDF verification, header/body validation, contract writes,
-signed transfers, rewards and settlement across hardforks 1 and 2. Rust tests
-cover reopen, explicit rollback/replacement, archive/index consistency, parameter
-binding, torn extension recovery, and failed commit preservation of pending state.
-Additional native fixtures cover a correctly signed/proof-verified block with an
-incorrect execution cost and a two-block alternate-root branch. Rust tests cover
-out-of-order orphans, deferred work, restart, selected-index rollback, atomic
-replay failures, deep forks, backwards-sync guards and torn branch replacement.
-The fork-choice oracle compares **430 native graphs**, including wrapping votes,
-unverified/invalid ancestors, differing root weights, height/hash ties and sync.
-Voting adds **290 native cases**: 110 signature/hash cases, 101 validator-history
-cases, 69 event sequences and ten signatures for real branch fixtures. Queue
-sequences compare every vote count, publication and pending length across proof
-verification, membership, duplicate votes, stronger proofs and timeout boundaries.
-End-to-end tests switch a tied branch using an authenticated eligible vote,
-preserve state on bad signatures, test transient votes across restart, and rewind
-and replay every height of the fixture chain with all orphans retained.
-
-The generated bindings also check **638 native C++ type/code hash pairs** and
-**644 registry descriptors**, decode public native wire fixtures, round-trip
-transactions/contracts, and call a generated MMX client through the VNX runtime.
-
-Additional tests cover malformed/truncated input, invalid versions, atomic batch
-validation, single-writer locking, checksum failures, every truncation point in a
-final journal record, durable rollback/forks, execution failure, gas exhaustion,
-read-only storage, and a counter across reopen/rollback.
-
-To regenerate fixtures from an existing CMake build of the reference node:
-
 ```sh
-python3 tools/generate_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_consensus_fixtures.py --source ~/workspace/mmx-node
-# Optional: --suite hashes or --suite authorization
-python3 tools/generate_transaction_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_block_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_header_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_work_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_vdf_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_nft_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_chain_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_network_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_fork_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_vote_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_sync_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_response_fixtures.py --source ~/workspace/mmx-node
-python3 tools/generate_next_vdf_fixtures.py --source ~/workspace/mmx-node
-# Optional: --build /path/to/mmx-node/build
-```
-
-The generator compiles a small oracle against that build's actual libraries. It
-does not modify the reference source or use its database. Review fixture changes
-alongside any semantic changes to the port.
-
-### Wallet
-
-The `mmx-wallet` library and `mmxwallet` CLI are ported from `mmx-node/rust`
-(Apache-2.0), with the original C++ compatibility fixtures and mock HTTP CLI
-suite. They support existing VNX key files, recovery words (including historical
-checksums), passphrases, accounts, addresses, exact amounts, offline transfer
-signing, validation and explicit broadcast through the C++ public HTTP API.
-`Transaction::to_record()` bridges wallet presentation into native VNX records;
-tests compare the transaction ID, content hash, cost and wire round trip with
-the consensus engine. The standalone CLI currently uses the C++ REST API, which
-is broader than this node's JSON-RPC interface.
-
-```sh
-cargo run -p mmxwallet -- create --json
-cargo run -p mmxwallet -- address --json
-cargo run -p mmxwallet -- balance --rpc https://rpc.mmx.network --json
-```
-
-Key files contain the seed in plaintext, matching C++; a passphrase changes key
-derivation rather than encrypting the file. The CLI creates private directories
-and files and takes secrets through interactive prompts or `--input-stdin`.
-
-### Wallet, farmer, harvester and `mmx` services
-
-Build the tools with `cargo build --locked -p mmx-tools -p mmxwallet`. CI release
-archives include `mmx`, `mmx-wallet`, `mmxwallet`, `mmx-farmer`, `mmx-harvester`
-and `mmx-node` from the same source revision, with `mmx_node`, `mmx_farmer` and
-`mmx_harvester` executable aliases.
-The `linux-x86_64-musl` archive contains static binaries for older Linux hosts;
-the regular Linux archive targets the CI runner's glibc version.
-
-On Linux, the node can start its sibling wallet, farmer and harvester binaries
-from existing VNX configuration layers, including parent inheritance and local
-overrides. Run from the existing installation directory, with the Rust release
-binaries on `PATH`:
-
-```sh
-mmx-node -c config/mainnet config/node "${MMX_HOME}config/local" \
-  --data-dir /path/to/rust-ledger
-```
-
-`Wallet.key_files`, `Wallet.num_addresses`, `Farmer.reward_addr`, and
-`Harvester.plot_dirs`, `num_threads`, `my_name`, `reload_interval`,
-`recursive_search`, `max_recursion` and `dir_blacklist` use the native config
-names. Relative wallet filenames use `MMX_HOME` (or the current directory).
-Explicit CLI flags take priority over config. The native `wallet`, `farmer` and
-`harvester` switches control startup. Dependencies become ready before their
-consumers start; shutdown proceeds in reverse order and checks each child
-process's executable, directory, arguments and start time before signaling it.
-`--no-services` leaves startup to an external supervisor. `--farmer ENDPOINT`
-connects block production to an independently running private signer. Offline
-and sync-once modes do not start farming services.
-
-Use a separate Rust data directory: the ledger format differs from C++.
-Existing wallet key files and plot files can be read directly. The example
-starts the implemented solo farming path; it does not replace every C++ service
-or its HTTP REST API.
-
-```sh
-# The same wallet CLI is available under mmx wallet.
-mmx wallet create --json
-mmx wallet address --json
-
-# Native VNX services; use disposable/test keys while testing this port.
-mmx-wallet --key-file /path/to/wallet.dat --listen 127.0.0.1:11335 \
-  --node 127.0.0.1:11331
 mmx-farmer --wallet 127.0.0.1:11335 --node 127.0.0.1:11331 \
-  --reward-address mmx1... --listen 127.0.0.1:11333
-mmx-harvester --farmer 127.0.0.1:11333 --plot-dir /path/to/plots \
-  --threads 2 --max-f1 65536 --listen 127.0.0.1:11334
+  --listen 127.0.0.1:11333
+```
 
-# Generic native RPC; --args accepts the VNX JSON representation.
-mmx node get_height --endpoint 127.0.0.1:11331
+```sh
+mmx-harvester --farmer 127.0.0.1:11333 \
+  --plot-dir /path/to/plots --threads 2 --log-lookups
+```
+
+The farmer uses the first available wallet account's address for rewards.
+Set `--reward-address YOUR_MMX_ADDRESS` on the farmer to choose another address.
+Repeat `--plot-dir` to add directories. `--threads` limits workers shared by
+parallel plot reads and proof computation. For C10 plots, add `--max-f1 262144`
+to permit their worst-case decompression work.
+
+Inspect the services with:
+
+```sh
+mmx node get_height
 mmx farmer get_farm_info
 mmx harvester get_farm_info
 mmx wallet-rpc get_address --args '{"index":0,"offset":0}'
-# Secret RPC arguments can be supplied through stdin using --args -.
 ```
 
-When using a C++ wallet that protects farmer keys, pass
-`--wallet-username mmx-admin --wallet-password-file /private/path/PASSWD` to
-`mmx-farmer`, or set `Farmer.wallet_username` and `Farmer.wallet_password_file`.
-Keep the wallet endpoint on loopback or inside an SSH tunnel. Only the derived
-farmer identities are requested; wallet seed files stay on the wallet host.
+The standalone `mmx wallet` / `mmxwallet` network commands use the C++ REST API.
+For wallet operations against this Rust node, use the `mmx-wallet` service through
+`mmx wallet-rpc`. Its arguments use native VNX JSON; see the
+[service reference](docs/development.md#service-implementation-and-compatibility).
 
-Harvester lookups run as owned per-plot jobs, so slow plot reads do not hold the
-service lock or delay receiving later challenges and farm-info reports. One
-shared `--threads` budget covers I/O and nested recomputation. Newer queued
-heights have priority; original deadlines, eight queued contexts and one active
-read per plot bound overlap. Proofs publish as soon as each lookup completes.
-Plot directory reload metadata I/O remains synchronous.
+## Reuse an existing configuration
 
-For remote harvesters, enable native `allow_remote=true` on the farmer host.
-The restricted harvester listener defaults to `0.0.0.0:11333` (or the configured
-`endpoint` IP), while private signing moves to `127.0.0.1:11332`. Override them
-with `Farmer.harvester_endpoint` and `Farmer.private_endpoint`, or explicitly:
+The services accept native VNX configuration directories with `-c`, including
+parent inheritance and local overrides. Explicit command-line options take
+priority over configuration values.
+
+For an existing C++ installation, run from its directory with the Rust binary
+directory on `PATH`:
 
 ```sh
-# Farmer host: wallet and node endpoints stay private.
+export MMX_HOME=/path/to/existing-mmx-home/
+cd /path/to/mmx-node
+mmx-node --mmx-root . -c config/mainnet config/node "${MMX_HOME}config/local" \
+  --data-dir /path/to/rust-ledger
+```
+
+This starts the configured wallet, farmer, and harvester alongside the node.
+The native `wallet`, `farmer`, `harvester`, and `timelord` switches control service
+startup; the timelord is off by default. Add `--no-services` to manage services
+separately. Automatic service startup requires explicit `-c` directories and
+is disabled in offline and sync-once modes.
+
+Common settings include `Wallet.key_files`, `Farmer.reward_addr`,
+`Harvester.plot_dirs`, `Harvester.num_threads`, and `Harvester.my_name`.
+Relative wallet filenames resolve under `MMX_HOME`, or the working directory
+when it is unset. The ledger location is selected separately with `--data-dir`.
+Stop services that already occupy the same ports before starting replacements.
+
+## Remote harvesters
+
+Run the wallet and node on the farmer host. Set the node's
+`--farmer 127.0.0.1:11332` to match the private signing listener below, then
+start the farmer with a separate remote harvester listener:
+
+```sh
 mmx-farmer --wallet 127.0.0.1:11335 --node 127.0.0.1:11331 \
   --listen 127.0.0.1:11332 --harvester-listen 0.0.0.0:11333
-# Harvester host: a hostname without a port defaults to 11333.
-mmx-harvester -c config/mainnet config/farmer "${MMX_HOME}config/local" \
-  --node FARMER_HOST
 ```
 
-The remote listener exports chain parameters, farmer public metadata and live
-challenges, and accepts harvester reports/proofs. It cannot sign blocks or
-votes, access wallet secrets, or publish signed farmer responses. Its native
-`REMOTE` permissions remain restricted even after a privileged login.
-Configured VNX users can authenticate with `--username USER --password-file
-PATH`, or `Proxy.username` / `Proxy.password`. `--require-harvester-login` on
-the farmer requires a valid login before remote access. Connections use the
-native VNX transport; use a trusted network or tunnel when crossing an untrusted
-network. Temporary disconnections preserve loaded plot metadata and reconnect
-subscriptions; old challenges are never replayed for new disk work.
-
-The wallet service loads one or more compatible key files, exposes account and
-address queries, lock/unlock, message signing, recovery/export and farmer-key
-access. Spending keys expire after `--lock-timeout` seconds (default 600); locking
-drops those keys while retaining addresses and the farmer identity. Each key
-file becomes wallet index 0, 1, ...; `--account` selects the derivation account.
-Passphrase-protected accounts acquire their address list on their first unlock.
-The standalone `mmx wallet` command handles transfers via the C++ REST API.
-
-With `--node`, the native service also exposes `send`, `send_many`, `send_from`
-(for owned public-key source addresses), `deploy`, `execute`, `deposit`,
-`complete`, `sign_off`, `send_off`, balance queries and reservation methods.
-Use `mmx wallet-rpc METHOD --args -` for native VNX JSON arguments on stdin;
-addresses are 32-byte arrays and amounts are 16-byte little-endian arrays.
-`complete` returns a funded, signed transaction without submitting it;
-`sign_off` adds signatures for known owners and can leave foreign inputs unsigned.
-Automatic sends use a single node admission/validation RPC and reserve inputs
-plus the static fee, as in C++; node admission checks actual pending execution
-fees. Setting
-`options.auto_send=false` returns a preview with an execution receipt;
-`send_off` accepts that preview, removes its receipt and validates it again.
-`options.passphrase` temporarily unlocks a locked account and always relocks it,
-including on failure. Supply secret arguments on stdin instead of the command line.
-
-Balances come from fresh batched node reads checked against the canonical tip.
-The wallet holds pending debits and explicit reservations in RAM, including
-confirmed pending records until expiry so a fork can reactivate their reservations.
-These reservations currently last for the daemon process; durable wallet pending
-history/recovery is still pending. `release_all` releases explicit reservations,
-while pending transaction debits remain until confirmation or expiry. An ambiguous
-submission keeps its reservation; explicit rejections release it. Retry `send_off` with the same signed transaction
-instead of creating a new one. The node pool deduplicates that transaction.
-
-Node `validate` executes against a pinned native database snapshot and never
-commits ledger changes. Pending transactions and peer relay records share bounded
-RAM storage (4,096 transactions / 64 MiB); the current admission/relay policy caps
-individual transactions at 256 KiB. This operational cap does not change block
-consensus validation. Peer transaction queues are separate from block/VDF/proof
-queues. Confirmed/expired entries are pruned when the selected tip changes, and
-manual rollback clears the pool. Automatic fork selection requeues orphaned
-transactions for validation against the new selected state.
-
-Native receipt feedback suppresses redundant gossip per peer. A bounded cache of
-100,000 verified message IDs filters replays before ledger queue admission;
-receipt claims cannot seed it, and explicit rollback resets it.
-Receipt notes are immediate, while payload fanout follows randomized native
-stages (`Router.relay_target_ms`, normally 2,000 ms). Ready consensus work can
-pass older deferred messages without sending completed payloads twice.
-
-While synced, the producer combines CPU-verified VDF work and authenticated
-proof responses, assembles transactions against a pinned parent snapshot,
-computes rewards and difficulty, asks the private farmer to sign, and performs
-the complete consensus/ledger checks before admission and peer publication.
-Candidate construction and validation do not write the database. Execution and
-signing run outside the live node mutex; a result is discarded if the selected
-tip or best proof changes. Eligible validator votes use the same private signer
-and bounded peer relay. `Node.reward_vote` or `--reward-vote -1|0|1` selects the
-local reward vote.
-
-Farmer keys use the C++ passphrase-independent KDF. The farmer signs native proof
-responses, headers (including reward targets and content hashes) and domain
-separated validator votes. It aggregates live harvester reports and drops expired
-reports. Signing services accept only explicit loopback IPs or private Unix
-sockets; spending/signing methods use separate VNX permission checks.
-
-The harvester discovers native `.plot` files with bounded recursion, ignores
-symlinks, rejects unknown farmer keys and duplicate plot IDs, and reuses unchanged
-plot headers on reload. It supports native HDD metadata parks, SSD proof lookups,
-delta-coded Y/PD parks, triangular X pairs and CPU/OpenCL X decompression. Park reads use
-`pread` on Unix, reuse parks within a lookup and do not write plot data. F1 work
-is limited by `--max-f1`; compression that exceeds the configured expansion limit
-is rejected explicitly. Remote recompute remains unimplemented.
-For C10 plots, `--max-f1 262144` permits the worst-case 256 prefixes expanded
-by ten missing X bits; the default remains 65536. `--log-lookups` reports proof
-counts, publications and elapsed time per challenge during farm testing. Native
-plot-size metadata is informational; reads use the actual file length and
-reject out-of-range or truncated parks.
-Eligible plots run concurrently on the worker pool selected by `--threads` or
-`Harvester.num_threads`; nested CPU proof computation shares that same bound.
-Each proof is published immediately when ready, independently of slower plots.
-Challenges use a bounded queue, prioritize the newest height, deduplicate work
-and expire after the native `challenge_delay * block_interval_ms` window
-(60 seconds on mainnet). The farmer uses the same forwarding deadline. Failed
-plots or individual qualities do not discard other completed proofs. The node publishes its C++ challenge
-window only while synced, and accepts signed farmer responses through its bounded
-inbox for the existing consensus checks.
-
-Remaining work includes reverse farmer RPC routing for a C++ node, pool/NFT
-partial submission, wallet pending history, contract withdrawal
-owner resolution, offer/swap convenience RPCs and the C++ REST API. Production
-farm smoke tests load existing native HDD/NFT plots alongside C++, check matching
-plot counts and farm sizes, and exercise live challenge/proof delivery. Existing C++ witnesses,
-tiny native park files, permission tests and the complete standalone wallet CLI
-suite cover the implemented paths. Tests launch the actual wallet, farmer,
-harvester, node and `mmx` binaries from native configuration; an end-to-end test
-reads a native plot through a remote harvester connection and produces a fully
-validated block. Separate tests relay a locally produced block to another node,
-compare candidate fields and execution with C++ fixtures, reject stale signer
-results and check that candidate assembly causes no disk writes. Farmer and
-harvester parameters come from node RPC, without C++ data files.
-
-### Timelord
-
-`mmx-timelord` (also `mmx_timelord`) imports native `timelord.requests` and
-exports signed `timelord.proof` over VNX. It works with Rust nodes and C++ nodes
-using the same interval/proof schema. Hashing runs on one dedicated thread;
-request handling, proof signing and network writes run separately.
+On each harvester host:
 
 ```sh
-cargo build --locked --release -p mmx-tools --bin mmx-timelord --bin mmx_timelord
-target/release/mmx-timelord --node 127.0.0.1:11331 \
-  --storage-path /path/to/network --reward-addr YOUR_MMX_ADDRESS
-# Native configuration layering and the C++ remote-node port:
-target/release/mmx_timelord -c /path/to/config --node HOST:11330
-# RAM-only benchmark; no node connection, key creation or ledger reads:
-target/release/mmx-timelord --benchmark 2000000
+mmx-harvester --farmer FARMER_HOST:11333 \
+  --plot-dir /path/to/plots --threads 2 --name harvester-1 --log-lookups
 ```
 
-On Linux, the default `--cpu auto` detects SHA-capable Intel efficiency cores with CPUID
-leaf 1A and pins only the hashing thread to the first one allowed by its inherited
-CPU set. Other CPUs, including ARM, retain normal scheduling. `--cpu N` selects
-an explicit logical CPU and `--cpu any` disables affinity. This respects process
-affinity/cgroup restrictions and never changes another thread's CPU set.
-Other operating systems currently retain normal scheduling.
-Single-chain hashing uses latency-oriented SHA-NI (with a guarded AVX variant),
-ARM SHA2 or portable RustCrypto fallback. GPU acceleration remains for verification;
-a timelord's dependent chain is computed serially.
+Only the farmer host needs wallet keys. The remote listener distributes
+challenges and accepts proofs and farm reports; it cannot sign blocks or votes.
+Allow TCP port 11333 from your harvesters. Use a trusted network or an SSH/VPN
+tunnel: native VNX connections do not provide transport encryption.
 
-The native `TimeLord.json` keys `reward_addr`, `storage_path`, `max_history`,
-`input_request` and `output_proofs` are supported, plus `cpu` and `listen`.
-Explicit CLI options take priority. `TimeLord.cpu` is a string (`"auto"`, `"any"`
-or a logical CPU number). Omitted rewards use the first available wallet account,
-then the zero reward address if none is available. `--wallet` selects a separate
-wallet endpoint. Storage is relative to `MMX_NETWORK`, falling back to `MMX_HOME`
-or the current directory. Existing native `timelord_sk.dat` identities are reused;
-new ones are atomically published with mode 0600. Corrupt keys are preserved and
-startup fails rather than silently replacing the identity.
+With native configuration, `allow_remote=true` enables the remote listener.
+`Farmer.private_endpoint` and `Farmer.harvester_endpoint` override its two
+addresses. To require authentication, configure VNX users on the farmer, enable
+`--require-harvester-login`, and give harvesters `--username USER` and
+`--password-file /private/path/PASSWD`. Connections restore their subscriptions
+after temporary disconnections.
 
-Setting the native `timelord` configuration switch to `true` starts the service
-with configured Rust node services. Its private control endpoint defaults to
-`127.0.0.1:11334`, reserving 11332 for the private farmer; `--listen` or
-`TimeLord.listen` can select the native 11332 port or a private Unix socket.
-The control service exposes native `TimeLord.stop_vdf`; the public node service
-cannot stop a timelord. New interval requests resume hashing as in C++.
+When using the private listener on 11332, query it explicitly:
 
-History is a bounded RAM ring, default one million 32-byte points, with at most
-1,000 pending intervals/infusions each; `max_history` accepts 2–16,000,000 points.
-Forecasts avoid waiting for the next
-block, duplicate requests reuse computed segments, and the native two-second
-retry timer permits retransmission. Generation checks fence work across forks
-and stop; cancellation checks every 65,536 iterations bound wasted hashing.
-The worker sleeps at the end of its known forecast instead of burning CPU on
-work beyond an unknown infusion; the next request wakes it immediately.
-Supplied restart inputs override expired/conflicting history, and changed past
-infusions trigger recomputation so obsolete overlapping forecasts cannot produce
-invalid proofs. The node verifies local/remote timelord work through the normal
-signature, history and CPU/GPU admission path. C++ fixture comparisons and an
-actual daemon-to-node test cover the producer and native identity compatibility.
+```sh
+mmx farmer get_farm_info --endpoint 127.0.0.1:11332
+```
 
-## Next port stages
+## Timelord
 
-1. Sync throughput, peer scheduling/relay and specialized
-   history indexes, building on the executable node and durable fork selection.
-2. The Rust JavaScript-subset compiler and the remaining original contract suites.
-3. Database compaction, cache/flush tuning and benchmarks,
-   using an independent disk format while preserving logical state semantics.
-4. Pool/NFT partials, reverse farmer RPC,
-   advanced wallet RPCs, durable wallet pending history
-   and the remaining public node methods. Carry over the original tests as each
-   component becomes executable.
+A timelord is optional for running a node or farming. To compute VDF proofs:
 
-Licensed under Apache-2.0, following the original MMX project. See [LICENSE](LICENSE).
+```sh
+mmx-timelord --node 127.0.0.1:11331 \
+  --storage-path /path/to/timelord --reward-addr YOUR_MMX_ADDRESS \
+  --listen 127.0.0.1:11336
+```
+
+Back up `timelord_sk.dat` in the chosen storage directory to preserve the
+identity. Existing C++ timelord identities are supported. Use port 11336 as above
+when running a harvester on the same host: both services otherwise default to
+control port 11334. For automatic startup, set `TimeLord.listen` accordingly.
+
+On Linux, the default `--cpu auto` selects an allowed SHA-capable Intel E-core
+when available. `--cpu N` pins hashing to a logical CPU, and `--cpu any` keeps
+normal scheduling. Other CPUs retain normal scheduling. Hashing uses SHA-NI,
+ARM SHA2, or a portable CPU fallback.
+
+Benchmark without connecting to a node or writing keys:
+
+```sh
+mmx-timelord --benchmark 2000000
+```
+
+## GPU acceleration
+
+The node uses OpenCL GPU 0 for VDF verification, and the harvester uses it for
+compressed plot proof computation, with automatic CPU fallback. CPU OpenCL
+devices are skipped. Timelord hashing runs on the CPU.
+
+On the node or harvester, `--opencl-device INDEX` selects another GPU and
+`--opencl-device -1` forces CPU work. Use `--opencl-platform NAME` to filter
+platforms. An OpenCL SDK is unnecessary for building; GPU use requires the
+system OpenCL loader and vendor driver at runtime.
+
+## RPC and maintenance
+
+HTTP uses JSON-RPC 2.0 at `/rpc`; native VNX RPC is available on port 11331.
+For example:
+
+```sh
+curl -sS http://127.0.0.1:11380/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"get_block_hash","params":{"height":100}}'
+```
+
+The API includes blocks, headers, transactions, contracts, balances, transaction
+validation, and submission. Parameters are named objects using native VNX JSON
+representations, including byte arrays. This HTTP endpoint implements a subset
+of node methods; C++ WebGUI and REST/WebAPI parity are still in progress.
+
+To serve stored data without contacting peers, restart with `--offline`:
+
+```sh
+mmx-node --mmx-root ../mmx-node --data-dir ./mmx-data --offline
+```
+
+History is retained by default, allowing rollback to any retained height after a
+fork. To reclaim disk space, stop the node and restart with a retention floor:
+
+```sh
+mmx-node --mmx-root ../mmx-node --data-dir ./mmx-data \
+  --purge-before 5000000 --no-services
+```
+
+Choose a height already present in your database. The block and state at that
+height remain available. Earlier blocks and transactions disappear from RPC,
+and **rollback below the purge height becomes impossible**, including after
+restart. A fork below that floor requires an unpurged database or a fresh sync.
+Purging runs before listeners start and temporarily needs extra space while
+retained data is collected. `get_status.earliest_height` reports the floor.
+
+For a manual rewind, restart with `--rollback-to HEIGHT`. Combine it with
+`--offline` to inspect that height without immediately resuming sync.
+
+To update a source installation, stop its services, run `git pull --ff-only` and
+`git submodule update --init --recursive`, repeat the release build above, then
+restart with your existing configuration and data directory.
+
+## Current limitations
+
+- Pool/NFT partial submission and remote proof recomputation remain unimplemented.
+- Reverse farmer RPC routing for a C++ node is incomplete. Use the Rust node for
+  the farming setup above.
+- Wallet pending transactions and input reservations are kept in RAM for the
+  wallet service's lifetime; durable pending history is still pending.
+- Advanced wallet, offer/swap, and some contract withdrawal methods remain
+  incomplete. The C++ REST API and WebGUI are not included.
+
+For development, tests, compatibility details, and measured performance, see the
+[development reference](docs/development.md),
+[C++ port audit](docs/cpp-port-audit.md), and
+[performance comparisons](docs/performance-parity.md).
+
+Licensed under [Apache-2.0](LICENSE).
