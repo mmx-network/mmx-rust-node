@@ -9,7 +9,7 @@ use mmx_consensus::{Hash, Record, Value};
 use mmx_types::mmx;
 use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex, Weak,
 };
 
 #[derive(Clone)]
@@ -20,6 +20,7 @@ pub(crate) struct PeerState {
     genesis: Hash,
     height: Arc<AtomicU64>,
     earliest: Arc<AtomicU32>,
+    identities: Arc<Mutex<std::collections::BTreeMap<Hash, Weak<std::net::TcpStream>>>>,
 }
 const SYNCED: u64 = 1 << 32;
 impl PeerState {
@@ -41,7 +42,39 @@ impl PeerState {
             })?),
             height: Arc::new(AtomicU64::new(height.into())),
             earliest: Arc::new(AtomicU32::new(0)),
+            identities: Default::default(),
         })
+    }
+    pub fn id(&self) -> Hash {
+        self.id
+    }
+    pub fn genesis(&self) -> Hash {
+        self.genesis
+    }
+    /// Native Router replaces the old connection only after the new socket
+    /// has proved ownership of the same identity. Weak leases cannot retain
+    /// closed sockets, and pruning bounds the registry by live connections.
+    pub fn claim(
+        &self,
+        id: Hash,
+        stream: &std::net::TcpStream,
+    ) -> Result<Arc<std::net::TcpStream>> {
+        if id == self.id {
+            return Err(crate::error("peer is our own identity"));
+        }
+        let socket = Arc::new(stream.try_clone()?);
+        let mut identities = self
+            .identities
+            .lock()
+            .map_err(|_| crate::error("peer identities poisoned"))?;
+        identities.retain(|_, connection| connection.strong_count() != 0);
+        if let Some(previous) = identities
+            .insert(id, Arc::downgrade(&socket))
+            .and_then(|p| p.upgrade())
+        {
+            let _ = previous.shutdown(std::net::Shutdown::Both);
+        }
+        Ok(socket)
     }
     pub fn publish(&self, height: u32, synced: bool) {
         self.height.store(

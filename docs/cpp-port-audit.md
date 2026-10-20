@@ -65,7 +65,7 @@ no live-ledger or plot scan is part of validation.
 | Contract execution: `vm/Engine.cpp`, `vm/instr_t.cpp`, `vm_interface.cpp`, `vm/StorageCache.cpp`, `Node_validate.cpp::prepare_context` | `mmx-vm/src/engine*`, `mmx-execution/src/lib.rs`; all declared opcodes, gas, composite ownership, remote calls, hardfork setup, locks, failed-engine publication, recursion/copy/erase and input limits have fixtures | JavaScript compiler and remaining original contract suites are unported. Per-engine/per-transaction storage overlays are bounded by execution and are distinct from a broad node state cache. |
 | Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Block/transaction payload consolidation is complete for new writes; synchronous durability comparisons below remain. Public balance ranges use a streaming bounded merge. No SQLite backend. |
 | Rollback/purge: C++ `Node` storage/apply/revert and versioned tables | `mmx-execution/src/chain/{mod,forks}.rs`, `mmx-db/src/native.rs`; every retained-height rollback, deep fork/restart, crash-safe collection, pinned snapshot and RPC floor tests | Purge necessarily rewrites retained live values during explicit collection. There is no automatic background migration or ledger scan. Rollback below the durable floor is refused; private consensus ancestry does not reappear through RPC. |
-| Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,relay,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native upload credits, earned early relay, first-seen filtering and VDF-only bootstrap are implemented. Peer-role filtering and full inbound authenticated lifecycle remain open. Balance scans and public validation run on pinned snapshots outside the ledger lock with two shared RPC slots. REST/WebAPI parity is incomplete. |
+| Peer and public RPC: `Router.cpp::{on_*,send*,receive_msg_hash,relay_msg_hash}`, `Node_api.cpp`, `WebAPI.cpp` | `mmx-node/src/{peer,relay,inbox,rpc,http,transactions}.rs`, VNX safe readers; native request allowlist, 32 peer workers, absolute frame deadlines, compressed/decoded/schema limits, separate transaction inbox, HTTP framing/deadline tests | Native upload credits, earned early relay, first-seen filtering and VDF-only bootstrap are implemented. Both connection directions now authenticate native signed identities and apply role/sync filtering; see the peer lifecycle checkpoint below. Balance scans and public validation run on pinned snapshots outside the ledger lock with two shared RPC slots. REST/WebAPI parity is incomplete. |
 | Farmer/wallet: `Farmer.cpp::{sign_block,sign_vote,handle}`, `Wallet.cpp`, `include/mmx/ECDSA_Wallet.h`, key derivation and spending | `mmx-farming/src/{farmer,wallet,spending,service}.rs`, `mmx-wallet`, `mmxwallet`; native keys/KDF/signatures, protected-key unlock verification, pending/reservation/fork/ambiguous-submit tests, real daemon RPC tests | Pool partial submission, reverse farmer RPC, complete wallet/history/offer/swap API and wallet query caches remain missing. Farm reports use bounded retention. |
 | Harvester/plots: `Harvester.cpp::{check_queue,lookup_task,reload}`, `pos/Prover.cpp`, `pos/verify_full.cpp` | `mmx-farming/src/{harvester,plot,encoding}.rs`, `mmx-tools/src/lib.rs`; bounded shared Rayon pool, immediate proof emission, native deadline, filter-before-full-proof, density-based park search, retained headers, positional park reads/reuse; stalled-plot test and live sample | Owned per-plot jobs allow overlapping challenges and reports; metadata-free/corrupt-quality paths still need additional slow-resource comparisons. Remote recompute remains missing. |
 | GPU and CLI/config: native OpenCL VDF code, CUDA recompute, `mmx.cpp`, native module config | `mmx-opencl`, consensus accelerator, `mmx-tools`, `mmxwallet`; GPU-only default discovery, bounded buffers, native CPU result checks/fallback, native config layering and CLI precedence tests, wallet CLI suites | Rust OpenCL F1 replaces CUDA for the implemented path. Static musl cannot load an ICD and falls back to CPU. Full C++ utility/compiler/timelord/service and configuration parity is not claimed. |
@@ -182,7 +182,29 @@ no live-ledger or plot scan is part of validation.
    are not replayed to new connections. Oversized decoded records fail before
    first-seen insertion; verified promotion drops early unhashed padding and
    relay/pool byte budgets charge heap footprint as well as compact encoding.
-   Still port peer-role filtering and authenticated incoming lifecycle.
+   Both inbound and outbound connections now prove native v103 identity with
+   a fresh random challenge, consistent get_id/get_info IDs and the same genesis
+   (including the purged-peer fallback). Five bounded requests are pipelined;
+   no gossip sender attaches before authentication. Native's early VDF bootstrap
+   is retained in a separate pre-authentication 128-item / 32 MiB window, then
+   authenticated envelopes enter the ordinary admission path. Pending handshake
+   deadlines do not reset, and shutdown cancels outstanding inbound exchanges.
+   The shared inbound/outbound identity registry uses weak socket leases;
+   only a newly authenticated matching identity disconnects its predecessor.
+   Spoofed IDs, invalid/replayed signatures, unknown roles and wrong networks
+   cannot replace a live connection or enqueue pre-authentication gossip.
+   Native role filters now apply before randomized fanout ranking: full nodes
+   receive all supported classes, light nodes receive blocks/VDFs/votes, and
+   API clients receive receipt notes but no live consensus/TX payloads. Native
+   VDF bootstrap still reaches all authenticated roles. Reliable local TXs
+   additionally require a synced full peer; incoming status is refreshed every
+   ten seconds, while outbound sync metadata refreshes its own status. Filtered
+   work is retired without affecting other recipients or blocking later work.
+   Deliberate tightening: all peers must support native's signed v103 identity;
+   unproven older identities are not admitted, whereas C++ retains that fallback.
+   Authentication starts after socket configuration, rather than optimistic
+   early sends. Existing wire/ledger/farming suites and fresh challenge attack,
+   duplicate replacement and native role/rank/sync regressions pass.
    ProofResponse CPU verification now runs all eligible work in parallel,
    resolving history once per height and returning completed results immediately.
    Native's full pre-production barrier is retained; a queued stronger proof

@@ -10,6 +10,7 @@ use crate::{
     Node, Result,
 };
 use mmx_consensus::{Hash, Record, Value};
+mod identity;
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
@@ -182,12 +183,13 @@ impl Connection {
             .map_err(|_| error("peer output poisoned"))?
             .send_batch(values)
     }
-    fn start_relay(&mut self, relay: Relay) -> Result<RelayPeer> {
+    fn start_relay(&mut self, relay: Relay, role: u32, synced: bool) -> Result<RelayPeer> {
         if self.relay_worker.is_some() {
             return Err(error("peer relay already started"));
         }
         self.set_compressed_limit(relay.compressed_limit()?)?;
         let mut sender = relay.attach()?;
+        sender.set_profile(role, synced)?;
         let receiver = sender.receipt_view();
         let output = self.output.clone();
         let socket = self.stream.try_clone()?;
@@ -437,6 +439,10 @@ pub struct Client {
     peer_state: PeerState,
     relay_peer: RelayPeer,
     relay: Relay,
+    identity: Option<identity::Identity>,
+    auth_gossip: Vec<(Record, usize)>,
+    auth_bytes: usize,
+    stopping: Option<Arc<AtomicBool>>,
 }
 impl Client {
     pub fn connect(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
@@ -444,18 +450,34 @@ impl Client {
             let local = node.lock().map_err(|_| error("node lock poisoned"))?;
             (local.inbox(), local.peer_state(), local.transaction_relay())
         };
-        let mut connection = Connection::connect(address)?;
-        let relay_peer = connection.start_relay(relay.clone())?;
-        Ok(Self {
+        let connection = Connection::connect(address)?;
+        Self::from_connection(connection, node, inbox, peer_state, relay, None)
+    }
+    fn from_connection(
+        mut connection: Connection,
+        node: Arc<Mutex<Node>>,
+        inbox: Inbox,
+        peer_state: PeerState,
+        relay: Relay,
+        stopping: Option<Arc<AtomicBool>>,
+    ) -> Result<Self> {
+        connection.set_compressed_limit(relay.compressed_limit()?)?;
+        let mut client = Self {
             connection,
             node,
             next_id: 1,
             inbox,
             backpressure_retries: 0,
             peer_state,
-            relay_peer,
+            relay_peer: Default::default(),
             relay,
-        })
+            identity: None,
+            auth_gossip: Vec::new(),
+            auth_bytes: 0,
+            stopping,
+        };
+        client.authenticate()?;
+        Ok(client)
     }
     pub fn call(&mut self, method: Record) -> Result<Value> {
         self.call_many(vec![method])?
@@ -471,6 +493,13 @@ impl Client {
         let mut request_window = methods.len().clamp(1, MAX_RPC_REQUESTS);
         let mut draining = false;
         while (!pending.is_empty() || !queued.is_empty()) && Instant::now() < end {
+            if self
+                .stopping
+                .as_ref()
+                .is_some_and(|stop| stop.load(Ordering::Relaxed))
+            {
+                return Err(error("peer shutdown"));
+            }
             if Instant::now() >= send_after && (!draining || pending.is_empty()) {
                 draining = false;
                 let mut batch = Vec::new();
@@ -551,48 +580,16 @@ impl Client {
     /// Authenticate the native node ID, reject aliases/self-connections, and
     /// qualify only synced full nodes on our genesis before using sync data.
     pub fn qualify(&mut self, genesis: Hash, own_id: Hash) -> Result<(Hash, u32)> {
-        use rand::RngCore;
-        let id: Hash = self
-            .call(record("mmx.Router.get_id", []))?
-            .bytes()?
-            .try_into()?;
-        let info = self.call(record("mmx.Router.get_info", []))?;
-        let info = info.record()?;
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| error("peer is not authenticated"))?;
+        let id = identity.id;
         if id == own_id
-            || crate::node::hash(info, "id")? != id
-            || info.field("type")?.uint()?
-                != u64::from(mmx_types::mmx::node_type_e::FULL_NODE.value)
+            || genesis != self.peer_state.genesis()
+            || identity.role != mmx_types::mmx::node_type_e::FULL_NODE.value
         {
-            return Err(error("peer is not a distinct full node"));
-        }
-        let mut challenge = [0; 32];
-        rand::thread_rng().fill_bytes(&mut challenge);
-        let signed = self.call(record(
-            "mmx.Router.sign_msg",
-            [("msg".into(), Value::Bytes(challenge.to_vec()))],
-        ))?;
-        let pair = signed.seq()?;
-        if pair.len() != 2 {
-            return Err(error("invalid peer identity proof"));
-        }
-        let key = pair[0].bytes()?.try_into()?;
-        if mmx_crypto::public_key_address(key) != id
-            || !mmx_crypto::verify(&challenge, key, pair[1].bytes()?.try_into()?)?
-        {
-            return Err(error("peer identity verification failed"));
-        }
-        let peer_genesis = match self.hash_at(0)? {
-            Some(hash) => hash,
-            // A purged Rust peer hides height-zero history, but still exports
-            // its immutable network identity. Legacy C++ peers take the first
-            // path and need no additional method or compatibility exception.
-            None => self
-                .call(record("mmx.Node.get_genesis_hash", []))?
-                .bytes()?
-                .try_into()?,
-        };
-        if peer_genesis != genesis {
-            return Err(error("peer genesis mismatch"));
+            return Err(error("peer is not a distinct full node on our genesis"));
         }
         let height = self
             .synced_height()?
@@ -600,11 +597,18 @@ impl Client {
         Ok((id, height))
     }
     pub fn synced_height(&mut self) -> Result<Option<u32>> {
-        self.call(record("mmx.Node.get_synced_height", []))?
+        let height = self
+            .call(record("mmx.Node.get_synced_height", []))?
             .optional()?
-            .map(|v| Ok(u32::try_from(v.uint()?)?))
-            .transpose()
+            .map(|v| -> Result<u32> { Ok(u32::try_from(v.uint()?)?) })
+            .transpose()?;
+        if let Some(identity) = &self.identity {
+            self.relay_peer
+                .set_profile(identity.role, height.is_some())?;
+        }
+        Ok(height)
     }
+
     pub fn hash_pairs(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
         if count > crate::sync::BATCH_BLOCKS {
             return Err(error("peer hash window exceeds sync batch limit"));
@@ -695,6 +699,18 @@ impl Client {
         self.relay_peer.note(&message)?;
         if message.name == "mmx.Request" {
             respond_with(&self.node, &self.peer_state, &mut self.connection, &message)
+        } else if message.name == "mmx.Return" {
+            Ok(())
+        } else if self.identity.is_none() {
+            // Native sends its VDF bootstrap before answering authentication.
+            // Retain a bounded window without admitting or forwarding it yet.
+            let size = self.connection.last_size.max(message.memory_size());
+            if self.auth_gossip.len() >= 128 || size > 32 * 1024 * 1024 - self.auth_bytes {
+                return Err(error("peer pre-authentication gossip exceeds limit"));
+            }
+            self.auth_bytes += size;
+            self.auth_gossip.push((message, size));
+            Ok(())
         } else {
             self.relay
                 .admit_gossip(message, self.connection.last_size, &self.inbox)
@@ -773,32 +789,25 @@ impl Server {
                         let stop = running.clone();
                         workers.push(thread::spawn(move || {
                             let run = || -> Result<()> {
-                                let mut connection = Connection::new(stream)?;
-                                let relay_peer = connection.start_relay(relay.clone())?;
+                                let mut client = Client::from_connection(
+                                    Connection::new(stream)?,
+                                    node,
+                                    inbox,
+                                    peer_state,
+                                    relay,
+                                    Some(stop.clone()),
+                                )?;
+                                let mut query = Instant::now();
                                 while !stop.load(Ordering::Relaxed) {
-                                    // Native Router's configured receive-idle
-                                    // timeout also releases silent inbound slots.
-                                    if connection.received_at.elapsed() > Duration::from_secs(180) {
+                                    if client.connection.received_at.elapsed()
+                                        > Duration::from_secs(180)
+                                    {
                                         return Err(error("peer receive idle timeout"));
                                     }
-                                    if let Some(msg) =
-                                        connection.receive(Duration::from_millis(200))?
-                                    {
-                                        relay_peer.note(&msg)?;
-                                        if msg.name == "mmx.Request" {
-                                            respond_with(
-                                                &node,
-                                                &peer_state,
-                                                &mut connection,
-                                                &msg,
-                                            )?;
-                                        } else {
-                                            relay.admit_gossip(
-                                                msg,
-                                                connection.last_size,
-                                                &inbox,
-                                            )?;
-                                        }
+                                    client.poll()?;
+                                    if query.elapsed() >= Duration::from_secs(10) {
+                                        client.synced_height()?;
+                                        query = Instant::now();
                                     }
                                 }
                                 Ok(())

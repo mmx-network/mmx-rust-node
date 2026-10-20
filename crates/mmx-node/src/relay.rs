@@ -28,6 +28,19 @@ struct Item {
 }
 const MAX_VERIFIED_IDS: usize = 100_000;
 const MAX_OUT_OF_ORDER: usize = 4096;
+fn allows(profile: u64, record: &Record, reliable: bool) -> bool {
+    let role = profile as u32;
+    if matches!(
+        record.name.as_str(),
+        "mmx.Transaction" | "mmx.ProofResponse"
+    ) {
+        role == mmx_types::mmx::node_type_e::FULL_NODE.value
+            && (record.name != "mmx.Transaction" || !reliable || profile & (1 << 32) != 0)
+    } else {
+        role == mmx_types::mmx::node_type_e::FULL_NODE.value
+            || role == mmx_types::mmx::node_type_e::LIGHT_NODE.value
+    }
+}
 struct Delivery {
     seq: u64,
     record: Arc<Record>,
@@ -51,7 +64,7 @@ struct RelayState {
     verified: Seen,
     envelopes: Seen,
     params: Option<Arc<mmx_types::mmx::ChainParams>>,
-    members: BTreeSet<u64>,
+    members: BTreeMap<u64, u64>,
     next_member: u64,
     target: Duration,
     upload: Option<upload::Budget>,
@@ -208,7 +221,12 @@ impl Relay {
             state.early.insert(seq, (id, size));
             state.early_bytes += size;
         }
-        let mut members: Vec<_> = state.members.iter().copied().collect();
+        let mut members: Vec<_> = state
+            .members
+            .iter()
+            .filter(|(_, profile)| allows(**profile, &record, reliable))
+            .map(|(id, _)| *id)
+            .collect();
         members.shuffle(&mut rand::thread_rng());
         // Native Router::send_to shuffles once, then spaces all ranks within
         // target * N/(N+1). Store timing metadata, never peer payload copies.
@@ -461,7 +479,10 @@ impl Relay {
             .checked_add(1)
             .ok_or_else(|| error("relay member sequence overflow"))?;
         let id = state.next_member;
-        state.members.insert(id);
+        state.members.insert(
+            id,
+            (1 << 32) | u64::from(mmx_types::mmx::node_type_e::FULL_NODE.value),
+        );
         Ok(RelayPeer {
             cursors: [self.latest.load(Ordering::Acquire); 2],
             acknowledgements: [self.latest.load(Ordering::Acquire); 2],
@@ -517,6 +538,13 @@ impl Relay {
                 break;
             }
             if completed.contains(seq) {
+                continue;
+            }
+            if member
+                .and_then(|id| state.members.get(&id))
+                .is_some_and(|profile| !allows(*profile, &item.record, item.reliable))
+            {
+                processed.push(*seq);
                 continue;
             }
             if next < *seq && completed.len() + processed.len() + out.len() >= MAX_OUT_OF_ORDER {
@@ -609,6 +637,21 @@ impl Seen {
     }
 }
 impl RelayPeer {
+    pub(crate) fn set_profile(&self, role: u32, synced: bool) -> Result<()> {
+        if let Some(member) = &self.member {
+            if let Some(state) = member.state.upgrade() {
+                if let Some(profile) = state
+                    .lock()
+                    .map_err(|_| error("relay poisoned"))?
+                    .members
+                    .get_mut(&member.id)
+                {
+                    *profile = u64::from(role) | if synced { 1 << 32 } else { 0 };
+                }
+            }
+        }
+        Ok(())
+    }
     /// The decoder needs only shared receipt/cache state. Do not pin the
     /// sender's initial VDF payload snapshot for the connection's lifetime.
     pub(crate) fn receipt_view(&self) -> Self {
@@ -750,6 +793,98 @@ impl RelayPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_role_filters_rank_only_recipients_and_local_transactions_require_sync() {
+        let relay = Relay::default();
+        relay.set_target(Duration::ZERO).unwrap();
+        let profiles = [
+            (mmx_types::mmx::node_type_e::FULL_NODE.value, true),
+            (mmx_types::mmx::node_type_e::FULL_NODE.value, false),
+            (mmx_types::mmx::node_type_e::LIGHT_NODE.value, true),
+            (mmx_types::mmx::node_type_e::API_CLIENT.value, true),
+        ];
+        let mut peers: Vec<_> = profiles
+            .iter()
+            .map(|(role, synced)| {
+                let peer = relay.attach().unwrap();
+                peer.set_profile(*role, *synced).unwrap();
+                peer
+            })
+            .collect();
+        for (index, (name, reliable, recipients)) in [
+            ("mmx.Block", true, 3),
+            ("mmx.ProofResponse", false, 2),
+            ("mmx.Transaction", false, 2),
+            ("mmx.Transaction", true, 1),
+            ("mmx.ValidatorVote", false, 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = [index as u8; 32];
+            relay
+                .publish_with_origin(
+                    id,
+                    Arc::new(record(name, [("content_hash".into(), bytes(id))])),
+                    100,
+                    reliable,
+                )
+                .unwrap();
+            let state = relay.state.lock().unwrap();
+            let (_, seq) = state.ids.get(&id).unwrap();
+            assert_eq!(
+                state.entries[usize::from(name == "mmx.Transaction")][seq]
+                    .delays
+                    .len(),
+                recipients
+            );
+        }
+        for (index, peer) in peers.iter_mut().enumerate() {
+            let mut bodies = Vec::new();
+            let mut notices = 0;
+            peer.flush(&relay, |r| {
+                if r.name == "mmx.ReceiveNote" {
+                    notices += 1;
+                } else {
+                    bodies.push(hash(r, "content_hash")?[0]);
+                }
+                Ok(())
+            })
+            .unwrap();
+            bodies.sort();
+            assert_eq!(
+                bodies,
+                [vec![0, 1, 2, 3, 4], vec![0, 1, 2, 4], vec![0, 4], vec![]][index]
+            );
+            assert_eq!(notices, 5, "native receipt notifications reach every role");
+            peer.flush(&relay, |_| {
+                panic!("filtered or sent bodies must not repeat")
+            })
+            .unwrap();
+        }
+        peers[1]
+            .set_profile(mmx_types::mmx::node_type_e::FULL_NODE.value, true)
+            .unwrap();
+        relay
+            .publish_with_origin(
+                [5; 32],
+                Arc::new(record(
+                    "mmx.Transaction",
+                    [("content_hash".into(), bytes([5; 32]))],
+                )),
+                100,
+                true,
+            )
+            .unwrap();
+        let mut count = 0;
+        peers[1]
+            .flush(&relay, |r| {
+                count += usize::from(r.name == "mmx.Transaction");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
     fn native_envelopes() -> (mmx_types::mmx::ChainParams, Vec<Record>) {
         use mmx_types::VnxType;
         use vnx::serde_json::{self, Value as Json};
@@ -1072,7 +1207,7 @@ mod tests {
             let item = state.entries[0].first_key_value().unwrap().1;
             assert_eq!(
                 item.delays.keys().copied().collect::<BTreeSet<_>>(),
-                state.members
+                state.members.keys().copied().collect()
             );
             let mut delays: Vec<_> = item.delays.values().copied().collect();
             delays.sort();

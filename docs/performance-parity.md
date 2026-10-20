@@ -74,8 +74,8 @@ cursors prevent old transaction backlog from delaying new proofs, VDFs or blocks
 A real socket test holds both complete RPC replies and partial inbound frames
 while a verified outgoing proof still arrives. Shared record ownership and
 20,000-entry per-peer echo caches avoid additional payload queues/copies.
-Credit accounting and earned early relay are detailed below; full peer identity
-and role lifecycle remain open.
+Credit accounting and earned early relay are detailed below. The authenticated
+peer lifecycle and role filtering checkpoint is recorded at the end of this file.
 
 Public balance queries now follow C++ `table.h::find_range`: native sorted sources
 seek to the owner range, merge visible keys lazily and stop at the row limit.
@@ -137,8 +137,8 @@ do not refresh their FIFO age, and explicit rewind resets them. Tests cover
 actual receipt/RPC framing, suppression on the wire, cross-peer isolation,
 cache bounds, rollback/reacceptance and a socket barrier proving known proofs,
 blocks and votes stay out of the inbox. Subsequent sections add native first-seen
-deduplication, transaction cost accounting and earned early relay. Full inbound
-identity/role lifecycle remains open.
+deduplication, transaction cost accounting and earned early relay. Signed inbound
+identity and role filtering now use the same lifecycle as outbound peers.
 
 Purged-peer identity: legacy C++ Router exposes the genesis hash through
 `get_block_hash(0)`. A purged Rust node intentionally returns no historical hash
@@ -159,7 +159,7 @@ examines at most 256 entries per class/tick and retains at most 4,096 completed
 out-of-order sequence numbers per class. Payloads remain shared; there is no
 new per-peer payload queue. Eight-connection rank/lifetime tests and native
 socket/production regressions pass. Whole-network bandwidth/latency comparisons
-remain open, along with inbound identity/role handling. VDF-only bootstrap and
+remain open. Authenticated role filtering is now implemented. VDF-only bootstrap and
 earned early relay are detailed below.
 
 Transaction upload credits now follow C++ `Router::send_to`, `send`, `update`
@@ -311,3 +311,17 @@ correctly committed/signed VDFs, verifies the whole chain, and checks the peak
 advances to 40. No ledger writes are needed. This removes the artificial count
 restriction; exhaustion of service byte budgets remains explicit admission
 failure and is not evidence that a network proof fails consensus.
+
+Peer lifecycle checkpoint: both socket directions pipeline native v103 ID, info,
+fresh signed challenge, genesis and synced-height requests before attaching a
+gossip sender. Native pre-handshake VDFs use a 128-item / 32 MiB temporary window;
+failed handshakes admit nothing. ID signatures and network identity precede
+duplicate connection replacement in a weak socket registry shared by incoming
+and outgoing peers. Native full/light/API role filters run before fanout ranks;
+reliable local transactions require synced full recipients. Incoming status
+refreshes every ten seconds. Socket tests reject ID/signature/challenge replay,
+network, role and old-version attacks; a forged reconnect leaves its predecessor
+usable, while a fresh valid reconnect replaces it. Role/rank/receipt tests and
+existing sync, purge, rollback, RPC and farming tests pass. Rust deliberately
+requires signed v103 identities for every connection rather than C++'s unproven
+legacy fallback, and withholds gossip until identity/network checks finish.

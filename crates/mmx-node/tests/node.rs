@@ -60,13 +60,268 @@ fn fixture() -> (Network, Value, Vec<Value>, Vec<Value>) {
 fn node(network: &Network) -> Arc<Mutex<Node>> {
     let mut chain = ForkChain::memory(network.params.clone());
     chain.initialize(&network.assets).unwrap();
-    let mut n = Node::from_chain(chain, SigningKey::from_slice(&[1; 32]).unwrap()).unwrap();
+    static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
+    let mut scalar = [0; 32];
+    scalar[24..].copy_from_slice(
+        &ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_be_bytes(),
+    );
+    let mut n = Node::from_chain(chain, SigningKey::from_slice(&scalar).unwrap()).unwrap();
     // These functional transport tests need deterministic delivery. Credit
     // probability and withholding are covered with controlled samples separately.
     let config = vnx::config::Config::new();
     config.set("Router.max_tx_upload", json!(0)).unwrap();
     n.configure_router(&config).unwrap();
     Arc::new(Mutex::new(n))
+}
+
+fn transport_identity() -> Arc<Mutex<Node>> {
+    let (network, genesis, _, _) = fixture();
+    let n = node(&network);
+    sync::synchronize_pipelined(
+        &mut MemorySource {
+            blocks: vec![wire(&genesis["block"])],
+            wrong: false,
+        },
+        &n,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    n
+}
+fn answer_authentication(connection: &mut peer::Connection) {
+    let identity = transport_identity();
+    for _ in 0..5 {
+        let request = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
+        assert_eq!(request.name, "mmx.Request");
+        peer::respond(&identity, connection, &request).unwrap();
+    }
+}
+struct TestPeer {
+    connection: peer::Connection,
+    bootstrap: std::collections::VecDeque<Record>,
+}
+impl std::ops::Deref for TestPeer {
+    type Target = peer::Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+impl std::ops::DerefMut for TestPeer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+impl TestPeer {
+    fn receive(&mut self, idle: Duration) -> Result<Option<Record>> {
+        if let Some(record) = self.bootstrap.pop_front() {
+            return Ok(Some(record));
+        }
+        self.connection.receive(idle)
+    }
+}
+fn connect_peer(address: &str) -> TestPeer {
+    connect_peer_as(address, &transport_identity())
+}
+fn connect_peer_as(address: &str, identity: &Arc<Mutex<Node>>) -> TestPeer {
+    let mut connection = peer::Connection::connect(address).unwrap();
+    for _ in 0..5 {
+        let request = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
+        peer::respond(identity, &mut connection, &request).unwrap();
+    }
+    // Wait for a post-authentication barrier while preserving native bootstrap.
+    connection
+        .send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(500_000)),
+                (
+                    "method".into(),
+                    V::Record(record("mmx.Node.get_height", [])),
+                ),
+            ],
+        ))
+        .unwrap();
+    let mut bootstrap = std::collections::VecDeque::new();
+    loop {
+        let message = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
+        if message.name == "mmx.Return" && message.field("id").unwrap().uint().unwrap() == 500_000 {
+            break;
+        }
+        bootstrap.push_back(message);
+    }
+    TestPeer {
+        connection,
+        bootstrap,
+    }
+}
+
+#[test]
+fn identity_challenges_reject_spoofs_replays_wrong_network_and_unknown_roles_before_gossip() {
+    for fault in [
+        "self",
+        "id",
+        "role",
+        "version",
+        "signature",
+        "replay",
+        "genesis",
+    ] {
+        let (network, _, steps, _) = fixture();
+        let receiving = node(&network);
+        let identity = if fault == "self" {
+            receiving.clone()
+        } else {
+            transport_identity()
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let before_auth = wire(&steps[0]["vdf"]);
+        let server = std::thread::spawn(move || {
+            let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+            c.send(&before_auth).unwrap();
+            for _ in 0..5 {
+                let request = c.receive(Duration::from_secs(3)).unwrap().unwrap();
+                let method = request.field("method").unwrap().record().unwrap();
+                let mut reply = identity.lock().unwrap().call(method).unwrap();
+                if method.name == "mmx.Router.get_info" {
+                    let mut info = reply.field("_ret_0").unwrap().record().unwrap().clone();
+                    match fault {
+                        "id" => {
+                            info.fields.insert("id".into(), V::Bytes(vec![99; 32]));
+                        }
+                        "role" => {
+                            info.fields.insert("type".into(), V::Uint(0));
+                        }
+                        "version" => {
+                            info.fields.insert("version".into(), V::Uint(102));
+                        }
+                        _ => (),
+                    }
+                    reply.fields.insert("_ret_0".into(), V::Record(info));
+                }
+                if method.name == "mmx.Router.sign_msg" {
+                    if fault == "signature" {
+                        let mut pair = reply.field("_ret_0").unwrap().seq().unwrap().to_vec();
+                        pair[1] = V::Bytes(vec![0; 64]);
+                        reply.fields.insert("_ret_0".into(), V::Sequence(pair));
+                    } else if fault == "replay" {
+                        reply = identity
+                            .lock()
+                            .unwrap()
+                            .call(&record(
+                                "mmx.Router.sign_msg",
+                                [("msg".into(), V::Bytes(vec![0; 32]))],
+                            ))
+                            .unwrap();
+                    }
+                }
+                if fault == "genesis" && method.name == "mmx.Node.get_block_hash" {
+                    reply.fields.insert(
+                        "_ret_0".into(),
+                        V::Optional(Some(Box::new(V::Bytes(vec![0; 32])))),
+                    );
+                }
+                c.send(&record(
+                    "mmx.Return",
+                    [
+                        ("id".into(), request.field("id").unwrap().clone()),
+                        ("result".into(), V::Record(reply)),
+                    ],
+                ))
+                .unwrap();
+            }
+        });
+        assert!(
+            peer::Client::connect(&address.to_string(), receiving.clone()).is_err(),
+            "{fault}"
+        );
+        let status = rpc::json_request(
+            &receiving,
+            br#"{"jsonrpc":"2.0","id":1,"method":"get_status"}"#,
+        )
+        .unwrap();
+        assert_eq!(status["result"]["queued_messages"], 0, "{fault}");
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn duplicate_inbound_identity_is_replaced_only_after_a_valid_fresh_challenge() {
+    let (network, _, _, _) = fixture();
+    let mut server = peer::Server::bind("127.0.0.1:0", node(&network)).unwrap();
+    let address = server.address().to_string();
+    let identity = transport_identity();
+    let mut old = connect_peer_as(&address, &identity);
+    let mut spoof = peer::Connection::connect(&address).unwrap();
+    for _ in 0..5 {
+        let request = spoof.receive(Duration::from_secs(3)).unwrap().unwrap();
+        let method = request.field("method").unwrap().record().unwrap();
+        let mut reply = identity.lock().unwrap().call(method).unwrap();
+        if method.name == "mmx.Router.sign_msg" {
+            let mut pair = reply.field("_ret_0").unwrap().seq().unwrap().to_vec();
+            pair[1] = V::Bytes(vec![0; 64]);
+            reply.fields.insert("_ret_0".into(), V::Sequence(pair));
+        }
+        spoof
+            .send(&record(
+                "mmx.Return",
+                [
+                    ("id".into(), request.field("id").unwrap().clone()),
+                    ("result".into(), V::Record(reply)),
+                ],
+            ))
+            .unwrap();
+    }
+    assert!(spoof.receive(Duration::from_secs(3)).is_err());
+    old.send(&record(
+        "mmx.Request",
+        [
+            ("id".into(), V::Uint(901)),
+            (
+                "method".into(),
+                V::Record(record("mmx.Node.get_height", [])),
+            ),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        old.receive(Duration::from_secs(3))
+            .unwrap()
+            .unwrap()
+            .field("id")
+            .unwrap()
+            .uint()
+            .unwrap(),
+        901
+    );
+    let mut replacement = connect_peer_as(&address, &identity);
+    assert!(old.receive(Duration::from_secs(3)).is_err());
+    replacement
+        .send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), V::Uint(902)),
+                (
+                    "method".into(),
+                    V::Record(record("mmx.Node.get_height", [])),
+                ),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(
+        replacement
+            .receive(Duration::from_secs(3))
+            .unwrap()
+            .unwrap()
+            .field("id")
+            .unwrap()
+            .uint()
+            .unwrap(),
+        902
+    );
+    server.shutdown();
 }
 
 #[test]
@@ -295,7 +550,7 @@ fn peer_socket_has_only_native_router_methods_and_never_executes_validation() {
     let (network, _, _, _) = fixture();
     let n = node(&network);
     let mut server = peer::Server::bind("127.0.0.1:0", n).unwrap();
-    let mut connection = peer::Connection::connect(&server.address().to_string()).unwrap();
+    let mut connection = connect_peer(&server.address().to_string());
     for method in [
         record("mmx.Node.validate", [("tx".into(), V::Optional(None))]),
         record(
@@ -1150,10 +1405,12 @@ fn peer_broadcast_io_continues_while_the_ledger_is_locked_then_validates_on_tick
     let sending = thread::spawn(move || {
         let (socket, _) = listener.accept().unwrap();
         let mut connection = peer::Connection::new(socket).unwrap();
+        answer_authentication(&mut connection);
         connection.send(&invalid).unwrap();
         drop(connection);
         let (socket, _) = listener.accept().unwrap();
         let mut connection = peer::Connection::new(socket).unwrap();
+        answer_authentication(&mut connection);
         connection.send(&proof).unwrap();
     });
     let mut bad_client = peer::Client::connect(&address.to_string(), n.clone()).unwrap();
@@ -1294,6 +1551,7 @@ fn native_peer_pipeline_correlates_reordered_returns_and_services_peer_requests(
     let replies = expected.clone();
     let thread = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        answer_authentication(&mut c);
         let mut requests = Vec::new();
         for _ in 0..2 {
             requests.push(c.receive(Duration::from_secs(2)).unwrap().unwrap());
@@ -1476,6 +1734,7 @@ fn native_backpressure_retries_only_rejected_requests_and_keeps_successes_and_th
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        answer_authentication(&mut c);
         let requests: Vec<_> = (0..peer::MAX_BODY_REQUESTS)
             .map(|_| c.receive(Duration::from_secs(2)).unwrap().unwrap())
             .collect();
@@ -1574,6 +1833,7 @@ fn native_metadata_backpressure_preserves_other_replies_and_restores_the_full_ne
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        answer_authentication(&mut c);
         let reply = |c: &mut peer::Connection, request: &Record, overflow: bool| {
             let result = if overflow {
                 Record::from_generated(&mmx_types::vnx::OverflowException::default()).unwrap()
@@ -1670,6 +1930,7 @@ fn full_hash_windows_pipeline_before_replies_and_correlate_reordered_returns() {
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        answer_authentication(&mut c);
         let requests: Vec<_> = (0..128)
             .map(|_| c.receive(Duration::from_secs(2)).unwrap().unwrap())
             .collect();
@@ -1723,7 +1984,7 @@ fn peer_identity_and_published_height_replies_do_not_wait_for_the_ledger_and_fol
     let (network, g, steps, _) = fixture();
     let n = node(&network);
     let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
-    let mut c = peer::Connection::new(TcpStream::connect(server.address()).unwrap()).unwrap();
+    let mut c = connect_peer(&server.address().to_string());
     let query = |c: &mut peer::Connection, method: Record| {
         c.send(&record(
             "mmx.Request",
@@ -1876,6 +2137,7 @@ fn outgoing_peer_can_answer_height_and_identity_queries_while_the_ledger_is_lock
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        answer_authentication(&mut c);
         for method in [
             "mmx.Node.get_height",
             "mmx.Node.get_synced_height",
@@ -2094,8 +2356,8 @@ fn verified_proof_announcements_relay_before_block_production_without_local_meta
     let n = ready_farming_node(&network, &genesis, &steps[0]);
     let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
     let address = server.address().to_string();
-    let mut sender = peer::Connection::connect(&address).unwrap();
-    let mut observer = peer::Connection::connect(&address).unwrap();
+    let mut sender = connect_peer(&address);
+    let mut observer = connect_peer(&address);
     for connection in [&mut sender, &mut observer] {
         assert_eq!(
             connection
@@ -2233,8 +2495,8 @@ fn foreign_live_blocks_work_and_accepted_votes_relay_after_verification_without_
     .unwrap();
     let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
     let address = server.address().to_string();
-    let mut sender = peer::Connection::connect(&address).unwrap();
-    let mut observer = peer::Connection::connect(&address).unwrap();
+    let mut sender = connect_peer(&address);
+    let mut observer = connect_peer(&address);
     let wait = |count| {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -2334,7 +2596,7 @@ fn foreign_live_blocks_work_and_accepted_votes_relay_after_verification_without_
     // Historical catchup is silent even though the same bodies are valid.
     let historical = node(&network);
     let mut server = peer::Server::bind("127.0.0.1:0", historical.clone()).unwrap();
-    let mut observer = peer::Connection::connect(&server.address().to_string()).unwrap();
+    let mut observer = connect_peer(&server.address().to_string());
     let mut blocks = vec![wire(&g["block"])];
     blocks.extend(steps.iter().take(2).map(|s| wire(&s["block"])));
     sync::synchronize_pipelined(
@@ -2408,8 +2670,8 @@ fn a_verified_farmer_proof_earns_one_early_block_relay_without_accepting_its_led
         config.set("Router.relay_target_ms", json!(0)).unwrap();
         node.lock().unwrap().configure_router(&config).unwrap();
         let mut server = peer::Server::bind("127.0.0.1:0", node.clone()).unwrap();
-        let mut sender = peer::Connection::connect(&server.address().to_string()).unwrap();
-        let mut observer = peer::Connection::connect(&server.address().to_string()).unwrap();
+        let mut sender = connect_peer(&server.address().to_string());
+        let mut observer = connect_peer(&server.address().to_string());
         for peer in [&mut sender, &mut observer] {
             assert_eq!(
                 peer.receive(Duration::from_secs(3)).unwrap().unwrap().name,
@@ -2533,7 +2795,7 @@ fn stronger_native_peer_proof_vetoes_full_block_planning_and_an_inflight_signatu
             None
         };
         let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
-        let mut sender = peer::Connection::connect(&server.address().to_string()).unwrap();
+        let mut sender = connect_peer(&server.address().to_string());
         let mut queued = 1;
         if !during_signing {
             // Place twenty authenticated but invalid space proofs before the
@@ -2989,6 +3251,7 @@ fn production_announcements_cross_outgoing_peers_while_rpc_or_partial_frames_are
             let stream = listener.accept().unwrap().0;
             let mut raw = stream.try_clone().unwrap();
             let mut connection = peer::Connection::new(stream).unwrap();
+            answer_authentication(&mut connection);
             let request = loop {
                 let message = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
                 if message.name == "mmx.Request" {
@@ -3196,7 +3459,7 @@ fn rpc_submission_and_peer_gossip_keep_native_reliable_upload_semantics() {
         config.set("Router.max_pending_cost", json!(0)).unwrap();
         n.lock().unwrap().configure_router(&config).unwrap();
         let mut server = peer::Server::bind("127.0.0.1:0", n.clone()).unwrap();
-        let mut observer = peer::Connection::connect(&server.address().to_string()).unwrap();
+        let mut observer = connect_peer(&server.address().to_string());
         assert_eq!(
             observer
                 .receive(Duration::from_secs(3))
