@@ -265,11 +265,31 @@ no live-ledger or plot scan is part of validation.
    per plot. Normal filesystem reload itself remains synchronous, as in C++;
    a lookup cannot hold the service lock during it. Native plot witnesses still
    pass. Comparative slow-drive throughput and remote recompute remain open.
-5. **Concurrent transaction execution (busy-block throughput).**
-   Port C++ dependency-aware worker execution using the already-produced lock
-   plan; retain deterministic reservation, fee order, errors and overlay merge
-   order. Benchmark independent contracts and a single contended contract.
-   Parallel proof checking does not establish transaction execution parity.
+5. **Concurrent block transaction execution completed; production selection next.**
+   Native body reservation, fee order and lock preparation still run in block
+   order. Independent transactions now execute on the shared bounded Rayon pool;
+   ready jobs never occupy workers waiting on predecessors. The owner merges
+   each completed VM delta before releasing dependent jobs, without a full-wave
+   barrier. Ledger contracts/indexes/balances remain on the immutable parent;
+   only VM writes/balances flow between dependent transactions, matching native.
+   No read lock spans backend I/O. Outcomes are consumed in block order for
+   deterministic errors and contract/index publication; a rejected block publishes
+   nothing. Completed VM write buffers are released as they merge. Empty/single
+   transactions, a fully serial dependency chain, or a nested Rayon caller use
+   the retained serial path to avoid overhead/starvation. Worker panics unwind
+   the owner instead of hanging its completion channel.
+   All 120 native block fixtures compare both paths (including exact results,
+   VM writes, balances, fees, lock graphs and rejection details). Six new native
+   witnesses exercise eight contracts, two interleaved chains and one contended
+   contract at both protocol versions. A controlled stalled-task test proves
+   independent branches refill immediately after their own predecessor merges.
+   A local release, four-worker, RAM-only five-round median measured 3,715 to
+   2,007 us/block for eight contracts (1.85x), 3,684 to 3,126 us for two chains
+   (1.18x), and 3,708 to 3,612 us for one contended chain (serial fast path).
+   Seven cached-signature transfers cost 42.6 versus 48.6 us (6 us scheduler
+   overhead); these small fixtures do not establish full C++ throughput parity.
+   Production candidate selection remains serial pending the same dependency
+   scheduler with ordered reservation/acceptance and deadline cancellation.
 6. **CPU VDF batching and competing-work priority.**
    C++ uses SHA-NI/ARM two-lane recursion and AVX2 eight-lane SHA plus timelord
    trust ordering. Rust's SHA dispatch and Rayon segments are not that execution

@@ -212,6 +212,27 @@ int main(int argc,char**argv) {
     auto emit=[&](const BlockSpec& s) {output_file<<vnx::to_string(native_block(s))<<'\n';++count;};
     for(unsigned version:{0,1}) {
         for(unsigned n:{0,1,2,3,7}) {auto s=block_base("empty_"+std::to_string(n),version,n);materialize(s);emit(s);}
+        // Equal VM work with disjoint contracts, interleaved dependency chains,
+        // and one contended contract. Native serial results are the oracle.
+        for(unsigned groups:{8,2,1}) {
+            auto s=block_base("parallel_groups_"+std::to_string(groups),version,8);
+            s.node.balance_table[{payer(),addr(0)}]=100000000;
+            std::vector<instr_t> code={{OP_COPY,0,MEM_STATIC,1},{OP_ADD,0,MEM_STATIC,MEM_STATIC,1}};
+            for(unsigned i=0;i<64;++i)code.push_back({OP_SHA256,0,MEM_STATIC+1,7});
+            code.push_back({OP_MINT,0,4,MEM_STATIC,0});code.push_back({OP_RET});
+            auto b=binary(code);auto next=b->methods["run"];next.name="next";next.entry_point=1;b->methods["next"]=next;
+            s.node.contracts[addr(101)]=b;
+            for(unsigned i=0;i<groups;++i){
+                auto exec=contract::Executable::create();exec->binary=addr(101);
+                s.node.contracts[addr(10+i)]=exec;s.node.tx_index[addr(10+i)].contract_read_cost=10;
+                s.node.balance_table[{addr(10+i),addr(0)}]=1000;
+            }
+            for(unsigned i=0;i<8;++i){
+                auto tx=mutable_tx(s,i);auto op=operation::Execute::create();
+                op->address=addr(10+i%groups);op->method=i<groups?"run":"next";tx->execute={op};
+            }
+            materialize(s);emit(s);
+        }
         auto s=block_base("shared_state",version);
         for(bool isolated:{false,true}) {
             s=block_base(isolated?"forged_isolated_state":"shared_state",version);block_calls(s);

@@ -34,3 +34,11 @@ u64::MAX; wrapping arithmetic follows the compiled native implementation.
 `vdf_winners.jsonl` contains a payout interval, ancestor header wires newest first
 and an optional winner as hex (empty means absent). It uses the original winner
 method over the supplied ancestry, including incomplete history and hash ties.
+
+The six `parallel_groups_{8,2,1}_v{0,1}` cases were generated against native
+`5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2`. Each runs eight transactions with
+64 SHA256 VM operations, persistent writes and state-dependent minting, spread
+over eight independent contracts, two interleaved dependency chains, or one
+contended contract. Later calls start after initialization and must observe the
+preceding committed VM state. Their C++ serial outputs and dependency graphs
+are compared with Rust's parallel and retained original serial paths.

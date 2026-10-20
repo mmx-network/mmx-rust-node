@@ -8,6 +8,7 @@
 //! This API does not select a chain or advance the database version.
 pub mod assemble;
 pub mod economics;
+mod parallel;
 
 use crate::{
     overlay::{Overlay, Shared},
@@ -64,7 +65,7 @@ impl std::fmt::Display for Rejected {
 }
 impl std::error::Error for Rejected {}
 
-/// Serial execution is a valid schedule for the native dependency graph.
+/// Native dependency-aware execution; independent transactions can run together.
 /// Predecessors identify the last preceding mutator of each locked contract.
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionPlan {
@@ -112,7 +113,7 @@ impl<S: BlockStorage> PreparedBlock<'_, S> {
 /// work/transitions. NFT reward targets are checked here against the original
 /// ledger snapshot. Nothing is published until `commit`;
 /// dropping the prepared block aborts every transaction.
-pub fn prepare<'a, S: BlockStorage>(
+pub fn prepare<'a, S: BlockStorage + Sync>(
     storage: &'a mut S,
     context: &BlockContext,
     block: &Record,
@@ -124,7 +125,7 @@ pub fn prepare<'a, S: BlockStorage>(
         batch,
     })
 }
-pub(crate) fn prepare_batch<S: Storage>(
+pub(crate) fn prepare_batch<S: Storage + Sync>(
     storage: &S,
     context: &BlockContext,
     block: &Record,
@@ -140,7 +141,7 @@ pub(crate) fn prepare_batch<S: Storage>(
         rejection
     })
 }
-pub fn execute<S: BlockStorage>(
+pub fn execute<S: BlockStorage + Sync>(
     storage: &mut S,
     context: &BlockContext,
     block: &Record,
@@ -149,7 +150,7 @@ pub fn execute<S: BlockStorage>(
 }
 /// Verify native space work and header transitions before preparing the body.
 /// VDF work/output linkage remains a prerequisite.
-pub fn prepare_with_proofs<'a, S: BlockStorage>(
+pub fn prepare_with_proofs<'a, S: BlockStorage + Sync>(
     storage: &'a mut S,
     context: &BlockContext,
     block: &Record,
@@ -194,7 +195,7 @@ pub fn prepare_with_vdf<'a, S, H>(
     points: &[mmx_consensus::vdf::VerifiedPoint],
 ) -> Result<PreparedBlock<'a, S>, Rejected>
 where
-    S: BlockStorage,
+    S: BlockStorage + Sync,
     H: mmx_consensus::transitions::history::HeaderSource,
 {
     verify_with_vdf(context, block, history, points)?;
@@ -345,7 +346,7 @@ fn envelope<S: Storage>(
     economics::validate_fields(storage, context, block)?;
     Ok(())
 }
-fn build<S: Storage>(
+fn build<S: Storage + Sync>(
     storage: &S,
     context: &BlockContext,
     block: &Record,
@@ -359,7 +360,7 @@ fn build<S: Storage>(
         .iter()
         .map(|v| v.record())
         .collect::<mmx_consensus::Result<Vec<_>>>()?;
-    let mut ctx = TransactionContext {
+    let ctx = TransactionContext {
         height: uint(block, "height")? as u32,
         params: p.clone(),
         locked_contracts: None,
@@ -416,26 +417,8 @@ fn build<S: Storage>(
     }
     rejected.transaction = None;
     minimum_fees(p, &txs)?;
-    let mut execution = Shared(Rc::new(RefCell::new(Overlay::new(storage))));
-    let mut batch = TransactionBatch::default();
-    for (index, tx) in txs.iter().enumerate() {
-        rejected.transaction = Some(index);
-        ctx.locked_contracts = Some(receipt.plan.locks[index].clone());
-        let (result, effects) = transaction::build(
-            storage,
-            &execution,
-            &ctx,
-            tx,
-            &mut rejected.info,
-            &mut rejected.total_cost,
-        )?;
-        execution.absorb_vm(&effects)?;
-        batch.contracts.extend(effects.contracts);
-        batch.transactions.extend(effects.transactions);
-        receipt.results.push(result);
-        rejected.info = ErrorInfo::default();
-        rejected.total_cost = 0;
-    }
+    let (results, mut batch) = parallel::execute(storage, &ctx, &txs, &receipt.plan, rejected)?;
+    receipt.results = results;
     rejected.transaction = None;
     let reward = if optional_address(block, "reward_addr")?.is_some() {
         economics::block_reward(
@@ -473,7 +456,6 @@ fn build<S: Storage>(
             receipt.outputs.extend(result.outputs.iter().cloned());
         }
     }
-    batch.writes = execution.0.borrow().batch().writes;
     let (balances, supplies) = settle(storage, &mut receipt)?;
     batch.balances = balances;
     batch.supplies = supplies;

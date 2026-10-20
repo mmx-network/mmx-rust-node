@@ -325,3 +325,29 @@ usable, while a fresh valid reconnect replaces it. Role/rank/receipt tests and
 existing sync, purge, rollback, RPC and farming tests pass. Rust deliberately
 requires signed v103 identities for every connection rather than C++'s unproven
 legacy fallback, and withholds gossip until identity/network checks finish.
+
+Block transaction checkpoint: native reservations/locks precede bounded Rayon
+execution. The owner immediately merges completed VM deltas and releases ready
+dependents, retaining parent-ledger reads and block-ordered errors/publication.
+Empty/single-TX blocks, fully serial graphs and nested Rayon calls retain the
+original serial implementation. A bounded completion channel and early release
+of consumed VM buffers avoid an extra full-block payload copy. All 120 native
+fixtures compare exact serial/parallel results and atomic abort behavior; new
+native eight-transaction SHA256/write/mint cases cover independent, interleaved
+and fully contended graphs at both versions. The stalled-branch regression
+checks immediate refill and merge-before-dispatch, and a panic regression guards
+the completion channel. A four-worker local release RAM-only benchmark (five
+alternating rounds of 100 preparations) measured median us/block:
+
+| Eight transactions | Original serial | Dependency scheduler | Speedup |
+| --- | ---: | ---: | ---: |
+| Eight independent contracts | 3,715 | 2,007 | 1.85x |
+| Two interleaved contract chains | 3,684 | 3,126 | 1.18x |
+| One contended contract (serial path) | 3,708 | 3,612 | 1.03x |
+| Cached-signature transfers | 42.6 | 48.6 | 0.88x |
+
+The last case exposes roughly 6 us of scheduling overhead for tiny cached work.
+These are bounded old-Rust/new-Rust comparisons, not full-node C++ or disk
+throughput claims. Run the ignored release `benchmark_parallel_contract_blocks`
+test to reproduce. Production candidate selection still needs ordered acceptance
+and cancellation before it can use this parallel scheduler safely.

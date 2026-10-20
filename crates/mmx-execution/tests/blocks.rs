@@ -251,8 +251,41 @@ fn native_block_reservations_execution_order_rewards_and_atomic_settlement() {
         }
         count += 1;
     }
-    assert_eq!(count, 114);
+    assert_eq!(count, 120);
     assert!(accepted >= 40, "{count} cases, {accepted} accepted");
+}
+#[test]
+fn parallel_and_original_serial_execution_match_every_native_block_fixture() {
+    let serial = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for line in include_str!("fixtures/blocks.jsonl").lines() {
+        let trace: Value = serde_json::from_str(line).unwrap();
+        let candidate = record(&trace["block"]);
+        let ctx = context(&trace);
+        let summarize = |db: &mut StorageDb| match block::prepare(db, &ctx, &candidate) {
+            Ok(prepared) => Ok((
+                format!("{:?}", prepared.receipt()),
+                format!("{:?}", prepared.batch()),
+            )),
+            Err(rejected) => Err((
+                rejected.transaction,
+                rejected.info,
+                rejected.total_cost,
+                rejected.error.to_string(),
+            )),
+        };
+        let mut a = StorageDb::memory();
+        let mut b = StorageDb::memory();
+        setup(&mut a, &trace);
+        setup(&mut b, &trace);
+        let expected = serial.install(|| summarize(&mut a));
+        let actual = summarize(&mut b);
+        assert_eq!(actual, expected, "{}", trace["name"]);
+        assert!(!a.database().has_pending());
+        assert!(!b.database().has_pending());
+    }
 }
 #[test]
 fn block_prepare_abort_durable_commit_reopen_and_fork() {
@@ -578,4 +611,55 @@ fn assembled_candidates_pass_independent_block_validation_across_cpp_cases() {
         checked += 1;
     }
     assert!(checked >= 40);
+}
+
+#[test]
+#[ignore = "bounded CPU-only throughput comparison; run with --release --ignored --nocapture"]
+fn benchmark_parallel_contract_blocks_against_original_serial_execution() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for name in [
+        "parallel_groups_8_v1",
+        "parallel_groups_2_v1",
+        "parallel_groups_1_v1",
+        "empty_7_v1",
+    ] {
+        let trace = seed(name);
+        let ctx = context(&trace);
+        let candidate = record(&trace["block"]);
+        let mut db = StorageDb::memory();
+        setup(&mut db, &trace);
+        let run = |db: &mut StorageDb| {
+            let start = std::time::Instant::now();
+            for _ in 0..100 {
+                drop(block::prepare(db, &ctx, &candidate).unwrap());
+            }
+            start.elapsed().as_secs_f64() * 10_000.0
+        };
+        drop(block::prepare(&mut db, &ctx, &candidate).unwrap());
+        let mut serial = Vec::new();
+        let mut parallel = Vec::new();
+        for round in 0..5 {
+            if round % 2 == 0 {
+                serial.push(pool.install(|| run(&mut db)));
+                parallel.push(run(&mut db));
+            } else {
+                parallel.push(run(&mut db));
+                serial.push(pool.install(|| run(&mut db)));
+            }
+        }
+        serial.sort_by(f64::total_cmp);
+        parallel.sort_by(f64::total_cmp);
+        eprintln!(
+            "BENCH {} threads={} serial_us={:.2} parallel_us={:.2} speedup={:.3}",
+            name,
+            rayon::current_num_threads(),
+            serial[2],
+            parallel[2],
+            serial[2] / parallel[2]
+        );
+        assert!(!db.database().has_pending());
+    }
 }
