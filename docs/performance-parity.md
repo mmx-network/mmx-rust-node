@@ -516,3 +516,10 @@ confirmed default selection of CPU 8, explicit CPU 0 and unrestricted fallback
 when the allowed set contains only CPU 0; all produced the same output. The
 reference helper accepts `--single` for the native baseline. Longer production
 timelord throughput comparisons remain separate from these short RAM benchmarks.
+
+A further x86 experiment held pre-feed-forward words between iterations and
+folded IV additions into the first round constants to shorten that dependency.
+It preserved all scalar/native digests, but three alternating runs per core
+(seven timing samples each) measured E-core AVX 33.774 to 33.877 ms and SSE
+33.471 to 33.601 ms; P-core changes were under 0.3%. There was no useful gain,
+so the native-style schedule was retained instead of adding another variant.
