@@ -1,4 +1,5 @@
 use crate::peer_state::PeerState;
+mod vdf_queue;
 use crate::{error, inbox::Inbox, Result};
 use k256::ecdsa::SigningKey;
 use mmx_consensus::{Hash, Record, Value};
@@ -34,6 +35,8 @@ pub struct Node {
     pending_bytes: usize,
     pub(crate) verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
     vdf_worker: Option<crate::vdf_worker::Worker>,
+    vdf_trust: vdf_queue::Trust,
+    rejected_work: BTreeSet<Hash>,
     responses: BTreeMap<Hash, (Record, i64, usize)>,
     response_bytes: usize,
     pub(crate) tx_pool: crate::transactions::Pool,
@@ -136,6 +139,8 @@ impl Node {
             pending_bytes: 0,
             verified_work: BTreeMap::new(),
             vdf_worker: None,
+            vdf_trust: Default::default(),
+            rejected_work: Default::default(),
             responses: BTreeMap::new(),
             response_bytes: 0,
             tx_pool,
@@ -283,6 +288,7 @@ impl Node {
         self.pending.clear();
         self.pending_bytes = 0;
         self.verified_work.clear();
+        self.rejected_work.clear();
         self.responses.clear();
         self.response_bytes = 0;
         self.tx_pool.clear()?;
@@ -321,90 +327,7 @@ impl Node {
                     .ok_or_else(|| error("missing selected root"))?,
             )?
             .ok_or_else(|| error("missing root header"))?;
-        let mut inputs: BTreeSet<Hash> = self
-            .chain
-            .verified_vdf_inputs(self.root)?
-            .into_iter()
-            .collect();
-        let now = vnx::util::get_wall_time_millis();
-        let ttl = self
-            .chain
-            .selected()
-            .params()
-            .block_interval_ms
-            .saturating_mul(10);
-        self.work.retain(|(work, received, size)| {
-            let keep = work
-                .field("start")
-                .and_then(Value::uint)
-                .is_ok_and(|start| start >= root.vdf_iters)
-                && (hash(work, "content_hash")
-                    .is_ok_and(|id| self.verified_work.contains_key(&id))
-                    || now.saturating_sub(*received) <= ttl);
-            if !keep {
-                self.work_bytes -= *size;
-                if let Ok(id) = hash(work, "content_hash") {
-                    self.verified_work.remove(&id);
-                }
-            }
-            keep
-        });
-        if let Some(worker) = &mut self.vdf_worker {
-            let retained = self
-                .work
-                .iter()
-                .map(|(work, _, _)| hash(work, "content_hash"))
-                .collect::<Result<_>>()?;
-            worker.poll(&retained);
-        }
-        for height in self.root..=tip.height {
-            let header = selected
-                .header(
-                    &selected
-                        .hash_at(height)?
-                        .ok_or_else(|| error("missing selected height"))?,
-                )?
-                .ok_or_else(|| error("missing selected header"))?;
-            inputs.insert(header.vdf_output.0);
-        }
-        for (work, _, _) in &self.work {
-            let id = hash(work, "content_hash")?;
-            if work.field("start")?.uint()? < root.vdf_iters
-                || !inputs.contains(&hash(work, "input")?)
-            {
-                continue;
-            }
-            if !self.verified_work.contains_key(&id) {
-                if let Some(worker) = &mut self.vdf_worker {
-                    if mmx_consensus::vdf::validate(
-                        work,
-                        self.chain.selected().params(),
-                        &self.chain,
-                    )
-                    .is_ok()
-                    {
-                        if let Some(cpu) = worker.proof(id, hash(work, "hash")?, work)? {
-                            // The fork can move while work runs. Admission
-                            // always rechecks authenticated current history.
-                            if let Ok(point) =
-                                cpu.admit(self.chain.selected().params(), &self.chain)
-                            {
-                                self.verified_work.insert(id, point);
-                            }
-                        }
-                    }
-                } else if let Ok(point) =
-                    mmx_consensus::vdf::verify(work, self.chain.selected().params(), &self.chain)
-                {
-                    self.verified_work.insert(id, point);
-                }
-            }
-            if let Some(point) = self.verified_work.get(&id) {
-                inputs.insert(point.point().output.0);
-            }
-        }
-        self.verified_work
-            .retain(|_, p| p.point().start >= root.vdf_iters);
+        self.verify_vdfs(&tip, &root)?;
         let points = self.verified_work.values().cloned().collect::<Vec<_>>();
         if self.synced {
             // Native verify_vdf_success relays advancing work immediately,
@@ -1075,6 +998,115 @@ mod work_queue_tests {
         node.broadcast(&work).unwrap();
         assert_eq!(node.tx_pool.relay.sequence(), sequence);
         assert_eq!(node.production.broadcasts.len(), 128);
+    }
+    fn sign_work(work: &mut Record, key: &SigningKey) -> [u8; 33] {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature};
+        let public: [u8; 33] = key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .try_into()
+            .unwrap();
+        let id = work.calc_hash(false, 0).unwrap();
+        let signature: Signature = key.sign_prehash(&id).unwrap();
+        work.fields.insert("hash".into(), bytes(id));
+        work.fields.insert("timelord_key".into(), bytes(public));
+        work.fields
+            .insert("timelord_sig".into(), bytes(signature.to_bytes().to_vec()));
+        work.fields.insert(
+            "content_hash".into(),
+            bytes(mmx_consensus::vdf::calc_content_hash(work).unwrap()),
+        );
+        public
+    }
+    #[test]
+    fn authenticated_vdf_failure_is_penalized_once_and_invalid_envelopes_earn_no_trust() {
+        let (mut node, work) = setup();
+        let key = SigningKey::from_slice(&[211; 32]).unwrap();
+        let mut bad = work.clone();
+        let mut segments = bad.field("segments").unwrap().seq().unwrap().to_vec();
+        let mut segment = segments[0].bytes().unwrap().to_vec();
+        segment[0] ^= 1;
+        segments[0] = bytes(segment);
+        bad.fields
+            .insert("segments".into(), Value::Sequence(segments));
+        let public = sign_work(&mut bad, &key);
+        node.admit_message(&bad).unwrap();
+        node.tick().unwrap();
+        assert_eq!(node.vdf_trust.score(&public), -101);
+        for _ in 0..3 {
+            node.tick().unwrap();
+        }
+        assert_eq!(
+            node.vdf_trust.score(&public),
+            -101,
+            "failed CPU work must not repeat on every tick"
+        );
+        assert!(node.verified_work.is_empty());
+        let mut unsigned = work.clone();
+        unsigned
+            .fields
+            .insert("timelord_sig".into(), bytes([0; 64]));
+        unsigned.fields.insert(
+            "content_hash".into(),
+            bytes(mmx_consensus::vdf::calc_content_hash(&unsigned).unwrap()),
+        );
+        assert!(node.admit_message(&unsigned).is_err());
+        let real: [u8; 33] = work
+            .field("timelord_key")
+            .unwrap()
+            .bytes()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(node.vdf_trust.score(&real), 0);
+        node.admit_message(&work).unwrap();
+        node.tick().unwrap();
+        assert_eq!(
+            node.vdf_trust.score(&real),
+            1,
+            "one submission and one advancing result"
+        );
+    }
+    #[test]
+    fn claimed_height_aliases_do_not_repeat_cpu_work_and_wrong_start_metadata_cannot_poison_recovery(
+    ) {
+        let (mut node, work) = setup();
+        node.admit_message(&work).unwrap();
+        node.tick().unwrap();
+        let mut alias = work.clone();
+        alias
+            .fields
+            .insert("vdf_height".into(), Value::Uint(u32::MAX.into()));
+        let public = sign_work(&mut alias, &SigningKey::from_slice(&[212; 32]).unwrap());
+        assert_ne!(hash(&work, "hash").unwrap(), hash(&alias, "hash").unwrap());
+        node.admit_message(&alias).unwrap();
+        node.tick().unwrap();
+        assert_eq!(node.verified_work.len(), 1);
+        assert_eq!(
+            node.vdf_trust.score(&public),
+            0,
+            "known work aliases earn neither a job nor trust"
+        );
+        let (mut node, work) = setup();
+        let mut wrong = work.clone();
+        wrong.fields.insert("start".into(), Value::Uint(1));
+        sign_work(&mut wrong, &SigningKey::from_slice(&[213; 32]).unwrap());
+        node.admit_message(&wrong).unwrap();
+        node.tick().unwrap();
+        assert_eq!(
+            node.vdf_peak().unwrap().0,
+            0,
+            "signed start metadata cannot advance the real VDF path"
+        );
+        node.admit_message(&work).unwrap();
+        node.tick().unwrap();
+        assert_eq!(node.verified_work.len(), 2);
+        assert_eq!(
+            node.vdf_peak().unwrap().0,
+            1,
+            "a correct replacement must not be suppressed by its input/output pair alone"
+        );
     }
     #[test]
     fn resigning_a_native_vdf_with_another_key_cannot_duplicate_work_or_refresh_its_timeout() {

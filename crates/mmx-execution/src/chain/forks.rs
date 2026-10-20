@@ -309,7 +309,7 @@ impl ForkChain {
     pub fn set_tip_limit(&mut self, height: Option<u32>) {
         self.tip_limit = height;
     }
-    pub fn verified_vdf_inputs(&self, root_height: u32) -> ChainResult<Vec<Hash>> {
+    pub fn verified_vdf_heights(&self, root_height: u32) -> ChainResult<BTreeMap<Hash, u32>> {
         self.connected
             .iter()
             .filter_map(|hash| {
@@ -319,7 +319,7 @@ impl ForkChain {
                         if h.height > root_height
                             && self.tip_limit.is_none_or(|limit| h.height <= limit) =>
                     {
-                        Some(Ok(h.vdf_output.0))
+                        Some(Ok((h.vdf_output.0, h.vdf_height)))
                     }
                     Ok(_) => None,
                     Err(e) => Some(Err(e)),

@@ -216,7 +216,7 @@ no live-ledger or plot scan is part of validation.
    different valid timelord key cannot duplicate CPU/GPU jobs, occupy another
    queue slot or refresh the original timeout. In-flight work hashes survive
    retention eviction until completion. Opaque completed evidence remains bound
-   to its original exact signed record. Timelord trust ordering remains open.
+   to its original exact signed record. Verified-input-height / timelord-trust ordering is now implemented (see below).
    The former fixed 32-VDF retention count is also removed: mainnet permits
    100 steps before a block. The count now covers `max_vdf_count * (commit_delay
    + 1)`, clamped to 32–16,384 items, while retaining the 32 MiB byte budget.
@@ -307,12 +307,33 @@ no live-ledger or plot scan is part of validation.
    release median measured 3,843 to 1,945 us for eight independent contracts
    (1.98x), 3,830 to 2,974 us for two chains (1.29x), 3,769 to 3,743 us for one
    chain, and 72.9 to 70.4 us for seven cached-signature transfers.
-6. **CPU VDF batching and competing-work priority.**
-   C++ uses SHA-NI/ARM two-lane recursion and AVX2 eight-lane SHA plus timelord
-   trust ordering. Rust's SHA dispatch and Rayon segments are not that execution
-   strategy. Benchmark CPU-only against C++ and port useful lanes/priority with
-   identical infusion and work verification. GPU default performance does not
-   establish CPU fallback performance.
+6. **Competing VDF priority completed; CPU batching next.**
+   The node now orders eligible work by inferred verified-input VDF height, then
+   timelord trust, matching Node::verify_vdfs. Root/connected verified headers
+   and already verified chronological points establish heights; a signed claimed
+   vdf_height never contributes priority. FIFO resolves exact ties. Completion
+   releases only children of that verified output, preserving the embedded
+   forty-step single-update regression without rescanning the entire queue.
+   Native trust charges one point only when a job is actually submitted, grants
+   two only for an advancing verified point, and sets failures to min(score,0)-100.
+   Bounded worker completions carry signer identity so eviction cannot erase a
+   failure penalty. Invalid envelopes/static work earn nothing. Failed CPU work
+   is retired rather than recomputed on every embedded-node tick. Trust uses a
+   100,000-key FIFO bound and saturating arithmetic; it is an ephemeral scheduling
+   hint, never consensus evidence or transport receipt credit. Native's text
+   files remain diagnostic outputs, not restored trust state.
+   Fully retired queues return before history reads, and a busy two-job worker
+   skips repeated static/history checks while still admitting completed evidence.
+   Verified input/output aliases skip duplicate CPU work. Deliberate tightening
+   over native find_vdf_point: compatible start, iteration, infusion and reward
+   metadata must match too. A validly signed wrong-start point therefore cannot
+   suppress the correct replacement needed for advancement. No evidence is
+   rebound to another signed record. Tests cover inferred-height/trust ordering,
+   output-specific release, exact score changes, failed-job eviction, no repeat
+   failures, metadata aliases, wrong-start recovery and the retained 40-step gap.
+   C++ SHA-NI/ARM two-lane recursion and AVX2 eight-lane SHA still need the CPU
+   batching checkpoint; GPU default performance does not establish fallback
+   parity.
 7. **Wallet request batching and operational feature completion.**
    `Wallet::update_cache` caches balances/owned contracts/liquidity/history with
    a TTL. Rust reads balances and each pending transaction afresh and serializes

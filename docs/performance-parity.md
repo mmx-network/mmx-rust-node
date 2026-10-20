@@ -299,7 +299,7 @@ still belongs to its exact original signed record; it is never rebound to a
 different key or envelope. A native VDF is re-signed with another valid key in
 the queue regression, and a blocked-worker test checks alias suppression after
 retention eviction. This avoids duplicate CPU/GPU work; native trust ranking and
-specialized CPU SHA lanes remain open.
+specialized CPU SHA lanes remain open; verified-input/trust priority is implemented below.
 
 VDF retention now also respects native `max_vdf_count` instead of a fixed 32
 records. Mainnet's limit is 100; discarding the first work record after 32
@@ -378,3 +378,20 @@ The same bounded four-worker RAM-only release benchmark measured median us/set:
 These five alternating 100-set rounds compare Rust scheduling on native-derived
 work, without disk writes. They do not establish complete C++ throughput parity.
 The ignored release `benchmark_parallel_candidate_selection` test reproduces it.
+
+VDF priority checkpoint: native inferred-input-height / timelord-trust ordering
+now precedes bounded CPU/GPU admission. Only authenticated header outputs and
+verified chronological points establish heights, never the record's claimed
+vdf_height. FIFO breaks equal priorities and verified output completion releases
+its own successors. Native score changes are -1 per actual submission, +2 only
+for an advancing verified result, and min(score,0)-100 on CPU failure. Signer
+identity accompanies worker completion even after queue eviction. A 100,000-key
+FIFO bound and saturating arithmetic deliberately bound this scheduling hint.
+Retired work returns before history reads; busy workers avoid repeated static
+reads. Known input/output aliases do not repeat CPU verification. Unlike native's
+input/output-only check, matching linkage metadata is also required, preventing
+a signed wrong-start proof from suppressing a correct replacement. Failed CPU
+work is retired, not retried on every synchronous tick, and no checked evidence
+is rebound to another record. Regressions cover priority, dependency release,
+exact credits/penalties, eviction, aliases, wrong-start recovery and the forty-step
+protocol gap. CPU SIMD batching remains the next checkpoint.
