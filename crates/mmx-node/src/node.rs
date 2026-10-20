@@ -1082,6 +1082,10 @@ mod work_queue_tests {
         assert_ne!(hash(&work, "hash").unwrap(), hash(&alias, "hash").unwrap());
         node.admit_message(&alias).unwrap();
         node.tick().unwrap();
+        alias.fields.insert("start".into(), Value::Uint(17));
+        sign_work(&mut alias, &SigningKey::from_slice(&[212; 32]).unwrap());
+        node.admit_message(&alias).unwrap();
+        node.tick().unwrap();
         assert_eq!(node.verified_work.len(), 1);
         assert_eq!(
             node.vdf_trust.score(&public),
@@ -1091,7 +1095,7 @@ mod work_queue_tests {
         let (mut node, work) = setup();
         let mut wrong = work.clone();
         wrong.fields.insert("start".into(), Value::Uint(1));
-        sign_work(&mut wrong, &SigningKey::from_slice(&[213; 32]).unwrap());
+        let wrong_key = sign_work(&mut wrong, &SigningKey::from_slice(&[213; 32]).unwrap());
         node.admit_message(&wrong).unwrap();
         node.tick().unwrap();
         assert_eq!(
@@ -1099,6 +1103,32 @@ mod work_queue_tests {
             0,
             "signed start metadata cannot advance the real VDF path"
         );
+        assert_eq!(
+            node.vdf_trust.score(&wrong_key),
+            -1,
+            "unusable metadata cannot earn advancement credit"
+        );
+        let attacker = SigningKey::from_slice(&[214; 32]).unwrap();
+        let mut public = [0; 33];
+        for n in 1..=8 {
+            let mut forged = work.clone();
+            let mut segments = forged.field("segments").unwrap().seq().unwrap().to_vec();
+            let mut first = segments[0].bytes().unwrap().to_vec();
+            first[0] ^= n;
+            segments[0] = bytes(first);
+            forged
+                .fields
+                .insert("segments".into(), Value::Sequence(segments));
+            public = sign_work(&mut forged, &attacker);
+            node.admit_message(&forged).unwrap();
+        }
+        node.tick().unwrap();
+        assert_eq!(
+            node.vdf_trust.score(&public),
+            0,
+            "forged repair claims must not consume CPU work slots"
+        );
+        assert_eq!(node.verified_work.len(), 1);
         node.admit_message(&work).unwrap();
         node.tick().unwrap();
         assert_eq!(node.verified_work.len(), 2);

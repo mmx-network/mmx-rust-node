@@ -381,16 +381,17 @@ The ignored release `benchmark_parallel_candidate_selection` test reproduces it.
 
 VDF priority checkpoint: native inferred-input-height / timelord-trust ordering
 now precedes bounded CPU/GPU admission. Only authenticated header outputs and
-verified chronological points establish heights, never the record's claimed
+the verified input/output graph establishes heights, never the record's claimed
 vdf_height. FIFO breaks equal priorities and verified output completion releases
 its own successors. Native score changes are -1 per actual submission, +2 only
 for an advancing verified result, and min(score,0)-100 on CPU failure. Signer
 identity accompanies worker completion even after queue eviction. A 100,000-key
 FIFO bound and saturating arithmetic deliberately bound this scheduling hint.
 Retired work returns before history reads; busy workers avoid repeated static
-reads. Known input/output aliases do not repeat CPU verification. Unlike native's
-input/output-only check, matching linkage metadata is also required, preventing
-a signed wrong-start proof from suppressing a correct replacement. Failed CPU
+reads. Known input/output aliases do not repeat CPU verification. A bounded repair exception to native's input/output-only check permits a
+correct-start replacement only when all its CPU inputs and segments exactly
+match checked work, preventing wrong metadata from suppressing recovery without
+allowing forged repair claims to occupy CPU jobs. Failed CPU
 work is retired, not retried on every synchronous tick, and no checked evidence
 is rebound to another record. Regressions cover priority, dependency release,
 exact credits/penalties, eviction, aliases, wrong-start recovery and the forty-step
@@ -405,3 +406,13 @@ three-peer minimum. Metadata query generations reject stale same-ID completions
 before touching a new worker or status. Real socket reconnection preserves the
 three distinct sync peers, and a controlled blocked-owner test exercises stale
 height isolation and promotion while below the minimum.
+
+VDF alias hardening: inferred iteration counters now accompany inferred heights
+in the authenticated work graph, removing reliance on claimed chronological
+ordering. A known usable input/output pair suppresses every metadata alias. If
+only wrong-start metadata exists, only an exact-computation, correct-start
+replacement can take a verification job; it still gets its own exact-record
+check. Eight signed forged-intermediate repair claims consume no jobs, while the
+genuine replacement advances. Positive trust also requires usable start, infusion
+and iteration linkage, tightening native's input-only bonus without changing
+block acceptance or proof hashes.

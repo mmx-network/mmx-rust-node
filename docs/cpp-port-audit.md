@@ -310,7 +310,7 @@ no live-ledger or plot scan is part of validation.
 6. **Competing VDF priority completed; CPU batching next.**
    The node now orders eligible work by inferred verified-input VDF height, then
    timelord trust, matching Node::verify_vdfs. Root/connected verified headers
-   and already verified chronological points establish heights; a signed claimed
+   and the already verified input/output graph establish heights; a signed claimed
    vdf_height never contributes priority. FIFO resolves exact ties. Completion
    releases only children of that verified output, preserving the embedded
    forty-step single-update regression without rescanning the entire queue.
@@ -324,11 +324,18 @@ no live-ledger or plot scan is part of validation.
    files remain diagnostic outputs, not restored trust state.
    Fully retired queues return before history reads, and a busy two-job worker
    skips repeated static/history checks while still admitting completed evidence.
-   Verified input/output aliases skip duplicate CPU work. Deliberate tightening
-   over native find_vdf_point: compatible start, iteration, infusion and reward
-   metadata must match too. A validly signed wrong-start point therefore cannot
-   suppress the correct replacement needed for advancement. No evidence is
-   rebound to another signed record. Tests cover inferred-height/trust ordering,
+   Verified input/output aliases skip duplicate CPU work. Heights and iteration
+   counters are derived from authenticated inputs and the checked work graph,
+   never signed start/height claims or their claimed chronological order.
+   Deliberate tightening over native find_vdf_point: if the retained point has
+   unusable start metadata, a correct-start replacement is permitted only when
+   its entire CPU computation (input, infusion, reward, count, segment size and
+   every segment) equals already checked work. It still gets its own work check
+   and exact-record evidence; forged repair claims consume no CPU jobs. Once a
+   usable point exists, native input/output suppression applies to every alias.
+   Advancing trust additionally requires usable start/infusion/iteration linkage,
+   so wrong metadata cannot farm positive trust. These scheduling safeguards do
+   not reject an otherwise valid block or rebind proof evidence. Tests cover inferred-height/trust ordering,
    output-specific release, exact score changes, failed-job eviction, no repeat
    failures, metadata aliases, wrong-start recovery and the retained 40-step gap.
    C++ SHA-NI/ARM two-lane recursion and AVX2 eight-lane SHA still need the CPU
@@ -482,3 +489,13 @@ metadata owner, qualify it with a stale height, or count toward its hash window.
 The real three-server sync test reconnects an identity and retains all three
 unique observers; a controlled stalled metadata test covers pending replacement,
 low-peer polling, stale returns and fresh qualification without abandoned jobs.
+
+VDF alias hardening follow-up: tests now flood the wrong-start recovery path
+with eight freshly signed correct-start envelopes containing forged intermediate
+segments but the already known final output. None consume CPU slots or earn
+trust, and the genuine exact-work replacement still advances the real chain.
+Start/height-only aliases of a usable point are suppressed too. Input graph
+progress derives both counters from authenticated headers and checked work rather
+than sorting by signed start metadata. Positive trust requires a point that can
+actually extend the selected VDF path; native's weaker input-only bonus is not
+used for unusable metadata. Block/point verification and hashes are unchanged.

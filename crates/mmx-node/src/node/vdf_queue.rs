@@ -3,16 +3,60 @@
 use super::*;
 use std::{cmp::Reverse, collections::BinaryHeap};
 type Key = [u8; 33];
-type PointIdentity = (Hash, Hash, u64, u64, Hash, Hash);
-fn point_identity(work: &Record) -> Result<PointIdentity> {
-    Ok((
-        hash(work, "input")?,
-        mmx_consensus::vdf::output(work)?,
-        work.field("start")?.uint()?,
-        work.field("num_iters")?.uint()?,
-        hash(work, "prev")?,
-        hash(work, "reward_addr")?,
-    ))
+type KnownPoints = BTreeMap<(Hash, Hash), Vec<Hash>>;
+// Native drops verified input/output duplicates. Permit one correct-start
+// replacement of bad metadata only when its full CPU work equals checked work.
+// Unverified intermediates cannot use that repair exception to consume jobs.
+fn duplicate(
+    work: &Record,
+    known: &KnownPoints,
+    verified: &BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
+    iterations: &BTreeMap<Hash, u64>,
+) -> Result<bool> {
+    let pair = (hash(work, "input")?, mmx_consensus::vdf::output(work)?);
+    let Some(ids) = known.get(&pair) else {
+        return Ok(false);
+    };
+    let Some(&expected) = iterations.get(&pair.0) else {
+        return Ok(false);
+    };
+    if ids
+        .iter()
+        .filter_map(|id| verified.get(id))
+        .any(|p| p.point().start == expected)
+    {
+        return Ok(true);
+    }
+    if work.field("start")?.uint()? != expected {
+        return Ok(true);
+    }
+    let prev = hash(work, "prev")?;
+    let reward = hash(work, "reward_addr")?;
+    let num = work.field("num_iters")?.uint()?;
+    let size = work.field("segment_size")?.uint()?;
+    let segments = work.field("segments")?.seq()?;
+    for point in ids.iter().filter_map(|id| verified.get(id)) {
+        let proof = point.proof();
+        if proof.prev.0 != prev
+            || proof.reward_addr.0 != reward
+            || proof.num_iters != num
+            || u64::from(proof.segment_size) != size
+            || proof.segments.len() != segments.len()
+        {
+            continue;
+        }
+        let mut same = true;
+        for (expected, supplied) in proof.segments.iter().zip(segments) {
+            if supplied.bytes()? != expected.0 {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 const MAX_TIMELORDS: usize = 100_000;
 
@@ -119,7 +163,15 @@ impl Node {
             return Ok(());
         }
         let selected = self.chain.selected();
-        let mut heights = self.chain.verified_vdf_heights(self.root)?;
+        let progress = self.chain.verified_vdf_progress(self.root)?;
+        let mut heights: BTreeMap<_, _> = progress
+            .iter()
+            .map(|(hash, (height, _))| (*hash, *height))
+            .collect();
+        let mut iterations: BTreeMap<_, _> = progress
+            .into_iter()
+            .map(|(hash, (_, iters))| (hash, iters))
+            .collect();
         for height in self.root..=tip.height {
             let header = selected
                 .header(
@@ -129,43 +181,49 @@ impl Node {
                 )?
                 .ok_or_else(|| error("missing selected header"))?;
             heights.insert(header.vdf_output.0, header.vdf_height);
+            iterations.insert(header.vdf_output.0, header.vdf_iters);
         }
         let points: Vec<_> = self.verified_work.values().cloned().collect();
-        // Native find_vdf_point avoids repeating work for an already verified
-        // input/output pair. Also require compatible linkage metadata so a
-        // signed wrong-start point cannot suppress a correct replacement.
-        let mut seen_points: BTreeSet<PointIdentity> = points
-            .iter()
-            .map(|p| {
-                let p = p.point();
-                (
-                    p.input.0,
-                    p.output.0,
-                    p.start,
-                    p.num_iters,
-                    p.prev.0,
-                    p.reward_addr.0,
-                )
-            })
-            .collect();
+        let mut known = KnownPoints::new();
+        let mut children = BTreeMap::<Hash, Vec<(Hash, u64)>>::new();
+        for (id, point) in &self.verified_work {
+            let p = point.point();
+            known.entry((p.input.0, p.output.0)).or_default().push(*id);
+            children
+                .entry(p.input.0)
+                .or_default()
+                .push((p.output.0, p.num_iters));
+        }
+        // Derive both counters from authenticated inputs and checked work, not
+        // signed start/height claims or their misleading chronological order.
+        let mut frontier: VecDeque<_> = heights.keys().copied().collect();
+        while let Some(input) = frontier.pop_front() {
+            if let Some(children) = children.get(&input) {
+                let next_height = heights[&input].wrapping_add(1);
+                let input_iters = iterations[&input];
+                for &(output, num) in children {
+                    if let std::collections::btree_map::Entry::Vacant(entry) = heights.entry(output)
+                    {
+                        entry.insert(next_height);
+                        iterations.insert(output, input_iters.wrapping_add(num));
+                        frontier.push_back(output);
+                    }
+                }
+            }
+        }
         let next = mmx_consensus::vdf::next_points(&self.chain, selected.params(), tip, &points)?;
         let mut advance_output = next.last().map_or(tip.vdf_output.0, |p| p.point().output.0);
         let mut advance_count = next.len();
-        let mut chronological: Vec<_> = points.iter().collect();
-        chronological
-            .sort_by_key(|point| point.point().start.wrapping_add(point.point().num_iters));
-        for point in chronological {
-            if let Some(height) = heights.get(&point.point().input.0).copied() {
-                heights.insert(point.point().output.0, height.wrapping_add(1));
-            }
-        }
+        let mut advance_iters = next.last().map_or(tip.vdf_iters, |p| {
+            p.point().start.wrapping_add(p.point().num_iters)
+        });
         let mut ready = Ready::default();
         for (index, (work, _, _)) in self.work.iter().enumerate() {
             let id = hash(work, "content_hash")?;
             if self.verified_work.contains_key(&id) || self.rejected_work.contains(&id) {
                 continue;
             }
-            if seen_points.contains(&point_identity(work)?) {
+            if duplicate(work, &known, &self.verified_work, &iterations)? {
                 self.rejected_work.insert(id);
                 continue;
             }
@@ -181,7 +239,7 @@ impl Node {
             let work = &self.work[index].0;
             let id = hash(work, "content_hash")?;
             let key: Key = work.field("timelord_key")?.bytes()?.try_into()?;
-            if seen_points.contains(&point_identity(work)?) {
+            if duplicate(work, &known, &self.verified_work, &iterations)? {
                 self.rejected_work.insert(id);
                 continue;
             }
@@ -241,16 +299,35 @@ impl Node {
             };
             if let Some(point) = point {
                 let output = point.point().output.0;
-                if point.point().input.0 == advance_output
+                let advancing = point.point().input.0 == advance_output
+                    && point.point().start == advance_iters
                     && advance_count < (self.chain.selected().params().max_vdf_count as usize)
-                {
+                    && mmx_consensus::transitions::history::infusion(
+                        &self.chain,
+                        self.chain.selected().params(),
+                        tip,
+                        advance_count as u32,
+                    )
+                    .is_ok_and(|infusion| {
+                        point.point().prev.0 == infusion.hash
+                            && point.point().num_iters == infusion.num_iters
+                    });
+                if advancing {
                     self.vdf_trust.advancing(key);
                     advance_output = output;
                     advance_count += 1;
+                    advance_iters = advance_iters.wrapping_add(point.point().num_iters);
                 }
+                iterations.insert(
+                    output,
+                    iterations[&point.point().input.0].wrapping_add(point.point().num_iters),
+                );
                 heights.insert(output, height.wrapping_add(1));
                 ready.advance(output, height.wrapping_add(1));
-                seen_points.insert(point_identity(work)?);
+                known
+                    .entry((point.point().input.0, output))
+                    .or_default()
+                    .push(id);
                 self.verified_work.insert(id, point);
             }
         }
