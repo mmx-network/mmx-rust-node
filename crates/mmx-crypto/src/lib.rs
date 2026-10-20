@@ -1,6 +1,7 @@
 //! Native MMX ECDSA verification shared by authorization and VM VERIFY.
 //! Addresses are SHA-256 of the original 33 public-key bytes, including invalid
 //! encodings. Verification preserves the native cache and parsing order.
+pub mod recursive;
 use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::sync::{LazyLock, Mutex};

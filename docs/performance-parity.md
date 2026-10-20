@@ -16,7 +16,7 @@ locators. Existing native payload records are read in place without migration.
 | --- | --- | --- |
 | Database | `src/DataBase.cpp`: buffered append log, sorted blocks, versioned rollback, flush thresholds | `crates/mmx-db/src/{native,journal,sorted}.rs`: append values once, index references, positional reads, bounded reader handles, batched checkpoints, historical versions. Rust synchronizes each published journal commit; compare durability and write throughput explicitly before changing this policy. |
 | Sync | `src/Router.cpp` height jobs and `src/Node.cpp`: random peer subsets, content-hash observations, unique body downloads, overlapping bounded jobs | `crates/mmx-node/src/sync/peers*`: 3–8 distinct authenticated peers, all observed content candidates, content deduplication and timeout reassignment, background peer refill and prefetch. Socket tests cover competing branches, duplicate providers and refill while syncing. Repeat throughput measurements after scheduling/storage changes. |
-| Proof/VDF work | `src/Node_verify.cpp`, `src/pos/verify*.cpp`: cheap checks, worker pools, SHA-NI/ARM/AVX batching and accelerated recompute | `crates/mmx-consensus` and `crates/mmx-opencl`: bounded work admission, parallel F1, GPU VDF/F1 kernels and CPU fallback with native witnesses. C++ specialized CPU VDF batching remains a performance comparison gap; the GPU path does not establish CPU fallback parity. |
+| Proof/VDF work | `src/Node_verify.cpp`, `src/pos/verify*.cpp`: cheap checks, worker pools, SHA-NI/ARM/AVX batching and accelerated recompute | `crates/mmx-consensus`, `crates/mmx-crypto/src/recursive` and `crates/mmx-opencl`: bounded work admission, parallel F1, GPU VDF/F1 kernels and runtime-dispatched CPU lane batching. Native CPU kernel and old/new Rust proof benchmarks are recorded below; full-node and ARM throughput parity remain unmeasured. |
 | Harvesting | `src/Harvester.cpp`, `src/pos/Prover.cpp`: concurrent plot jobs, publish each proof immediately, network challenge deadline, estimated Y park search, post-filter before full proof, retained headers | `crates/mmx-farming` and `crates/mmx-tools`: shared bounded Rayon workers for plot reads and nested F1, streaming proofs, `challenge_delay * block_interval_ms`, density-based Y search, positional reads, per-proof park reuse, retained headers and per-quality error isolation. A stalled-plot regression test verifies that another plot can publish first. The daemon now dispatches owned per-plot jobs while its service loop handles later challenges/reports. Worker and queued-context bounds, original deadlines and per-plot leases isolate stalled reads; compare sustained slow-drive throughput before large-farm migration. |
 | Wallet/farmer | `src/Wallet.cpp`, `src/Farmer.cpp`: retained farmer identities, separate signing work, native key derivation and RPC | Rust retains farmer keys, uses a private signer and a restricted remote harvester listener, and tests native signatures and wallet spending through actual daemons. Large-wallet/history latency and signing under sustained harvester traffic still need comparative measurements. Pool partial submission and other unported RPCs remain listed in README. |
 
@@ -298,8 +298,8 @@ queue. Its existing one-active / one-waiting bound remains. Completed evidence
 still belongs to its exact original signed record; it is never rebound to a
 different key or envelope. A native VDF is re-signed with another valid key in
 the queue regression, and a blocked-worker test checks alias suppression after
-retention eviction. This avoids duplicate CPU/GPU work; native trust ranking and
-specialized CPU SHA lanes remain open; verified-input/trust priority is implemented below.
+retention eviction. This avoids duplicate CPU/GPU work; verified-input/trust
+priority and specialized CPU SHA lanes are implemented in the later checkpoints below.
 
 VDF retention now also respects native `max_vdf_count` instead of a fixed 32
 records. Mainnet's limit is 100; discarding the first work record after 32
@@ -383,7 +383,7 @@ The ignored release `benchmark_parallel_candidate_selection` test reproduces it.
 
 VDF priority checkpoint: native inferred-input-height / timelord-trust ordering
 now precedes bounded CPU/GPU admission. Only authenticated header outputs and
-the verified input/output graph establishes heights, never the record's claimed
+the verified input/output graph establish heights, never the record's claimed
 vdf_height. FIFO breaks equal priorities and verified output completion releases
 its own successors. Native score changes are -1 per actual submission, +2 only
 for an advancing verified result, and min(score,0)-100 on CPU failure. Signer
@@ -397,7 +397,7 @@ allowing forged repair claims to occupy CPU jobs. Failed CPU
 work is retired, not retried on every synchronous tick, and no checked evidence
 is rebound to another record. Regressions cover priority, dependency release,
 exact credits/penalties, eviction, aliases, wrong-start recovery and the forty-step
-protocol gap. CPU SIMD batching remains the next checkpoint.
+protocol gap. CPU SIMD batching is recorded below.
 
 Reconnect ownership checkpoint: native authenticated identity replacement now
 replaces the corresponding sync slot too. A pending old metadata owner and the
@@ -418,3 +418,42 @@ check. Eight signed forged-intermediate repair claims consume no jobs, while the
 genuine replacement advances. Positive trust also requires usable start, infusion
 and iteration linkage, tightening native's input-only bonus without changing
 block acceptance or proof hashes.
+
+CPU VDF checkpoint: `mmx-crypto/src/recursive` ports native fixed-32-byte recursive
+SHA256 with two interleaved SHA-NI/ARM SHA2 states and eight AVX2 lanes. All target
+features are runtime-checked before private unsafe kernels. Fixed-size arrays,
+unaligned loads, initialized AVX tails and scalar odd hardware tails cover every
+length; the 64 hardware rounds are unrolled and digest words stay in registers
+between iterations. Ordinary hashes, signatures and VM SHA instructions retain
+their existing implementation. GPU-only OpenCL remains the default.
+
+`verify_cpu` caps chunks at native's 16 segments, balances complete worker waves
+and preserves SIMD groups. Every segment starts from its supplied predecessor,
+including when that predecessor is invalid. A failure skips later pending chunks
+but leaves earlier chunks eligible, retaining deterministic first-error reporting.
+The kernel has zero/odd/partial-lane/endian/padding differential tests against
+RustCrypto; both x86 paths execute locally. The ARM SHA2 kernel also passes local
+AArch64 emulation, and a native ARM CI job exercises crypto and consensus suites.
+Complete proof tests cover 1/2/15/16/17/31/32/33 segments, multiple iteration
+counts and invalid outputs across chunk boundaries.
+
+Local Intel Core Ultra 7 265KF release medians (five samples, RAM only) for sixteen
+lanes of 250,000 iterations were C++ SHA-NI 48.972 ms, Rust SHA-NI 48.962 ms,
+old single-lane Rust 126.957 ms and forced AVX2 91.877 ms. The native output is
+asserted in the ignored `benchmark_recursive_sha256_backends` test;
+`tools/reference_recursive_sha.cpp` reproduces the C++ baseline. Forced AVX2 on
+a SHA-capable CPU is a kernel comparison, not an older CPU performance claim.
+
+The complete-proof `benchmark_batched_vdf_verification_against_original_parallel_segments`
+test compares original parallel single-segment verification with the batched
+implementation, four Rayon workers and five alternating samples:
+
+| Segments, 250,000 iterations each | Original Rust ms | Batched CPU ms | Speedup |
+| --- | ---: | ---: | ---: |
+| 16 | 35.010 | 12.637 | 2.77x |
+| 40 | 82.575 | 31.100 | 2.66x |
+| 80 | 159.800 | 61.715 | 2.59x |
+| 128 | 254.743 | 98.464 | 2.59x |
+
+These measurements establish bounded CPU kernel/proof improvements, without
+ledger or plot I/O. ARM emulation establishes correctness, not throughput.

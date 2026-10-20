@@ -3,6 +3,120 @@ use mmx_types::{mmx, VnxType};
 use std::collections::BTreeMap;
 use vnx::serde_json::{self, Value};
 
+#[test]
+#[ignore = "bounded CPU-only complete VDF verification comparison"]
+fn benchmark_batched_vdf_verification_against_original_parallel_segments() {
+    use rayon::prelude::*;
+    use sha2::{Digest, Sha256};
+    for count in [16usize, 40, 80, 128] {
+        let mut proof = mmx::ProofOfTime {
+            input: [1; 32].into(),
+            prev: [2; 32].into(),
+            reward_addr: [3; 32].into(),
+            segment_size: 250_000,
+            num_iters: count as u64 * 250_000,
+            vdf_height: 1,
+            ..Default::default()
+        };
+        let mixed = Sha256::digest([[1; 32].as_slice(), [2; 32].as_slice()].concat());
+        let initial: Hash = Sha256::digest([mixed.as_slice(), [3; 32].as_slice()].concat()).into();
+        let mut point = initial;
+        let mut inputs = Vec::new();
+        for _ in 0..count {
+            inputs.push(point);
+            for _ in 0..proof.segment_size {
+                point = Sha256::digest(point).into();
+            }
+            proof.segments.push(point.into());
+        }
+        let record = Record::from_generated(&proof).unwrap();
+        let baseline = || {
+            let start = std::time::Instant::now();
+            assert!(inputs
+                .par_iter()
+                .zip(&proof.segments)
+                .all(|(input, expected)| {
+                    let mut point = *input;
+                    for _ in 0..proof.segment_size {
+                        point = Sha256::digest(point).into();
+                    }
+                    point == expected.0
+                }));
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        let batched = || {
+            let start = std::time::Instant::now();
+            vdf::verify_cpu(&record).unwrap();
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for round in 0..5 {
+            if round % 2 == 0 {
+                old.push(baseline());
+                new.push(batched());
+            } else {
+                new.push(batched());
+                old.push(baseline());
+            }
+        }
+        old.sort_by(f64::total_cmp);
+        new.sort_by(f64::total_cmp);
+        eprintln!("BENCH vdf segments={} size=250000 threads={} old_ms={:.3} batched_ms={:.3} speedup={:.3}",count,rayon::current_num_threads(),old[2],new[2],old[2]/new[2]);
+    }
+}
+
+#[test]
+fn cpu_batches_preserve_segment_inputs_odd_tails_and_first_failure_across_chunks() {
+    use sha2::{Digest, Sha256};
+    for count in [1usize, 2, 15, 16, 17, 31, 32, 33] {
+        for size in [1u32, 3, 17] {
+            let mut proof = mmx::ProofOfTime {
+                input: [1; 32].into(),
+                prev: [2; 32].into(),
+                reward_addr: [3; 32].into(),
+                segment_size: size,
+                num_iters: count as u64 * u64::from(size),
+                vdf_height: 1,
+                ..Default::default()
+            };
+            let mixed = Sha256::digest([[1; 32].as_slice(), [2; 32].as_slice()].concat());
+            let mut point: Hash =
+                Sha256::digest([mixed.as_slice(), [3; 32].as_slice()].concat()).into();
+            for _ in 0..count {
+                for _ in 0..size {
+                    point = Sha256::digest(point).into();
+                }
+                proof.segments.push(point.into());
+            }
+            assert!(
+                vdf::verify_cpu(&Record::from_generated(&proof).unwrap()).is_ok(),
+                "{count} / {size}"
+            );
+            for bad in [0, count / 2, count - 1] {
+                let mut bad_proof = proof.clone();
+                bad_proof.segments[bad].0[0] ^= 1;
+                assert_eq!(
+                    vdf::verify_cpu(&Record::from_generated(&bad_proof).unwrap())
+                        .unwrap_err()
+                        .to_string(),
+                    format!("invalid output on segment {bad}")
+                );
+            }
+            if count > 16 {
+                proof.segments[1].0[0] ^= 1;
+                proof.segments[16].0[0] ^= 1;
+                assert_eq!(
+                    vdf::verify_cpu(&Record::from_generated(&proof).unwrap())
+                        .unwrap_err()
+                        .to_string(),
+                    "invalid output on segment 1"
+                );
+            }
+        }
+    }
+}
+
 fn bytes(v: &Value) -> Vec<u8> {
     v.as_str()
         .unwrap()

@@ -57,11 +57,11 @@ no live-ledger or plot scan is part of validation.
 
 | Area and C++ paths inspected | Rust path and evidence | Remaining difference |
 | --- | --- | --- |
-| Block production: `Node_update.cpp::update`, `make_block`, `Node.cpp::fork_to`, voting, `Node_verify.cpp::add_proof`, `find_best_proof` | `mmx-node/src/production.rs`, `node.rs`; native chain, production and vote witnesses; asynchronous stale-result tests | Independent sending, consensus priority, parallel proof verification with a production barrier and earned early relay credits are implemented. Authenticated role handling below remains unported. Signed block tracking is transient as in C++. |
+| Block production: `Node_update.cpp::update`, `make_block`, `Node.cpp::fork_to`, voting, `Node_verify.cpp::add_proof`, `find_best_proof` | `mmx-node/src/production.rs`, `node.rs`; native chain, production and vote witnesses; asynchronous stale-result tests | Independent sending, consensus priority, parallel proof verification with a production barrier and earned early relay credits are implemented. Both peer directions now authenticate identities and apply native role filters. Signed block tracking is transient as in C++. |
 | Header/space consensus: `Node_verify.cpp::verify_proof*`, `ProofOfSpace*`, `pos/verify*.cpp`, native header/hash implementations | `mmx-consensus/src/{proof,transitions,header,pos}.rs`; native proof/hash/difficulty/weight/challenge traces, proof ordering and malformed witnesses | No additional acceptance mismatch identified in this pass. Continue differential mutation coverage at fork boundaries; this is not an exhaustive proof. |
-| VDF consensus and scheduling: `Node_verify.cpp::verify_vdf*`, `Node_update.cpp::verify_vdfs` | `mmx-consensus/src/vdf.rs`, `mmx-node/src/vdf_worker.rs`; opaque work evidence rechecked against current history, native infusion/segment/continuation fixtures, two-job worker bound | C++ trust ranking of competing timelords and specialized CPU multi-lane SHA remain missing. |
+| VDF consensus and scheduling: `Node_verify.cpp::verify_vdf*`, `Node_update.cpp::verify_vdfs` | `mmx-consensus/src/vdf.rs`, `mmx-node/src/vdf_worker.rs`; opaque work evidence rechecked against current history, native infusion/segment/continuation fixtures, two-job worker bound | Verified-input height and bounded timelord trust now schedule competing proofs; runtime-dispatched SHA-NI/ARM/AVX CPU lanes and native throughput comparisons are recorded below. |
 | Fork choice/sync: `Node.cpp::find_best_fork`, `fork_to`, `Node_update.cpp::on_sync_done`, `Router.cpp::process` | `mmx-execution/src/chain/{choice,forks,sync,voting}.rs`, `mmx-node/src/sync/peers*`; native fork/vote/root witnesses, three-observer socket tests, competing contents, timeout reassignment and deep reorg tests | Requested 3–8 observer policy is deliberately stricter than native completion. Every observed content is fetched once; no majority filter. Native transmit credits remain separate from body leases. |
-| Body/economics: `Node_validate.cpp::validate`, `execute`, native reward and fee helpers | `mmx-execution/src/{block,transaction}`, `mmx-consensus/src/authorization.rs`; native block/transaction/economics/NFT/multisig traces and rejection ordering | Canonical-parent validation hands off one verified execution delta; independent transactions still execute serially. Dependency locks and predecessor plans exist, but are not a concurrent executor. |
+| Body/economics: `Node_validate.cpp::validate`, `execute`, native reward and fee helpers | `mmx-execution/src/{block,transaction}`, `mmx-consensus/src/authorization.rs`; native block/transaction/economics/NFT/multisig traces and rejection ordering | Canonical-parent validation hands off one verified execution delta. Bounded dependency scheduling now executes independent validation/production transactions concurrently with ordered acceptance; serial/parallel native fixtures and RAM benchmarks are recorded below. |
 | Contract execution: `vm/Engine.cpp`, `vm/instr_t.cpp`, `vm_interface.cpp`, `vm/StorageCache.cpp`, `Node_validate.cpp::prepare_context` | `mmx-vm/src/engine*`, `mmx-execution/src/lib.rs`; all declared opcodes, gas, composite ownership, remote calls, hardfork setup, locks, failed-engine publication, recursion/copy/erase and input limits have fixtures | JavaScript compiler and remaining original contract suites are unported. Per-engine/per-transaction storage overlays are bounded by execution and are distinct from a broad node state cache. |
 | Native DB: `DataBase.cpp::Table::{find,commit,revert,flush}`, storage versioning | `mmx-db/src/{native,journal,sorted}.rs`; append-only values, reference-only sorted compaction, positional reads, bounded reader handles, pinned MVCC snapshots, atomic suffix publication; crash/truncation/checksum/reopen tests | Block/transaction payload consolidation is complete for new writes; synchronous durability comparisons below remain. Public balance ranges use a streaming bounded merge. No SQLite backend. |
 | Rollback/purge: C++ `Node` storage/apply/revert and versioned tables | `mmx-execution/src/chain/{mod,forks}.rs`, `mmx-db/src/native.rs`; every retained-height rollback, deep fork/restart, crash-safe collection, pinned snapshot and RPC floor tests | Purge necessarily rewrites retained live values during explicit collection. There is no automatic background migration or ledger scan. Rollback below the durable floor is refused; private consensus ancestry does not reappear through RPC. |
@@ -309,7 +309,7 @@ no live-ledger or plot scan is part of validation.
    release median measured 3,843 to 1,945 us for eight independent contracts
    (1.98x), 3,830 to 2,974 us for two chains (1.29x), 3,769 to 3,743 us for one
    chain, and 72.9 to 70.4 us for seven cached-signature transfers.
-6. **Competing VDF priority completed; CPU batching next.**
+6. **Competing VDF priority and CPU lane batching completed.**
    The node now orders eligible work by inferred verified-input VDF height, then
    timelord trust, matching Node::verify_vdfs. Root/connected verified headers
    and the already verified input/output graph establish heights; a signed claimed
@@ -340,9 +340,18 @@ no live-ledger or plot scan is part of validation.
    not reject an otherwise valid block or rebind proof evidence. Tests cover inferred-height/trust ordering,
    output-specific release, exact score changes, failed-job eviction, no repeat
    failures, metadata aliases, wrong-start recovery and the retained 40-step gap.
-   C++ SHA-NI/ARM two-lane recursion and AVX2 eight-lane SHA still need the CPU
-   batching checkpoint; GPU default performance does not establish fallback
-   parity.
+   CPU verification now uses runtime-dispatched SHA-NI/ARM SHA2 two-lane
+   recursion, AVX2 eight-lane SHA or a scalar fallback. Native's 16-segment cap
+   is retained with SIMD-aligned chunks balanced across worker waves; later
+   pending chunks skip after a failure while earlier chunks retain deterministic
+   error order. Fixed padding and register-resident recursion match C++; odd
+   hardware tails use scalar SHA and AVX tails are initialized. Local x86 tests
+   exercise both SHA-NI and forced AVX2; local ARM emulation tests SHA2, with a
+   separate native ARM CI job. A 16-lane/250,000-iteration release median was
+   48.962 ms versus native SHA-NI 48.972 ms and old Rust 126.957 ms. Four-worker
+   full-proof CPU verification improves about 2.6x across 40–128 segments.
+   These RAM-only comparisons do not establish whole-node throughput or ARM
+   performance parity. OpenCL remains the default GPU-only acceleration path.
 7. **Wallet request batching and operational feature completion.**
    `Wallet::update_cache` caches balances/owned contracts/liquidity/history with
    a TTL. Rust reads balances and each pending transaction afresh and serializes

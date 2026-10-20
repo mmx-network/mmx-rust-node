@@ -22,3 +22,21 @@ jobs:
           POCL_MAX_PTHREAD_COUNT: '2'
       - run: python3 tools/test_wallet_cli.py --binary target/debug/mmxwallet -v
       - run: python3 tools/test_wallet_cli.py --binary target/debug/mmx -v
+  arm-vdf:
+    runs-on: ubuntu-24.04-arm
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RAYON_NUM_THREADS: '4'
+      RUST_TEST_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked -p mmx-crypto -p mmx-consensus --all-targets -- -D warnings
+      - run: cargo test --locked -p mmx-crypto -p mmx-consensus -- --nocapture

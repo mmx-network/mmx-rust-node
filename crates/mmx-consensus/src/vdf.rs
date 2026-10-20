@@ -114,7 +114,7 @@ pub fn validate<S: HeaderSource>(
     }
     Ok(())
 }
-/// Portable equivalent of Node::verify_vdf_cpu. Each segment starts from the
+/// Lane-batched equivalent of Node::verify_vdf_cpu. Each segment starts from the
 /// supplied preceding digest; the first mixes input, infusion and reward. When
 /// several segments fail, native parallel execution may report a different
 /// failing index. This implementation reports the first in sequence.
@@ -135,31 +135,67 @@ pub fn verify_cpu(record: &Record) -> VdfResult<()> {
     reward.update(initial.finalize());
     reward.update(bytes::<32>(record, "reward_addr")?);
     let initial: Hash = reward.finalize().into();
-    // Supplied segment outputs make the checks independent, as in native CPU
-    // verification. Preserve deterministic first-failure reporting afterward.
+    // Native CPU verification caps chunks at sixteen independent segments.
+    // Keep SIMD groups intact, but expose enough chunks to fill the shared pool
+    // for short proofs too, instead of serializing sixteen lanes on one worker.
+    let group = match mmx_crypto::recursive::backend() {
+        mmx_crypto::recursive::Backend::ShaNi | mmx_crypto::recursive::Backend::ArmSha2 => 2,
+        mmx_crypto::recursive::Backend::Avx2 => 8,
+        mmx_crypto::recursive::Backend::Scalar => 1,
+    };
+    let workers = rayon::current_num_threads().max(1);
+    let waves = segments.len().div_ceil(workers.saturating_mul(16));
+    let batch = segments
+        .len()
+        .div_ceil(waves.saturating_mul(workers))
+        .div_ceil(group)
+        * group;
+    let failed = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    // The supplied preceding digest remains the input even when another segment
+    // is wrong. Indexed collection retains deterministic first-failure reporting.
     let results: Vec<VdfResult<()>> = segments
-        .par_iter()
+        .par_chunks(batch)
         .enumerate()
-        .map(|(i, segment)| {
-            let supplied: Hash = segment
-                .bytes()?
-                .try_into()
-                .map_err(|_| input("VDF segment size"))?;
-            let mut value = if i == 0 {
-                initial
-            } else {
-                segments[i - 1]
-                    .bytes()?
-                    .try_into()
-                    .map_err(|_| input("VDF segment size"))?
-            };
-            for _ in 0..size {
-                value = Sha256::digest(value).into();
+        .map(|(chunk, supplied)| {
+            use std::sync::atomic::Ordering;
+            // Native skips pending chunks after a bad segment. Keep lower
+            // chunks eligible so first-failure reporting stays deterministic.
+            if chunk > failed.load(Ordering::Relaxed) {
+                return Ok(());
             }
-            if value != supplied {
-                return Err(invalid(format!("invalid output on segment {i}")));
+            let result: VdfResult<()> = (|| {
+                let mut inputs = [[0; 32]; 16];
+                let mut outputs = [[0; 32]; 16];
+                for (lane, segment) in supplied.iter().enumerate() {
+                    let index = chunk * batch + lane;
+                    outputs[lane] = segment
+                        .bytes()?
+                        .try_into()
+                        .map_err(|_| input("VDF segment size"))?;
+                    inputs[lane] = if index == 0 {
+                        initial
+                    } else {
+                        segments[index - 1]
+                            .bytes()?
+                            .try_into()
+                            .map_err(|_| input("VDF segment size"))?
+                    };
+                }
+                mmx_crypto::recursive::hash_many(&mut inputs[..supplied.len()], size);
+                for lane in 0..supplied.len() {
+                    if inputs[lane] != outputs[lane] {
+                        return Err(invalid(format!(
+                            "invalid output on segment {}",
+                            chunk * batch + lane
+                        )));
+                    }
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                failed.fetch_min(chunk, Ordering::Relaxed);
             }
-            Ok(())
+            result
         })
         .collect();
     for result in results {

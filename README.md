@@ -407,7 +407,7 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-types` | Generated MMX/VNX wire types, type registry, typed RPC clients and service dispatchers, built from the VNI snapshot using the VNX submodule. |
 | `mmx-consensus` | Native hashes/costs and authorization, header/vote/farmer-response authentication, validator history, CPU space/VDF work verification, difficulty/challenge/weight transitions, output linkage and ancestor lookup. |
 | `mmx-opencl` | Runtime-loaded OpenCL 1.2 engines for recursive SHA256 and the native F1 memory hash; bounded reusable device buffers, no build-time OpenCL SDK requirement. |
-| `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`. |
+| `mmx-crypto` | Public-key address hashing and native ECDSA verification, with one signature cache shared by authorization and VM `VERIFY`; runtime-dispatched SHA-NI/ARM SHA2/AVX2 recursive VDF kernels. |
 | `mmx-execution` | Contract loading/calls and constructors; transaction/block validation, NFT rewards, shared execution and atomic settlement; native network bootstrap, durable selected-chain state, orphan archives, native fork-choice policy and atomic branch replacement. |
 | `mmx-wallet` | Compatible recovery words/key files, address and farmer-key derivation, message signing, exact amounts and signed transfers with a native consensus bridge. |
 | `mmxwallet` | Standalone HTTP(S) wallet CLI, private file storage, recovery/import/export, queries, prepared transfers, validation and explicit broadcast. |
