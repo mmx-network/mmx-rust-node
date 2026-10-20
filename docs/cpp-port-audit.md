@@ -183,8 +183,10 @@ no live-ledger or plot scan is part of validation.
    first-seen insertion; verified promotion drops early unhashed padding and
    relay/pool byte budgets charge heap footprint as well as compact encoding.
    Both inbound and outbound connections now prove native v103 identity with
-   a fresh random challenge, consistent get_id/get_info IDs and the same genesis
-   (including the purged-peer fallback). Five bounded requests are pipelined;
+   a fresh random challenge and consistent get_id/get_info IDs. Three identity
+   requests are pipelined, followed by two ledger requests only for full nodes;
+   those must prove the same genesis (including the purged-peer fallback).
+   Light/API peers need not export ledger methods and never qualify for sync;
    no gossip sender attaches before authentication. Native's early VDF bootstrap
    is retained in a separate pre-authentication 128-item / 32 MiB window, then
    authenticated envelopes enter the ordinary admission path. Pending handshake

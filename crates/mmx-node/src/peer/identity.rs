@@ -20,11 +20,6 @@ impl Client {
                 "mmx.Router.sign_msg",
                 [("msg".into(), Value::Bytes(challenge.to_vec()))],
             ),
-            record(
-                "mmx.Node.get_block_hash",
-                [("height".into(), Value::Uint(0))],
-            ),
-            record("mmx.Node.get_synced_height", []),
         ])?;
         let id: Hash = values[0].bytes()?.try_into()?;
         let info = values[1].record()?;
@@ -52,22 +47,34 @@ impl Client {
         {
             return Err(error("peer identity verification failed"));
         }
-        let genesis: Hash = match values[3].optional()? {
-            Some(value) => value.bytes()?.try_into()?,
-            // Purged nodes still expose their immutable network identity.
-            None => self
-                .call(record("mmx.Node.get_genesis_hash", []))?
-                .bytes()?
-                .try_into()?,
+        // Native light/API peers need not export a full ledger service. Only
+        // full nodes qualify as sync observers or receive local transactions.
+        let synced = if role == mmx_types::mmx::node_type_e::FULL_NODE.value {
+            let ledger = self.call_many(vec![
+                record(
+                    "mmx.Node.get_block_hash",
+                    [("height".into(), Value::Uint(0))],
+                ),
+                record("mmx.Node.get_synced_height", []),
+            ])?;
+            let genesis: Hash = match ledger[0].optional()? {
+                Some(value) => value.bytes()?.try_into()?,
+                None => self
+                    .call(record("mmx.Node.get_genesis_hash", []))?
+                    .bytes()?
+                    .try_into()?,
+            };
+            if genesis != self.peer_state.genesis() {
+                return Err(error("peer genesis mismatch"));
+            }
+            ledger[1]
+                .optional()?
+                .map(|value| -> Result<u32> { Ok(u32::try_from(value.uint()?)?) })
+                .transpose()?
+                .is_some()
+        } else {
+            false
         };
-        if genesis != self.peer_state.genesis() {
-            return Err(error("peer genesis mismatch"));
-        }
-        let synced = values[4]
-            .optional()?
-            .map(|value| -> Result<u32> { Ok(u32::try_from(value.uint()?)?) })
-            .transpose()?
-            .is_some();
         let socket = self.peer_state.claim(id, &self.connection.stream)?;
         self.identity = Some(Identity {
             id,

@@ -181,7 +181,7 @@ fn identity_challenges_reject_spoofs_replays_wrong_network_and_unknown_roles_bef
         let server = std::thread::spawn(move || {
             let mut c = peer::Connection::new(listener.accept().unwrap().0).unwrap();
             c.send(&before_auth).unwrap();
-            for _ in 0..5 {
+            for _ in 0..if fault == "genesis" { 5 } else { 3 } {
                 let request = c.receive(Duration::from_secs(3)).unwrap().unwrap();
                 let method = request.field("method").unwrap().record().unwrap();
                 let mut reply = identity.lock().unwrap().call(method).unwrap();
@@ -248,6 +248,60 @@ fn identity_challenges_reject_spoofs_replays_wrong_network_and_unknown_roles_bef
 }
 
 #[test]
+fn authenticated_light_and_api_clients_do_not_need_to_export_ledger_methods() {
+    for role in [
+        mmx::node_type_e::LIGHT_NODE.value,
+        mmx::node_type_e::API_CLIENT.value,
+    ] {
+        let (network, _, _, _) = fixture();
+        let mut server = peer::Server::bind("127.0.0.1:0", node(&network)).unwrap();
+        let identity = transport_identity();
+        let mut client = peer::Connection::connect(&server.address().to_string()).unwrap();
+        for _ in 0..3 {
+            let request = client.receive(Duration::from_secs(3)).unwrap().unwrap();
+            let method = request.field("method").unwrap().record().unwrap();
+            assert!(
+                method.name.starts_with("mmx.Router."),
+                "non-full peers cannot be required to serve a ledger"
+            );
+            let mut reply = identity.lock().unwrap().call(method).unwrap();
+            if method.name == "mmx.Router.get_info" {
+                let mut info = reply.field("_ret_0").unwrap().record().unwrap().clone();
+                info.fields.insert("type".into(), V::Uint(role.into()));
+                reply.fields.insert("_ret_0".into(), V::Record(info));
+            }
+            client
+                .send(&record(
+                    "mmx.Return",
+                    [
+                        ("id".into(), request.field("id").unwrap().clone()),
+                        ("result".into(), V::Record(reply)),
+                    ],
+                ))
+                .unwrap();
+        }
+        client
+            .send(&record(
+                "mmx.Request",
+                [
+                    ("id".into(), V::Uint(903)),
+                    (
+                        "method".into(),
+                        V::Record(record("mmx.Node.get_height", [])),
+                    ),
+                ],
+            ))
+            .unwrap();
+        let reply = client.receive(Duration::from_secs(3)).unwrap().unwrap();
+        assert_eq!(
+            reply.name, "mmx.Return",
+            "authentication must finish without reverse ledger queries"
+        );
+        assert_eq!(reply.field("id").unwrap().uint().unwrap(), 903);
+        server.shutdown();
+    }
+}
+#[test]
 fn duplicate_inbound_identity_is_replaced_only_after_a_valid_fresh_challenge() {
     let (network, _, _, _) = fixture();
     let mut server = peer::Server::bind("127.0.0.1:0", node(&network)).unwrap();
@@ -255,7 +309,7 @@ fn duplicate_inbound_identity_is_replaced_only_after_a_valid_fresh_challenge() {
     let identity = transport_identity();
     let mut old = connect_peer_as(&address, &identity);
     let mut spoof = peer::Connection::connect(&address).unwrap();
-    for _ in 0..5 {
+    for _ in 0..3 {
         let request = spoof.receive(Duration::from_secs(3)).unwrap().unwrap();
         let method = request.field("method").unwrap().record().unwrap();
         let mut reply = identity.lock().unwrap().call(method).unwrap();

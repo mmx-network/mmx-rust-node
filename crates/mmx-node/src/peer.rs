@@ -805,7 +805,12 @@ impl Server {
                                         return Err(error("peer receive idle timeout"));
                                     }
                                     client.poll()?;
-                                    if query.elapsed() >= Duration::from_secs(10) {
+                                    if query.elapsed() >= Duration::from_secs(10)
+                                        && client.identity.as_ref().is_some_and(|identity| {
+                                            identity.role
+                                                == mmx_types::mmx::node_type_e::FULL_NODE.value
+                                        })
+                                    {
                                         client.synced_height()?;
                                         query = Instant::now();
                                     }

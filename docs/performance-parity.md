@@ -312,9 +312,11 @@ advances to 40. No ledger writes are needed. This removes the artificial count
 restriction; exhaustion of service byte budgets remains explicit admission
 failure and is not evidence that a network proof fails consensus.
 
-Peer lifecycle checkpoint: both socket directions pipeline native v103 ID, info,
-fresh signed challenge, genesis and synced-height requests before attaching a
-gossip sender. Native pre-handshake VDFs use a 128-item / 32 MiB temporary window;
+Peer lifecycle checkpoint: both socket directions pipeline native v103 ID, info
+and fresh signed challenge requests. Full nodes then prove genesis and synced
+height; light/API clients authenticate without exporting ledger methods, never
+qualify as sync observers and receive no periodic ledger queries. No gossip
+sender attaches before these checks. Native pre-handshake VDFs use a 128-item / 32 MiB temporary window;
 failed handshakes admit nothing. ID signatures and network identity precede
 duplicate connection replacement in a weak socket registry shared by incoming
 and outgoing peers. Native full/light/API role filters run before fanout ranks;
