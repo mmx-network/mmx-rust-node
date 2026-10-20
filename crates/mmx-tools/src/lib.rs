@@ -1,4 +1,5 @@
 mod config;
+mod timelord;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use mmx_farming::{
     farmer::Farmer,
@@ -21,6 +22,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+pub use timelord::timelord_main;
 use vnx::{
     net::{NetworkClient, Server},
     runtime::{Methods, OverflowPolicy, Runtime},

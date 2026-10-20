@@ -38,5 +38,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy --locked -p mmx-crypto -p mmx-consensus --all-targets -- -D warnings
-      - run: cargo test --locked -p mmx-crypto -p mmx-consensus -- --nocapture
+      - run: cargo clippy --locked -p mmx-crypto -p mmx-consensus -p mmx-timelord --all-targets -- -D warnings
+      - run: cargo test --locked -p mmx-crypto -p mmx-consensus -p mmx-timelord -- --nocapture

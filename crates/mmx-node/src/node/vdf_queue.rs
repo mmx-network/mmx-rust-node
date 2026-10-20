@@ -135,7 +135,9 @@ impl Node {
             if !keep {
                 self.work_bytes -= *size;
                 if let Ok(id) = hash(work, "content_hash") {
-                    self.verified_work.remove(&id);
+                    if self.verified_work.remove(&id).is_some() {
+                        self.timelord_revision = self.timelord_revision.wrapping_add(1);
+                    }
                 }
             }
             keep
@@ -329,10 +331,15 @@ impl Node {
                     .or_default()
                     .push(id);
                 self.verified_work.insert(id, point);
+                self.timelord_revision = self.timelord_revision.wrapping_add(1);
             }
         }
+        let before = self.verified_work.len();
         self.verified_work
             .retain(|_, point| point.point().start >= root.vdf_iters);
+        if self.verified_work.len() != before {
+            self.timelord_revision = self.timelord_revision.wrapping_add(1);
+        }
         Ok(())
     }
 }

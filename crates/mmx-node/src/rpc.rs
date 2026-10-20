@@ -217,6 +217,7 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
     }
     runtime.register("Node", methods)?;
     let incoming = runtime.subscribe("farmer.proof", 64, OverflowPolicy::DropOldest, false)?;
+    let timelord = runtime.subscribe("timelord.proof", 16, OverflowPolicy::DropOldest, false)?;
     let inbox = node
         .lock()
         .map_err(|_| error("node lock poisoned"))?
@@ -235,8 +236,8 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
                     "vnx.permission_e.PUBLISH".into(),
                 ],
             ),
-            export_topics: ["harvester.challenges".into()].into(),
-            publish_topics: ["farmer.proof".into()].into(),
+            export_topics: ["harvester.challenges".into(), "timelord.requests".into()].into(),
+            publish_topics: ["farmer.proof".into(), "timelord.proof".into()].into(),
             ..Default::default()
         },
     )?;
@@ -245,6 +246,9 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
     let worker = thread::spawn(move || {
         let mut published = std::collections::BTreeSet::new();
         let mut checked = std::time::Instant::now() - Duration::from_secs(1);
+        let mut interval_stamp = None;
+        let mut interval_requests = Vec::<mmx_types::mmx::IntervalRequest>::new();
+        let mut interval_sent = std::time::Instant::now() - Duration::from_secs(2);
         while !running.load(Ordering::Relaxed) {
             while let Ok(Some(sample)) = incoming.try_recv() {
                 if sample.replay {
@@ -266,6 +270,54 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
                 if let Err(e) = decoded {
                     eprintln!("Farmer proof handoff: {e}");
                 }
+            }
+            for _ in 0..16 {
+                let Ok(Some(sample)) = timelord.try_recv() else {
+                    break;
+                };
+                if sample.replay {
+                    continue;
+                }
+                let decoded = (|| -> Result<()> {
+                    let record = from_json_record(&sample.value)?;
+                    if record.name != "mmx.ProofOfTime" {
+                        return Err(error("expected timelord proof of time"));
+                    }
+                    let size = record.memory_size().max(record.encode_compact()?.len());
+                    if size > 32 * 1024 * 1024 {
+                        return Err(error("timelord proof exceeds 32 MiB"));
+                    }
+                    // Local/remote timelords receive no trust shortcut: normal
+                    // envelope, signature, history and work checks run on tick.
+                    inbox.submit(record, size)
+                })();
+                if let Err(e) = decoded {
+                    eprintln!("Timelord proof handoff: {e}");
+                }
+            }
+            if let Ok(n) = node.try_lock() {
+                let stamp = (n.synced, n.timelord_tip, n.timelord_revision);
+                if interval_stamp != Some(stamp) {
+                    match n.timelord_requests() {
+                        Ok(requests) => {
+                            interval_requests = requests;
+                            interval_stamp = Some(stamp);
+                            interval_sent = std::time::Instant::now() - Duration::from_secs(2);
+                        }
+                        Err(e) => eprintln!("Timelord interval lookup: {e}"),
+                    }
+                }
+            }
+            if interval_sent.elapsed() >= Duration::from_secs(2) {
+                for request in &interval_requests {
+                    if let Err(e) = request
+                        .to_value()
+                        .and_then(|v| runtime.publish("timelord.requests", v, false))
+                    {
+                        eprintln!("Timelord interval publication: {e}");
+                    }
+                }
+                interval_sent = std::time::Instant::now();
             }
             if checked.elapsed() >= Duration::from_secs(1) {
                 if let Ok(n) = node.try_lock() {

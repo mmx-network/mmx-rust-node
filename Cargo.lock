@@ -846,6 +846,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmx-timelord"
+version = "0.1.0"
+dependencies = [
+ "k256",
+ "libc",
+ "mmx-consensus",
+ "mmx-crypto",
+ "mmx-types",
+ "rand",
+ "sha2",
+ "tempfile",
+ "vnx",
+ "zeroize",
+]
+
+[[package]]
 name = "mmx-tools"
 version = "0.1.0"
 dependencies = [
@@ -856,6 +872,7 @@ dependencies = [
  "mmx-execution",
  "mmx-farming",
  "mmx-node",
+ "mmx-timelord",
  "mmx-types",
  "mmx-vm",
  "mmx-wallet",

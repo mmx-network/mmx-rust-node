@@ -699,6 +699,118 @@ fn synced_test_node(
 }
 
 #[test]
+fn timelord_daemon_uses_native_intervals_and_only_verified_work_advances_the_node() {
+    use mmx_node::rpc;
+    let (mut network, _, _) = synthetic_network();
+    network.params.vdf_segment_size = 100_000;
+    network.params.initial_time_diff = 1;
+    network.params.time_diff_divider = 1;
+    network.params.time_diff_constant = 200_000;
+    network.params.max_vdf_count = 4;
+    network.params.infuse_delay = 1;
+    let state = synced_test_node(&network, 17);
+    let requests = state.lock().unwrap().timelord_requests().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].input.is_some());
+    assert!(requests[1].input.is_none());
+    let mut node = rpc::vnx_server("127.0.0.1:0".parse().unwrap(), state.clone()).unwrap();
+    let observer = client(&node.endpoint().to_string(), "Node");
+    let mut secret = [0; 32];
+    secret[31] = 2;
+    let forged = mmx_timelord::identity::Identity::from_bytes(&secret)
+        .unwrap()
+        .sign(mmx::ProofOfTime {
+            vdf_height: 1,
+            start: requests[0].start,
+            num_iters: requests[0].end - requests[0].start,
+            segment_size: network.params.vdf_segment_size,
+            input: requests[0].input.clone().unwrap(),
+            prev: requests[0].infuse.clone(),
+            segments: vec![[0; 32].into(); 2],
+            ..Default::default()
+        })
+        .unwrap();
+    observer
+        .publish("timelord.proof", forged.to_value().unwrap())
+        .unwrap();
+    for _ in 0..5 {
+        thread::sleep(Duration::from_millis(20));
+        state.lock().unwrap().tick().unwrap();
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .call(&mmx_node::node::record("mmx.Node.get_vdf_height", []))
+            .unwrap()
+            .field("_ret_0")
+            .unwrap()
+            .uint()
+            .unwrap(),
+        0
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::write(config.join("TimeLord.json"),json!({"max_history":4096,"cpu":"auto","reward_addr":mmx_wallet::Address([7;32]).to_string()}).to_string()).unwrap();
+    let storage = dir.path().join("identity");
+    let args = vec![
+        "-c".into(),
+        config.into_os_string(),
+        "--node".into(),
+        node.endpoint().to_string().into(),
+        "--reward-addr".into(),
+        "MMX".into(),
+        "--storage-path".into(),
+        storage.clone().into_os_string(),
+        "--listen".into(),
+        "127.0.0.1:0".into(),
+    ];
+    let (daemon, _) = Daemon::start_line(env!("CARGO_BIN_EXE_mmx-timelord"), &args, dir.path());
+    let endpoint = daemon
+        .line("TimeLord VNX RPC ")
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_string();
+    let control = client(&endpoint, "TimeLord");
+    assert!(observer
+        .call_value("mmx.TimeLord.stop_vdf", json!({}))
+        .is_err());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut n = state.lock().unwrap();
+        n.tick().unwrap();
+        let reply = n
+            .call(&mmx_node::node::record("mmx.Node.get_vdf_height", []))
+            .unwrap();
+        let peak = reply.field("_ret_0").unwrap().uint().unwrap();
+        if peak >= 1 {
+            break;
+        }
+        drop(n);
+        assert!(
+            Instant::now() < deadline,
+            "timelord work never advanced the verified VDF peak"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    control
+        .call_value("mmx.TimeLord.stop_vdf", json!({}))
+        .unwrap();
+    let key = fs::read(storage.join("timelord_sk.dat")).unwrap();
+    assert_eq!(key.len(), 42);
+    control.close();
+    drop(daemon);
+    let (alias, _) = Daemon::start_line(env!("CARGO_BIN_EXE_mmx_timelord"), &args, dir.path());
+    alias.line("TimeLord VNX RPC ");
+    assert_eq!(fs::read(storage.join("timelord_sk.dat")).unwrap(), key);
+    drop(alias);
+    observer.close();
+    node.shutdown();
+}
+
+#[test]
 fn remote_plot_to_farmer_to_rust_node_produces_a_live_block() {
     use mmx_node::{production::Worker, rpc};
     use std::sync::{atomic::AtomicBool, Arc};
@@ -816,9 +928,13 @@ fn remote_plot_to_farmer_to_rust_node_produces_a_live_block() {
 }
 
 #[test]
-fn node_starts_configured_wallet_farmer_and_remote_harvester_services() {
+fn node_starts_configured_wallet_farmer_remote_harvester_and_timelord_services() {
     use mmx_execution::chain::network::BINARY_FILES;
-    let (network, _, _) = synthetic_network();
+    let (mut network, _, _) = synthetic_network();
+    network.params.vdf_segment_size = 100_000;
+    network.params.initial_time_diff = 1;
+    network.params.time_diff_divider = 1;
+    network.params.time_diff_constant = 200_000;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let base = root.join("config/base");
@@ -854,6 +970,14 @@ fn node_starts_configured_wallet_farmer_and_remote_harvester_services() {
     let farmer = endpoint("farmer.sock");
     let harvesters = endpoint("remote.sock");
     let harvester = endpoint("harvester.sock");
+    let timelord = endpoint("timelord.sock");
+    fs::write(local.join("timelord"), "true").unwrap();
+    fs::write(
+        local.join("TimeLord.json"),
+        json!({"listen":timelord,"storage_path":root.join("timelord-identity"),"max_history":4096})
+            .to_string(),
+    )
+    .unwrap();
     fs::write(
         root.join("wallet.dat"),
         KeyFile::new([83; 32], None).encode(),
@@ -903,6 +1027,11 @@ fn node_starts_configured_wallet_farmer_and_remote_harvester_services() {
     );
     let line = daemon.line("P2P ");
     daemon.line("Wallet VNX RPC ");
+    daemon.line("TimeLord VNX RPC ");
+    let time_control = client(&timelord, "TimeLord");
+    time_control
+        .call_value("mmx.TimeLord.stop_vdf", json!({}))
+        .unwrap();
     // The remote surface and the local harvester both announce this prefix;
     // wait for the control endpoint itself before querying it.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -962,6 +1091,7 @@ fn node_starts_configured_wallet_farmer_and_remote_harvester_services() {
         thread::sleep(Duration::from_millis(50));
     }
     control.close();
+    time_control.close();
     remote.close();
     wallets.close();
     node.close();

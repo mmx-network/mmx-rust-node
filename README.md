@@ -412,7 +412,8 @@ counter. It does not require the C++ repository or a running MMX node.
 | `mmx-wallet` | Compatible recovery words/key files, address and farmer-key derivation, message signing, exact amounts and signed transfers with a native consensus bridge. |
 | `mmxwallet` | Standalone HTTP(S) wallet CLI, private file storage, recovery/import/export, queries, prepared transfers, validation and explicit broadcast. |
 | `mmx-farming` | Wallet locking and native RPC, farmer response/header/vote signing, farm reports, native HDD/SSD/C1+ park reads, bounded CPU decompression and challenge scheduling. |
-| `mmx-tools` | `mmx`, `mmx-wallet`, `mmx-farmer` and `mmx-harvester` executables. |
+| `mmx-timelord` | Bounded native interval scheduling, dedicated single-chain SHA-NI/ARM SHA2 hashing, persistent native signing identity and automatic Intel efficiency-core placement. |
+| `mmx-tools` | `mmx`, `mmx-wallet`, `mmx-farmer`, `mmx-harvester`, `mmx-timelord` and the native `mmx_timelord` alias. |
 | `mmx-vm` | MMX value types and compact serialization, instruction metadata and compressed bytecode v1, interpreter with heap references and collections, gas accounting, call frames, read-only execution, and contract storage adapters. |
 
 The interpreter executes all 48 recognized opcodes: copy/clear and cloning,
@@ -1508,6 +1509,63 @@ validated block. Separate tests relay a locally produced block to another node,
 compare candidate fields and execution with C++ fixtures, reject stale signer
 results and check that candidate assembly causes no disk writes. Farmer and
 harvester parameters come from node RPC, without C++ data files.
+
+### Timelord
+
+`mmx-timelord` (also `mmx_timelord`) imports native `timelord.requests` and
+exports signed `timelord.proof` over VNX. It works with Rust nodes and C++ nodes
+using the same interval/proof schema. Hashing runs on one dedicated thread;
+request handling, proof signing and network writes run separately.
+
+```sh
+cargo build --locked --release -p mmx-tools --bin mmx-timelord --bin mmx_timelord
+target/release/mmx-timelord --node 127.0.0.1:11331 \
+  --storage-path /path/to/network --reward-addr YOUR_MMX_ADDRESS
+# Native configuration layering and the C++ remote-node port:
+target/release/mmx_timelord -c /path/to/config --node HOST:11330
+# RAM-only benchmark; no node connection, key creation or ledger reads:
+target/release/mmx-timelord --benchmark 2000000
+```
+
+The default `--cpu auto` detects SHA-capable Intel efficiency cores with CPUID
+leaf 1A and pins only the hashing thread to the first one allowed by its inherited
+CPU set. Other CPUs, including ARM, retain normal scheduling. `--cpu N` selects
+an explicit logical CPU and `--cpu any` disables affinity. This respects process
+affinity/cgroup restrictions and never changes another thread's CPU set.
+Single-chain hashing uses latency-oriented SHA-NI (with a guarded AVX variant),
+ARM SHA2 or portable RustCrypto fallback. GPU acceleration remains for verification;
+a timelord's dependent chain is computed serially.
+
+The native `TimeLord.json` keys `reward_addr`, `storage_path`, `max_history`,
+`input_request` and `output_proofs` are supported, plus `cpu` and `listen`.
+Explicit CLI options take priority. `TimeLord.cpu` is a string (`"auto"`, `"any"`
+or a logical CPU number). Omitted rewards use the first available wallet account,
+then the zero reward address if none is available. `--wallet` selects a separate
+wallet endpoint. Storage is relative to `MMX_NETWORK`, falling back to `MMX_HOME`
+or the current directory. Existing native `timelord_sk.dat` identities are reused;
+new ones are atomically published with mode 0600. Corrupt keys are preserved and
+startup fails rather than silently replacing the identity.
+
+Setting the native `timelord` configuration switch to `true` starts the service
+with configured Rust node services. Its private control endpoint defaults to
+`127.0.0.1:11334`, reserving 11332 for the private farmer; `--listen` or
+`TimeLord.listen` can select the native 11332 port or a private Unix socket.
+The control service exposes native `TimeLord.stop_vdf`; the public node service
+cannot stop a timelord. New interval requests resume hashing as in C++.
+
+History is a bounded RAM ring, default one million 32-byte points, with at most
+1,000 pending intervals/infusions each; `max_history` accepts 2–16,000,000 points.
+Forecasts avoid waiting for the next
+block, duplicate requests reuse computed segments, and the native two-second
+retry timer permits retransmission. Generation checks fence work across forks
+and stop; cancellation checks every 65,536 iterations bound wasted hashing.
+The worker sleeps at the end of its known forecast instead of burning CPU on
+work beyond an unknown infusion; the next request wakes it immediately.
+Supplied restart inputs override expired/conflicting history, and changed past
+infusions trigger recomputation so obsolete overlapping forecasts cannot produce
+invalid proofs. The node verifies local/remote timelord work through the normal
+signature, history and CPU/GPU admission path. C++ fixture comparisons and an
+actual daemon-to-node test cover the producer and native identity compatibility.
 
 ## Next port stages
 

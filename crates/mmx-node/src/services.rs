@@ -144,7 +144,7 @@ impl Services {
                 "--node".into(),
                 node.into(),
                 "--wallet".into(),
-                wallet_endpoint,
+                wallet_endpoint.clone(),
                 "--listen".into(),
                 farmer.into(),
             ]);
@@ -164,12 +164,34 @@ impl Services {
                 } else {
                     farmer.to_owned()
                 };
-                let mut args = base;
+                let mut args = base.clone();
                 args.extend(["--farmer".into(), harvester_farmer]);
                 services
                     .0
                     .push(Owned::spawn(&directory.join("mmx-harvester"), args)?);
             }
+        }
+        if config.read::<bool>("timelord")?.unwrap_or(false) {
+            let endpoint = config
+                .read::<String>("TimeLord.listen")?
+                .unwrap_or_else(|| "127.0.0.1:11334".into());
+            let mut args = base;
+            args.extend([
+                "--node".into(),
+                node.into(),
+                "--wallet".into(),
+                wallet_endpoint,
+                "--listen".into(),
+                endpoint.clone(),
+            ]);
+            services
+                .0
+                .push(Owned::spawn(&directory.join("mmx-timelord"), args)?);
+            services
+                .0
+                .last_mut()
+                .unwrap()
+                .ready(&endpoint, "TimeLord")?;
         }
         Ok(services)
     }

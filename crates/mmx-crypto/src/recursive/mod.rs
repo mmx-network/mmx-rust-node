@@ -13,6 +13,61 @@ pub enum Backend {
     Avx2,
     Scalar,
 }
+/// The timelord computes one dependent chain, so it needs a latency-optimized
+/// single lane rather than the verification kernel's independent-lane batching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SingleBackend {
+    ShaNi,
+    ShaNiAvx,
+    ArmSha2,
+    Scalar,
+}
+pub fn single_backend() -> SingleBackend {
+    match backend() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        Backend::ShaNi => {
+            if std::is_x86_feature_detected!("avx") {
+                SingleBackend::ShaNiAvx
+            } else {
+                SingleBackend::ShaNi
+            }
+        }
+        Backend::ArmSha2 => SingleBackend::ArmSha2,
+        _ => SingleBackend::Scalar,
+    }
+}
+pub fn hash_one(point: &mut [u8; 32], iterations: u64) {
+    single_dispatch(point, iterations, single_backend());
+}
+fn single_dispatch(point: &mut [u8; 32], iterations: u64, selected: SingleBackend) {
+    if iterations == 0 {
+        return;
+    }
+    match selected {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        SingleBackend::ShaNi | SingleBackend::ShaNiAvx => {
+            // SAFETY: single_backend checked every required CPU/OS feature;
+            // this mutable fixed array supplies exactly 32 valid bytes.
+            unsafe {
+                if selected == SingleBackend::ShaNiAvx {
+                    x86::single_avx(point, iterations);
+                } else {
+                    x86::single(point, iterations);
+                }
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        SingleBackend::ArmSha2 => {
+            // SAFETY: runtime SHA2 support and one complete fixed-width lane.
+            unsafe { arm::single(point, iterations) }
+        }
+        _ => {
+            for _ in 0..iterations {
+                *point = Sha256::digest(*point).into();
+            }
+        }
+    }
+}
 pub fn backend() -> Backend {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -108,6 +163,64 @@ const K: [u32; 64] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn single_chain_matches_scalar_and_split_calls_for_every_available_backend() {
+        let modes = vec![SingleBackend::Scalar, single_backend()];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let mut modes = modes;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if backend() == Backend::ShaNi {
+            modes.push(SingleBackend::ShaNi);
+        }
+        eprintln!("single-chain SHA backend: {:?}", single_backend());
+        for mode in modes {
+            for seed in [[0; 32], [0xff; 32], std::array::from_fn(|i| (i * 37) as u8)] {
+                for iterations in [0u32, 1, 2, 17, 64, 1009] {
+                    let mut expected = [seed];
+                    scalar(&mut expected, iterations);
+                    let mut actual = seed;
+                    single_dispatch(&mut actual, u64::from(iterations), mode);
+                    assert_eq!(actual, expected[0], "{mode:?} / {iterations}");
+                    let mut split = seed;
+                    single_dispatch(&mut split, u64::from(iterations / 2), mode);
+                    single_dispatch(&mut split, u64::from(iterations - iterations / 2), mode);
+                    assert_eq!(actual, split);
+                }
+            }
+        }
+    }
+    #[test]
+    #[ignore = "CPU-only timelord latency comparison"]
+    fn benchmark_single_chain() {
+        let modes = vec![SingleBackend::Scalar, single_backend()];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let mut modes = modes;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if backend() == Backend::ShaNi {
+            modes.push(SingleBackend::ShaNi);
+        }
+        for mode in modes {
+            let mut times = Vec::new();
+            for _ in 0..7 {
+                let mut point = [0x42; 32];
+                let start = std::time::Instant::now();
+                single_dispatch(&mut point, 2_000_000, mode);
+                times.push(start.elapsed());
+                assert_eq!(
+                    vnx::util::to_hex_string(&point, false, false).to_lowercase(),
+                    "e68e555b9eef1e0ced3fb34970dc4eaaefe75a7bac1e0b2a323daa0e5faecadf",
+                    "native single-chain output"
+                );
+                std::hint::black_box(point);
+            }
+            times.sort();
+            eprintln!(
+                "BENCH single {mode:?} iterations=2000000 median_ms={:.3} MH/s={:.3}",
+                times[3].as_secs_f64() * 1000.0,
+                2.0 / times[3].as_secs_f64()
+            );
+        }
+    }
     fn check(selected: Backend) {
         for count in [0, 1, 2, 3, 7, 8, 15, 16, 17] {
             for iterations in [0, 1, 2, 17, 64] {

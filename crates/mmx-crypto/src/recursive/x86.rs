@@ -6,6 +6,93 @@ use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+// Native single-chain look-ahead schedule: overlap message expansion with the
+// dependent SHA rounds, constant-fold padding, and retain endian words between
+// iterations. Separate target functions let AVX hosts use non-destructive VEX
+// instructions without requiring AVX on older SHA-capable CPUs.
+macro_rules! single_kernel {
+    ($name:ident, $features:literal) => {
+        #[target_feature(enable = $features)]
+        pub(super) unsafe fn $name(point: &mut [u8; 32], iterations: u64) {
+            let swap = _mm_set_epi64x(0x0c0d0e0f08090a0b, 0x0405060700010203);
+            let init0 = _mm_set_epi64x(0x6a09e667bb67ae85, 0x510e527f9b05688c);
+            let init1 = _mm_set_epi64x(0x3c6ef372a54ff53a, 0x1f83d9ab5be0cd19);
+            let pad0 = _mm_set_epi64x(0, 0x0000000080000000);
+            let pad1 = _mm_set_epi64x(0x0000010000000000, 0);
+            let more0 = _mm_set_epi64x(0x5807aa985807aa98, 0x550c7dc3243185be);
+            let mut hash0 = _mm_shuffle_epi8(_mm_loadu_si128(point.as_ptr().cast()), swap);
+            let mut hash1 = _mm_shuffle_epi8(_mm_loadu_si128(point.as_ptr().add(16).cast()), swap);
+            for _ in 0..iterations {
+                let mut state0 = init0;
+                let mut state1 = init1;
+                let mut m0 = hash0;
+                let mut m1 = hash1;
+                let mut m2 = pad0;
+                let mut m3 = pad1;
+                let mut msg = _mm_add_epi32(m0, _mm_loadu_si128(K.as_ptr().cast()));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32::<0x0e>(msg));
+                msg = _mm_add_epi32(m1, _mm_loadu_si128(K.as_ptr().add(4).cast()));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32::<0x0e>(msg));
+                m0 = _mm_sha256msg1_epu32(m0, m1);
+                msg = _mm_add_epi32(pad0, _mm_loadu_si128(K.as_ptr().add(8).cast()));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, more0);
+                m1 = _mm_sha256msg1_epu32(m1, pad0);
+                msg = _mm_add_epi32(pad1, _mm_loadu_si128(K.as_ptr().add(12).cast()));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+                m0 = _mm_sha256msg2_epu32(m0, m3);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32::<0x0e>(msg));
+                // sha256msg1(pad0,pad1) equals pad0: no instruction required.
+                single_round!(m0, m1, m2, m3, state0, state1, 16);
+                single_round!(m1, m2, m3, m0, state0, state1, 20);
+                single_round!(m2, m3, m0, m1, state0, state1, 24);
+                single_round!(m3, m0, m1, m2, state0, state1, 28);
+                single_round!(m0, m1, m2, m3, state0, state1, 32);
+                single_round!(m1, m2, m3, m0, state0, state1, 36);
+                single_round!(m2, m3, m0, m1, state0, state1, 40);
+                single_round!(m3, m0, m1, m2, state0, state1, 44);
+                single_round!(m0, m1, m2, m3, state0, state1, 48);
+                msg = _mm_add_epi32(m1, _mm_loadu_si128(K.as_ptr().add(52).cast()));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+                m2 = _mm_add_epi32(m2, _mm_alignr_epi8::<4>(m1, m0));
+                m2 = _mm_sha256msg2_epu32(m2, m1);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32::<0x0e>(msg));
+                msg = _mm_add_epi32(m2, _mm_loadu_si128(K.as_ptr().add(56).cast()));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+                m3 = _mm_add_epi32(m3, _mm_alignr_epi8::<4>(m2, m1));
+                m3 = _mm_sha256msg2_epu32(m3, m2);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32::<0x0e>(msg));
+                msg = _mm_add_epi32(m3, _mm_loadu_si128(K.as_ptr().add(60).cast()));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32::<0x0e>(msg));
+                let a = _mm_shuffle_epi32::<0x1b>(_mm_add_epi32(state0, init0));
+                let b = _mm_shuffle_epi32::<0xb1>(_mm_add_epi32(state1, init1));
+                hash0 = _mm_blend_epi16::<0xf0>(a, b);
+                hash1 = _mm_alignr_epi8::<8>(b, a);
+            }
+            _mm_storeu_si128(point.as_mut_ptr().cast(), _mm_shuffle_epi8(hash0, swap));
+            _mm_storeu_si128(
+                point.as_mut_ptr().add(16).cast(),
+                _mm_shuffle_epi8(hash1, swap),
+            );
+        }
+    };
+}
+macro_rules! single_round {
+    ($a:ident,$b:ident,$c:ident,$d:ident,$s0:ident,$s1:ident,$round:literal) => {{
+        let msg = _mm_add_epi32($a, _mm_loadu_si128(K.as_ptr().add($round).cast()));
+        $s1 = _mm_sha256rnds2_epu32($s1, $s0, msg);
+        $b = _mm_add_epi32($b, _mm_alignr_epi8::<4>($a, $d));
+        $b = _mm_sha256msg2_epu32($b, $a);
+        $s0 = _mm_sha256rnds2_epu32($s0, $s1, _mm_shuffle_epi32::<0x0e>(msg));
+        $d = _mm_sha256msg1_epu32($d, $a);
+    }};
+}
+single_kernel!(single, "sha,ssse3,sse4.1");
+single_kernel!(single_avx, "sha,ssse3,sse4.1,avx");
+
 #[target_feature(enable = "sha,ssse3,sse4.1")]
 pub(super) unsafe fn sha_ni(points: &mut [[u8; 32]; 2], iterations: u32) {
     let swap = _mm_set_epi64x(0x0c0d0e0f08090a0b, 0x0405060700010203);

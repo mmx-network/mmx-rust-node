@@ -1,0 +1,21 @@
+[package]
+name = "mmx-timelord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native MMX timelord, bounded interval scheduling and single-chain VDF generation"
+
+[dependencies]
+mmx-types.workspace = true
+mmx-consensus.workspace = true
+mmx-crypto.workspace = true
+sha2.workspace = true
+k256.workspace = true
+zeroize.workspace = true
+rand = "0.8"
+libc = "0.2"
+tempfile.workspace = true
+
+[dev-dependencies]
+vnx.workspace = true

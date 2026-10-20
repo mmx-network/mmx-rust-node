@@ -34,6 +34,8 @@ pub struct Node {
     pending: BTreeMap<Hash, (Record, i64, usize)>,
     pending_bytes: usize,
     pub(crate) verified_work: BTreeMap<Hash, mmx_consensus::vdf::VerifiedPoint>,
+    pub(crate) timelord_revision: u64,
+    pub(crate) timelord_tip: Hash,
     vdf_worker: Option<crate::vdf_worker::Worker>,
     vdf_trust: vdf_queue::Trust,
     rejected_work: BTreeSet<Hash>,
@@ -138,6 +140,8 @@ impl Node {
             pending: BTreeMap::new(),
             pending_bytes: 0,
             verified_work: BTreeMap::new(),
+            timelord_revision: 0,
+            timelord_tip: tip.hash.0,
             vdf_worker: None,
             vdf_trust: Default::default(),
             rejected_work: Default::default(),
@@ -216,6 +220,46 @@ impl Node {
             })
             .collect()
     }
+    /// Native Node::update's infusion look-ahead. Only the interval at the
+    /// work-verified VDF peak carries an input; future intervals are forecasts.
+    pub fn timelord_requests(&self) -> Result<Vec<mmx::IntervalRequest>> {
+        if !self.synced {
+            return Ok(Vec::new());
+        }
+        let tip = self
+            .chain
+            .selected()
+            .tip()?
+            .ok_or_else(|| error("missing timelord tip"))?;
+        let params = self.chain.selected().params();
+        let (height, output) = self.vdf_peak()?;
+        let count = height.saturating_sub(tip.vdf_height);
+        let advance = count
+            .saturating_add(params.infuse_delay)
+            .min(params.max_vdf_count);
+        let mut start = tip.vdf_iters;
+        let mut requests = Vec::new();
+        for offset in 0..=advance {
+            let infusion =
+                mmx_consensus::transitions::history::infusion(&self.chain, params, &tip, offset)?;
+            let end = start
+                .checked_add(infusion.num_iters)
+                .ok_or_else(|| error("timelord iteration overflow"))?;
+            requests.push(mmx::IntervalRequest {
+                vdf_height: tip
+                    .vdf_height
+                    .checked_add(offset)
+                    .and_then(|v| v.checked_add(1))
+                    .ok_or_else(|| error("timelord height overflow"))?,
+                start,
+                end,
+                infuse: infusion.hash.into(),
+                input: (offset == count).then_some(output.into()),
+            });
+            start = end;
+        }
+        Ok(requests)
+    }
     /// Apply native Router transport policy before starting peers.
     pub fn configure_router(&mut self, config: &vnx::config::Config) -> Result<()> {
         let target = config
@@ -288,6 +332,7 @@ impl Node {
         self.pending.clear();
         self.pending_bytes = 0;
         self.verified_work.clear();
+        self.timelord_revision = self.timelord_revision.wrapping_add(1);
         self.rejected_work.clear();
         self.responses.clear();
         self.response_bytes = 0;
@@ -430,6 +475,7 @@ impl Node {
             .tip()?
             .ok_or_else(|| error("missing selected tip"))?;
         let mut line = Vec::new();
+        self.timelord_tip = tip.hash.0;
         for height in self.root + 1..=tip.height {
             let h = selected
                 .header(
@@ -714,7 +760,13 @@ impl Node {
                 while self.work.len() > limit {
                     if let Some((old, _, size)) = self.work.pop_front() {
                         self.work_bytes -= size;
-                        self.verified_work.remove(&hash(&old, "content_hash")?);
+                        if self
+                            .verified_work
+                            .remove(&hash(&old, "content_hash")?)
+                            .is_some()
+                        {
+                            self.timelord_revision = self.timelord_revision.wrapping_add(1);
+                        }
                     }
                 }
                 update = true;
