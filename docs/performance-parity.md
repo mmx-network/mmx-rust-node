@@ -395,3 +395,13 @@ work is retired, not retried on every synchronous tick, and no checked evidence
 is rebound to another record. Regressions cover priority, dependency release,
 exact credits/penalties, eviction, aliases, wrong-start recovery and the forty-step
 protocol gap. CPU SIMD batching remains the next checkpoint.
+
+Reconnect ownership checkpoint: native authenticated identity replacement now
+replaces the corresponding sync slot too. A pending old metadata owner and the
+latest new socket share one bounded slot until the old operation returns; no
+worker is abandoned and no duplicate observer is counted. Nonblocking control
+draining during ordinary peer polling promotes replacements even below the
+three-peer minimum. Metadata query generations reject stale same-ID completions
+before touching a new worker or status. Real socket reconnection preserves the
+three distinct sync peers, and a controlled blocked-owner test exercises stale
+height isolation and promotion while below the minimum.

@@ -91,6 +91,16 @@ impl<S: PeerSource> PeerPool<S> {
             return Ok(None);
         };
         let peer = &mut self.peers[index];
+        // A removed connection can finish after another connection with the
+        // same authenticated ID has been installed. Never take/join the newer
+        // operation or restore an older owner from that stale completion.
+        if peer
+            .inflight
+            .as_ref()
+            .is_none_or(|job| job.query != reply.query)
+        {
+            return Ok(None);
+        }
         let job = peer
             .inflight
             .take()
@@ -100,10 +110,18 @@ impl<S: PeerSource> PeerPool<S> {
                 .join()
                 .map_err(|_| error("peer metadata owner panicked"))?,
         );
-        if job.query != reply.query {
-            return Err(error("peer metadata operation mismatch"));
-        }
         peer.backpressure = peer.backpressure.max(reply.busy);
+        if let Some(replacement) = peer.replacement.take() {
+            self.retired_backpressure += peer.backpressure;
+            peer.source = Some(replacement);
+            peer.active = true;
+            peer.qualified = false;
+            peer.needs_status = true;
+            peer.height = 0;
+            peer.latency = Duration::MAX;
+            peer.backpressure = 0;
+            return Ok(None);
+        }
         match reply.result {
             Ok(Value::Status(Some(height))) => {
                 peer.height = height;
@@ -169,6 +187,10 @@ impl<S: PeerSource> PeerPool<S> {
         if self.peers.iter().any(|p| p.inflight.is_some()) {
             self.receive_metadata(Duration::from_millis(50))?;
         }
+        self.drain_metadata()?;
+        Ok(())
+    }
+    pub(super) fn drain_control(&mut self) -> Result<()> {
         self.drain_metadata()?;
         Ok(())
     }
@@ -290,5 +312,117 @@ impl<S> Drop for PeerPool<S> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+    use std::sync::{Arc, Condvar, Mutex};
+    struct Source {
+        height: u32,
+        release: Option<Arc<(Mutex<bool>, Condvar)>>,
+        started: Option<SyncSender<()>>,
+    }
+    impl PeerSource for Source {
+        fn hashes(&mut self, _: u32, count: u32) -> Result<Vec<Option<BlockHash>>> {
+            Ok(vec![None; count as usize])
+        }
+        fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
+            Ok(vec![None; hashes.len()])
+        }
+        fn synced_height(&mut self) -> Result<Option<u32>> {
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+            }
+            if let Some(release) = &self.release {
+                let mut ready = release.0.lock().unwrap();
+                while !*ready {
+                    ready = release.1.wait(ready).unwrap();
+                }
+            }
+            Ok(Some(self.height))
+        }
+    }
+    #[test]
+    fn a_reconnect_waits_for_its_old_owner_and_late_returns_cannot_replace_the_new_owner() {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started, ready) = sync_channel(1);
+        let mut pool = PeerPool::new(vec![(
+            [1; 32],
+            Source {
+                height: 999,
+                release: Some(release.clone()),
+                started: Some(started),
+            },
+        )]);
+        let old = pool.next_query();
+        pool.start_metadata(0, old, Kind::Status).unwrap();
+        ready.recv_timeout(Duration::from_secs(3)).unwrap();
+        for id in [2u8, 3] {
+            assert!(pool.add(
+                [id; 32],
+                Source {
+                    height: 41,
+                    release: None,
+                    started: None
+                }
+            ));
+        }
+        assert!(pool.install_authenticated(
+            [1; 32],
+            Source {
+                height: 42,
+                release: None,
+                started: None
+            }
+        ));
+        assert_eq!(
+            pool.len(),
+            2,
+            "a pending replacement is not an extra qualified observer"
+        );
+        pool.remove_failed();
+        assert_eq!(
+            pool.peers.len(),
+            3,
+            "keep the pending replacement and old owner bounded in one slot"
+        );
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pool.peers[0].replacement.is_some() {
+            assert!(Instant::now() < deadline);
+            pool.poll().unwrap();
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            pool.len(),
+            3,
+            "polling below the sync minimum must restore the replacement"
+        );
+        assert_eq!(pool.peers[0].source.as_ref().unwrap().height, 42);
+        assert!(
+            !pool.peers[0].qualified,
+            "old advertised height must not qualify the replacement"
+        );
+        let fresh = pool.next_query();
+        pool.start_metadata(0, fresh, Kind::Status).unwrap();
+        assert!(pool
+            .accept_metadata(Reply {
+                id: [1; 32],
+                query: old,
+                kind: Kind::Status,
+                elapsed: Duration::ZERO,
+                busy: 0,
+                result: Ok(Value::Status(Some(999)))
+            })
+            .unwrap()
+            .is_none());
+        assert_eq!(pool.peers[0].inflight.as_ref().unwrap().query, fresh);
+        pool.receive_metadata(Duration::from_secs(3)).unwrap();
+        assert_eq!(pool.peers[0].height, 42);
+        assert!(pool.peers[0].qualified);
+        assert_eq!(pool.peers.len(), 3);
     }
 }

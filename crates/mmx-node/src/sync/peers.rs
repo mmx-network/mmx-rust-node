@@ -70,6 +70,7 @@ impl PeerSource for Client {
 struct Peer<S> {
     id: Hash,
     source: Option<S>,
+    replacement: Option<S>,
     inflight: Option<metadata::Job<S>>,
     active: bool,
     qualified: bool,
@@ -147,6 +148,7 @@ impl<S: PeerSource> PeerPool<S> {
             .map(|(id, source)| Peer {
                 id,
                 source: Some(source),
+                replacement: None,
                 inflight: None,
                 active: true,
                 qualified: false,
@@ -185,10 +187,10 @@ impl<S: PeerSource> PeerPool<S> {
         self.retired_backpressure += self
             .peers
             .iter()
-            .filter(|p| !p.active)
+            .filter(|p| !p.active && p.replacement.is_none())
             .map(|p| p.backpressure)
             .sum::<u64>();
-        self.peers.retain(|p| p.active);
+        self.peers.retain(|p| p.active || p.replacement.is_some());
     }
     fn backpressure_retries(&self) -> u64 {
         self.retired_backpressure + self.peers.iter().map(|p| p.backpressure).sum::<u64>()
@@ -200,6 +202,7 @@ impl<S: PeerSource> PeerPool<S> {
         self.peers.push(Peer {
             id,
             source: Some(source),
+            replacement: None,
             inflight: None,
             active: true,
             qualified: false,
@@ -211,7 +214,33 @@ impl<S: PeerSource> PeerPool<S> {
         self.refreshed = Instant::now() - Duration::from_secs(10);
         true
     }
+    /// Native identity replacement has already shut down the old socket. Keep
+    /// its metadata owner until it returns, then install the authenticated
+    /// replacement in the same slot. It never counts as a second observer.
+    pub fn install_authenticated(&mut self, id: Hash, source: S) -> bool {
+        let Some(peer) = self.peers.iter_mut().find(|peer| peer.id == id) else {
+            return self.add(id, source);
+        };
+        if peer.inflight.is_some() {
+            peer.replacement = Some(source);
+            peer.active = false;
+            peer.qualified = false;
+        } else {
+            self.retired_backpressure += peer.backpressure;
+            peer.source = Some(source);
+            peer.replacement = None;
+            peer.active = true;
+            peer.qualified = false;
+            peer.needs_status = true;
+            peer.height = 0;
+            peer.latency = Duration::MAX;
+            peer.backpressure = 0;
+        }
+        self.refreshed = Instant::now() - Duration::from_secs(10);
+        true
+    }
     pub fn poll(&mut self) -> Result<()> {
+        self.drain_control()?;
         if !self.peers.iter().any(|p| p.active && p.source.is_some()) {
             self.poll_metadata()?;
         }
@@ -985,12 +1014,12 @@ pub fn run(
             return Ok(());
         }
         pool.remove_failed();
-        connected.retain(|id, _| pool.ids().contains(id));
+        connected.retain(|id, _| pool.peers.iter().any(|peer| peer.id == *id));
         for (address, result) in connections.finished() {
             retry_at.insert(address.clone(), Instant::now() + Duration::from_secs(30));
             match result {
                 Ok((id, height, client, discovered)) => {
-                    if pool.add(id, client) {
+                    if pool.install_authenticated(id, client) {
                         println!(
                             "Sync peer {address}: authenticated {}, synced height {height}",
                             vnx::util::to_hex_string(&id[..8], true, false)

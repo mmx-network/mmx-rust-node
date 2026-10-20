@@ -1669,7 +1669,21 @@ fn coordinated_socket_sync_authenticates_three_ids_and_uses_native_content_hash_
     assert!(client.qualify(genesis, actual_id).is_err());
     assert!(client.qualify([7; 32], own_id).is_err());
     assert_ne!(id, own_id);
-    drop(client);
+    assert!(pool.install_authenticated(actual_id, client));
+    assert_eq!(pool.refresh().unwrap(), 2);
+    assert_eq!(
+        pool.len(),
+        3,
+        "a reconnect must replace its old observer, not drop both sockets"
+    );
+    assert_eq!(
+        pool.ids()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    pool.poll().unwrap();
     drop(pool);
     for server in &mut servers {
         server.shutdown();

@@ -470,3 +470,15 @@ VNX follow-up: the submodule advances to `35be1ac`, adding serialization and
 bytecode allocation/recursion/schema fuzz campaigns and the nightly array-chunk
 fix. The runtime crate tree is identical to `beaddc6`; this update adds test
 coverage without changing node wire or execution behavior.
+
+Authenticated reconnect follow-up: the sync coordinator now installs a freshly
+proven identity into the existing observer slot, instead of rejecting it after
+the identity registry has already closed the old socket. An old metadata owner
+is retained until its bounded operation returns; the latest replacement waits
+in that same slot and never counts as an additional observer. Polling below
+three peers drains control completions so replacement cannot strand sync below
+its minimum. Old connection query generations cannot take or restore a newer
+metadata owner, qualify it with a stale height, or count toward its hash window.
+The real three-server sync test reconnects an identity and retains all three
+unique observers; a controlled stalled metadata test covers pending replacement,
+low-peer polling, stale returns and fresh qualification without abandoned jobs.
