@@ -44,26 +44,26 @@ fn dispatch(points: &mut [[u8; 32]], iterations: u32, selected: Backend) {
     match selected {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         Backend::ShaNi => {
-            let mut pairs = points.chunks_exact_mut(2);
-            for pair in pairs.by_ref() {
+            let (pairs, remainder) = points.as_chunks_mut::<2>();
+            for pair in pairs {
                 // SAFETY: the selected backend checked SHA/SSSE3/SSE4.1, and
-                // chunks_exact_mut supplies exactly two complete 32-byte lanes.
+                // as_chunks_mut supplies exactly two complete 32-byte lanes.
                 unsafe {
-                    x86::sha_ni(pair.try_into().unwrap(), iterations);
+                    x86::sha_ni(pair, iterations);
                 }
             }
-            scalar(pairs.into_remainder(), iterations);
+            scalar(remainder, iterations);
         }
         #[cfg(target_arch = "aarch64")]
         Backend::ArmSha2 => {
-            let mut pairs = points.chunks_exact_mut(2);
-            for pair in pairs.by_ref() {
+            let (pairs, remainder) = points.as_chunks_mut::<2>();
+            for pair in pairs {
                 // SAFETY: runtime SHA2 support and exactly two complete lanes.
                 unsafe {
-                    arm::sha2(pair.try_into().unwrap(), iterations);
+                    arm::sha2(pair, iterations);
                 }
             }
-            scalar(pairs.into_remainder(), iterations);
+            scalar(remainder, iterations);
         }
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         Backend::Avx2 => {
