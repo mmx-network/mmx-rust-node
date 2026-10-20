@@ -523,3 +523,7 @@ It preserved all scalar/native digests, but three alternating runs per core
 (seven timing samples each) measured E-core AVX 33.774 to 33.877 ms and SSE
 33.471 to 33.601 ms; P-core changes were under 0.3%. There was no useful gain,
 so the native-style schedule was retained instead of adding another variant.
+
+Shutdown checks assert successful SIGINT exit for both timelord executable names.
+Closing the request stream after the stop flag is set is normal shutdown, rather
+than a daemon failure that could trigger an unnecessary supervisor restart.

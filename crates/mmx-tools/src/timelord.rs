@@ -243,6 +243,7 @@ pub fn timelord_main() -> Result<()> {
                         }
                     }
                     Ok(_) | Err(vnx::Error::Timeout) => (),
+                    Err(_) if request_stop.load(Ordering::Relaxed) => break,
                     Err(e) => return Err(e.into()),
                 }
             }

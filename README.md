@@ -1527,11 +1527,12 @@ target/release/mmx_timelord -c /path/to/config --node HOST:11330
 target/release/mmx-timelord --benchmark 2000000
 ```
 
-The default `--cpu auto` detects SHA-capable Intel efficiency cores with CPUID
+On Linux, the default `--cpu auto` detects SHA-capable Intel efficiency cores with CPUID
 leaf 1A and pins only the hashing thread to the first one allowed by its inherited
 CPU set. Other CPUs, including ARM, retain normal scheduling. `--cpu N` selects
 an explicit logical CPU and `--cpu any` disables affinity. This respects process
 affinity/cgroup restrictions and never changes another thread's CPU set.
+Other operating systems currently retain normal scheduling.
 Single-chain hashing uses latency-oriented SHA-NI (with a guarded AVX variant),
 ARM SHA2 or portable RustCrypto fallback. GPU acceleration remains for verification;
 a timelord's dependent chain is computed serially.

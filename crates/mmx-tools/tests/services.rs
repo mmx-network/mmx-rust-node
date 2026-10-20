@@ -118,6 +118,26 @@ impl Daemon {
             && fs::read(format!("{p}/cmdline")).ok().as_ref() == Some(&self.argv)
             && start_time(self.child.id()).as_ref() == Some(&self.start)
     }
+    fn shutdown_successfully(mut self) {
+        assert!(self.owns());
+        assert!(Command::new("kill")
+            .args(["-s", "INT", &self.child.id().to_string()])
+            .status()
+            .unwrap()
+            .success());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(status.success(), "daemon shutdown failed: {status}");
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not shut down promptly"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 impl Drop for Daemon {
     fn drop(&mut self) {
@@ -801,11 +821,11 @@ fn timelord_daemon_uses_native_intervals_and_only_verified_work_advances_the_nod
     let key = fs::read(storage.join("timelord_sk.dat")).unwrap();
     assert_eq!(key.len(), 42);
     control.close();
-    drop(daemon);
+    daemon.shutdown_successfully();
     let (alias, _) = Daemon::start_line(env!("CARGO_BIN_EXE_mmx_timelord"), &args, dir.path());
     alias.line("TimeLord VNX RPC ");
     assert_eq!(fs::read(storage.join("timelord_sk.dat")).unwrap(), key);
-    drop(alias);
+    alias.shutdown_successfully();
     observer.close();
     node.shutdown();
 }
