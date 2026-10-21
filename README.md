@@ -296,6 +296,10 @@ To update a source installation, stop its services, run `git pull --ff-only` and
 `git submodule update --init --recursive`, repeat the release build above, then
 restart with your existing configuration and data directory.
 
+For automatic startup and restart after a reboot, use the
+[systemd service installer](scripts/systemd/README.md). It supports the node,
+separate wallet/farmer services, remote harvesters, timelords, and SSH tunnels.
+
 ## Current limitations
 
 - Pool/NFT partial submission and remote proof recomputation remain unimplemented.

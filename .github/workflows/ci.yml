@@ -13,6 +13,7 @@ jobs:
       - name: Install software OpenCL ICD for kernel conformance tests
         run: sudo apt-get update && sudo apt-get install -y pocl-opencl-icd
       - run: cargo fmt --all --check
+      - run: python3 -m unittest discover -s tools -p test_systemd_units.py -v
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo build --locked -p mmx-node -p mmxwallet -p mmx-tools
       - run: cargo test --workspace --all-targets --locked --no-fail-fast

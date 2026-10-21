@@ -564,3 +564,17 @@ The RAM-only hardware check on t320 compared actual GPU outputs with CPU outputs
 CPU threads; 16,385 F1 memory hashes took 4.76 ms versus 102.8 ms. Both outputs
 matched exactly. Startup also passed the normal accelerator self-tests, and the
 live log confirmed `Using OpenCL GPU 'NVIDIA RTX A5000'` without driver errors.
+
+The reboot follow-up compares native `scripts/systemd/{mmx-node.service,install.sh}`.
+Rust now provides a persistent user-service installer with restart-on-exit,
+journal logging and SIGINT shutdown. Lingering starts these services at boot;
+node, farmer, wallet, harvester and private SSH tunnel processes remain under
+their owning account. Installation uses per-user units instead of native
+system-wide units; a host may require authorization to enable lingering.
+Mount/free-space preconditions preserve
+the existing ledger location and low-disk startup guard. The live deployment
+replaced transient units/screen sessions and verified the same five farmer
+identities/reward address through a dedicated Rust wallet; C++ wallet startup
+is no longer required. Unit argument escaping, validation and storage
+preconditions have regression checks. No ledger/plot format or consensus logic
+changed.
