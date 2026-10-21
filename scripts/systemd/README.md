@@ -37,11 +37,17 @@ For a remote harvester:
 
 ```sh
 python3 scripts/systemd/install.py --name mmx-rust-harvester \
-  --working-directory /path/to/mmx-node --enable -- \
+  --working-directory /path/to/mmx-node \
+  --environment MALLOC_MMAP_THRESHOLD_=131072 --enable -- \
   /path/to/rust/bin/mmx-harvester --farmer FARMER_HOST:11333 \
   --plot-dir /path/to/plots --threads 16 --log-lookups
 systemctl --user start mmx-rust-harvester
 ```
+
+On GNU/glibc builds, this allocator setting returns large temporary proof buffers
+to the OS after each lookup. It prevents idle memory retention across worker
+heaps; it does not limit memory needed for active proofs. See
+[memory measurements](../../docs/performance-parity.md#harvester-idle-memory).
 
 The same installer supports separate wallet, farmer, timelord and SSH tunnel
 services: choose a distinct `--name` and supply the command after `--`. Keep

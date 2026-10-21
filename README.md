@@ -131,6 +131,10 @@ Repeat `--plot-dir` to add directories. `--threads` limits workers shared by
 parallel plot reads and proof computation. For C10 plots, add `--max-f1 262144`
 to permit their worst-case decompression work.
 
+On GNU/glibc builds, prefix the harvester command with
+`MALLOC_MMAP_THRESHOLD_=131072` to return large temporary proof buffers after
+lookups. The [systemd example](scripts/systemd/README.md) includes this setting.
+
 Inspect the services with:
 
 ```sh

@@ -578,3 +578,33 @@ identities/reward address through a dedicated Rust wallet; C++ wallet startup
 is no longer required. Unit argument escaping, validation and storage
 preconditions have regression checks. No ledger/plot format or consensus logic
 changed.
+
+## Harvester idle memory
+
+After the GNU/OpenCL deployment, t320's 16-worker harvester retained about
+1,025 MiB RSS between challenges. `/proc/PID/smaps` attributed 932 MiB to
+anonymous memory, including sixteen worker heaps of roughly 53–57 MiB; NVIDIA
+library mappings contributed about 84 MiB. Inspection of
+`pos::compute_with_accelerator` and native `pos/verify_full.cpp` confirmed that
+proof computation uses temporary vectors which are released after the lookup.
+These maps pointed to allocator retention rather than a deliberately retained
+plot cache.
+
+The persistent harvester service now sets `MALLOC_MMAP_THRESHOLD_=131072`.
+This fixes [glibc's mmap threshold](https://sourceware.org/glibc/manual/latest/html_node/Memory-Allocation-Tunables.html)
+at 128 KiB instead of allowing its dynamic policy to move large allocations
+into worker heaps. Large temporary buffers can return to the OS when freed.
+The service example includes the setting; it applies to GNU/glibc builds and
+does not cap memory required by active proof computations.
+
+With the same binary, A5000, 800 available plots, 16 workers and 262144 F1 limit,
+the post-change 120-second sample ended at 130.5 MiB RSS, with sampled RSS at
+most 168.9 MiB and an observed process high-water mark of 221.2 MiB. The old
+process had remained at 1,025.3 MiB through its 60-second sample. Mean CPU was
+11.3% before and 11.2% after (100% means one logical CPU). No plots were skipped
+or GPU errors reported. Fifteen new lookups had a median of 1,236 ms, versus
+690 ms in the preceding eighteen logged lookups; these different live challenges
+are not an isolated throughput comparison. Normal farming was the only source
+of plot reads. Only the owned harvester restarted; node and farmer stayed up.
+The deliberately removed SSD was also removed from the configured plot roots;
+it had already contributed no plots to either sample.
