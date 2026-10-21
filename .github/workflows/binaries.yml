@@ -8,15 +8,32 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
+    # Keep GNU binaries usable on older GPU hosts. Static musl cannot load
+    # vendor OpenCL drivers; the runner's glibc would require a newer host.
+    container: ubuntu:20.04
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
     steps:
+      - name: Install build tools for the glibc 2.31 baseline
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential ca-certificates curl git pkg-config
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --locked -p mmx-node -p mmx-tools -p mmxwallet
+      - name: Check GNU runtime baseline
+        run: |
+          getconf GNU_LIBC_VERSION
+          for bin in mmx-node mmx mmx-wallet mmxwallet mmx-farmer mmx-harvester; do
+            required=$(readelf --version-info "target/release/$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1 | cut -d_ -f2)
+            test -n "$required"
+            test "$(printf '%s\n' 2.31 "$required" | sort -V | tail -n 1)" = 2.31
+          done
       - name: Package binaries and source revision
         shell: bash
         run: |
@@ -40,6 +57,8 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
         with:

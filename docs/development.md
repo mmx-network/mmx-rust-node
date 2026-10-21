@@ -1284,7 +1284,8 @@ archives include `mmx`, `mmx-wallet`, `mmxwallet`, `mmx-farmer`, `mmx-harvester`
 and `mmx-node` from the same source revision, with `mmx_node`, `mmx_farmer` and
 `mmx_harvester` executable aliases.
 The `linux-x86_64-musl` archive contains static binaries for older Linux hosts;
-the regular Linux archive targets the CI runner's glibc version.
+the regular Linux archive targets glibc 2.31 or newer and supports runtime-loaded
+GPU drivers; its build uses an Ubuntu 20.04 container on the CI runner.
 
 On Linux, the node can start its sibling wallet, farmer and harvester binaries
 from existing VNX configuration layers, including parent inheritance and local

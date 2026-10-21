@@ -246,6 +246,12 @@ On the node or harvester, `--opencl-device INDEX` selects another GPU and
 platforms. An OpenCL SDK is unnecessary for building; GPU use requires the
 system OpenCL loader and vendor driver at runtime.
 
+Use a GNU Linux build for GPU acceleration. The static `linux-x86_64-musl`
+archives use CPU work because they cannot load vendor OpenCL drivers. GNU
+archives target glibc 2.31 or newer, including Ubuntu 20.04. Check the service's
+startup log for `Using OpenCL GPU`; `OpenCL unavailable; using CPU` means
+acceleration is inactive.
+
 ## RPC and maintenance
 
 HTTP uses JSON-RPC 2.0 at `/rpc`; native VNX RPC is available on port 11331.

@@ -527,3 +527,40 @@ so the native-style schedule was retained instead of adding another variant.
 Shutdown checks assert successful SIGINT exit for both timelord executable names.
 Closing the request stream after the stop flag is set is normal shutdown, rather
 than a daemon failure that could trigger an unnecessary supervisor restart.
+
+## GNU builds and remote GPU harvesting
+
+The t320 CPU-load investigation found a deployment gap: the portable static musl
+harvester could not dynamically load its installed NVIDIA OpenCL ICD. It used
+CPU proof computation despite having an RTX A5000. The GNU build on the newer
+CI runner previously required a newer glibc than t320's Ubuntu 20.04/glibc 2.31.
+GNU binary packaging now builds inside Ubuntu 20.04 and checks each packaged
+binary's required glibc symbol versions against that baseline. The static musl package
+remains a CPU-only option. This changes packaging, not plot or consensus logic.
+
+A local two-job release build in an existing Ubuntu 20.04 build container was
+deployed to t320 after checking its checksum and full owned process identity.
+Only the Rust harvester restarted; C++ harvesting remained disabled. The same
+configuration, 16 shared workers and 262144 F1 limit were retained. Measurements
+used ordinary farming activity and process counters, without additional plot
+lookups or cache flushes.
+
+Two 120-second windows, with twelve natural challenges each, measured:
+
+| Deployment | Mean CPU (100% = one logical CPU) | Median lookup | Maximum lookup | Queued plots skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Static musl, CPU fallback | 167.2% | 1648 ms | 3277 ms | 0 |
+| GNU/glibc 2.31, OpenCL A5000 | 39.1% | 1096 ms | 1521 ms | 0 |
+
+The observed CPU reduction was 76.6%, with a 33.5% lower median lookup time.
+These windows contain different challenges and include the allocator/runtime
+change; they do not isolate GPU effects or establish C++ performance parity.
+The restarted harvester reported 1,207 plots and 146.2 TB effective farm size.
+Both sample windows produced no qualifying proofs, so they measure lookup load
+rather than successful proof publication.
+
+The RAM-only hardware check on t320 compared actual GPU outputs with CPU outputs:
+256 chains of 10,000 SHA iterations took 16.2 ms on GPU versus 310.6 ms on four
+CPU threads; 16,385 F1 memory hashes took 4.76 ms versus 102.8 ms. Both outputs
+matched exactly. Startup also passed the normal accelerator self-tests, and the
+live log confirmed `Using OpenCL GPU 'NVIDIA RTX A5000'` without driver errors.
