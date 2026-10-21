@@ -28,7 +28,6 @@ python3 scripts/systemd/install.py --name mmx-rust-node \
   --working-directory /path/to/mmx-node --environment MMX_HOME=/path/to/mmx-home/ \
   --environment RAYON_NUM_THREADS=8 --nice 19 --enable -- \
   /path/to/rust/bin/mmx-node --mmx-root /path/to/mmx-node \
-  -c /path/to/mmx-node/config/mainnet /path/to/mmx-home/config/local \
   --data-dir /path/to/rust-ledger
 systemctl --user start mmx-rust-node
 ```

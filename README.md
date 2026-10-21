@@ -161,20 +161,43 @@ directory on `PATH`:
 ```sh
 export MMX_HOME=/path/to/existing-mmx-home/
 cd /path/to/mmx-node
-mmx-node --mmx-root . -c config/mainnet config/node "${MMX_HOME}config/local" \
-  --data-dir /path/to/rust-ledger
+mmx-node --mmx-root . --data-dir /path/to/rust-ledger
 ```
 
 This starts the configured wallet, farmer, and harvester alongside the node.
 The native `wallet`, `farmer`, `harvester`, and `timelord` switches control service
 startup; the timelord is off by default. Add `--no-services` to manage services
-separately. Automatic service startup requires explicit `-c` directories and
-is disabled in offline and sync-once modes.
+separately. Automatic service startup uses explicit `-c` directories or a local
+configuration directory and is disabled in offline and sync-once modes.
+
+The node and standalone services resolve paths like the C++ startup scripts:
+
+| Setting | Behavior |
+| --- | --- |
+| `MMX_HOME` | Home for local configuration and wallets; defaults to the working directory. A trailing slash is optional. |
+| `NETWORK` | Read from `MMX_HOME/NETWORK`, defaulting to `mainnet`; `--network` overrides it. |
+| `MMX_DATA` | Base for network state. `MMX_HOME/config/local/MMX_DATA` takes priority over the environment, then defaults to `MMX_HOME`. |
+| `MMX_NETWORK` | Explicit network state directory, overriding `MMX_DATA/<network>`. |
+| `--mmx-root` | Installation containing public `config/` and `data/` assets, independent of `MMX_HOME`. |
+
+Without `-c`, the node loads installation `config/<network>`, `config/node`, and
+`MMX_HOME/config/local` in that order, skipping absent directories. Standalone
+wallet, farmer/harvester and timelord services use their corresponding `wallet`,
+`farmer` and `timelord` configuration layers. An explicit `-c` list replaces
+automatic layer selection. These paths are resolved at startup; existing data
+is not moved and the C++ password/config initialization scripts are not run.
 
 Common settings include `Wallet.key_files`, `Farmer.reward_addr`,
 `Harvester.plot_dirs`, `Harvester.num_threads`, and `Harvester.my_name`.
-Relative wallet filenames resolve under `MMX_HOME`, or the working directory
-when it is unset. The ledger location is selected separately with `--data-dir`.
+Relative wallet filenames resolve under the configured `Wallet.storage_path`
+within `MMX_HOME`, with an empty storage path by default. Relative `TimeLord.storage_path` values resolve
+under the network state directory. Absolute paths remain absolute.
+
+The ledger uses `Node.database_path` (`db` by default) under the network directory.
+`--data-dir` selects an explicit path, independent of those settings. **When
+reusing a C++ home, supply a separate Rust ledger directory:** startup rejects a
+C++ database before creating Rust files. Keep an existing Rust node's explicit
+`--data-dir` to continue using its current ledger.
 Stop services that already occupy the same ports before starting replacements.
 
 ## Remote harvesters

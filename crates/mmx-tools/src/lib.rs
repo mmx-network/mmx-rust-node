@@ -89,7 +89,7 @@ pub struct WalletArgs {
 pub fn wallet_main() -> Result<()> {
     let matches = WalletArgs::command().get_matches();
     let mut args = WalletArgs::from_arg_matches(&matches)?;
-    let cfg = args.layers.load()?;
+    let (cfg, layout) = args.layers.load("wallet")?;
     config::apply(&matches, &cfg, "listen", "Wallet.listen", &mut args.listen)?;
     config::apply(
         &matches,
@@ -115,10 +115,13 @@ pub fn wallet_main() -> Result<()> {
     if args.key_file.is_empty() {
         return Err(err("supply --key-file or Wallet.key_files in -c CONFIG"));
     }
+    let storage = cfg
+        .read::<PathBuf>("Wallet.storage_path")?
+        .unwrap_or_default();
     args.key_file = args
         .key_file
         .iter()
-        .map(|p| args.layers.relative(p))
+        .map(|p| layout.wallet_path(&storage, p))
         .collect();
     let mut accounts = BTreeMap::new();
     for (index, path) in args.key_file.iter().enumerate() {
@@ -196,8 +199,6 @@ pub struct FarmerArgs {
     listen: String,
     #[arg(long)]
     reward_address: Option<Address>,
-    #[arg(long)]
-    network: Option<String>,
 }
 fn farmer_keys(wallet: &NetworkClient) -> Result<Vec<FarmerKey>> {
     let value = call(wallet, "mmx.Wallet.get_all_farmer_keys", json!({}))?;
@@ -238,7 +239,7 @@ fn wallet_reward(wallet: &NetworkClient) -> Result<Option<Address>> {
 pub fn farmer_main() -> Result<()> {
     let matches = FarmerArgs::command().get_matches();
     let mut args = FarmerArgs::from_arg_matches(&matches)?;
-    let cfg = args.layers.load()?;
+    let (cfg, _) = args.layers.load("farmer")?;
     config::apply(
         &matches,
         &cfg,
@@ -293,7 +294,7 @@ pub fn farmer_main() -> Result<()> {
         args.listen = "127.0.0.1:11332".into();
     }
     let node = connect(&args.node, "Node")?;
-    let params = params(&node, args.network.as_deref())?;
+    let params = params(&node, args.layers.network.as_deref())?;
     let challenge_window = challenge_timeout(&params)?;
     let wallet = connect(&args.wallet, "Wallet")?;
     if let (Some(username), Some(path)) = (&args.wallet_username, &args.wallet_password_file) {
@@ -491,13 +492,11 @@ pub struct HarvesterArgs {
     log_lookups: bool,
     #[arg(long, default_value_t = 3600)]
     reload_interval: u64,
-    #[arg(long)]
-    network: Option<String>,
 }
 pub fn harvester_main() -> Result<()> {
     let matches = HarvesterArgs::command().get_matches();
     let mut args = HarvesterArgs::from_arg_matches(&matches)?;
-    let cfg = args.layers.load()?;
+    let (cfg, _) = args.layers.load("farmer")?;
     config::apply(
         &matches,
         &cfg,
@@ -546,7 +545,7 @@ pub fn harvester_main() -> Result<()> {
     )?;
     config::apply(&matches, &cfg, "farmer", "node", &mut args.farmer)?;
     args.farmer = config::remote_endpoint(&args.farmer, 11333);
-    if args.plot_dir.is_empty() && args.layers.paths.is_empty() {
+    if args.plot_dir.is_empty() && cfg.get("Harvester.plot_dirs")?.is_none() {
         return Err(err("supply --plot-dir or Harvester.plot_dirs in -c CONFIG"));
     }
     if args.username.is_none() {
@@ -580,7 +579,7 @@ pub fn harvester_main() -> Result<()> {
         .build_global()?;
     let node = connect(&args.farmer, "Node")?;
     login(&node)?;
-    let params = params(&node, args.network.as_deref())?;
+    let params = params(&node, args.layers.network.as_deref())?;
     let challenge_window = challenge_timeout(&params)?;
     node.close();
     let farmer = Arc::new(connect(&args.farmer, "Farmer")?);

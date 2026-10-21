@@ -1,0 +1,10 @@
+[package]
+name = "mmx-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared native MMX home, network and configuration path resolution"
+
+[dev-dependencies]
+tempfile.workspace = true

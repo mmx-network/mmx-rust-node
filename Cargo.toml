@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node", "crates/mmx-wallet", "crates/mmxwallet", "crates/mmx-farming", "crates/mmx-tools", "crates/mmx-opencl", "crates/mmx-timelord"]
+members = ["crates/mmx-config", "crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node", "crates/mmx-wallet", "crates/mmxwallet", "crates/mmx-farming", "crates/mmx-tools", "crates/mmx-opencl", "crates/mmx-timelord"]
 exclude = ["vendor/vnx-rust"]
 resolver = "2"
 
@@ -10,6 +10,7 @@ rust-version = "1.89"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+mmx-config = { path = "crates/mmx-config" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 hex = "0.4"

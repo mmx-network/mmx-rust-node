@@ -70,6 +70,13 @@ pub(crate) fn bytes(v: impl Into<Vec<u8>>) -> Value {
 
 impl Node {
     pub fn open(path: impl AsRef<Path>, network: &Network) -> Result<Self> {
+        // Native startup now defaults to the same directory as C++. Its ledger
+        // format is incompatible: reject it before creating any Rust files.
+        if path.as_ref().join("blocks.dat").try_exists()? {
+            return Err(error(
+                "C++ node database detected; select a separate Rust ledger with --data-dir",
+            ));
+        }
         let chain_path = path.as_ref().join("chain");
         let mut chain = ForkChain::open_native(&chain_path, network.params.clone())?;
         if chain.selected().tip()?.is_none() {

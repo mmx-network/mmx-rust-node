@@ -47,7 +47,7 @@ impl Owned {
             thread::sleep(Duration::from_millis(20));
         }
     }
-    fn spawn(path: &Path, args: Vec<String>) -> Result<Self> {
+    fn spawn(path: &Path, args: Vec<String>, layout: &mmx_config::Layout) -> Result<Self> {
         use std::os::unix::ffi::OsStrExt;
         let exe = std::fs::canonicalize(path)?;
         let cwd = std::env::current_dir()?.canonicalize()?;
@@ -57,7 +57,12 @@ impl Owned {
             argv.extend(a.as_bytes());
             argv.push(0);
         }
-        let child = Command::new(&exe).args(&args).current_dir(&cwd).spawn()?;
+        let child = Command::new(&exe)
+            .args(&args)
+            .current_dir(&cwd)
+            .env("MMX_HOME", &layout.home)
+            .env("MMX_NETWORK", &layout.network_dir)
+            .spawn()?;
         let start = start_time(child.id());
         Ok(Self {
             child,
@@ -102,12 +107,21 @@ impl Drop for Owned {
 }
 pub struct Services(Vec<Owned>);
 impl Services {
-    pub fn start(config: &Config, paths: &[PathBuf], node: &str, farmer: &str) -> Result<Self> {
+    pub fn start(
+        config: &Config,
+        paths: &[PathBuf],
+        layout: &mmx_config::Layout,
+        network: &str,
+        node: &str,
+        farmer: &str,
+    ) -> Result<Self> {
         let directory = std::env::current_exe()?
             .parent()
             .ok_or("missing executable directory")?
             .to_owned();
-        let mut base = vec!["-c".to_owned()];
+        // The config directory's label can differ from params.network. Pin the
+        // resolved chain for children instead of rereading a mutable NETWORK file.
+        let mut base = vec!["--network".to_owned(), network.to_owned(), "-c".to_owned()];
         for path in paths {
             base.push(
                 path.to_str()
@@ -131,7 +145,7 @@ impl Services {
             ]);
             services
                 .0
-                .push(Owned::spawn(&directory.join("mmx-wallet"), args)?);
+                .push(Owned::spawn(&directory.join("mmx-wallet"), args, layout)?);
             services
                 .0
                 .last_mut()
@@ -150,7 +164,7 @@ impl Services {
             ]);
             services
                 .0
-                .push(Owned::spawn(&directory.join("mmx-farmer"), args)?);
+                .push(Owned::spawn(&directory.join("mmx-farmer"), args, layout)?);
             services.0.last_mut().unwrap().ready(farmer, "Farmer")?;
             if config.read::<bool>("harvester")?.unwrap_or(true) {
                 let remote = config.read::<bool>("allow_remote")?.unwrap_or(false)
@@ -166,9 +180,11 @@ impl Services {
                 };
                 let mut args = base.clone();
                 args.extend(["--farmer".into(), harvester_farmer]);
-                services
-                    .0
-                    .push(Owned::spawn(&directory.join("mmx-harvester"), args)?);
+                services.0.push(Owned::spawn(
+                    &directory.join("mmx-harvester"),
+                    args,
+                    layout,
+                )?);
             }
         }
         if config.read::<bool>("timelord")?.unwrap_or(false) {
@@ -186,7 +202,7 @@ impl Services {
             ]);
             services
                 .0
-                .push(Owned::spawn(&directory.join("mmx-timelord"), args)?);
+                .push(Owned::spawn(&directory.join("mmx-timelord"), args, layout)?);
             services
                 .0
                 .last_mut()

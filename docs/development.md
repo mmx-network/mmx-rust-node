@@ -1293,14 +1293,16 @@ overrides. Run from the existing installation directory, with the Rust release
 binaries on `PATH`:
 
 ```sh
-mmx-node -c config/mainnet config/node "${MMX_HOME}config/local" \
-  --data-dir /path/to/rust-ledger
+mmx-node --mmx-root . --data-dir /path/to/rust-ledger
 ```
 
 `Wallet.key_files`, `Wallet.num_addresses`, `Farmer.reward_addr`, and
 `Harvester.plot_dirs`, `num_threads`, `my_name`, `reload_interval`,
 `recursive_search`, `max_recursion` and `dir_blacklist` use the native config
-names. Relative wallet filenames use `MMX_HOME` (or the current directory).
+names. `MMX_HOME` defaults to the current directory. Wallet filenames use its
+`Wallet.storage_path` (empty by default). Without `-c`, services load the native
+network, role and home-local configuration layers; explicit `-c` lists replace
+that discovery. See [home and network path precedence](../README.md#reuse-an-existing-configuration).
 Explicit CLI flags take priority over config. The native `wallet`, `farmer` and
 `harvester` switches control startup. Dependencies become ready before their
 consumers start; shutdown proceeds in reverse order and checks each child
@@ -1309,7 +1311,14 @@ process's executable, directory, arguments and start time before signaling it.
 connects block production to an independently running private signer. Offline
 and sync-once modes do not start farming services.
 
-Use a separate Rust data directory: the ledger format differs from C++.
+The network selector comes from `--network`, `MMX_HOME/NETWORK`, or `mainnet`.
+`MMX_NETWORK` selects the network directory directly; otherwise it is
+`MMX_DATA/<network>`, with the home-local `MMX_DATA` file taking priority over
+the environment, then falling back to `MMX_HOME`. The ledger uses
+`Node.database_path` (`db`) beneath that directory unless `--data-dir` is given.
+Node-started children inherit the resolved home and network directories.
+Use a separate Rust data directory: the ledger format differs from C++ and
+startup refuses a directory containing its `blocks.dat` before writing files.
 Existing wallet key files and plot files can be read directly. The example
 starts the implemented solo farming path; it does not replace every C++ service
 or its HTTP REST API.
@@ -1507,8 +1516,9 @@ The native `TimeLord.json` keys `reward_addr`, `storage_path`, `max_history`,
 Explicit CLI options take priority. `TimeLord.cpu` is a string (`"auto"`, `"any"`
 or a logical CPU number). Omitted rewards use the first available wallet account,
 then the zero reward address if none is available. `--wallet` selects a separate
-wallet endpoint. Storage is relative to `MMX_NETWORK`, falling back to `MMX_HOME`
-or the current directory. Existing native `timelord_sk.dat` identities are reused;
+wallet endpoint. Storage is relative to the resolved network directory:
+`MMX_NETWORK`, or `MMX_DATA/<network>` with `MMX_HOME` as the default data base.
+Existing native `timelord_sk.dat` identities are reused;
 new ones are atomically published with mode 0600. Corrupt keys are preserved and
 startup fails rather than silently replacing the identity.
 

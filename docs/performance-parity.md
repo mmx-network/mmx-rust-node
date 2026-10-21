@@ -608,3 +608,37 @@ are not an isolated throughput comparison. Normal farming was the only source
 of plot reads. Only the owned harvester restarted; node and farmer stayed up.
 The deliberately removed SSD was also removed from the configured plot roots;
 it had already contributed no plots to either sample.
+
+## Home and network path resolution
+
+The path follow-up reads native `activate.sh`, `run_node.sh`,
+`run_harvester.sh`, `src/mmx_{node,wallet,harvester,timelord}.cpp`, and
+`modules/{Node,Wallet,TimeLord}.vni`. The shared `mmx-config` resolver now uses
+`MMX_HOME` (working directory by default), the home `NETWORK` selector,
+home-local `MMX_DATA` before the environment, and an explicit `MMX_NETWORK`
+override. Default config layers are installation network, installation role,
+then home-local; explicit `-c` lists replace discovery. The node passes resolved
+home/network directories to its owned children without mutating global process
+environment. Relative wallet storage is home-based and timelord/node database
+storage is network-based. Explicit CLI data paths and absolute paths remain
+explicit. Selector reads are bounded to 64 KiB, happen only at startup, and do
+not enumerate ledger or plot contents.
+
+Temporary-directory tests cover selector/env/CLI precedence, paths with spaces,
+missing trailing slashes, invalid selectors, layer order and absolute storage.
+The daemon regression starts node, wallet, farmer, harvester and timelord from a
+separate home without `-c` or `--data-dir`, syncs against three synthetic peers,
+checks the home-based wallet, network-based ledger/key, and shuts down owned
+children. The existing explicit-config/data-dir scenario remains covered.
+An incompatible C++ `blocks.dat` is rejected before creating Rust ledger files.
+No live data is moved or read for these tests; consensus and steady-state I/O
+are unchanged. This is startup compatibility coverage, not a throughput claim.
+
+Deliberate differences: Rust does not run the C++ activation script's password
+generation/config-copy side effects. Missing optional config directories are
+skipped; automatic service startup requires a home-local directory or explicit
+`-c`, retaining node-only startup for unconfigured installations. Invalid network
+selectors fail early. Absolute paths override their base rather than using C++
+string concatenation. The Rust node keeps its transport identity inside its
+ledger directory; `Node.storage_path` does not relocate that identity. The C++
+ledger format remains incompatible and must use a separate directory.

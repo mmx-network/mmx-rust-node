@@ -19,7 +19,11 @@ const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir 
   [--opencl-device INDEX|-1] [--opencl-platform NAME]
   [--p2p-listen HOST:PORT] [--rpc-listen HOST:PORT] [--http-listen HOST:PORT]
 
-Defaults: --mmx-root ../mmx-node --network mainnet --data-dir ./mmx-data
+Defaults: --mmx-root ../mmx-node; network from $MMX_HOME/NETWORK or mainnet.
+  MMX_HOME defaults to the working directory; local config is MMX_HOME/config/local.
+  MMX_NETWORK overrides the network state directory, otherwise MMX_DATA/<network>
+  (MMX_DATA comes from MMX_HOME/config/local/MMX_DATA, the env, or MMX_HOME).
+  Ledger: <network directory>/db, or Node.database_path; --data-dir overrides both.
   P2P 127.0.0.1:<network port>, VNX RPC 127.0.0.1:11331,
   HTTP JSON-RPC http://127.0.0.1:11380/rpc.
 OpenCL GPU 0 is used when available, with CPU fallback; --opencl-device -1 disables it.
@@ -34,8 +38,8 @@ struct Options {
     farmer: Option<String>,
     reward_vote: Option<i8>,
     root: PathBuf,
-    network: String,
-    data: PathBuf,
+    network: Option<String>,
+    data: Option<PathBuf>,
     peers: Vec<String>,
     offline: bool,
     once: bool,
@@ -53,13 +57,9 @@ fn options() -> Result<Option<Options>> {
         no_services: false,
         farmer: None,
         reward_vote: None,
-        root: if std::path::Path::new("config").is_dir() && std::path::Path::new("data").is_dir() {
-            ".".into()
-        } else {
-            "../mmx-node".into()
-        },
-        network: "mainnet".into(),
-        data: "mmx-data".into(),
+        root: mmx_config::installation_root(),
+        network: None,
+        data: None,
         peers: vec![],
         offline: false,
         once: false,
@@ -95,8 +95,8 @@ fn options() -> Result<Option<Options>> {
                     }
                     "--farmer" => o.farmer = Some(value),
                     "--reward-vote" => o.reward_vote = Some(value.parse()?),
-                    "--network" => o.network = value,
-                    "--data-dir" => o.data = value.into(),
+                    "--network" => o.network = Some(value),
+                    "--data-dir" => o.data = Some(value.into()),
                     "--peer" => o.peers.push(value),
                     "--rollback-to" => o.rollback = Some(value.parse()?),
                     "--purge-before" => o.purge = Some(value.parse()?),
@@ -124,21 +124,30 @@ fn main() -> Result<()> {
     let Some(mut options) = options()? else {
         return Ok(());
     };
+    let layout = mmx_config::Layout::from_env(None, options.network.as_deref())?;
     let config = vnx::config::Config::new();
     let config_paths = if options.configs.is_empty() {
-        vec![options.root.join("config").join(&options.network)]
+        let paths = layout.config_paths(&options.root, "node");
+        if paths.is_empty() {
+            return Err(std::io::Error::other(
+                "no network configuration found; specify --mmx-root or -c",
+            )
+            .into());
+        }
+        paths
     } else {
         options.configs.clone()
     };
     for path in &config_paths {
         config.load_tree(path)?;
     }
+    let configured = !options.configs.is_empty() || layout.local_config().is_dir();
     let network = Network::from_config(&config, options.root.join("data"))?;
     let remote_harvesters = config.read::<bool>("allow_remote")?.unwrap_or(false)
         || config
             .read::<String>("Farmer.harvester_endpoint")?
             .is_some();
-    if !options.configs.is_empty()
+    if configured
         && config.read::<bool>("farmer")?.unwrap_or(true)
         && config.read::<bool>("wallet")?.unwrap_or(true)
         && options.farmer.is_none()
@@ -181,7 +190,15 @@ fn main() -> Result<()> {
             }
         })
         .collect();
-    let mut state = Node::open(&options.data, &network)?;
+    let data = match options.data {
+        Some(path) => path,
+        None => layout.network_path(
+            &config
+                .read::<PathBuf>("Node.database_path")?
+                .unwrap_or_else(|| "db".into()),
+        ),
+    };
+    let mut state = Node::open(&data, &network)?;
     state.configure_router(&config)?;
     if let Some(height) = options.rollback {
         state.rollback_to(height)?;
@@ -230,19 +247,19 @@ fn main() -> Result<()> {
         http.address()
     );
     #[cfg(unix)]
-    let mut services =
-        if !options.offline && !options.once && !options.no_services && !options.configs.is_empty()
-        {
-            let paths = config_paths.clone();
-            Some(services::Services::start(
-                &config,
-                &paths,
-                &vnx.endpoint().to_string(),
-                options.farmer.as_deref().unwrap_or("127.0.0.1:11333"),
-            )?)
-        } else {
-            None
-        };
+    let mut services = if !options.offline && !options.once && !options.no_services && configured {
+        let paths = config_paths.clone();
+        Some(services::Services::start(
+            &config,
+            &paths,
+            &layout,
+            &network.params.network,
+            &vnx.endpoint().to_string(),
+            options.farmer.as_deref().unwrap_or("127.0.0.1:11333"),
+        )?)
+    } else {
+        None
+    };
     let mut farming = if !options.offline {
         options
             .farmer

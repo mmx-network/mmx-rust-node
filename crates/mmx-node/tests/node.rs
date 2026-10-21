@@ -75,6 +75,19 @@ fn node(network: &Network) -> Arc<Mutex<Node>> {
     Arc::new(Mutex::new(n))
 }
 
+#[test]
+fn cpp_database_is_rejected_before_creating_rust_ledger_files() {
+    let (network, _, _, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let cpp = dir.path().join("blocks.dat");
+    std::fs::write(&cpp, b"existing C++ blocks").unwrap();
+    let err = Node::open(dir.path(), &network).err().unwrap();
+    assert!(err.to_string().contains("C++ node database"));
+    assert_eq!(std::fs::read(&cpp).unwrap(), b"existing C++ blocks");
+    assert!(!dir.path().join("chain").exists());
+    assert!(!dir.path().join("identity.key").exists());
+}
+
 fn transport_identity() -> Arc<Mutex<Node>> {
     let (network, genesis, _, _) = fixture();
     let n = node(&network);

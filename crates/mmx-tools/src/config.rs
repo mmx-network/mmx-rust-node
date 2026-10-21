@@ -13,14 +13,32 @@ pub struct Layers {
     /// Wallet/config home; defaults to MMX_HOME or the current directory.
     #[arg(long)]
     pub home: Option<PathBuf>,
+    /// Installation directory containing config/ and data/ (independent of MMX_HOME).
+    #[arg(long)]
+    pub mmx_root: Option<PathBuf>,
+    /// Select a network instead of reading MMX_HOME/NETWORK.
+    #[arg(long)]
+    pub network: Option<String>,
 }
 impl Layers {
-    pub fn load(&self) -> Result<Config> {
+    pub fn load(&self, role: &str) -> Result<(Config, mmx_config::Layout)> {
+        let layout = mmx_config::Layout::from_env(self.home.as_deref(), self.network.as_deref())?;
         let config = Config::new();
-        for path in &self.paths {
+        let paths = if self.paths.is_empty() {
+            layout.config_paths(
+                &self
+                    .mmx_root
+                    .clone()
+                    .unwrap_or_else(mmx_config::installation_root),
+                role,
+            )
+        } else {
+            self.paths.clone()
+        };
+        for path in &paths {
             config.load_tree(path)?;
         }
-        Ok(config)
+        Ok((config, layout))
     }
     pub fn home(&self) -> PathBuf {
         self.home

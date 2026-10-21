@@ -43,6 +43,14 @@ impl Daemon {
         (daemon, line.split_whitespace().last().unwrap().into())
     }
     fn start_line(exe: &str, args: &[OsString], cwd: &Path) -> (Self, String) {
+        Self::start_line_env(exe, args, cwd, &[])
+    }
+    fn start_line_env(
+        exe: &str,
+        args: &[OsString],
+        cwd: &Path,
+        environment: &[(&str, &Path)],
+    ) -> (Self, String) {
         use std::os::unix::ffi::OsStrExt;
         let exe = fs::canonicalize(exe).unwrap();
         let cwd = fs::canonicalize(cwd).unwrap();
@@ -52,11 +60,18 @@ impl Daemon {
             argv.extend(a.as_bytes());
             argv.push(0);
         }
-        let mut child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        command
             .args(args)
             .current_dir(&cwd)
             .env("RAYON_NUM_THREADS", "1")
             .env("MMX_HOME", &cwd)
+            .env_remove("MMX_DATA")
+            .env_remove("MMX_NETWORK");
+        for (key, value) in environment {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -949,6 +964,87 @@ fn remote_plot_to_farmer_to_rust_node_produces_a_live_block() {
 
 #[test]
 fn node_starts_configured_wallet_farmer_remote_harvester_and_timelord_services() {
+    configured_services(false, false);
+}
+
+#[test]
+fn mmx_home_auto_loads_native_layers_and_passes_wallet_and_network_paths_to_children() {
+    configured_services(true, false);
+}
+
+#[test]
+fn explicit_network_and_data_dir_override_home_selectors_and_configured_database_path() {
+    configured_services(true, true);
+}
+
+#[test]
+fn standalone_wallet_discovers_home_and_role_config_with_cli_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let home = root.join("wallet home");
+    let installation = root.join("installation");
+    for path in [
+        home.join("config/local"),
+        home.join("keys"),
+        installation.join("config/chosen"),
+        installation.join("config/wallet"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::write(home.join("NETWORK"), "chosen\n").unwrap();
+    fs::write(
+        installation.join("config/chosen/Wallet.json"),
+        r#"{"num_addresses":7,"key_files":["missing.dat"]}"#,
+    )
+    .unwrap();
+    fs::write(
+        installation.join("config/wallet/Wallet.json"),
+        r#"{"storage_path":"keys"}"#,
+    )
+    .unwrap();
+    let wrong_listener = root.join("must-not-be-created.sock");
+    fs::write(
+        home.join("config/local/Wallet.json"),
+        json!({"key_files":["wallet.dat"],"listen":format!("unix://{}",wrong_listener.display())})
+            .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        home.join("keys/wallet.dat"),
+        KeyFile::new([91; 32], None).encode(),
+    )
+    .unwrap();
+    let endpoint = format!("unix://{}", root.join("wallet.sock").display());
+    let (daemon, _) = Daemon::start(
+        env!("CARGO_BIN_EXE_mmx-wallet"),
+        &[
+            "--home".into(),
+            home.into_os_string(),
+            "--mmx-root".into(),
+            installation.into_os_string(),
+            "--listen".into(),
+            endpoint.clone().into(),
+            "--num-addresses".into(),
+            "2".into(),
+        ],
+        root,
+    );
+    let wallet = client(&endpoint, "Wallet");
+    assert_eq!(
+        wallet
+            .call_value("mmx.Wallet.get_all_addresses", json!({"index":0}))
+            .unwrap()["_ret_0"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!wrong_listener.exists());
+    wallet.close();
+    daemon.shutdown_successfully();
+}
+
+fn configured_services(from_home: bool, overrides: bool) {
     use mmx_execution::chain::network::BINARY_FILES;
     let (mut network, _, _) = synthetic_network();
     network.params.vdf_segment_size = 100_000;
@@ -957,11 +1053,55 @@ fn node_starts_configured_wallet_farmer_remote_harvester_and_timelord_services()
     network.params.time_diff_constant = 200_000;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let base = root.join("config/base");
-    let local = root.join("config/local");
+    let home = if from_home {
+        root.join("separate home")
+    } else {
+        root.to_owned()
+    };
+    let base = root.join("config").join(if from_home {
+        "selected-network"
+    } else {
+        "base"
+    });
+    let local = home.join("config/local");
+    let state = root.join(if overrides {
+        "explicit network directory"
+    } else {
+        "state disk/selected-network"
+    });
     let data = root.join("data").join(&network.params.network);
     for path in [&base, &local, &data] {
         fs::create_dir_all(path).unwrap();
+    }
+    if from_home {
+        fs::write(
+            home.join("NETWORK"),
+            if overrides {
+                "../invalid-selector\n"
+            } else {
+                "selected-network\n"
+            },
+        )
+        .unwrap();
+        fs::write(
+            local.join("MMX_DATA"),
+            root.join("state disk").to_str().unwrap(),
+        )
+        .unwrap();
+        // Network, role, local order: the role supplies wallet storage while
+        // local overrides the network's address count.
+        let role = root.join("config/node");
+        fs::create_dir_all(&role).unwrap();
+        fs::create_dir_all(home.join("keys")).unwrap();
+        fs::write(role.join("Wallet.json"), r#"{"storage_path":"keys"}"#).unwrap();
+        fs::write(base.join("Wallet.json"), r#"{"num_addresses":7}"#).unwrap();
+        if overrides {
+            fs::write(
+                local.join("Node.json"),
+                r#"{"database_path":"configured-ledger"}"#,
+            )
+            .unwrap();
+        }
     }
     fs::write(
         base.join("chain.json"),
@@ -994,12 +1134,16 @@ fn node_starts_configured_wallet_farmer_remote_harvester_and_timelord_services()
     fs::write(local.join("timelord"), "true").unwrap();
     fs::write(
         local.join("TimeLord.json"),
-        json!({"listen":timelord,"storage_path":root.join("timelord-identity"),"max_history":4096})
+        json!({"listen":timelord,"storage_path":if from_home { PathBuf::from("timelord-identity") } else {root.join("timelord-identity")},"max_history":4096})
             .to_string(),
     )
     .unwrap();
     fs::write(
-        root.join("wallet.dat"),
+        if from_home {
+            home.join("keys/wallet.dat")
+        } else {
+            root.join("wallet.dat")
+        },
         KeyFile::new([83; 32], None).encode(),
     )
     .unwrap();
@@ -1026,28 +1170,53 @@ fn node_starts_configured_wallet_farmer_remote_harvester_and_timelord_services()
         .parent()
         .unwrap()
         .join("mmx-node");
-    let (daemon, _) = Daemon::start_line(
-        binary.to_str().unwrap(),
-        &[
-            "--mmx-root".into(),
-            root.as_os_str().into(),
+    let mut args = vec!["--mmx-root".into(), root.as_os_str().into()];
+    if !from_home {
+        args.extend([
             "-c".into(),
             base.into_os_string(),
             local.into_os_string(),
             "--data-dir".into(),
             root.join("rust-data").into_os_string(),
-            "--p2p-listen".into(),
-            "127.0.0.1:0".into(),
-            "--rpc-listen".into(),
-            "127.0.0.1:0".into(),
-            "--http-listen".into(),
-            "127.0.0.1:0".into(),
-        ],
-        root,
-    );
+        ]);
+    }
+    if overrides {
+        args.extend([
+            "--network".into(),
+            "selected-network".into(),
+            "--data-dir".into(),
+            state.join("cli-ledger").into_os_string(),
+        ]);
+    }
+    args.extend([
+        "--p2p-listen".into(),
+        "127.0.0.1:0".into(),
+        "--rpc-listen".into(),
+        "127.0.0.1:0".into(),
+        "--http-listen".into(),
+        "127.0.0.1:0".into(),
+    ]);
+    let mut environment = vec![("MMX_HOME", home.as_path())];
+    if overrides {
+        environment.push(("MMX_NETWORK", state.as_path()));
+    }
+    let (daemon, _) = Daemon::start_line_env(binary.to_str().unwrap(), &args, root, &environment);
     let line = daemon.line("P2P ");
     daemon.line("Wallet VNX RPC ");
     daemon.line("TimeLord VNX RPC ");
+    if from_home {
+        assert!(state
+            .join(if overrides {
+                "cli-ledger/identity.key"
+            } else {
+                "db/identity.key"
+            })
+            .is_file());
+        assert!(state.join("timelord-identity/timelord_sk.dat").is_file());
+        assert!(!root.join("mmx-data").exists());
+        assert!(!root.join("wallet.dat").exists());
+        assert!(!state.join("configured-ledger").exists());
+    }
     let time_control = client(&timelord, "TimeLord");
     time_control
         .call_value("mmx.TimeLord.stop_vdf", json!({}))

@@ -29,10 +29,8 @@ pub struct Args {
     #[arg(long)]
     wallet: Option<String>,
     #[arg(long)]
-    network: Option<String>,
-    #[arg(long)]
     reward_addr: Option<Address>,
-    /// Key directory; defaults to MMX_NETWORK, or MMX_HOME when unset.
+    /// Key directory; relative to the resolved MMX_NETWORK directory.
     #[arg(long)]
     storage_path: Option<PathBuf>,
     #[arg(long, default_value_t = 1_000_000)]
@@ -92,7 +90,7 @@ fn benchmark(iterations: u64, cpu: Affinity) -> Result<()> {
 pub fn timelord_main() -> Result<()> {
     let matches = Args::command().get_matches();
     let mut args = Args::from_arg_matches(&matches)?;
-    let cfg = args.layers.load()?;
+    let (cfg, layout) = args.layers.load("timelord")?;
     config::apply(&matches, &cfg, "node", "node", &mut args.node)?;
     config::apply(
         &matches,
@@ -148,7 +146,7 @@ pub fn timelord_main() -> Result<()> {
         mmx_types::vnx_registry()?,
         Duration::from_secs(3),
     )?;
-    let chain = params(&node, args.network.as_deref())?;
+    let chain = params(&node, args.layers.network.as_deref())?;
     let reward = if let Some(address) = args.reward_addr {
         address
     } else {
@@ -179,14 +177,11 @@ pub fn timelord_main() -> Result<()> {
     let mut config = Config::new(chain.vdf_segment_size);
     config.max_history = args.max_history;
     config.reward_addr = reward.0;
-    let network_dir = std::env::var_os("MMX_NETWORK")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| args.layers.home());
-    let storage = match args.storage_path {
-        Some(path) if path.is_absolute() => path,
-        Some(path) => network_dir.join(path),
-        None => network_dir,
-    };
+    let storage = layout.network_path(
+        args.storage_path
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("")),
+    );
     let identity = Identity::load_or_create(&storage.join("timelord_sk.dat"))?;
     println!(
         "Timelord key: {} / reward: {reward}",

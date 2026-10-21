@@ -7,6 +7,7 @@ license.workspace = true
 description = "MMX full ledger node, native peer sync and RPC server"
 
 [dependencies]
+mmx-config.workspace = true
 mmx-db.workspace = true
 mmx-consensus.workspace = true
 mmx-execution.workspace = true
