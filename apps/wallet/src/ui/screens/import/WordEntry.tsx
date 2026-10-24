@@ -161,6 +161,8 @@ export function WordEntry({ words, onWords, showErrors, disabled = false, inputs
                 }}
                 listLabel={`Suggestions for word ${i + 1}`}
                 autoHighlight
+                // The last row's list would cover the buttons below the grid.
+                placement={i >= words.length - 4 ? 'top-start' : 'bottom-start'}
                 sensitive
                 invalid={invalid}
                 disabled={disabled}

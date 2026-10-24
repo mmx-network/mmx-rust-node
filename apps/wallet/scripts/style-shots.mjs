@@ -3,7 +3,7 @@
 // visual review of themes. Needs a mock dev server (VITE_PLATFORM=mock vite),
 // because only development builds honour ?style=.
 //
-//   node scripts/style-shots.mjs --style draft --out /tmp/shots [--base http://127.0.0.1:5391/] [--only overview,send]
+//   node scripts/style-shots.mjs --style obsidian --out /tmp/shots [--base http://127.0.0.1:5391/] [--only overview,send]
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -11,7 +11,7 @@ import { chromium } from 'playwright';
 
 const { values } = parseArgs({
   options: {
-    style: { type: 'string', default: 'draft' },
+    style: { type: 'string', default: 'obsidian' },
     out: { type: 'string' },
     base: { type: 'string', default: 'http://127.0.0.1:5391/' },
     only: { type: 'string' },

@@ -153,7 +153,7 @@ available, so they are never clipped by scroll containers.
 - `stylesReady: Promise<void>` — await before the first render to avoid a flash of the fallback theme.
 - `activeTheme: ThemeMeta`.
 
-Selection: `VITE_WALLET_STYLE=<id>` at build time (default `draft`); dev builds also
+Selection: `VITE_WALLET_STYLE=<id>` at build time (default `obsidian`); dev builds also
 accept `?style=<id>` and `?layout=<sidebar|rail|topbar>`.
 
 Adding a style: create `src/styles/themes/<id>/theme.css` and `theme.ts`

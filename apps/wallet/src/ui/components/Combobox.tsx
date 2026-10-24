@@ -2,7 +2,7 @@ import type { ComponentChildren } from 'preact';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { TextInput, type TextInputProps } from './TextInput';
 import { cx } from './internal/cx';
-import { useFloatingPosition, useOutsidePress } from './internal/floating';
+import { type Placement, useFloatingPosition, useOutsidePress } from './internal/floating';
 
 export interface ComboboxOption {
   /** Stable key; passed back through onSelect. */
@@ -22,6 +22,8 @@ export interface ComboboxProps extends Omit<TextInputProps, 'role' | 'onSelect'>
   listLabel: string;
   /** Highlight the first suggestion so Enter picks it (word entry). Default false. */
   autoHighlight?: boolean;
+  /** Where the list opens. Default below the field; 'top-start' keeps it off controls placed underneath. */
+  placement?: Placement;
 }
 
 /**
@@ -33,6 +35,7 @@ export function Combobox({
   onSelect,
   listLabel,
   autoHighlight = false,
+  placement = 'bottom-start',
   value,
   onValue,
   onKeyDown,
@@ -50,7 +53,7 @@ export function Combobox({
   const optionId = (i: number): string => `${listId}-${i}`;
   const visible = open && options.length > 0;
 
-  useFloatingPosition(visible, rootRef, panelRef, 'bottom-start', true);
+  useFloatingPosition(visible, rootRef, panelRef, placement, true);
   useOutsidePress(visible, [rootRef, panelRef], () => setOpen(false));
 
   useEffect(() => {

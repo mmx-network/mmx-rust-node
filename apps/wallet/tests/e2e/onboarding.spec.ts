@@ -4,6 +4,7 @@ import {
   capture,
   createWallet,
   expectNoWords,
+  expectActiveWallet,
   expectOverview,
   importWallet,
   lockWallet,
@@ -169,7 +170,7 @@ test('imports a wallet with a passphrase and finds its used addresses', async ({
   await page.locator('input[name=wallet-passphrase]').fill(passphrase);
   await page.getByRole('button', { name: 'Unlock', exact: true }).click();
   await expect(page).toHaveURL(/#\/overview$/u);
-  await expect(walletSwitcher(page)).toContainText('Imported');
+  await expectActiveWallet(page, 'Imported');
 });
 
 test('rejects invalid recovery words and a wallet that is already added', async ({ page }) => {

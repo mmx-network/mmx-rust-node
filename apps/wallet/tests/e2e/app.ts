@@ -33,7 +33,13 @@ export async function openApp(page: Page, hash = ''): Promise<void> {
 export async function expectOverview(page: Page, walletName?: string): Promise<void> {
   await expect(page).toHaveURL(/#\/overview$/u);
   await expect(page.getByText('Total balance')).toBeVisible();
-  if (walletName) await expect(walletSwitcher(page)).toContainText(walletName);
+  if (walletName) await expectActiveWallet(page, walletName);
+}
+
+/** The active wallet's name, as the switcher exposes it (full button text, or the label of the compact rail button). */
+export async function expectActiveWallet(page: Page, walletName: string): Promise<void> {
+  const escaped = walletName.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  await expect(walletSwitcher(page)).toHaveAccessibleName(new RegExp(escaped, 'u'));
 }
 
 /** The wallet menu button in the shell (sidebar or mobile top bar). */

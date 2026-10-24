@@ -1,5 +1,5 @@
 // Several wallets, locking and settings of the web wallet.
-import { capture, expectOverview, goTo, importWallet, lockWallet, openApp, openFundedWallet, unlockWithWords, walletSwitcher } from './app';
+import { capture, expectActiveWallet, expectOverview, goTo, importWallet, lockWallet, openApp, openFundedWallet, unlockWithWords, walletSwitcher } from './app';
 import { expect, test } from './fixtures';
 import { newMnemonic, walletAddresses } from './wallet';
 
@@ -16,7 +16,7 @@ test('switches between wallets and keeps each one apart', async ({ page, rpc }) 
 
   await walletSwitcher(page).click();
   await page.getByRole('menuitemradio', { name: /Spending/u }).click();
-  await expect(walletSwitcher(page)).toContainText('Spending');
+  await expectActiveWallet(page, 'Spending');
   await expect(page.locator('.overview-hero')).toContainText('7');
   await goTo(page, 'Receive');
   await expect(page.locator('.receive-card__address')).toHaveText(first.addresses[0]!);
@@ -94,7 +94,7 @@ test('renames a wallet, changes its address count and shows its recovery phrase'
   await rename.getByLabel('Name').fill('Farm');
   await rename.getByRole('button', { name: /Save|Rename/u }).click();
   await expect(rename).toBeHidden();
-  await expect(walletSwitcher(page)).toContainText('Farm');
+  await expectActiveWallet(page, 'Farm');
 
   // Fewer addresses: address 7 holds funds, so the app asks first.
   const count = page.getByRole('spinbutton', { name: 'Number of addresses' });

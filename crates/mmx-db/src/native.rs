@@ -22,6 +22,9 @@ use std::{
 type OrderKey = (String, Key, Reverse<u32>);
 type Memtable = BTreeMap<OrderKey, Option<ValueRef>>;
 type Rows = BTreeMap<Key, (u32, Option<ValueRef>)>;
+fn mem_entry_bytes(table: &str, key: &Key, value: Option<ValueRef>) -> usize {
+    table.len() + key.0.len() + 20 + value.map_or(0, |_| 24)
+}
 
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -312,7 +315,11 @@ impl State {
         }
         let mem = Arc::make_mut(&mut self.mem);
         if action.cut < self.version {
-            mem.retain(|(_, _, Reverse(v)), _| *v < action.cut);
+            mem.retain(|(table, key, Reverse(v)), value| {
+                if *v < action.cut { return true; }
+                self.mem_bytes -= mem_entry_bytes(table,key,*value);
+                false
+            });
             for view in &mut self.runs {
                 view.cutoff = view.cutoff.min(action.cut);
             }
@@ -324,15 +331,13 @@ impl State {
             {
                 return Err(Error::Corrupt("native recovered reference"));
             }
-            mem.insert(
-                (entry.table, Key(entry.key), Reverse(entry.version)),
-                entry.value,
-            );
+            let key = (entry.table, Key(entry.key), Reverse(entry.version));
+            let base = mem_entry_bytes(&key.0,&key.1,None);
+            self.mem_bytes += base + entry.value.map_or(0, |_| 24);
+            if let Some(previous) = mem.insert(key, entry.value) {
+                self.mem_bytes -= base + previous.map_or(0, |_| 24);
+            }
         }
-        self.mem_bytes = mem
-            .iter()
-            .map(|((t, k, _), value)| t.len() + k.0.len() + 20 + value.map_or(0, |_| 24))
-            .sum();
         self.version = action.next;
         self.generation = action.generation;
         self.floor = action.floor;
@@ -1399,4 +1404,32 @@ fn write_gc_batch(
     );
     batch.clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::*;
+    fn check(db: &Native) {
+        assert_eq!(db.state.mem_bytes, db.state.mem.iter().map(|((t,k,_),v)| mem_entry_bytes(t,k,*v)).sum::<usize>());
+    }
+    #[test]
+    fn metadata_accounting_survives_tombstones_forks_rewind_checkpoint_and_recovery() {
+        let directory=tempfile::tempdir().unwrap();
+        let mut db=Native::open(directory.path()).unwrap();
+        for version in 1..20u32 {
+            db.commit_batch(version,[Write::put("t",b"key",version.to_le_bytes()),Write::delete("deleted",b"key")]).unwrap();
+            check(&db);
+        }
+        let pinned=db.fork(19).unwrap();
+        let mut branch=db.fork(7).unwrap();
+        branch.commit_batch(8,[Write::delete("t",b"key"),Write::put("added",b"new",b"value")]).unwrap();
+        db.replace_suffix(7,&branch).unwrap(); check(&db);
+        db.revert(4).unwrap();check(&db);
+        db.commit_batch(5,[Write::put("t",b"key",b"replacement")]).unwrap();check(&db);
+        assert_eq!(pinned.get("t",b"key",None).unwrap(),Some(18u32.to_le_bytes().to_vec()));
+        drop(pinned);drop(branch);drop(db);
+        let mut db=Native::open(directory.path()).unwrap();check(&db);
+        db.checkpoint().unwrap();check(&db);assert_eq!(db.state.mem_bytes,0);
+        db.commit_batch(6,[Write::delete("t",b"key")]).unwrap();check(&db);
+    }
 }

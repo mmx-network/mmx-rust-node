@@ -2901,9 +2901,18 @@ h3.section__title {
   align-items: center;
   padding: var(--s4) var(--s2);
 }
-[data-layout='rail'] .shell__lockup .brand__name,
-[data-layout='rail'] .nav-item__label {
+[data-layout='rail'] .shell__lockup .brand__name {
   display: none;
+}
+/* Icon-only navigation keeps its labels for screen readers and tooltips. */
+[data-layout='rail'] .nav-item__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 [data-layout='rail'] .shell__brand {
   padding: 0 0 var(--s3);
@@ -2931,9 +2940,17 @@ h3.section__title {
     align-items: center;
     padding: var(--s4) var(--s2);
   }
-  [data-layout='sidebar'] .shell__lockup .brand__name,
-  [data-layout='sidebar'] .nav-item__label {
+  [data-layout='sidebar'] .shell__lockup .brand__name {
     display: none;
+  }
+  [data-layout='sidebar'] .nav-item__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   [data-layout='sidebar'] .shell__brand {
     padding: 0 0 var(--s3);
@@ -3021,7 +3038,13 @@ h3.section__title {
 }
 @media (min-width: 720px) and (max-width: 1099.98px) {
   [data-layout='topbar'] .nav-item__label {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   [data-layout='topbar'] .nav-item {
     width: 44px;

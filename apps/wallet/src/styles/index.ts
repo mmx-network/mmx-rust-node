@@ -1,6 +1,6 @@
 // Styles entry: base structure + the active theme.
 //
-// The theme is chosen at build time with VITE_WALLET_STYLE (default "draft").
+// The theme is chosen at build time with VITE_WALLET_STYLE (default "obsidian").
 // Development builds also accept ?style=<id> (and ?layout=<layout>) in the URL.
 import './base.css';
 import { DEFAULT_THEME, themes, type ThemeMeta } from './themes';

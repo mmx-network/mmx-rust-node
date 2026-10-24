@@ -72,7 +72,7 @@ function buildScope(style: string, platform: Platform): Plugin {
 export default defineConfig(({ mode }) => {
   const platform = resolvePlatform(mode, process.env.VITE_PLATFORM);
   const env = loadEnv(mode, process.cwd(), 'VITE_');
-  const style = (process.env.VITE_WALLET_STYLE ?? env.VITE_WALLET_STYLE ?? 'draft').trim() || 'draft';
+  const style = (process.env.VITE_WALLET_STYLE ?? env.VITE_WALLET_STYLE ?? 'obsidian').trim() || 'obsidian';
   if (!/^[a-z0-9-]+$/.test(style) || !existsSync(new URL(`./src/styles/themes/${style}/theme.css`, import.meta.url))) {
     throw new Error(`unknown VITE_WALLET_STYLE: ${style}`);
   }

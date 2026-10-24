@@ -5,14 +5,42 @@ use mmx_wallet::{Address, FarmerKey};
 use rand::RngCore;
 use std::{
     collections::BTreeMap,
+    io::{self, Write},
     time::{Duration, Instant},
 };
+
+pub const MAX_REPORT_BYTES: usize = 256 * 1024;
+const MAX_REPORT_MEMORY: usize = 32 * 1024 * 1024;
+
+struct ReportSize(usize);
+impl Write for ReportSize {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.checked_add(bytes.len()).filter(|n| *n <= MAX_REPORT_BYTES)
+            .ok_or_else(|| io::Error::other("farm report exceeds 256 KiB"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+}
+fn report_memory(info: &mmx::FarmInfo) -> Result<usize> {
+    if info.harvester.as_ref().is_some_and(|n| n.len() >= 1024)
+        || info.plot_dirs.len() > 1024 || info.plot_dirs.iter().any(|p| p.len() > 4096)
+        || info.plot_count.len() > 64 || info.harvester_bytes.len() > 1024
+        || info.pool_info.len() > 1024 || info.pool_stats.len() > 1024 {
+        return Err(error("farm report field limit exceeded"));
+    }
+    let mut size=ReportSize(0);
+    vnx::serde_json::to_writer(&mut size,info)?;
+    // Charge string/vector/map overhead conservatively as well as encoded
+    // bytes. Tiny entries can occupy much more heap than their JSON spelling.
+    Ok(size.0 * 16 + std::mem::size_of::<mmx::FarmInfo>() + 128)
+}
 
 /// Holds only farmer identities. Spending keys remain in the wallet process.
 pub struct Farmer {
     keys: BTreeMap<[u8; 33], FarmerKey>,
     pub reward_address: Option<Address>,
-    reports: BTreeMap<[u8; 32], (Instant, mmx::FarmInfo)>,
+    reports: BTreeMap<[u8; 32], (Instant, mmx::FarmInfo, usize)>,
+    report_bytes: usize,
     pub harvester_timeout: Duration,
     pub partial_difficulties: BTreeMap<Address, u64>,
 }
@@ -22,6 +50,7 @@ impl Farmer {
             keys: keys.into_iter().map(|k| (k.public_key(), k)).collect(),
             reward_address: reward_address.filter(|a| *a != Address::default()),
             reports: BTreeMap::new(),
+            report_bytes: 0,
             harvester_timeout: Duration::from_secs(60),
             partial_difficulties: BTreeMap::new(),
         }
@@ -107,17 +136,25 @@ impl Farmer {
     }
     pub fn report(&mut self, info: mmx::FarmInfo) -> Result<()> {
         use sha2::{Digest, Sha256};
+        let size = report_memory(&info)?;
         let id = match (&info.harvester_id, &info.harvester) {
             (Some(id), _) => id.0,
             (_, Some(name)) => Sha256::digest(name.as_bytes()).into(),
             _ => return Err(error("harvester report has no identity")),
         };
-        self.reports
-            .retain(|_, (time, _)| time.elapsed() <= self.harvester_timeout);
+        self.reports.retain(|_, (time, _, bytes)| {
+            if time.elapsed() <= self.harvester_timeout { return true; }
+            self.report_bytes -= *bytes;
+            false
+        });
         if self.reports.len() >= 4096 && !self.reports.contains_key(&id) {
             return Err(error("too many harvesters"));
         }
-        self.reports.insert(id, (Instant::now(), info));
+        let previous = self.reports.get(&id).map_or(0, |(_,_,bytes)| *bytes);
+        let bytes = self.report_bytes - previous + size;
+        if bytes > MAX_REPORT_MEMORY { return Err(error("farm report memory budget exceeded")); }
+        self.reports.insert(id, (Instant::now(), info, size));
+        self.report_bytes = bytes;
         Ok(())
     }
     pub fn farm_info(&self) -> Result<mmx::FarmInfo> {
@@ -125,10 +162,10 @@ impl Farmer {
             reward_addr: self.reward_address.map(|a| a.0.into()),
             ..Default::default()
         };
-        for (_, r) in self
+        for (_, r, _) in self
             .reports
             .values()
-            .filter(|(t, _)| t.elapsed() <= self.harvester_timeout)
+            .filter(|(t, _, _)| t.elapsed() <= self.harvester_timeout)
         {
             out.total_bytes = out
                 .total_bytes
@@ -181,4 +218,31 @@ impl Farmer {
 }
 fn optional_address(address: Option<Address>) -> Value {
     Value::Optional(address.map(|a| Box::new(Value::Bytes(a.0.to_vec()))))
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    fn report(id: u8) -> mmx::FarmInfo {
+        mmx::FarmInfo { harvester_id:Some([id;32].into()),harvester:Some("test".into()),plot_dirs:vec!["x".repeat(4096);32],..Default::default() }
+    }
+    #[test]
+    fn reports_bound_fields_retained_bytes_replacements_and_expiry() {
+        let mut farmer=Farmer::new([],None);
+        let mut bad=report(0);bad.plot_dirs=vec!["x".repeat(128*1024)];
+        assert!(farmer.report(bad).is_err());assert!(farmer.reports.is_empty());
+        for id in 0..=255u8 {
+            if farmer.report(report(id)).is_err() { break; }
+        }
+        assert!(farmer.reports.len() < 256 && !farmer.reports.is_empty());
+        assert!(farmer.report_bytes <= MAX_REPORT_MEMORY);
+        let size=farmer.report_bytes;
+        farmer.report(report(0)).unwrap();assert_eq!(farmer.report_bytes,size);
+        let count=farmer.reports.len();
+        let mut oversized=report(0);oversized.plot_dirs=vec!["x".repeat(4096);128];
+        assert!(farmer.report(oversized).is_err());assert_eq!(farmer.reports.len(),count);assert_eq!(farmer.report_bytes,size);
+        for (time,_,_) in farmer.reports.values_mut() { *time=Instant::now()-Duration::from_secs(120); }
+        farmer.report(report(255)).unwrap();assert_eq!(farmer.reports.len(),1);
+        assert_eq!(farmer.report_bytes,report_memory(&report(255)).unwrap());
+    }
 }
