@@ -1,0 +1,225 @@
+import type { ComponentChildren } from 'preact';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import type { WalletInfo } from '../../backend/types';
+import { BrandLockup, BrandMark } from '../components/Brand';
+import { Icon, type IconName } from '../components/Icon';
+import { IconButton } from '../components/IconButton';
+import { Menu } from '../components/Menu';
+import { Tooltip } from '../components/Tooltip';
+import { cx } from '../components/internal/cx';
+import { NetworkStatus, type NetworkInfo } from './NetworkStatus';
+import { WalletSwitcher } from './WalletSwitcher';
+
+export type RouteId = 'overview' | 'send' | 'receive' | 'activity' | 'contacts' | 'settings';
+
+export interface ShellProps {
+  route: RouteId;
+  onNavigate(r: RouteId): void;
+  wallets: WalletInfo[];
+  activeWalletId?: string;
+  onSelectWallet(id: string): void;
+  onAddWallet(): void;
+  network: NetworkInfo;
+  canLock: boolean;
+  onLock(): void;
+  children: ComponentChildren;
+}
+
+interface NavDef {
+  id: RouteId;
+  label: string;
+  icon: IconName;
+}
+
+export const NAV_ITEMS: readonly NavDef[] = [
+  { id: 'overview', label: 'Overview', icon: 'overview' },
+  { id: 'send', label: 'Send', icon: 'send' },
+  { id: 'receive', label: 'Receive', icon: 'receive' },
+  { id: 'activity', label: 'Activity', icon: 'activity' },
+  { id: 'contacts', label: 'Contacts', icon: 'contacts' },
+  { id: 'settings', label: 'Settings', icon: 'settings' },
+];
+
+const TAB_IDS: readonly RouteId[] = ['overview', 'send', 'receive', 'activity'];
+const MORE_IDS: readonly RouteId[] = ['contacts', 'settings'];
+
+interface NavMode {
+  /** Nav labels are hidden (rail layout, collapsed sidebar, narrow top bar). */
+  iconOnly: boolean;
+  /** Where nav tooltips open. */
+  tooltip: 'right' | 'bottom';
+}
+
+const COLLAPSE_QUERY: Record<string, string | null> = {
+  sidebar: '(min-width: 720px) and (max-width: 1023.98px)',
+  topbar: '(min-width: 720px) and (max-width: 1099.98px)',
+  rail: null,
+};
+
+function useNavMode(): NavMode {
+  const layout = typeof document !== 'undefined' ? document.documentElement.dataset.layout ?? 'sidebar' : 'sidebar';
+  const query = COLLAPSE_QUERY[layout] ?? null;
+  const [collapsed, setCollapsed] = useState(() => (query ? window.matchMedia(query).matches : false));
+  useEffect(() => {
+    if (!query) return;
+    const mq = window.matchMedia(query);
+    const update = (): void => setCollapsed(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, [query]);
+  return { iconOnly: layout === 'rail' || collapsed, tooltip: layout === 'topbar' ? 'bottom' : 'right' };
+}
+
+export function Shell({
+  route,
+  onNavigate,
+  wallets,
+  activeWalletId,
+  onSelectWallet,
+  onAddWallet,
+  network,
+  canLock,
+  onLock,
+  children,
+}: ShellProps) {
+  const mainRef = useRef<HTMLElement>(null);
+  const auto = useId();
+  const mainId = `main${auto}`;
+  const { iconOnly, tooltip } = useNavMode();
+  const firstRender = useRef(true);
+
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    window.scrollTo({ top: 0 });
+  }, [route]);
+
+  const switcherProps = { wallets, activeWalletId, onSelectWallet, onAddWallet };
+  const moreActive = MORE_IDS.includes(route);
+
+  return (
+    <div class="shell" data-route={route}>
+      <button type="button" class="skip-link" onClick={() => mainRef.current?.focus()}>
+        Skip to content
+      </button>
+
+      <header class="shell__mobilebar">
+        <BrandMark size={28} class="shell__mobilebrand" label="MMX Wallet" />
+        <WalletSwitcher {...switcherProps} class="shell__mobileswitcher" />
+        <NetworkStatus {...network} display="auto" class="shell__mobilestatus" />
+        {canLock ? <IconButton icon="lock" label="Lock" class="shell__mobilelock" onClick={onLock} /> : null}
+      </header>
+
+      <header class="shell__nav">
+        <div class="shell__brand">
+          <BrandLockup size="sm" class="shell__lockup" />
+        </div>
+        <div class="shell__switcher">
+          <WalletSwitcher
+            {...switcherProps}
+            compact={iconOnly && tooltip === 'right'}
+            placement={iconOnly && tooltip === 'right' ? 'right-start' : tooltip === 'bottom' ? 'bottom-end' : 'bottom-start'}
+          />
+        </div>
+        <nav class="shell__navlist" aria-label="Main">
+          <ul class="shell__navitems">
+            {NAV_ITEMS.map((item) => {
+              const active = item.id === route;
+              const button = (
+                <button
+                  type="button"
+                  class={cx('nav-item', active && 'nav-item--active')}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => onNavigate(item.id)}
+                >
+                  <Icon name={item.icon} class="nav-item__icon" />
+                  <span class="nav-item__label">{item.label}</span>
+                </button>
+              );
+              return (
+                <li key={item.id}>
+                  {iconOnly ? (
+                    <Tooltip content={item.label} placement={tooltip} describe={false}>
+                      {button}
+                    </Tooltip>
+                  ) : (
+                    button
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
+        <div class="shell__status">
+          <NetworkStatus {...network} display={iconOnly && tooltip === 'right' ? 'dot' : 'full'} />
+        </div>
+        {canLock ? (
+          <div class="shell__lock">
+            {iconOnly ? (
+              <Tooltip content="Lock" placement={tooltip} describe={false}>
+                <IconButton icon="lock" label="Lock" noTitle onClick={onLock} />
+              </Tooltip>
+            ) : (
+              <button type="button" class="nav-item nav-item--quiet" onClick={onLock}>
+                <Icon name="lock" class="nav-item__icon" />
+                <span class="nav-item__label">Lock</span>
+              </button>
+            )}
+          </div>
+        ) : null}
+      </header>
+
+      <main id={mainId} ref={mainRef} class="shell__main" tabIndex={-1}>
+        <div class="shell__content">{children}</div>
+      </main>
+
+      <nav class="tabbar" aria-label="Main">
+        <ul class="tabbar__items">
+          {NAV_ITEMS.filter((n) => TAB_IDS.includes(n.id)).map((item) => {
+            const active = item.id === route;
+            return (
+              <li key={item.id}>
+                <button
+                  type="button"
+                  class={cx('tabbar__item', active && 'tabbar__item--active')}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => onNavigate(item.id)}
+                >
+                  <Icon name={item.icon} class="tabbar__icon" />
+                  <span class="tabbar__label">{item.label}</span>
+                </button>
+              </li>
+            );
+          })}
+          <li>
+            <Menu
+              label="More"
+              placement="top-end"
+              items={NAV_ITEMS.filter((n) => MORE_IDS.includes(n.id)).map((item) => ({
+                id: item.id,
+                label: item.label,
+                icon: item.icon,
+                checked: item.id === route,
+                onSelect: () => onNavigate(item.id),
+              }))}
+              trigger={(props) => (
+                <button
+                  {...props}
+                  type="button"
+                  class={cx('tabbar__item', moreActive && 'tabbar__item--active')}
+                  aria-current={moreActive ? 'page' : undefined}
+                >
+                  <Icon name="more" class="tabbar__icon" />
+                  <span class="tabbar__label">More</span>
+                </button>
+              )}
+            />
+          </li>
+        </ul>
+      </nav>
+    </div>
+  );
+}

@@ -10,7 +10,7 @@ description = "MMX farmer signing and native plot harvesting"
 mmx-types.workspace = true
 mmx-consensus.workspace = true
 mmx-crypto.workspace = true
-mmx-wallet.workspace = true
+mmx-wallet = { workspace = true, features = ["native"] }
 vnx.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

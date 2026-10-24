@@ -1,0 +1,94 @@
+/* Welcome screen. Theme tokens only. */
+
+/* First start: the hero carries the brand, so the header lockup is not repeated. */
+.welcome--start .focus-layout__start {
+  visibility: hidden;
+}
+.welcome-hero {
+  gap: var(--s5);
+}
+.welcome-hero__mark {
+  display: block;
+  filter: drop-shadow(0 10px 24px var(--accent-soft));
+}
+
+.welcome-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.welcome-choice__button {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  width: 100%;
+  min-height: 76px;
+  padding: var(--s4) var(--s5);
+  text-align: start;
+  color: var(--text);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  cursor: pointer;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    background-color var(--duration-fast) var(--ease),
+    transform var(--duration-fast) var(--ease);
+}
+.welcome-choice__button:hover {
+  border-color: var(--border-strong);
+}
+.welcome-choice__button:active {
+  transform: translateY(1px);
+}
+.welcome-choice__button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.welcome-choice__icon {
+  flex: none;
+}
+.welcome-choice__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.welcome-choice__title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+.welcome-choice__detail {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.welcome-choice__chevron {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+}
+.welcome-choice__button:hover .welcome-choice__chevron {
+  color: var(--text-muted);
+  transform: translateX(2px);
+}
+@media (max-width: 719.98px) {
+  .welcome-choice__button {
+    min-height: 68px;
+    padding: var(--s3) var(--s4);
+    gap: var(--s3);
+  }
+  .welcome-choice__title {
+    font-size: var(--text-md);
+  }
+}
+@media (forced-colors: active) {
+  .welcome-choice__button {
+    border: 1px solid CanvasText;
+  }
+}

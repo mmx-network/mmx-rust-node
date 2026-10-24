@@ -1,0 +1,154 @@
+/*
+ * Draft — calm, precise, quietly violet. System fonts.
+ * Tokens follow the contract in docs/wallet-app.md §8.
+ */
+
+:root,
+[data-scheme='light'] {
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Display', 'Segoe UI', system-ui, Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', 'JetBrains Mono', Menlo, Consolas,
+    'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+
+  --bg: #f6f5f9;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #efedf4;
+  --surface: #ffffff;
+  --surface-2: #f3f1f7;
+  --border: #e6e3ed;
+  --border-strong: #8a849c;
+  --text: #16131f;
+  --text-muted: #5b5670;
+  --text-faint: #6a657d;
+  --accent: #5e289f;
+  --accent-contrast: #ffffff;
+  --accent-soft: #f0eaf9;
+  --positive: #137a55;
+  --negative: #c42b3c;
+  --warning: #935600;
+  --focus: #6b3bc4;
+
+  --radius-s: 7px;
+  --radius-m: 11px;
+  --radius-l: 18px;
+  --shadow-1: 0 1px 2px rgba(22, 19, 31, 0.05), 0 0 0 0.5px rgba(22, 19, 31, 0.02);
+  --shadow-2: 0 22px 48px -16px rgba(32, 20, 60, 0.28), 0 6px 16px -6px rgba(22, 19, 31, 0.1);
+
+  --chart-line: #6a32b2;
+  --chart-fill: rgba(106, 50, 178, 0.1);
+  --chart-grid: #ebe8f1;
+
+  --space-unit: 4px;
+  --nav-width: 252px;
+  --layout: sidebar;
+
+  --control-border: #938da6;
+  --nav-bg: #f6f5f9;
+  --nav-item-active-bg: #ffffff;
+  --nav-item-active-shadow: 0 1px 2px rgba(22, 19, 31, 0.06), 0 0 0 1px rgba(22, 19, 31, 0.04);
+  --backdrop: rgba(22, 15, 38, 0.42);
+  --hero-glow: rgba(94, 40, 159, 0.1);
+  --hero-glow-2: rgba(160, 120, 230, 0.12);
+  --hero-hatch: rgba(94, 40, 159, 0.07);
+
+  --positive-soft: #e2f3eb;
+  --negative-soft: #fbe9eb;
+  --warning-soft: #fbf0dc;
+  --on-negative: #ffffff;
+}
+
+[data-scheme='dark'] {
+  --bg: #0f0d14;
+  --bg-elevated: #1b1823;
+  --bg-sunken: #0b0a0f;
+  --surface: #16131d;
+  --surface-2: #1f1b28;
+  --border: #2a2634;
+  --border-strong: #736c86;
+  --text: #eeebf5;
+  --text-muted: #a9a3ba;
+  --text-faint: #8c869d;
+  --accent: #a88ef2;
+  --accent-contrast: #150d24;
+  --accent-soft: #261d3b;
+  --positive: #4fcb94;
+  --negative: #ff7f8a;
+  --warning: #f0b251;
+  --focus: #b39df5;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 24px 56px -16px rgba(0, 0, 0, 0.7), 0 6px 16px -6px rgba(0, 0, 0, 0.5);
+
+  --chart-line: #a88ef2;
+  --chart-fill: rgba(168, 142, 242, 0.12);
+  --chart-grid: #221e2b;
+
+  --control-border: #6e6781;
+  --nav-bg: #0c0b11;
+  --nav-item-active-bg: #1d1a26;
+  --nav-item-active-shadow: inset 0 0 0 1px #2c2838;
+  --backdrop: rgba(4, 3, 8, 0.66);
+  --hero-glow: rgba(168, 142, 242, 0.12);
+  --hero-glow-2: rgba(110, 70, 200, 0.16);
+  --hero-hatch: rgba(168, 142, 242, 0.06);
+  --qr-frame: #ffffff;
+
+  --positive-soft: rgba(79, 203, 148, 0.13);
+  --negative-soft: rgba(255, 127, 138, 0.13);
+  --warning-soft: rgba(240, 178, 81, 0.13);
+  --on-negative: #2b0910;
+}
+
+.shell__nav {
+  border-right: 1px solid transparent;
+}
+
+.card--hero {
+  background:
+    radial-gradient(120% 140% at 100% 0%, var(--hero-glow-2) 0%, transparent 46%),
+    radial-gradient(90% 120% at 0% 100%, var(--hero-glow) 0%, transparent 52%),
+    var(--card-bg);
+}
+
+/* The slant of the MMX mark, as a faint hatch fading out from the top-right corner. */
+.card--hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    63deg,
+    transparent 0 18px,
+    var(--hero-hatch) 18px 19px
+  );
+  -webkit-mask-image: radial-gradient(70% 120% at 100% 0%, #000 0%, transparent 70%);
+  mask-image: radial-gradient(70% 120% at 100% 0%, #000 0%, transparent 70%);
+}
+
+.card--hero > * {
+  position: relative;
+}
+
+.page-header__title {
+  font-weight: 650;
+}
+
+.btn--primary {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 1px 2px rgba(40, 14, 80, 0.24);
+}
+
+[data-scheme='dark'] .btn--primary {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.amount--display .amount__number {
+  font-weight: 600;
+}
+
+.empty-state__icon {
+  border-radius: 50%;
+}

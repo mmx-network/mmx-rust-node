@@ -1,6 +1,8 @@
 use std::fmt;
 pub type Result<T> = std::result::Result<T, Error>;
-#[derive(Debug)]
+/// A stable machine-readable `code` and a human-readable `message`. Messages
+/// never contain secrets. Serializes as `{"code": …, "message": …}`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Error {
     pub code: &'static str,
     pub message: String,
@@ -18,6 +20,7 @@ impl fmt::Display for Error {
         f.write_str(&self.message)
     }
 }
+impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Self::new("io_error", e.to_string())

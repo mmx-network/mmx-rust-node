@@ -1,0 +1,33 @@
+{
+  "name": "mmx-wallet",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:mock": "VITE_PLATFORM=mock vite --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:desktop": "VITE_PLATFORM=desktop vite --host 127.0.0.1 --port 1420 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "build:web": "npm run typecheck && VITE_PLATFORM=web vite build --outDir dist/web",
+    "build:desktop": "npm run typecheck && VITE_PLATFORM=desktop vite build --outDir dist/desktop",
+    "build:mock": "VITE_PLATFORM=mock vite build --outDir dist/mock",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@preact/signals": "2.11.3",
+    "@tauri-apps/api": "2.12.4",
+    "preact": "10.29.8",
+    "uqr": "0.1.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@tauri-apps/cli": "2.12.4",
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "4.1.12"
+  }
+}

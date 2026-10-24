@@ -2,9 +2,67 @@ use crate::{
     error::{invalid, rpc_invalid, Result},
     rpc::{self, Rpc},
 };
-use mmx_wallet::{format_amount, Address, ChainParams, Wallet};
+use mmx_wallet::{format_amount, Address, ChainParams};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+
+/// Concurrent balance requests per wallet (the UI's chain client uses the same).
+const FETCH_WORKERS: usize = 4;
+
+/// `/address` for every address, up to FETCH_WORKERS requests at a time.
+/// Responses are returned in address order; on failure the error of the
+/// first failed address is returned and no new requests are started.
+fn fetch_balances(rpc: &Rpc, addresses: &[Address]) -> Result<Vec<Value>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let work = || {
+        let mut done = Vec::new();
+        while !failed.load(Ordering::Relaxed) {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(address) = addresses.get(i) else {
+                break;
+            };
+            let result = rpc.get(&format!("/address?id={address}&limit=1000"));
+            if result.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+            done.push((i, result));
+        }
+        done
+    };
+    let mut results: Vec<Option<Result<Value>>> = Vec::new();
+    results.resize_with(addresses.len(), || None);
+    std::thread::scope(|scope| {
+        let helpers: Vec<_> = (1..FETCH_WORKERS.min(addresses.len()))
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
+            .collect();
+        // This thread works too, so progress never depends on spawning.
+        let mut done = work();
+        for helper in helpers {
+            if let Ok(more) = helper.join() {
+                done.extend(more);
+            }
+        }
+        for (i, result) in done {
+            results[i] = Some(result);
+        }
+    });
+    let mut values = Vec::with_capacity(addresses.len());
+    for result in results {
+        match result {
+            Some(Ok(value)) => values.push(value),
+            Some(Err(e)) => return Err(e),
+            // Skipped after an earlier failure, which is reported below.
+            None => (),
+        }
+    }
+    if values.len() != addresses.len() {
+        // A helper panicked; never return partial balances.
+        return Err(rpc_invalid("incomplete balances response"));
+    }
+    Ok(values)
+}
 
 pub struct Balance {
     pub amount: u128,
@@ -17,12 +75,11 @@ pub struct State {
     pub totals: BTreeMap<Address, Balance>,
 }
 impl State {
-    pub fn fetch(rpc: &Rpc, wallet: &Wallet, params: &ChainParams) -> Result<Self> {
+    pub fn fetch(rpc: &Rpc, addresses: &[Address], params: &ChainParams) -> Result<Self> {
         let height = rpc.height(params)?;
         let mut balances = BTreeMap::new();
         let mut totals: BTreeMap<Address, Balance> = BTreeMap::new();
-        for address in &wallet.addresses {
-            let v = rpc.get(&format!("/address?id={address}&limit=1000"))?;
+        for (address, v) in addresses.iter().zip(fetch_balances(rpc, addresses)?) {
             for row in v["balances"]
                 .as_array()
                 .ok_or_else(|| rpc_invalid("invalid balances response"))?
@@ -114,13 +171,13 @@ pub fn currency(s: &str) -> Result<Address> {
 }
 pub fn history(
     rpc: &Rpc,
-    wallet: &Wallet,
+    addresses: &[Address],
     params: &ChainParams,
     filter: &Filter,
     limit: u32,
 ) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
-    for address in &wallet.addresses {
+    for address in addresses {
         let mut until = None;
         let mut matches = 0usize;
         loop {

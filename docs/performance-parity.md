@@ -642,3 +642,30 @@ selectors fail early. Absolute paths override their base rather than using C++
 string concatenation. The Rust node keeps its transport identity inside its
 ledger directory; `Node.storage_path` does not relocate that identity. The C++
 ledger format remains incompatible and must use a separate directory.
+
+## Wallet app and `mmxwallet` service
+
+The desktop and web wallet (`apps/wallet`, `mmxwallet::service`,
+`crates/mmx-wallet-wasm`) are new clients of the public node API, not ports of
+the C++ GUI; their request patterns were chosen for a remote, load-balanced
+server rather than measured against C++.
+
+- Balances are fetched 4 addresses at a time (CLI, service, web), with in-flight
+  de-duplication of identical GETs in the UI and a 20 s deadline per request.
+  The CLI used to fetch them one by one.
+- History refresh re-reads the newest 6 blocks of every address instead of
+  `since = top + 1`, replacing those rows, so a short reorg or a lagging server
+  behind the load balancer cannot leave stale or missing rows. History is cached
+  in memory per open wallet only (capped at 20,000 rows); nothing is persisted.
+- Pending transfers are checked with `/transaction?id=` only while pending; a
+  sync runs at most every 20 s, polling `/node/info` every 10 s (30 s hidden).
+- Max and Review fetch `/chain/info`, `/node/info` and fresh balances every time
+  (web and desktop) so a transfer is never signed against stale balances.
+- Listing desktop wallets computes up to two fingerprints (16,384 SHA-256 rounds
+  each) per key file with no cache; it runs only on user actions.
+- The exact maximum sendable amount is searched with at most about 5n candidate
+  input selections (n = owned addresses), stopping at the first sendable one.
+- Chromium resends a POST once when a reused keep-alive connection closes
+  without a reply. A broadcast can therefore reach the node twice; it is the
+  same signed transaction (same id), which the node accepts idempotently while
+  it is pending, so no second transfer can result.

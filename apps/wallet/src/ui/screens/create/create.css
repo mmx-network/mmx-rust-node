@@ -1,0 +1,154 @@
+/* Create screen (also used by import for the details and save steps). Theme tokens only. */
+
+/* Details: passphrase option and its fields share one surface. */
+.create-details__passphrase {
+  overflow: hidden;
+}
+.card.create-details__passphrase > .option-row:first-child {
+  flex-wrap: nowrap;
+  padding: var(--s4) var(--s5);
+}
+.create-details__passphrase .option-row__text {
+  flex: 1 1 auto;
+}
+.create-details__passphrase .option-row__control {
+  flex: none;
+}
+.create-details__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding: var(--s4) var(--s5) var(--s5);
+  border-top: 1px solid var(--card-border);
+}
+.create-details__warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--warning);
+}
+.create-details__warning-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+/* Recovery phrase */
+.create-phrase {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.create-phrase__tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s1);
+}
+
+/* Confirm: pick the right word */
+.create-confirm {
+  gap: var(--s6);
+}
+.create-pick {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.create-pick__legend {
+  float: left;
+  width: 100%;
+  margin-bottom: var(--s2);
+  padding: 0;
+  font-weight: var(--weight-semibold);
+}
+.create-pick--wrong .create-pick__legend {
+  color: var(--negative);
+}
+.create-pick__options {
+  clear: both;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s2);
+}
+.create-pick__option {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+.create-pick__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.create-pick__label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-h);
+  padding: var(--s2) var(--s3);
+  overflow-wrap: anywhere;
+  text-align: center;
+  font-weight: var(--weight-medium);
+  color: var(--text);
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  pointer-events: none;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    background-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+.create-pick__option:hover .create-pick__label {
+  background: var(--state-hover);
+}
+.create-pick__input:focus-visible + .create-pick__label {
+  box-shadow: var(--ring);
+}
+.create-pick__option--checked .create-pick__label {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.create-pick__option--checked .create-pick__input:focus-visible + .create-pick__label {
+  box-shadow: inset 0 0 0 1px var(--accent), var(--ring);
+}
+.create-pick--wrong .create-pick__label {
+  border-color: var(--negative);
+}
+.create-pick:disabled .create-pick__label {
+  opacity: 0.6;
+}
+.create-confirm__message {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--negative);
+}
+.create-confirm__message:empty {
+  display: none;
+}
+@media (max-width: 719.98px) {
+  .create-pick__label {
+    min-height: 44px;
+  }
+}
+@media (forced-colors: active) {
+  .create-pick__label {
+    border: 1px solid CanvasText;
+  }
+  .create-pick__option--checked .create-pick__label {
+    border: 3px solid Highlight;
+  }
+}
+
+/* Save to the password manager */
+.create-save__username .input__control {
+  text-overflow: ellipsis;
+}

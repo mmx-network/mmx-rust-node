@@ -1,0 +1,110 @@
+{
+  "load_app_state": {},
+  "save_app_state": {
+    "state": {
+      "labels": {
+        "wallet_3291348052.dat": {
+          "0": "Rent",
+          "3": "Savings"
+        }
+      },
+      "contacts": [
+        {
+          "id": "c-1",
+          "name": "Alice",
+          "address": "mmx1mktnzjz82tzre764afvttx0rj2886g24gnmuzxntcvnzdnm9kkvsqwz36c",
+          "note": "Lunch"
+        },
+        {
+          "id": "c-2",
+          "name": "Bob",
+          "address": "mmx1nrr8ppvg9cx8c6lne428743erqpnw7pl7mqdqzcjmduppvasj7ass44zfl"
+        }
+      ],
+      "settings": {
+        "theme": "dark",
+        "autoLockMinutes": 30,
+        "feeLevel": 2,
+        "rpcUrl": "https://rpc.mmx.network"
+      },
+      "activeWallet": "wallet_3291348052.dat"
+    }
+  },
+  "list_wallets": {},
+  "create_wallet": {
+    "name": "Main",
+    "addressCount": 10,
+    "passphrase": "correct horse"
+  },
+  "import_wallet": {
+    "name": "Main",
+    "mnemonic": "cactus wedding mansion deal random arrive gate tissue bench party setup captain abstract mandate crouch lift anxiety embark achieve army expect account amount claim",
+    "addressCount": 100,
+    "passphrase": "correct horse"
+  },
+  "unlock_wallet": {
+    "id": "wallet_3291348052.dat",
+    "passphrase": "correct horse"
+  },
+  "lock_wallet": {
+    "id": "wallet_3291348052.dat"
+  },
+  "lock_all": {},
+  "rename_wallet": {
+    "id": "wallet_3291348052.dat",
+    "name": "Savings"
+  },
+  "set_address_count": {
+    "id": "wallet_3291348052.dat",
+    "count": 12
+  },
+  "remove_wallet": {
+    "id": "wallet_3291348052.dat"
+  },
+  "reveal_mnemonic": {
+    "id": "wallet_3291348052.dat"
+  },
+  "get_addresses": {
+    "id": "wallet_3291348052.dat"
+  },
+  "set_active_wallet": {
+    "id": "wallet_3291348052.dat"
+  },
+  "rpc_get": {
+    "path": "/address?id=mmx1mktnzjz82tzre764afvttx0rj2886g24gnmuzxntcvnzdnm9kkvsqwz36c&limit=1000"
+  },
+  "max_sendable": {
+    "walletId": "wallet_3291348052.dat",
+    "to": "",
+    "contract": "mmx1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdgytev",
+    "feeLevel": 2,
+    "memo": "rent"
+  },
+  "prepare_send": {
+    "walletId": "wallet_3291348052.dat",
+    "to": "mmx1mktnzjz82tzre764afvttx0rj2886g24gnmuzxntcvnzdnm9kkvsqwz36c",
+    "contract": "mmx1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdgytev",
+    "feeLevel": 2,
+    "amount": "1500000",
+    "memo": "rent"
+  },
+  "broadcast": {
+    "walletId": "wallet_3291348052.dat",
+    "txid": "AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01"
+  },
+  "discard_prepared": {
+    "txid": "AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01"
+  },
+  "copy_text": {
+    "text": "cactus wedding mansion deal random arrive gate tissue bench party setup captain abstract mandate crouch lift anxiety embark achieve army expect account amount claim",
+    "sensitive": true
+  },
+  "open_external": {
+    "url": "https://explore.mmx.network/#/explore/transaction/AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01"
+  },
+  "export_file": {
+    "suggestedName": "mmx-contacts.json",
+    "contents": "{\"contacts\":[]}\n"
+  },
+  "import_file": {}
+}

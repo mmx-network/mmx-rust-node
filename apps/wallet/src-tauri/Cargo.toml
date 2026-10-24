@@ -1,0 +1,61 @@
+[package]
+name = "mmx-wallet-desktop"
+version = "1.0.0"
+description = "MMX Wallet"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+publish = false
+default-run = "mmx-wallet"
+
+# Not a member of the repository workspace: the desktop shell needs the
+# WebView system libraries and is built by the Tauri CLI.
+[workspace]
+
+[lib]
+name = "mmx_wallet_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mmx-wallet"
+path = "src/main.rs"
+required-features = ["app"]
+
+[features]
+default = ["app"]
+# The desktop application. Without it only the platform-independent request
+# handling is built, so its tests run on hosts without WebView libraries.
+app = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-window-state",
+]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", optional = true , features = [] }
+
+[dependencies]
+mmxwallet = { path = "../../../crates/mmxwallet" }
+mmx-wallet = { path = "../../../crates/mmx-wallet", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+zeroize = { version = "1", features = ["serde"] }
+tauri = { version = "=2.12.4", optional = true, default-features = false, features = ["wry", "compression", "common-controls-v6", "x11", "dbus"] }
+tauri-plugin-clipboard-manager = { version = "=2.5.0", optional = true }
+tauri-plugin-dialog = { version = "=2.8.3", optional = true }
+tauri-plugin-opener = { version = "=2.7.2", optional = true }
+tauri-plugin-single-instance = { version = "=2.5.4", optional = true }
+tauri-plugin-window-state = { version = "=2.5.0", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# Same arithmetic checks as the repository's release builds (wallet amounts).
+overflow-checks = true

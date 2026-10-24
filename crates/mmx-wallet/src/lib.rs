@@ -3,24 +3,31 @@
 //! No node runtime, RPC transport, CLI state or C/C++ wallet bindings are used.
 mod address;
 mod amount;
+mod fee;
 mod keyfile;
 mod keys;
 mod mnemonic;
+#[cfg(feature = "native")]
 mod native;
+#[cfg(feature = "native")]
 mod spend;
 mod transaction;
 
 pub use address::Address;
 pub use amount::{format_amount, parse_amount};
+pub use fee::static_fee;
 pub use keyfile::KeyFile;
 pub use keys::{fingerprint, FarmerKey, Wallet};
 pub use mnemonic::{seed_to_words, words_to_seed};
-pub use spend::Balances;
 pub use transaction::{ChainParams, Input, Output, Solution, Transaction, TransferOptions};
+
+/// Confirmed balances keyed by (owner address, currency contract).
+pub type Balances = std::collections::BTreeMap<(Address, Address), u128>;
 
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[cfg(feature = "native")]
     #[error(transparent)]
     Native(#[from] mmx_consensus::Error),
     #[error("{0}")]

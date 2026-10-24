@@ -1,0 +1,14 @@
+/* Unlock screen. Theme tokens only. */
+
+.unlock-credentials__wallet .input__control {
+  text-overflow: ellipsis;
+}
+.unlock-credentials__change {
+  margin-block: calc(var(--s1) * -1);
+}
+.unlock-list .list-item__title {
+  overflow-wrap: anywhere;
+}
+.unlock-list__lock {
+  color: var(--text-faint);
+}

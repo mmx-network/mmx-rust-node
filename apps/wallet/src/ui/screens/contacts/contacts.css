@@ -1,0 +1,50 @@
+/* Contacts screen and contact dialog. Theme tokens only. */
+
+.contacts__item-sub {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+}
+.contacts__item-address {
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+}
+.contacts__item-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+}
+.contacts__item-note::before {
+  content: '·';
+  margin-inline-end: var(--s2);
+}
+
+.contact-dialog__delete {
+  margin-inline-end: auto;
+  color: var(--negative);
+}
+.contact-dialog__recipient {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius-m);
+  background: var(--bg-sunken);
+  min-width: 0;
+}
+.contact-dialog__recipient-address {
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+
+@media (max-width: 719.98px) {
+  .contacts__item-note {
+    display: none;
+  }
+  .contact-dialog__delete {
+    margin-inline-end: 0;
+  }
+}

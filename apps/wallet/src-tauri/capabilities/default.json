@@ -1,0 +1,33 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The wallet window may call the wallet's own commands and nothing else.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-load-app-state",
+    "allow-save-app-state",
+    "allow-list-wallets",
+    "allow-create-wallet",
+    "allow-import-wallet",
+    "allow-unlock-wallet",
+    "allow-lock-wallet",
+    "allow-lock-all",
+    "allow-rename-wallet",
+    "allow-set-address-count",
+    "allow-remove-wallet",
+    "allow-reveal-mnemonic",
+    "allow-get-addresses",
+    "allow-set-active-wallet",
+    "allow-rpc-get",
+    "allow-max-sendable",
+    "allow-prepare-send",
+    "allow-broadcast",
+    "allow-discard-prepared",
+    "allow-copy-text",
+    "allow-open-external",
+    "allow-export-file",
+    "allow-import-file"
+  ]
+}

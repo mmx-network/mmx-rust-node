@@ -1,9 +1,14 @@
-use crate::error::{invalid, Error, Result};
+use crate::{
+    config,
+    error::{invalid, Error, Result},
+    validate,
+};
 use mmx_wallet::KeyFile;
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
 
@@ -31,11 +36,18 @@ pub fn absolute(path: &Path) -> Result<PathBuf> {
         std::env::current_dir()?.join(path)
     })
 }
+const MAX_KEY_FILE: usize = 65536;
 pub fn read_key(path: &Path) -> Result<KeyFile> {
-    if fs::metadata(path)?.len() > 65536 {
+    // Reserved up front so the buffer holding the seed is never reallocated
+    // (which would leave a copy behind in freed memory).
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_KEY_FILE + 1));
+    fs::File::open(path)?
+        .take(MAX_KEY_FILE as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_KEY_FILE {
         return Err(Error::new("wallet_error", "wallet file exceeds size limit"));
     }
-    Ok(KeyFile::decode(&Zeroizing::new(fs::read(path)?))?)
+    Ok(KeyFile::decode(&bytes)?)
 }
 fn parent(path: &Path) -> &Path {
     path.parent()
@@ -97,67 +109,98 @@ pub struct Entry {
     pub fingerprint: String,
     pub with_passphrase: bool,
 }
-pub fn wallets(dir: &Path) -> Result<Vec<Entry>> {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(dir)? {
+/// A key file in the wallet directory that cannot be read or decoded.
+pub struct Unreadable {
+    pub path: PathBuf,
+    pub error: Error,
+}
+/// Regular files in `dir` named like key files (`wallet.dat`, `wallet_*.dat`,
+/// `mmxwallet_*.dat`), sorted by name. Symbolic links are not followed.
+pub fn wallet_files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name != "wallet.dat"
-            && !(name.ends_with(".dat")
-                && (name.starts_with("wallet_") || name.starts_with("mmxwallet_")))
-        {
+        let Ok(name) = entry.file_name().into_string() else {
             continue;
+        };
+        if validate::is_wallet_file_name(&name) {
+            files.push((name, entry.path()));
         }
-        let key = read_key(&entry.path())?;
-        entries.push(Entry {
-            path: entry.path(),
-            fingerprint: key.fingerprint(),
-            with_passphrase: key.requires_passphrase(),
-        });
     }
-    entries.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
-    Ok(entries)
+    files.sort();
+    Ok(files)
+}
+/// Readable wallets plus the key files that could not be read.
+pub fn scan(dir: &Path) -> Result<(Vec<Entry>, Vec<Unreadable>)> {
+    let mut entries = Vec::new();
+    let mut unreadable = Vec::new();
+    for (_, path) in wallet_files(dir)? {
+        match read_key(&path) {
+            Ok(key) => entries.push(Entry {
+                fingerprint: key.fingerprint(),
+                with_passphrase: key.requires_passphrase(),
+                path,
+            }),
+            Err(error) => unreadable.push(Unreadable { path, error }),
+        }
+    }
+    Ok((entries, unreadable))
+}
+pub fn wallets(dir: &Path) -> Result<Vec<Entry>> {
+    Ok(scan(dir)?.0)
 }
 pub fn active(dir: &Path) -> Result<Option<String>> {
-    let path = dir.join("mmxwallet.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let v: serde_json::Value = serde_json::from_slice(&fs::read(path)?)
-        .map_err(|_| invalid("invalid wallet configuration"))?;
-    Ok(v["active_wallet"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned))
+    Ok(config::active(&config::read(dir)?).map(str::to_owned))
 }
 pub fn set_active(dir: &Path, path: &Path) -> Result<()> {
-    create_private_directory(dir)?;
-    let config = dir.join("mmxwallet.json");
-    let mut v = if config.exists() {
-        serde_json::from_slice(&fs::read(&config)?)
-            .map_err(|_| invalid("invalid wallet configuration"))?
-    } else {
-        serde_json::json!({})
-    };
-    if !v.is_object() {
-        return Err(invalid("invalid wallet configuration"));
-    }
-    v["active_wallet"] = serde_json::json!(path
+    let name = path
         .file_name()
         .ok_or_else(|| invalid("invalid wallet filename"))?
-        .to_string_lossy());
-    save(
-        &config,
-        &serde_json::to_vec(&v).expect("config serialization"),
-        None,
-    )
+        .to_string_lossy()
+        .into_owned();
+    let mut config = config::read(dir)?;
+    config::set_active(&mut config, Some(&name));
+    config::save(dir, config)
+}
+/// `dir/<base>.<unix time>`, with a counter appended if that name is taken.
+pub fn unique_path(dir: &Path, base: &str) -> Result<PathBuf> {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for n in 0..1000u32 {
+        let name = if n == 0 {
+            format!("{base}.{time}")
+        } else {
+            format!("{base}.{time}-{n}")
+        };
+        let path = dir.join(name);
+        if fs::symlink_metadata(&path).is_err() {
+            return Ok(path);
+        }
+    }
+    Err(Error::new("io_error", "no free file name"))
+}
+/// Moves a key file into `<dir>/removed/` (created private) under a
+/// timestamped name. Key files are never deleted.
+pub fn move_to_removed(dir: &Path, name: &str) -> Result<PathBuf> {
+    let removed = dir.join("removed");
+    create_private_directory(&removed)?;
+    let target = unique_path(&removed, name)?;
+    fs::rename(dir.join(name), &target)?;
+    #[cfg(unix)]
+    {
+        fs::File::open(&removed)?.sync_all()?;
+        fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(target)
 }
 pub fn select(
     entries: &[Entry],

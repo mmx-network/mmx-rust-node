@@ -1,0 +1,9 @@
+node_modules/
+dist/
+src/backend/web/pkg/
+test-results/
+playwright-report/
+artifacts/
+src-tauri/target/
+src-tauri/gen/
+tests/.wasm-test/

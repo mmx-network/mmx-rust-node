@@ -100,6 +100,24 @@ Wallet files contain the seed in plaintext. A wallet passphrase changes key
 derivation; it does not encrypt the file. Keep key files and recovery words
 private, and supply secrets through interactive prompts or `--input-stdin`.
 
+Without `--file`, wallets live in `$MMX_HOME` or `~/.mmx` (Windows:
+`%USERPROFILE%\.mmx`); `mmx wallet list` shows them and `mmx wallet use`
+selects one. Each wallet uses 10 addresses unless changed with
+`mmx wallet set-addresses <N>` (1 to 100) or `--num-addresses`, and
+`mmx wallet rename <NAME>` names it. Both act on the selected wallet or the one
+given with `--wallet <FINGERPRINT>`. These settings and an optional chain server
+(`"rpc"`, used when `--rpc` is not given) are kept in `mmxwallet.json` in the
+same directory.
+
+The desktop wallet (Windows, macOS, Linux deb and AppImage) uses the same wallet
+directory, key files and `mmxwallet.json`; the web wallet keeps the recovery
+words in the browser's password manager. Both are built from
+[`apps/wallet`](apps/wallet): `npm ci && npm run build:wasm`, then
+`npm run build:web` for the static site (served with the headers in
+[`apps/wallet/deploy`](apps/wallet/deploy/README.md)), or
+`scripts/build-linux-container.sh`, `scripts/build-macos.sh` or
+`scripts/build-windows.ps1` for the desktop packages.
+
 For farming, restart the node with the private farmer endpoint configured:
 
 ```sh

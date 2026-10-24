@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["native"]
+# Bridges signed transfers to the node's consensus records (native.rs, spend.rs).
+# Without it the crate is pure Rust and builds for wasm32-unknown-unknown.
+native = ["dep:mmx-consensus", "dep:mmx-types", "dep:vnx"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -15,6 +21,10 @@ hmac = "0.12"
 k256.workspace = true
 rand = "0.8"
 thiserror = "2"
-mmx-consensus.workspace = true
-mmx-types.workspace = true
-vnx.workspace = true
+mmx-consensus = { workspace = true, optional = true }
+mmx-types = { workspace = true, optional = true }
+vnx = { workspace = true, optional = true }
+
+# Browsers provide the OS random source through the Web Crypto API.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

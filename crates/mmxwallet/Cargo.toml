@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-mmx-wallet.workspace = true
+mmx-wallet = { workspace = true, default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true

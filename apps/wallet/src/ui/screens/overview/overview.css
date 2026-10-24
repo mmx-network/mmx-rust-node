@@ -1,0 +1,355 @@
+/* Overview screen. Theme tokens only. */
+
+/* ------------------------------------------------------------------ hero */
+
+.overview-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s6);
+  flex-wrap: wrap;
+}
+.overview-hero__balance {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+  flex: 1 1 18rem;
+}
+.overview-hero__label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+.overview-hero__amount {
+  min-height: 1.05em;
+}
+.overview-hero__skeleton {
+  display: flex;
+  align-items: center;
+  min-height: 3.15rem;
+}
+.overview-hero__pending {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.overview-hero__pending .icon {
+  color: var(--warning);
+}
+.overview-hero__actions {
+  display: flex;
+  gap: var(--s3);
+  flex: 0 0 auto;
+}
+.overview-hero__actions .btn {
+  min-width: 8.5rem;
+}
+
+@media (max-width: 719.98px) {
+  .overview-hero {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--s5);
+  }
+  .overview-hero__balance {
+    flex: 0 0 auto;
+  }
+  .overview-hero__amount--long.amount--display {
+    font-size: var(--text-3xl);
+  }
+  .overview-hero__actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .overview-hero__actions .btn {
+    min-width: 0;
+  }
+}
+
+/* --------------------------------------------------------------- history */
+
+.overview-history__card.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s5) var(--s5) var(--s3);
+}
+.overview-history__change {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+  min-height: 1.5rem;
+  font-size: var(--text-md);
+}
+.overview-history__phrase,
+.overview-history__flat {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.overview-history__flat {
+  font-weight: var(--weight-semibold);
+}
+
+@media (max-width: 719.98px) {
+  .overview-history .section__actions {
+    width: 100%;
+  }
+  .overview-history__range.segmented {
+    display: flex;
+    width: 100%;
+  }
+  .overview-history__range .segmented__item {
+    flex: 1 1 0;
+    padding-inline: var(--s1);
+  }
+  .overview-history__card.card {
+    padding: var(--s4) var(--s3) var(--s2);
+  }
+}
+
+/* ----------------------------------------------------------------- chart */
+
+.overview-chart {
+  position: relative;
+  min-width: 0;
+  transition: opacity var(--duration) var(--ease);
+}
+.overview-chart--loading {
+  opacity: 0.55;
+}
+.overview-chart__plot {
+  position: relative;
+  height: 220px;
+  min-width: 0;
+  border-radius: var(--radius-s);
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: crosshair;
+}
+.overview-chart__plot:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.overview-chart__plot--skeleton {
+  cursor: default;
+}
+.overview-chart__plot--skeleton .skeleton {
+  border-radius: var(--radius-m);
+}
+.overview-chart__svg {
+  display: block;
+  overflow: visible;
+}
+.overview-chart__gridline {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.overview-chart__ytick,
+.overview-chart__xtick {
+  fill: var(--text-faint);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+/* A halo in the card colour keeps value labels readable where the line crosses them. */
+.overview-chart__ytick {
+  stroke: var(--card-bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+.overview-chart__stop--top {
+  stop-color: var(--chart-fill);
+  stop-opacity: 1;
+}
+.overview-chart__stop--bottom {
+  stop-color: var(--chart-fill);
+  stop-opacity: 0.15;
+}
+.overview-chart__area {
+  stroke: none;
+}
+.overview-chart__line {
+  fill: none;
+  stroke: var(--chart-line);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.overview-chart__end {
+  fill: var(--chart-line);
+  stroke: var(--card-bg);
+  stroke-width: 2;
+}
+.overview-chart__crosshair {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  shape-rendering: crispEdges;
+}
+.overview-chart__dot {
+  fill: var(--card-bg);
+  stroke: var(--chart-line);
+  stroke-width: 2.5;
+}
+.overview-chart__empty {
+  position: absolute;
+  inset: 0 0 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.overview-chart__tooltip {
+  position: absolute;
+  top: 0;
+  transform: translateX(12px);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius-s);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 1;
+}
+.overview-chart__tooltip--left {
+  transform: translateX(calc(-100% - 12px));
+}
+.overview-chart__tooltip-value {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.overview-chart__tooltip-time {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+@media (max-width: 719.98px) {
+  .overview-chart__plot {
+    height: 176px;
+  }
+}
+
+@media (forced-colors: active) {
+  .overview-chart__line {
+    stroke: CanvasText;
+  }
+  .overview-chart__area {
+    fill: none;
+  }
+}
+
+/* ------------------------------------------------- tokens + recent grid */
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s8);
+  align-items: start;
+}
+
+/* Only unverified tokens: the activity matters more, so it comes first when stacked. */
+.overview-grid--others-only > .overview-tokens {
+  order: 2;
+}
+
+@media (min-width: 1100px) {
+  .overview-grid--split {
+    grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+    grid-template-areas: 'recent tokens';
+  }
+  .overview-grid--split > .overview-tokens {
+    grid-area: tokens;
+  }
+  .overview-grid--split > .overview-recent {
+    grid-area: recent;
+  }
+}
+
+@media (max-width: 719.98px) {
+  .overview-grid {
+    gap: var(--s6);
+  }
+}
+
+/* ---------------------------------------------------------------- tokens */
+
+.overview-tokens__card {
+  display: flex;
+  flex-direction: column;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  padding: var(--s1);
+}
+.overview-tokens__list + .overview-tokens__other {
+  border-top: 1px solid var(--border);
+  margin: var(--s1) var(--s3) 0;
+  padding-top: var(--s1);
+}
+.overview-tokens__list + .overview-tokens__other .disclosure__toggle {
+  margin-inline: calc(var(--s3) * -1);
+}
+.overview-tokens__note {
+  padding: var(--s1) var(--s3) var(--s2);
+}
+.overview-token__contract {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.overview-token__pending {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s1);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- recent */
+
+.overview-recent__loading,
+.overview-recent__empty {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+}
+.overview-recent__loading {
+  padding: var(--s1);
+}
+.overview-recent__skeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 60px;
+  padding: var(--s3);
+}
+.overview-recent__skeleton > .skeleton--circle {
+  flex: 0 0 40px;
+}
+.overview-recent__skeleton > .skeleton--text {
+  flex: 0 0 auto;
+}
+.overview-recent__skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  flex: 1 1 auto;
+  min-width: 0;
+}

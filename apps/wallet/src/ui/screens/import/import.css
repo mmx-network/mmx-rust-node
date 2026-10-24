@@ -1,0 +1,126 @@
+/* Import screen. Theme tokens only. */
+
+.import-words {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.import-words__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.import-word {
+  min-width: 0;
+}
+.import-word__box .input {
+  padding-left: var(--s2);
+}
+.import-word__box .input__adornment--leading {
+  margin-right: 0;
+}
+.import-word__number {
+  display: inline-block;
+  min-width: 1.75em;
+  padding-right: var(--s1);
+  text-align: right;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.import-word--invalid .import-word__number {
+  color: var(--negative);
+}
+.import-word__box .input__control {
+  min-width: 0;
+  font-weight: var(--weight-medium);
+}
+.import-words__message {
+  min-height: 1.25rem;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--negative);
+}
+.import-suggestion__typed {
+  font-weight: var(--weight-semibold);
+  color: var(--accent);
+}
+@media (max-width: 899.98px) {
+  .import-words__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 479.98px) {
+  .import-words__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.import-form__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+.import-form__submit {
+  flex: 0 1 16rem;
+}
+@media (max-width: 719.98px) {
+  .import-form__actions {
+    flex-direction: column-reverse;
+    align-items: center;
+  }
+  .import-form .import-form__actions .import-form__submit {
+    flex: none;
+    width: 100%;
+  }
+}
+
+/* Address discovery after import */
+.import-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s6);
+  padding-block: var(--s8);
+}
+.import-progress__bar {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+}
+.import-progress__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--duration) var(--ease);
+}
+.import-progress__bar--waiting .import-progress__fill {
+  width: 30%;
+  animation: import-progress-slide 1.4s var(--ease) infinite;
+}
+@keyframes import-progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+@media (forced-colors: active) {
+  .import-progress__bar {
+    border: 1px solid CanvasText;
+  }
+  .import-progress__fill {
+    background: Highlight;
+  }
+}

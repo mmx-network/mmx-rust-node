@@ -1,12 +1,11 @@
 //! General native transaction completion. The lossless consensus record retains
 //! contract/Variant arguments; wallet presentation JSON is never hashed here.
-use crate::{sha256, Address, Error, Result, Wallet};
+use crate::{sha256, Address, Balances, Error, Result, Wallet};
 use mmx_consensus::{Record, Value as V};
 use mmx_types::mmx;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 
-pub type Balances = BTreeMap<(Address, Address), u128>;
 fn invalid(s: &'static str) -> Error {
     Error::InvalidTransaction(s)
 }

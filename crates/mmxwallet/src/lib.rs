@@ -1,8 +1,11 @@
-mod error;
+mod config;
+pub mod error;
 mod remote;
 mod rpc;
 mod secrets;
+pub mod service;
 mod storage;
+mod validate;
 
 use clap::Parser;
 use error::{invalid, rpc_invalid, Error, Result};
@@ -24,14 +27,15 @@ use zeroize::Zeroizing;
 #[derive(Parser)]
 #[command(
     version,
-    after_help = "Commands: create, import, list, use <INDEX|FINGERPRINT>, mnemonic, get mnemonic,\naddress, addresses, balance, history, send, broadcast, info, transaction <TXID>, capabilities\n\nWallet directory: $MMX_HOME or ~/.mmx (Windows: %USERPROFILE%\\.mmx)"
+    after_help = "Commands: create, import, list, use <INDEX|FINGERPRINT>, rename <NAME>, set-addresses <N>,\nmnemonic, get mnemonic, address, addresses, balance, history, send, broadcast, info,\ntransaction <TXID>, capabilities\n\nrename and set-addresses change the selected wallet (--wallet or the active one).\n\nWallet directory: $MMX_HOME or ~/.mmx (Windows: %USERPROFILE%\\.mmx)\nSettings: <wallet directory>/mmxwallet.json"
 )]
 struct Args {
     #[arg(default_value = "help")]
     command: String,
     subject: Option<String>,
-    #[arg(long, short = 'r', default_value = "rpc.mmx.network")]
-    rpc: String,
+    /// Chain server URL [default: the "rpc" setting in mmxwallet.json, else rpc.mmx.network]
+    #[arg(long, short = 'r')]
+    rpc: Option<String>,
     #[arg(long, short = 'f')]
     file: Option<PathBuf>,
     #[arg(long, short = 'w')]
@@ -46,8 +50,9 @@ struct Args {
     memo: Option<String>,
     #[arg(long, short = 'k', default_value_t = 0)]
     offset: u32,
-    #[arg(long, short = 'N', default_value_t = 1)]
-    num_addresses: u32,
+    /// Addresses to use, 1 to 100 [default: the wallet's setting (see set-addresses), else 10]
+    #[arg(long, short = 'N')]
+    num_addresses: Option<u32>,
     #[arg(long, default_value_t = 0)]
     account: u32,
     #[arg(long, default_value_t = 20)]
@@ -75,29 +80,56 @@ impl Args {
     fn non_interactive(&self) -> bool {
         self.json || self.input_stdin || self.non_interactive
     }
-    fn key_path(&self) -> Result<PathBuf> {
+    fn rpc(&self) -> Result<Rpc> {
+        Rpc::new(&self.rpc_url())
+    }
+    fn rpc_url(&self) -> String {
+        if let Some(url) = &self.rpc {
+            return url.clone();
+        }
+        storage::directory()
+            .ok()
+            .and_then(|dir| config::rpc(&config::read_lenient(&dir)).map(str::to_owned))
+            .unwrap_or_else(|| rpc::DEFAULT_URL.to_owned())
+    }
+    /// The selected key file and, for a wallet in the wallet directory, its
+    /// file name (which keys its settings).
+    fn key_path(&self) -> Result<(PathBuf, Option<String>)> {
         if self.file.is_some() && self.wallet.is_some() {
             return Err(invalid("--file and --wallet cannot be used together"));
         }
         if let Some(path) = &self.file {
-            return Ok(path.clone());
+            return Ok((path.clone(), None));
         }
         let dir = storage::directory()?;
-        Ok(storage::select(
+        let path = storage::select(
             &storage::wallets(&dir)?,
             self.wallet.as_deref(),
             storage::active(&dir)?.as_deref(),
             false,
         )?
-        .path)
+        .path;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        Ok((path, name))
     }
-    fn unlock(&self, key: &KeyFile, secrets: &Secrets) -> Result<mmx_wallet::Wallet> {
+    /// --num-addresses, else the wallet's setting, else the default.
+    fn address_count(&self, wallet: Option<&str>) -> u32 {
+        self.num_addresses.unwrap_or_else(|| {
+            wallet
+                .and_then(|id| {
+                    let dir = storage::directory().ok()?;
+                    Some(config::num_addresses(&config::read_lenient(&dir), id))
+                })
+                .unwrap_or(validate::DEFAULT_NUM_ADDRESSES)
+        })
+    }
+    fn unlock(&self, key: &KeyFile, secrets: &Secrets, count: u32) -> Result<mmx_wallet::Wallet> {
         let pass = if key.requires_passphrase() {
             secrets.value("passphrase", self.non_interactive())?
         } else {
             Zeroizing::new(String::new())
         };
-        Ok(key.unlock(&pass, self.account, self.num_addresses)?)
+        Ok(key.unlock(&pass, self.account, count)?)
     }
     fn list_address(&self, entry: &storage::Entry, secrets: &Secrets) -> Result<Option<Address>> {
         let passphrase = if entry.with_passphrase {
@@ -141,14 +173,20 @@ fn run(a: &Args) -> Result<()> {
     if a.command == "capabilities" {
         print_json(
             &a.command,
-            json!({"commands":["create","import","list","use","mnemonic","get","address","addresses","balance","history","send","broadcast","info","transaction","capabilities"], "secret_input":"stdin-json-line", "memo_max_bytes":64, "max_num_addresses":10, "curl_override":false, "http_transport":"native-rust", "prepare_transaction":true, "key_file_encrypted":false}),
+            json!({"commands":["create","import","list","use","rename","set-addresses","mnemonic","get","address","addresses","balance","history","send","broadcast","info","transaction","capabilities"], "secret_input":"stdin-json-line", "memo_max_bytes":validate::MEMO_MAX_BYTES, "max_num_addresses":validate::MAX_NUM_ADDRESSES, "default_num_addresses":validate::DEFAULT_NUM_ADDRESSES, "wallet_names":true, "curl_override":false, "http_transport":"native-rust", "prepare_transaction":true, "key_file_encrypted":false}),
         );
         return Ok(());
     }
-    if !(1..=10).contains(&a.num_addresses) {
-        return Err(invalid("num-addresses must be between 1 and 10"));
+    if let Some(n) = a.num_addresses {
+        validate::num_addresses(n)
+            .map_err(|_| invalid("num-addresses must be between 1 and 100"))?;
     }
-    if a.subject.is_some() && !matches!(a.command.as_str(), "get" | "use" | "transaction") {
+    if a.subject.is_some()
+        && !matches!(
+            a.command.as_str(),
+            "get" | "use" | "transaction" | "rename" | "set-addresses"
+        )
+    {
         return Err(invalid("unexpected positional argument"));
     }
     match a.command.as_str() {
@@ -196,7 +234,7 @@ fn run(a: &Args) -> Result<()> {
                     return Err(Error::new("wallet_exists", "wallet already exists"));
                 }
             }
-            let wallet = key.unlock(pass_ref.unwrap_or(""), a.account, a.num_addresses)?;
+            let wallet = key.unlock(pass_ref.unwrap_or(""), a.account, 1)?;
             storage::save_key(&path, &key)?;
             if let Some(dir) = dir {
                 storage::set_active(&dir, &path)?;
@@ -228,7 +266,7 @@ fn run(a: &Args) -> Result<()> {
                 return Err(invalid("list/use do not accept --file or --wallet"));
             }
             let dir = storage::directory()?;
-            let entries = storage::wallets(&dir)?;
+            let (entries, unreadable) = storage::scan(&dir)?;
             if a.command == "use" {
                 let selected = storage::select(
                     &entries,
@@ -254,19 +292,25 @@ fn run(a: &Args) -> Result<()> {
                     );
                 }
             } else {
-                let active = storage::active(&dir)?;
-                let selected = storage::select(&entries, None, active.as_deref(), false).ok();
+                let config = config::read(&dir)?;
+                let selected = storage::select(&entries, None, config::active(&config), false).ok();
+                let file_name = |path: &std::path::Path| {
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
                 let mut rows = Vec::new();
                 for (i, e) in entries.iter().enumerate() {
                     let active = selected.as_ref().is_some_and(|s| s.path == e.path);
                     let address = a.list_address(e, &secrets)?;
-                    rows.push(json!({"index":i,"fingerprint":e.fingerprint,"wallet_file":storage::absolute(&e.path)?,"with_passphrase":e.with_passphrase,"active":active,"address":address}));
+                    let file = file_name(&e.path);
+                    let name = config::wallet_name(&config, &file);
+                    rows.push(json!({"index":i,"fingerprint":e.fingerprint,"wallet_file":storage::absolute(&e.path)?,"with_passphrase":e.with_passphrase,"active":active,"address":address,"name":name,"num_addresses":config::num_addresses(&config, &file)}));
                     if !a.json {
                         println!(
-                            "{}[{i}] {}  {}  {}{}",
+                            "{}[{i}] {}  {file}  {}{}{}",
                             if active { "* " } else { "  " },
                             e.fingerprint,
-                            e.path.file_name().unwrap().to_string_lossy(),
                             address
                                 .map(|a| a.to_string())
                                 .unwrap_or_else(|| "[passphrase required]".into()),
@@ -274,34 +318,92 @@ fn run(a: &Args) -> Result<()> {
                                 "  (passphrase)"
                             } else {
                                 ""
-                            }
+                            },
+                            name.map(|n| format!("  {n}")).unwrap_or_default()
+                        );
+                    }
+                }
+                let mut bad = Vec::new();
+                for u in &unreadable {
+                    bad.push(json!({"wallet_file":storage::absolute(&u.path)?,"code":u.error.code,"error":u.error.message}));
+                    if !a.json {
+                        println!(
+                            "  [!] {}  unreadable: {}",
+                            file_name(&u.path),
+                            u.error.message.replace(char::is_control, " ")
                         );
                     }
                 }
                 if a.json {
                     print_json(
                         &a.command,
-                        json!({"wallet_directory":storage::absolute(&dir)?,"wallets":rows}),
+                        json!({"wallet_directory":storage::absolute(&dir)?,"wallets":rows,"unreadable":bad}),
                     );
-                } else if entries.is_empty() {
+                } else if entries.is_empty() && unreadable.is_empty() {
                     println!("No wallets found in {}", dir.display());
                 }
             }
         }
+        "rename" | "set-addresses" => {
+            if a.file.is_some() {
+                return Err(invalid(format!(
+                    "{} changes a wallet in the wallet directory; select it with --wallet",
+                    a.command
+                )));
+            }
+            let subject = a.subject.as_deref().ok_or_else(|| {
+                invalid(if a.command == "rename" {
+                    "usage: mmxwallet rename <NAME>"
+                } else {
+                    "usage: mmxwallet set-addresses <N>"
+                })
+            })?;
+            let (path, file) = a.key_path()?;
+            let file = file.ok_or_else(|| invalid("invalid wallet filename"))?;
+            let fingerprint = storage::read_key(&path)?.fingerprint();
+            let dir = storage::directory()?;
+            let mut config = config::read(&dir)?;
+            let mut v = json!({"wallet_file":storage::absolute(&path)?,"fingerprint":fingerprint});
+            if a.command == "rename" {
+                let name = validate::name(subject)?;
+                config::set_wallet_name(&mut config, &file, &name);
+                config::save(&dir, config)?;
+                if !a.json {
+                    println!("Wallet {fingerprint} renamed to {name}");
+                }
+                v["name"] = json!(name);
+            } else {
+                let count = subject
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|n| validate::num_addresses(n).ok())
+                    .ok_or_else(|| invalid("number of addresses must be between 1 and 100"))?;
+                config::set_num_addresses(&mut config, &file, count);
+                config::save(&dir, config)?;
+                if !a.json {
+                    println!("Wallet {fingerprint} uses {count} addresses");
+                }
+                v["num_addresses"] = json!(count);
+            }
+            if a.json {
+                print_json(&a.command, v);
+            }
+        }
         "info" => {
-            let v = Rpc::new(&a.rpc)?.get("/node/info")?;
+            let url = a.rpc_url();
+            let v = Rpc::new(&url)?.get("/node/info")?;
             let name = rpc::text(&v, "name")?;
             let height = rpc::u32_field(&v, "height")?;
             let synced = rpc::boolean(&v, "is_synced")?;
             if a.json {
                 print_json(
                     &a.command,
-                    json!({"rpc":a.rpc,"network":name,"height":height,"is_synced":synced}),
+                    json!({"rpc":url,"network":name,"height":height,"is_synced":synced}),
                 );
             } else {
                 println!(
                     "RPC: {}\nNetwork: {name}\nHeight: {height}\nSynced: {}",
-                    a.rpc,
+                    url.replace(char::is_control, " "),
                     if synced { "yes" } else { "no" }
                 );
             }
@@ -321,7 +423,7 @@ fn run(a: &Args) -> Result<()> {
             }
             let tx: Transaction = serde_json::from_slice(&bytes)
                 .map_err(|_| invalid("invalid signed transaction file"))?;
-            let rpc = Rpc::new(&a.rpc)?;
+            let rpc = a.rpc()?;
             let params = rpc.params()?;
             let height = rpc.height(&params)?;
             if tx.expires < height {
@@ -349,7 +451,8 @@ fn run(a: &Args) -> Result<()> {
             if a.command == "get" && a.subject.as_deref() != Some("mnemonic") {
                 return Err(invalid("usage: mmxwallet get mnemonic"));
             }
-            let path = a.key_path()?;
+            let (path, file) = a.key_path()?;
+            let count = a.address_count(file.as_deref());
             let key = storage::read_key(&path)?;
             match a.command.as_str() {
                 "mnemonic" | "get" => {
@@ -362,12 +465,12 @@ fn run(a: &Args) -> Result<()> {
                     } else if a.command == "get" {
                         println!("{}", *words);
                     } else {
-                        let w = a.unlock(&key, &secrets)?;
+                        let w = a.unlock(&key, &secrets, 1)?;
                         println!("Address: {}\nMnemonic: {}", w.addresses[0], *words);
                     }
                 }
                 "address" | "addresses" => {
-                    let w = a.unlock(&key, &secrets)?;
+                    let w = a.unlock(&key, &secrets, count)?;
                     if a.command == "address" {
                         let addr = w
                             .addresses
@@ -393,9 +496,9 @@ fn run(a: &Args) -> Result<()> {
                     }
                 }
                 _ => {
-                    let rpc = Rpc::new(&a.rpc)?;
+                    let rpc = a.rpc()?;
                     let params = rpc.params()?;
-                    let w = a.unlock(&key, &secrets)?;
+                    let w = a.unlock(&key, &secrets, count)?;
                     if a.command == "history" {
                         if !(1..=1000).contains(&a.limit) {
                             return Err(invalid("limit must be between 1 and 1000"));
@@ -403,7 +506,7 @@ fn run(a: &Args) -> Result<()> {
                         let height = rpc.height(&params)?;
                         let rows = remote::history(
                             &rpc,
-                            &w,
+                            &w.addresses,
                             &params,
                             &remote::Filter::parse(&a.currency)?,
                             a.limit,
@@ -439,7 +542,7 @@ fn run(a: &Args) -> Result<()> {
                             }
                         }
                     } else {
-                        let state = remote::State::fetch(&rpc, &w, &params)?;
+                        let state = remote::State::fetch(&rpc, &w.addresses, &params)?;
                         if a.command == "balance" {
                             let rows = state.rows(&remote::Filter::parse(&a.currency)?, &params)?;
                             if a.json {
@@ -486,7 +589,7 @@ fn transaction_status(a: &Args) -> Result<()> {
             "transaction requires a 64-character hexadecimal transaction ID",
         ));
     }
-    let rpc = Rpc::new(&a.rpc)?;
+    let rpc = a.rpc()?;
     let params = rpc.params()?;
     let height = rpc.height(&params)?;
     let tx = rpc.get(&format!("/transaction?id={id}"))?;

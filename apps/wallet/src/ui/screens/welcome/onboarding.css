@@ -1,0 +1,58 @@
+/* Shared by the welcome, create, import and unlock screens. Theme tokens only. */
+
+.onboarding-header {
+  gap: var(--s3);
+}
+.onboarding-header--center {
+  align-items: center;
+  text-align: center;
+}
+.onboarding-header--center .page-header__row,
+.onboarding-header--center .page-header__titles {
+  justify-content: center;
+  align-items: center;
+}
+.onboarding-header__title {
+  font-size: var(--text-2xl);
+  overflow-wrap: anywhere;
+}
+.onboarding-header__title:focus {
+  outline: none;
+}
+.onboarding-header__title:focus-visible {
+  outline: none;
+  border-radius: var(--radius-s);
+  box-shadow: var(--ring);
+}
+.onboarding-header__subtitle {
+  max-width: 36rem;
+}
+.onboarding-header__leading {
+  display: flex;
+}
+.onboarding-header--center .onboarding-header__leading {
+  justify-content: center;
+}
+@media (min-width: 720px) {
+  .onboarding-header__title {
+    font-size: var(--text-3xl);
+  }
+}
+
+/* A form inside a flow step: fields, then the actions. */
+.onboarding-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+}
+.onboarding-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.onboarding-actions__secondary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--s2);
+}

@@ -1,0 +1,70 @@
+/* Settings screen. Theme tokens only. */
+
+.settings__mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.settings-count {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+.settings-count__actions {
+  display: flex;
+  gap: var(--s1);
+}
+
+.settings-server {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  width: 100%;
+}
+.settings-server > .field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.settings-server__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--control-h);
+}
+
+.settings-remove,
+.settings-reveal {
+  margin-top: var(--s4);
+}
+
+@media (max-width: 719.98px) {
+  /* Compact rows: small controls stay beside their title. */
+  .settings .option-row:not(.option-row--stacked) .option-row__text {
+    flex-basis: 9rem;
+  }
+  .settings .option-row:not(.option-row--stacked) .option-row__control {
+    flex: 0 1 auto;
+    margin-inline-start: auto;
+    justify-content: flex-end;
+  }
+  .settings .option-row.settings-theme .option-row__control {
+    flex: 1 1 100%;
+    margin-inline-start: 0;
+  }
+  .settings .settings-theme .segmented {
+    width: 100%;
+  }
+  .settings .settings-theme .segmented__item {
+    flex: 1 1 0;
+  }
+  .settings-server {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .settings-server__actions {
+    justify-content: flex-end;
+  }
+}

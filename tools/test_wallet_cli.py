@@ -135,8 +135,13 @@ class WalletCLI(unittest.TestCase):
         caps = self.run_cli('capabilities')
         self.assertEqual(caps['memo_max_bytes'], 64)
         self.assertEqual(caps['secret_input'], 'stdin-json-line')
-        self.assertIn('transaction', caps['commands'])
-        self.assertEqual(self.run_cli('list')['wallets'], [])
+        self.assertEqual(caps['max_num_addresses'], 100)
+        self.assertEqual(caps['default_num_addresses'], 10)
+        for command in ['transaction', 'rename', 'set-addresses']:
+            self.assertIn(command, caps['commands'])
+        listed = self.run_cli('list')
+        self.assertEqual(listed['wallets'], [])
+        self.assertEqual(listed['unreadable'], [])
 
     def test_create_import_addresses_and_permissions(self):
         created = self.run_cli('create')
@@ -149,10 +154,17 @@ class WalletCLI(unittest.TestCase):
         addresses = self.run_cli('addresses', '--num-addresses', '3')['addresses']
         self.assertEqual(len(addresses), 3)
         self.assertEqual(addresses[0], created['address'])
+        self.assertEqual(self.run_cli('addresses')['addresses'][:3], addresses)
+        self.assertEqual(len(self.run_cli('addresses')['addresses']), 10)
+        self.assertEqual(len(self.run_cli('addresses', '--num-addresses', '100')['addresses']), 100)
+        for count in ['0', '101']:
+            self.run_cli('addresses', '--num-addresses', count, error='invalid_argument')
         self.assertEqual(self.run_cli('address', '--num-addresses', '3', '--offset', '2')['address'], addresses[2])
         listed = self.run_cli('list')['wallets'][0]
         self.assertEqual(listed['active'], True)
         self.assertEqual(listed['address'], created['address'])
+        self.assertIsNone(listed['name'])
+        self.assertEqual(listed['num_addresses'], 10)
         self.assertIn(created['address'], self.run_cli('list', json_mode=False))
         account_address = self.run_cli('address', '--account', '7')['address']
         self.assertEqual(self.run_cli('list', '--account', '7')['wallets'][0]['address'], account_address)
@@ -216,15 +228,18 @@ class WalletCLI(unittest.TestCase):
     def test_rpc_balance_history_and_info(self):
         info = self.run_cli('info', '--rpc', self.url)
         self.assertTrue(info['is_synced'])
-        balance = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url)
+        balance = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url, '-N', '1')
         self.assertEqual(balance['balances'][0]['amount_atomic'], '9007199254740993')
+        # Ten addresses by default, each holding the mock balance.
+        balance = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url)
+        self.assertEqual(balance['balances'][0]['amount_atomic'], str(10 * 9007199254740993))
         history = self.run_cli('history', '--file', str(self.file), '--rpc', self.url)
         self.assertEqual(history['history'][0]['amount_atomic'], '1234567')
         self.assertEqual(history['history'][0]['memo'], 'hello <b>世界</b>\x00\x01\n')
 
     def test_full_width_atomic_balance_is_formatted_exactly(self):
         self.server.amount = '340282366920938463463374607431768211455'
-        row = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url)['balances'][0]
+        row = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url, '-N', '1')['balances'][0]
         self.assertEqual(row['amount_atomic'], self.server.amount)
         self.assertEqual(row['amount'], '340282366920938463463374607431768.211455')
 
@@ -360,7 +375,7 @@ class WalletCLI(unittest.TestCase):
             {'contract': token, 'amount': '1000', 'decimals': 2, 'symbol': 'TOKEN'},
             {'contract': nft, 'amount': '1', 'is_nft': True, 'is_native': False},
         ]}, 200)
-        native = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url)['balances']
+        native = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url, '-N', '1')['balances']
         self.assertEqual([(r['symbol'], r['amount_atomic']) for r in native], [('MMX', '2000000')])
         all_balances = self.run_cli('balance', '--file', str(self.file), '--rpc', self.url,
                                     '--currency', 'all')['balances']
@@ -381,7 +396,7 @@ class WalletCLI(unittest.TestCase):
     def test_fee_payer_affordability_is_checked_by_rpc(self):
         self.server.amount = '1000000'
         self.server.responses['/transaction/validate'] = ({'did_fail': True, 'error': 'insufficient fee payer balance'}, 200)
-        self.run_cli('send', '--file', str(self.file), '--rpc', self.url,
+        self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
                      '--target', self.wallet['address'], '--amount', '1', error='wallet_error')
         self.assertEqual([path for path, _ in self.server.posts], ['/transaction/validate'])
         tx = json.loads(self.server.posts[0][1])
@@ -408,6 +423,68 @@ class WalletCLI(unittest.TestCase):
         self.assertEqual(self.run_cli('transaction', txid, '--rpc', self.url)['status'], 'failed')
         self.server.transaction['id'] = 'b' * 64
         self.run_cli('transaction', txid, '--rpc', self.url, error='rpc_response_invalid')
+
+    def test_rename_set_addresses_and_names(self):
+        first = self.run_cli('create')
+        second = self.run_cli('create')
+        renamed = self.run_cli('rename', ' Daily savings 世界 ')
+        self.assertEqual(renamed['name'], 'Daily savings 世界')
+        self.assertEqual(renamed['fingerprint'], second['fingerprint'])
+        self.run_cli('rename', 'Cold', '--wallet', first['fingerprint'])
+        resized = self.run_cli('set-addresses', '3')
+        self.assertEqual(resized['num_addresses'], 3)
+        self.assertEqual(len(self.run_cli('addresses')['addresses']), 3)
+        self.assertEqual(len(self.run_cli('addresses', '-N', '5')['addresses']), 5)
+        self.assertEqual(len(self.run_cli('addresses', '--wallet', first['fingerprint'])['addresses']), 10)
+        wallets = {w['fingerprint']: w for w in self.run_cli('list')['wallets']}
+        self.assertEqual(wallets[second['fingerprint']]['name'], 'Daily savings 世界')
+        self.assertEqual(wallets[second['fingerprint']]['num_addresses'], 3)
+        self.assertEqual(wallets[first['fingerprint']]['name'], 'Cold')
+        text = self.run_cli('list', json_mode=False)
+        self.assertIn('Daily savings 世界', text)
+        self.assertIn('Cold', text)
+        self.assertIn('Wallet ' + second['fingerprint'] + ' uses 4 addresses',
+                      self.run_cli('set-addresses', '4', json_mode=False))
+        for bad in ['', '   ', 'tab\there', 'x' * 65, 'evil\u202egnp']:
+            self.run_cli('rename', bad, error='invalid_argument')
+        for bad in ['0', '101', 'x', '-1']:
+            self.run_cli('set-addresses', bad, error='invalid_argument')
+        self.run_cli('rename', error='invalid_argument')
+        self.run_cli('rename', 'X', '--file', str(self.file), error='invalid_argument')
+        self.run_cli('set-addresses', '2', '--file', str(self.file), error='invalid_argument')
+        # The active wallet and keys written by other tools are kept.
+        config_path = self.root / 'wallets' / 'mmxwallet.json'
+        config = json.loads(config_path.read_text())
+        config['other_tool'] = {'keep': True}
+        config_path.write_text(json.dumps(config))
+        self.run_cli('rename', 'Kept')
+        config = json.loads(config_path.read_text())
+        self.assertEqual(config['other_tool'], {'keep': True})
+        self.assertEqual(config['active_wallet'], Path(second['wallet_file']).name)
+        self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+
+    def test_unreadable_key_file_does_not_break_list(self):
+        created = self.run_cli('create')
+        bad = self.root / 'wallets' / 'wallet_broken.dat'
+        bad.write_bytes(b'\xffnot a key file')
+        listed = self.run_cli('list')
+        self.assertEqual([w['fingerprint'] for w in listed['wallets']], [created['fingerprint']])
+        self.assertEqual(len(listed['unreadable']), 1)
+        self.assertEqual(listed['unreadable'][0]['wallet_file'], str(bad))
+        self.assertEqual(listed['unreadable'][0]['code'], 'wallet_error')
+        self.assertIn('[!] wallet_broken.dat', self.run_cli('list', json_mode=False))
+        self.assertEqual(self.run_cli('address')['address'], created['address'])
+        self.run_cli('use', '0')
+
+    def test_default_rpc_from_configuration(self):
+        self.run_cli('create')
+        config_path = self.root / 'wallets' / 'mmxwallet.json'
+        config = json.loads(config_path.read_text())
+        config['rpc'] = self.url
+        config_path.write_text(json.dumps(config))
+        self.assertEqual(self.run_cli('info')['rpc'], self.url)
+        self.assertEqual(self.run_cli('balance', '-N', '1')['balances'][0]['amount_atomic'], '9007199254740993')
+        self.run_cli('info', '--rpc', 'ftp://127.0.0.1', error='invalid_argument')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

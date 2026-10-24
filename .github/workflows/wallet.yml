@@ -1,0 +1,137 @@
+name: Wallet
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apps/wallet/**'
+      - 'crates/mmx-wallet/**'
+      - 'crates/mmx-wallet-wasm/**'
+      - 'crates/mmxwallet/**'
+      - 'Cargo.lock'
+      - '.github/workflows/wallet.yml'
+  pull_request:
+    paths:
+      - 'apps/wallet/**'
+      - 'crates/mmx-wallet/**'
+      - 'crates/mmx-wallet-wasm/**'
+      - 'crates/mmxwallet/**'
+      - 'Cargo.lock'
+      - '.github/workflows/wallet.yml'
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+  # Must match the wasm-bindgen crate version in Cargo.lock.
+  WASM_BINDGEN_VERSION: '0.2.127'
+jobs:
+  # Wallet core parity (native vs WASM), unit tests, the hosted web build and
+  # the end-to-end suite against a mock chain server.
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: apps/wallet
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:wasm
+      - run: bash scripts/build-wasm.sh --test
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build:web
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+        env:
+          CI: '1'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/wallet/playwright-report
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mmx-wallet-web
+          path: apps/wallet/dist/web
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
+      - run: bash apps/wallet/scripts/build-wasm.sh
+      # deb + AppImage built in the Ubuntu 22.04 container, then started under Xvfb.
+      - run: bash apps/wallet/scripts/build-linux-container.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mmx-wallet-linux
+          path: apps/wallet/artifacts/packages
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: apps/wallet
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
+      - run: bash scripts/build-wasm.sh
+      - run: bash scripts/build-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mmx-wallet-macos
+          path: apps/wallet/artifacts/packages
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: apps/wallet
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,x86_64-pc-windows-msvc
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: cargo install wasm-bindgen-cli --version "$env:WASM_BINDGEN_VERSION" --locked
+        shell: pwsh
+      - run: bash scripts/build-wasm.sh
+        shell: bash
+      - run: ./scripts/build-windows.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mmx-wallet-windows
+          path: apps/wallet/artifacts/packages

@@ -47,8 +47,10 @@ impl Wallet {
         }
         let chain = hmac(&master[..32], &master[32..], Some(11337));
         let account = hmac(&chain[..32], &chain[32..], Some(account));
-        let mut keys = Vec::new();
-        let mut addresses = Vec::new();
+        // Reserve up front: growing the vector would leave copies of moved
+        // private keys behind in freed memory.
+        let mut keys = Vec::with_capacity(count as usize);
+        let mut addresses = Vec::with_capacity(count as usize);
         for i in 0..count {
             let key = hmac(&account[..32], &account[32..], Some(i));
             let signing = SigningKey::from_slice(&key[..32]).map_err(|_| {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mmx-config", "crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node", "crates/mmx-wallet", "crates/mmxwallet", "crates/mmx-farming", "crates/mmx-tools", "crates/mmx-opencl", "crates/mmx-timelord"]
+members = ["crates/mmx-config", "crates/mmx-db", "crates/mmx-types", "crates/mmx-vm", "crates/mmx-execution", "crates/mmx-consensus", "crates/mmx-crypto", "crates/mmx-node", "crates/mmx-wallet", "crates/mmx-wallet-wasm", "crates/mmxwallet", "crates/mmx-farming", "crates/mmx-tools", "crates/mmx-opencl", "crates/mmx-timelord"]
 exclude = ["vendor/vnx-rust"]
 resolver = "2"
 
@@ -16,7 +16,8 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 mmx-farming = { path = "crates/mmx-farming" }
-mmx-wallet = { path = "crates/mmx-wallet" }
+# Members opt into the consensus record bridge with features = ["native"].
+mmx-wallet = { path = "crates/mmx-wallet", default-features = false }
 mmx-timelord = { path = "crates/mmx-timelord" }
 mmx-db = { path = "crates/mmx-db" }
 mmx-types = { path = "crates/mmx-types" }
@@ -38,3 +39,11 @@ tempfile = "3"
 overflow-checks = true
 lto = "thin"
 codegen-units = 1
+
+# Web wallet WebAssembly (apps/wallet/scripts/build-wasm.sh): optimized for size.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true

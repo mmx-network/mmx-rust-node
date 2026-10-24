@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>MMX Wallet</title>
+  <defs>
+    <radialGradient id="face" cx="0.34" cy="0.26" r="0.86">
+      <stop offset="0" stop-color="#6A31B0"/>
+      <stop offset="0.55" stop-color="#5E289F"/>
+      <stop offset="1" stop-color="#521F8F"/>
+    </radialGradient>
+  </defs>
+  <circle cx="512" cy="512" r="416" fill="url(#face)"/>
+  <g transform="translate(96 96) scale(3.25)">
+    <path fill="#FFFFFF" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
+  </g>
+</svg>

@@ -74,24 +74,27 @@ fn transactions_match_cpp() {
                 },
             )
             .unwrap();
-        let native = tx.to_record().unwrap();
-        assert_eq!(native.calc_hash(false, 0).unwrap(), tx.id);
-        assert_eq!(native.calc_hash(true, 0).unwrap(), tx.content_hash);
-        assert_eq!(
-            native.hash_serialize(false).unwrap(),
-            tx.hash_serialize(false).unwrap()
-        );
-        let validation = mmx_consensus::ValidationParams {
-            network: params.network.as_bytes().to_vec(),
-            ..Default::default()
-        };
-        assert!(native.is_valid(&validation).unwrap());
-        assert_eq!(
-            native.calc_cost(&validation).unwrap(),
-            u64::from(tx.static_cost)
-        );
-        let decoded = mmx_consensus::Record::decode(&native.encode().unwrap()).unwrap();
-        assert_eq!(decoded, native);
+        #[cfg(feature = "native")]
+        {
+            let native = tx.to_record().unwrap();
+            assert_eq!(native.calc_hash(false, 0).unwrap(), tx.id);
+            assert_eq!(native.calc_hash(true, 0).unwrap(), tx.content_hash);
+            assert_eq!(
+                native.hash_serialize(false).unwrap(),
+                tx.hash_serialize(false).unwrap()
+            );
+            let validation = mmx_consensus::ValidationParams {
+                network: params.network.as_bytes().to_vec(),
+                ..Default::default()
+            };
+            assert!(native.is_valid(&validation).unwrap());
+            assert_eq!(
+                native.calc_cost(&validation).unwrap(),
+                u64::from(tx.static_cost)
+            );
+            let decoded = mmx_consensus::Record::decode(&native.encode().unwrap()).unwrap();
+            assert_eq!(decoded, native);
+        }
         let expected = &reference["transactions"][i];
         let id: Vec<u8> = expected["id"]
             .as_array()
@@ -320,6 +323,7 @@ fn fee_counts_distinct_input_and_sender_signatures() {
     }
 }
 
+#[cfg(feature = "native")]
 #[test]
 fn native_completion_matches_cpp_transfer_and_supports_both_transaction_versions() {
     use mmx_consensus::{authorization, Record, Value as N};
@@ -386,6 +390,7 @@ fn native_completion_matches_cpp_transfer_and_supports_both_transaction_versions
     assert!(old.is_valid(&(&params).into()).unwrap());
     authorization::authorize_sender(&old).unwrap();
 }
+#[cfg(feature = "native")]
 #[test]
 fn completion_accounts_for_deposits_shared_user_signatures_and_existing_inputs() {
     use mmx_consensus::{authorization, Record, Value as N};

@@ -1,0 +1,215 @@
+/* Send screen: form, review and result. Theme tokens only. */
+
+/* ---- form */
+
+.send-form__match {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--text);
+  font-weight: var(--weight-medium);
+}
+.send-form__match .icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.send-form__note {
+  color: var(--text-muted);
+  font-weight: var(--weight-regular);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.send-form__note::before {
+  content: '·';
+  margin-inline: var(--s1);
+}
+.send-form__match--own {
+  color: var(--text-muted);
+  font-weight: var(--weight-regular);
+}
+.send-form__match--own .icon {
+  color: var(--text-muted);
+}
+.send-form__warning {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--warning);
+}
+.send-form__available {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s1);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.send-form__available .amount__number,
+.send-form__available .amount__frac {
+  color: var(--text);
+}
+.send-form__amount .input__control {
+  font-variant-numeric: tabular-nums;
+}
+.send-form__amount-end {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.send-form__unit {
+  font-weight: var(--weight-semibold);
+  color: var(--text-muted);
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.send-passphrase {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+/* ---- review */
+
+.send-review,
+.send-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+  outline: none;
+}
+.send-review__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s6);
+}
+.send-review__hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) 0 var(--s5);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+}
+.send-review__eyebrow {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+}
+.send-review__details {
+  margin-top: calc(var(--s3) * -1);
+}
+.send-review__recipient {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+.send-review__recipient-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.send-review__recipient-name {
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.send-review__recipient-note {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+.send-review__address {
+  margin-top: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius-m);
+  background: var(--bg-sunken);
+  font-size: var(--text-md);
+  line-height: 1.7;
+  width: 100%;
+}
+.send-review__token {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+.send-review__token .address {
+  font-weight: var(--weight-regular);
+  color: var(--text-muted);
+}
+.send-review__memo {
+  font-weight: var(--weight-regular);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.send-review__actions,
+.send-result__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s3);
+}
+
+/* ---- result */
+
+.send-result {
+  padding-top: var(--s8);
+}
+.send-result__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+.send-result__card .empty-state {
+  padding: var(--s4) 0 var(--s2);
+}
+.send-result__details {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.send-result__txid {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+.send-result__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--s2);
+}
+.send-result__card .send-result__actions {
+  justify-content: stretch;
+  padding-top: var(--s2);
+}
+.send-result__card .send-result__actions > .btn {
+  flex: 1 1 0;
+}
+
+@media (max-width: 719.98px) {
+  .send-review__actions,
+  .send-result__actions {
+    flex-direction: column-reverse;
+  }
+  .send-review__actions > .btn,
+  .send-result__actions > .btn,
+  .send-result__card .send-result__actions > .btn {
+    flex: 0 0 auto;
+    width: 100%;
+  }
+  .send-review__address {
+    font-size: var(--text-sm);
+  }
+}

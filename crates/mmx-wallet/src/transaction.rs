@@ -228,6 +228,27 @@ impl Transaction {
     pub fn id_hex(&self) -> String {
         hex::encode(self.id)
     }
+    /// Fee charged for a simple transfer: static cost × fee ratio / 1024.
+    pub fn fee_amount(&self) -> u128 {
+        crate::fee::cost_to_fee(self.static_cost.into(), self.fee_ratio)
+    }
+    /// Whether the fee payer (`sender`) keeps at least the fee after funding
+    /// its own native inputs, given the balances the transfer was built from.
+    pub fn fee_payer_covered(&self, balances: &crate::Balances) -> bool {
+        let Some(sender) = self.sender else {
+            return false;
+        };
+        let native = Address::default();
+        let spent = self
+            .inputs
+            .iter()
+            .filter(|i| i.address == sender && i.contract == native)
+            .try_fold(0u128, |sum, i| sum.checked_add(i.amount));
+        let balance = balances.get(&(sender, native)).copied().unwrap_or(0);
+        spent
+            .and_then(|spent| spent.checked_add(self.fee_amount()))
+            .is_some_and(|needed| balance >= needed)
+    }
     pub fn calc_cost(&self, params: &ChainParams) -> Result<u32> {
         self.calc_cost_with_signatures(params, self.solutions.len())
     }
@@ -323,6 +344,90 @@ impl Transaction {
         Ok(())
     }
 }
+/// Inputs and fee payer of a simple transfer, exactly as `Wallet::transfer`
+/// signs them. Shared with the maximum-amount search so both always agree.
+pub(crate) struct Selection {
+    /// (owner, amount, solution index) in signing order.
+    pub inputs: Vec<(Address, u128, u16)>,
+    /// Pays the fee: the owned address with the largest remaining native balance.
+    pub sender: Address,
+    /// Distinct signers: the sender first, then input owners in input order.
+    pub owners: Vec<Address>,
+}
+impl Wallet {
+    /// Spend the largest owned balances of `currency` first. The fee payer is
+    /// the owned address with the largest native balance left after its own
+    /// inputs (first in map order on ties, else the first wallet address).
+    /// Affordability of the fee is checked by callers or RPC validation.
+    pub(crate) fn select(
+        &self,
+        balances: &BTreeMap<(Address, Address), u128>,
+        currency: Address,
+        amount: u128,
+    ) -> Result<Selection> {
+        let first = *self
+            .addresses
+            .first()
+            .ok_or_else(|| Error::InvalidArgument("wallet has no addresses".into()))?;
+        let owned: BTreeSet<&Address> = self.addresses.iter().collect();
+        let mut candidates: Vec<_> = balances
+            .iter()
+            .filter(|((a, c), _)| *c == currency && owned.contains(a))
+            .collect();
+        candidates.sort_by(|a, b| b.1.cmp(a.1));
+        let mut left = amount;
+        let mut inputs = Vec::new();
+        let mut spent = BTreeMap::new();
+        for ((address, currency), balance) in candidates {
+            if left == 0 {
+                break;
+            }
+            let amount = left.min(*balance);
+            if amount == 0 {
+                continue;
+            }
+            left -= amount;
+            inputs.push((*address, amount));
+            spent.insert((*address, *currency), amount);
+        }
+        if left != 0 {
+            return Err(Error::InsufficientFunds("not enough funds"));
+        }
+        // Prefer the largest remaining native balance, but leave fee-payer
+        // affordability to RPC validation, including when no MMX remains.
+        let mut sender = first;
+        let mut max_amount = 0;
+        for ((a, c), balance) in balances {
+            if *c == Address::default() && owned.contains(a) {
+                let balance = balance.saturating_sub(*spent.get(&(*a, *c)).unwrap_or(&0));
+                if balance > max_amount {
+                    max_amount = balance;
+                    sender = *a;
+                }
+            }
+        }
+        // Input owners are distinct (one balance per address and currency), so
+        // only the sender can already hold a solution slot.
+        let mut owners = vec![sender];
+        let mut selected = Vec::with_capacity(inputs.len());
+        for (address, amount) in inputs {
+            let index = if address == sender {
+                0
+            } else {
+                owners.push(address);
+                owners.len() - 1
+            };
+            let index = u16::try_from(index)
+                .map_err(|_| Error::InvalidArgument("too many transfer inputs".into()))?;
+            selected.push((address, amount, index));
+        }
+        Ok(Selection {
+            inputs: selected,
+            sender,
+            owners,
+        })
+    }
+}
 impl Wallet {
     pub fn transfer(
         &self,
@@ -365,59 +470,21 @@ impl Wallet {
             exec_result: None,
             content_hash: [0; 32],
         };
-        let mut candidates: Vec<_> = balances
+        let selection = self.select(balances, tx.outputs[0].contract, tx.outputs[0].amount)?;
+        tx.sender = Some(selection.sender);
+        tx.inputs = selection
+            .inputs
             .iter()
-            .filter(|((a, c), _)| *c == tx.outputs[0].contract && self.addresses.contains(a))
-            .collect();
-        candidates.sort_by(|a, b| b.1.cmp(a.1));
-        let mut left = tx.outputs[0].amount;
-        let mut spent = BTreeMap::new();
-        for ((address, currency), balance) in candidates {
-            if left == 0 {
-                break;
-            }
-            let amount = left.min(*balance);
-            if amount == 0 {
-                continue;
-            }
-            left -= amount;
-            tx.inputs.push(Input {
-                address: *address,
-                contract: *currency,
+            .map(|&(address, amount, solution)| Input {
+                address,
+                contract: tx.outputs[0].contract,
                 amount,
                 memo: None,
-                solution: u16::MAX,
+                solution,
                 flags: 0,
-            });
-            spent.insert((*address, *currency), amount);
-        }
-        if left != 0 {
-            return Err(Error::InsufficientFunds("not enough funds"));
-        }
-        // Prefer the largest remaining native balance, but leave fee-payer
-        // affordability to RPC validation, including when no MMX remains.
-        let mut sender = self.addresses[0];
-        let mut max_amount = 0;
-        for ((a, c), balance) in balances {
-            if *c == Address::default() && self.addresses.contains(a) {
-                let balance = balance.saturating_sub(*spent.get(&(*a, *c)).unwrap_or(&0));
-                if balance > max_amount {
-                    max_amount = balance;
-                    sender = *a;
-                }
-            }
-        }
-        tx.sender = Some(sender);
-        let mut owners = vec![sender];
-        for i in &mut tx.inputs {
-            let index = if let Some(index) = owners.iter().position(|a| *a == i.address) {
-                index
-            } else {
-                owners.push(i.address);
-                owners.len() - 1
-            };
-            i.solution = index as u16;
-        }
+            })
+            .collect();
+        let owners = selection.owners;
         // The signed maximum is part of the transaction ID. Count the unique
         // sender/input signatures before hashing, without signing a provisional ID.
         tx.static_cost = tx.calc_cost_with_signatures(params, owners.len())?;
