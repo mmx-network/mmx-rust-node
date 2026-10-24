@@ -207,6 +207,7 @@ export const ERROR_CODES = [
   'rpc_response_invalid',
   'tx_rejected',
   'tx_expired',
+  'tx_not_sent',
   'prepared_not_found',
   'io_error',
   'internal',

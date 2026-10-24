@@ -32,7 +32,10 @@
         // Option+arrow moves by word in macOS text fields.
         return event.altKey && !event.ctrlKey && !event.metaKey && !(MACOS && editable(event.target));
     }
-    return (event.ctrlKey || event.metaKey) && !event.altKey && LETTERS.has(letter(event));
+    // The browser's own modifier only: on macOS that is Cmd, and Ctrl+letter
+    // stays with the text fields' keys (Ctrl+P moves up a line).
+    const modifier = MACOS ? event.metaKey && !event.ctrlKey : event.ctrlKey;
+    return modifier && !event.altKey && LETTERS.has(letter(event));
   };
 
   window.addEventListener(

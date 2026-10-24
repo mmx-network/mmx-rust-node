@@ -728,7 +728,7 @@ fn send(
         rpc.post("/transaction/broadcast", &bytes)?;
     }
     if a.json {
-        let mut result = json!({"status":if broadcast {"broadcast"} else {"validated"},"transaction_id":tx.id_hex(),"amount":format_amount(amount,decimals)?,"amount_atomic":amount.to_string(),"currency":symbol,"currency_address":currency,"target":target,"fee":format_amount(fee,params.decimals)?,"fee_atomic":fee.to_string(),"max_fee_atomic":tx.max_fee_amount.to_string(),"network":params.network,"transaction_file":a.transaction.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"decimals":decimals,"expires_height":tx.expires,"current_height":state.height,"broadcast":broadcast});
+        let mut result = json!({"status":if broadcast {"broadcast"} else {"prepared"},"transaction_id":tx.id_hex(),"amount":format_amount(amount,decimals)?,"amount_atomic":amount.to_string(),"currency":symbol,"currency_address":currency,"target":target,"fee":format_amount(fee,params.decimals)?,"fee_atomic":fee.to_string(),"max_fee_atomic":tx.max_fee_amount.to_string(),"network":params.network,"transaction_file":a.transaction.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"decimals":decimals,"expires_height":tx.expires,"current_height":state.height,"broadcast":broadcast});
         if let Some(memo) = &a.memo {
             result["memo"] = json!(memo);
         }

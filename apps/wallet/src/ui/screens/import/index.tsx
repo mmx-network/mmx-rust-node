@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { toBackendError, type WalletInfo } from '../../../backend/types';
 import { errorMessage } from '../../../lib/errors';
 import { allWordsValid, joinWords, MNEMONIC_WORDS } from '../../../lib/mnemonic';
-import { credentialUsername, importWallet, navigate, notify, platform, suggestWalletName } from '../../../state';
+import { beginSetup, credentialUsername, importWallet, navigate, notify, platform, suggestWalletName } from '../../../state';
 import { Banner, Button, ProgressSteps } from '../../components';
 import { FocusLayout } from '../../shell';
 import { SaveCredential } from '../create/SaveCredential';
@@ -43,6 +43,12 @@ export default function ImportScreen() {
   const mounted = useMounted();
   const importing = useRef(false);
   const steps = web ? ['Name', 'Recovery phrase', 'Save'] : ['Name', 'Recovery phrase'];
+
+  // Typed words (or a passphrase) count as an open wallet for auto-lock, as in
+  // the create flow: a lock drops them and shows the welcome screen. Not while
+  // importing (it finishes anyway) nor after it (the wallet is open then).
+  const holding = (step === 'details' || step === 'words') && (words.some(Boolean) || details.passphrase !== '' || canUndo);
+  useEffect(() => (holding ? beginSetup() : undefined), [holding]);
 
   const runImport = async (): Promise<void> => {
     if (importing.current) return;

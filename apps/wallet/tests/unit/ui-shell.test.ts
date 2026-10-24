@@ -3,7 +3,7 @@ import { act } from 'preact/test-utils';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { WalletInfo } from '../../src/backend/types';
 import { NO_TOASTS_PLACED, placeToasts, ToastViewport, type Toast } from '../../src/ui/components/Toasts';
-import type { MenuItem } from '../../src/ui/components/Menu';
+import { initialFocus, MENU_ITEM_SELECTOR, type MenuItem } from '../../src/ui/components/Menu';
 import { documentTitle, focusNewPage } from '../../src/ui/shell/Shell';
 import { walletMenuItems } from '../../src/ui/shell/WalletSwitcher';
 
@@ -175,6 +175,20 @@ describe('wallet switcher', () => {
     ok?.onSelect();
     add?.onSelect();
     expect(chosen).toEqual(['ok', 'add']);
+  });
+
+  it('keeps unavailable items reachable by keyboard but never focuses one first', () => {
+    // Arrow keys, Home/End and type-ahead use every item, so a wallet that
+    // cannot be opened is announced with its reason.
+    expect(MENU_ITEM_SELECTOR).toBe('[data-menu-item]');
+    const item = (name: string, attrs: Record<string, string> = {}) => ({ name, getAttribute: (a: string) => attrs[a] ?? null });
+    const broken = item('broken', { 'aria-disabled': 'true', 'aria-checked': 'true' });
+    const ok = item('ok', { 'aria-checked': 'false' });
+    const add = item('add');
+    expect(initialFocus([broken, ok, add], 'first')?.name).toBe('ok');
+    expect(initialFocus([ok, add, broken], 'last')?.name).toBe('add');
+    expect(initialFocus([broken, ok, add], 'checked')?.name).toBe('ok');
+    expect(initialFocus([broken], 'first')).toBeUndefined();
   });
 });
 

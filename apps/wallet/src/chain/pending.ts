@@ -1,8 +1,9 @@
 /**
  * Locally tracked broadcasts. The public server does not report pending
  * entries, so sends are followed via `/transaction?id=` until included
- * (confirmed or failed) or expired (`expires < height`).
+ * (confirmed or failed) or expired (`expires < height`, with a margin).
  */
+import { REFRESH_OVERLAP } from './history';
 import type { TxInfo } from './types';
 
 export type PendingStatus = 'pending' | 'confirmed' | 'failed' | 'expired';
@@ -19,6 +20,8 @@ export interface PendingTx {
   memo?: string;
   /** Last height at which the transaction can be included. */
   expires: number;
+  /** Network the transfer was made for (absent in entries from older versions). */
+  network?: string;
   createdAt: number;
   status: PendingStatus;
   /** The broadcast result was not confirmed by the server (connection failed). */
@@ -31,14 +34,30 @@ export interface PendingTx {
 
 /** How long settled (failed/expired) local entries stay visible. */
 export const SETTLED_RETENTION_MS = 60 * 60 * 1000;
+/**
+ * Blocks past `expires` before a send that was not found in a block counts as
+ * expired. The lookup may reach a server a few blocks behind the height it is
+ * compared with, and expiring is final; waiting only shows a real expiry a
+ * little later, with the funds still held back meanwhile.
+ */
+export const EXPIRY_MARGIN = REFRESH_OVERLAP;
 
 export function nextStatus(p: PendingTx, tx: TxInfo | null, height: number, now = Date.now()): PendingTx {
   if (p.status !== 'pending') return p;
   if (tx && tx.height !== undefined) {
     return { ...p, status: tx.didFail ? 'failed' : 'confirmed', includedHeight: tx.height, settledAt: now };
   }
-  if (height > p.expires) return { ...p, status: 'expired', settledAt: now };
+  if (height > p.expires + EXPIRY_MARGIN) return { ...p, status: 'expired', settledAt: now };
   return p;
+}
+
+/**
+ * Whether a send still takes funds out of the shown balances: while pending,
+ * and once confirmed until history shows it and `prunePending` drops it
+ * (balances are refreshed with the history that contains it, not before).
+ */
+function holdsFunds(p: PendingTx): boolean {
+  return p.status === 'pending' || p.status === 'confirmed';
 }
 
 /**
@@ -61,7 +80,7 @@ function addTo(out: Map<string, bigint>, contract: string, amount: bigint): void
 /**
  * What open sends will take out of the wallet, per contract: fees always, the
  * amount only when it goes to someone else (a move between the wallet's own
- * addresses costs just the fee).
+ * addresses costs just the fee). Sends count until history shows them.
  */
 export function pendingOutgoing(
   list: readonly PendingTx[],
@@ -70,7 +89,7 @@ export function pendingOutgoing(
 ): Map<string, bigint> {
   const out = new Map<string, bigint>();
   for (const p of list) {
-    if (p.status !== 'pending') continue;
+    if (!holdsFunds(p)) continue;
     if (!ownAddresses.has(p.to)) addTo(out, p.contract, p.amount);
     addTo(out, nativeContract, p.fee);
   }
@@ -78,14 +97,14 @@ export function pendingOutgoing(
 }
 
 /**
- * What open sends hold back from spending until they are included, per
+ * What open sends hold back from spending until history shows them, per
  * contract: amount plus fee for every send, moves to own addresses included
  * (the moved amount is not spendable before the transaction confirms).
  */
 export function pendingReserved(list: readonly PendingTx[], nativeContract: string): Map<string, bigint> {
   const out = new Map<string, bigint>();
   for (const p of list) {
-    if (p.status !== 'pending') continue;
+    if (!holdsFunds(p)) continue;
     addTo(out, p.contract, p.amount);
     addTo(out, nativeContract, p.fee);
   }

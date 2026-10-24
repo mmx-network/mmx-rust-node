@@ -82,9 +82,9 @@ test('sends MMX with a memo, once, and follows it until it is confirmed', async 
   expect(sent).toMatchObject({ submissions: 1, status: 'pending' });
   expect(sent!.outputs).toEqual([{ address: recipient, contract: NATIVE, amount: '2500000', memo: 'Invoice 7' }]);
   expect(BigInt(sent!.fee)).toBeGreaterThan(0n);
-  // "Send now" posted the signed transfer once, and nothing else.
+  // "Send now" checked the signed transfer with the node's dry run, then posted it once.
   const posts = (await rpc.requests()).slice(beforeReview).filter((r) => r.method !== 'GET' && r.method !== 'OPTIONS');
-  expect(posts.map((r) => r.path)).toEqual(['/transaction/broadcast']);
+  expect(posts.map((r) => r.path)).toEqual(['/transaction/validate', '/transaction/broadcast']);
 
   // Save the recipient from the result.
   await page.getByRole('button', { name: 'Save to contacts' }).click();

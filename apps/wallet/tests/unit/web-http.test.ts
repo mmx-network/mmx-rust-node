@@ -52,8 +52,8 @@ describe('read paths', () => {
 });
 
 describe('RpcHttp', () => {
-  it('has no way to send a signed transfer other than the broadcast', () => {
-    expect(Object.getOwnPropertyNames(RpcHttp.prototype).filter((n) => n !== 'constructor' && n !== 'request').sort()).toEqual(['broadcast', 'get']);
+  it('sends a signed transfer only by its dry run and its broadcast', () => {
+    expect(Object.getOwnPropertyNames(RpcHttp.prototype).filter((n) => n !== 'constructor' && n !== 'request').sort()).toEqual(['broadcast', 'get', 'validate']);
   });
 
   it('sends credential-free, uncached, non-redirecting requests to the base URL', async () => {
@@ -69,6 +69,11 @@ describe('RpcHttp', () => {
     expect(calls[0]!.init.headers).toBeUndefined();
     expect(calls[1]!.url).toBe('https://rpc.example.org/api/transaction/broadcast');
     expect(calls[1]!.init).toMatchObject({ method: 'POST', body: '{"x":1}', headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
+    expect((await http.validate('{"x":2}')).value).toEqual({ height: 5 });
+    expect(calls[2]!.url).toBe('https://rpc.example.org/api/transaction/validate');
+    expect(calls[2]!.init).toMatchObject({ method: 'POST', body: '{"x":2}', credentials: 'omit', redirect: 'error' });
+    // A refusal of the dry run is classified as for the broadcast.
+    expect(await code(new RpcHttp(reply('insufficient funds for tx fee', { status: 400 }), 'https://x').validate('{}'))).toBe('insufficient_fee');
   });
 
   it('refuses paths outside the allowlist before any request', async () => {

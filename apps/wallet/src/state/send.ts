@@ -15,7 +15,7 @@ import { memoState } from '../lib/memo';
 import { sanitizeSymbol, shortenHash } from '../lib/text';
 import { activeWallet, activeWalletId, backend, contacts, sessionWalletId, settings, upsertWallet } from './core';
 import { navigate } from './router';
-import { assets, ownAddressSet, pendingReservedTotals, refreshNow, trackPending } from './session';
+import { assets, ownAddressSet, params, pendingReservedTotals, refreshNow, trackPending } from './session';
 import { notify } from './toasts';
 
 export interface SendDraft {
@@ -405,6 +405,8 @@ export async function confirmSend(): Promise<void> {
   // Set synchronously: a second click sees busy and returns.
   sendFlow.value = { ...flow, busy: 'sending' };
   clearExpiry();
+  // Reviewed on this server's network (the backend refuses it on another).
+  const network = params.peek()?.network;
   const pending = {
     txid: prepared.txid,
     walletId: request.walletId,
@@ -417,6 +419,7 @@ export async function confirmSend(): Promise<void> {
     expires: prepared.expires,
     createdAt: Date.now(),
     status: 'pending' as const,
+    ...(network ? { network } : {}),
     ...(prepared.memo ? { memo: prepared.memo } : {}),
   };
   try {

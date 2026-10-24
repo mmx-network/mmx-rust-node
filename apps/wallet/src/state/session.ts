@@ -114,6 +114,8 @@ interface Session {
   needsSync: boolean;
   syncing: boolean;
   syncAgain: boolean;
+  /** The sync requested while one was running was a forced one (user refresh). */
+  syncAgainForced: boolean;
   syncTimer: ReturnType<typeof setTimeout> | null;
   /** Retry delay after failed syncs (starts at the minimum sync interval). */
   syncBackoff: Backoff;
@@ -169,7 +171,19 @@ export const balancesLoaded = computed(() => assets.value !== null);
 
 const completeHistoryRows = computed(() => completeRows(historyMap.value, addresses.value));
 const historyItems = computed(() => groupRows(completeHistoryRows.value, isVerified.value));
-export const walletPending = computed(() => pendingTxs.value.filter((p) => p.walletId === sessionWalletId.value));
+/**
+ * Local sends of the open wallet on the server's network. Sends made on
+ * another network are kept (for when that server is used again) but neither
+ * shown nor deducted here: addresses are the same on every network.
+ */
+export const walletPending = computed(() => {
+  const net = params.value?.network;
+  return pendingTxs.value.filter((p) => p.walletId === sessionWalletId.value && onNetwork(p, net));
+});
+
+function onNetwork(p: PendingTx, net: string | undefined): boolean {
+  return net === undefined || p.network === undefined || p.network === net;
+}
 /** All activity items, newest first (local sends on top). */
 export const activity = computed<ActivityItem[]>(() =>
   mergeActivity(historyItems.value, walletPending.value, ownAddressSet.value, isVerified.value),
@@ -272,6 +286,7 @@ export async function openSession(walletId: string): Promise<boolean> {
     needsSync: true,
     syncing: false,
     syncAgain: false,
+    syncAgainForced: false,
     syncTimer: null,
     syncBackoff: new Backoff(MIN_SYNC_INTERVAL_MS, MAX_SYNC_RETRY_MS),
     syncRetryAt: 0,
@@ -511,7 +526,7 @@ function requestSync(s: Session, force = false): void {
       clearTimeout(s.syncTimer);
       s.syncTimer = null;
     }
-    void runSync(s);
+    void runSync(s, force);
   } else if (!s.syncTimer) {
     s.syncTimer = setTimeout(() => {
       s.syncTimer = null;
@@ -535,9 +550,12 @@ async function firstError<T>(tasks: Promise<T>[]): Promise<T[]> {
   return results.map((r) => (r as PromiseFulfilledResult<T>).value);
 }
 
-async function runSync(s: Session): Promise<void> {
+async function runSync(s: Session, force = false): Promise<void> {
   if (s.syncing) {
+    // Run again when this one ends; a forced request (user refresh) then
+    // skips the minimum interval and the failure delay as it would have.
     s.syncAgain = true;
+    if (force) s.syncAgainForced = true;
     return;
   }
   const head = s.head;
@@ -546,7 +564,13 @@ async function runSync(s: Session): Promise<void> {
   const startedAt = Date.now();
   try {
     const p = await ensureParams();
+    // Sends are looked up before history and balances are read: one found in
+    // a block is then already in what this sync reads and publishes.
+    const updates = await lookupPending(s, head, p);
+    if (s !== current) return;
     await withLock(s, async () => {
+      /** Addresses with new rows found by this sync's refresh. */
+      const changed = new Set<string>();
       const historyTask = firstError(
         s.addresses.map(async (a) => {
           const h = s.history.get(a);
@@ -568,7 +592,10 @@ async function runSync(s: Session): Promise<void> {
           }
           if (s === current) {
             s.history.set(a, result.history);
-            if (result.changed) s.balanceDirty.add(a);
+            if (result.changed) {
+              s.balanceDirty.add(a);
+              changed.add(a);
+            }
           }
         }),
       );
@@ -582,20 +609,22 @@ async function runSync(s: Session): Promise<void> {
         if (balances.status === 'fulfilled') {
           s.balances = new Map(balances.value);
           s.lastFullBalanceAt = startedAt;
-          s.balanceDirty.clear();
+          // New rows the refresh found may postdate the balances read beside
+          // it: those addresses are read again below.
+          s.balanceDirty = changed;
         }
         if (history.status === 'rejected') throw history.reason;
         if (balances.status === 'rejected') throw balances.reason;
       } else {
         await historyTask;
-        const targets = s.addresses.filter((a) => s.balanceDirty.has(a) || !s.balances.has(a));
-        if (targets.length > 0) {
-          const balances = await fetchBalances(rpc(), targets, p);
-          if (s !== current) return;
-          for (const [a, b] of balances) {
-            s.balances.set(a, b);
-            s.balanceDirty.delete(a);
-          }
+      }
+      const targets = s.addresses.filter((a) => s.balanceDirty.has(a) || !s.balances.has(a));
+      if (targets.length > 0) {
+        const balances = await fetchBalances(rpc(), targets, p);
+        if (s !== current) return;
+        for (const [a, b] of balances) {
+          s.balances.set(a, b);
+          s.balanceDirty.delete(a);
         }
       }
       if (s !== current) return;
@@ -605,8 +634,7 @@ async function runSync(s: Session): Promise<void> {
       });
     });
     if (s !== current) return;
-    await checkPending(s, head, p);
-    if (s !== current) return;
+    settlePending(updates);
     s.lastSyncAt = Date.now();
     s.needsSync = false;
     s.synced = true;
@@ -623,8 +651,10 @@ async function runSync(s: Session): Promise<void> {
   } finally {
     s.syncing = false;
     if (s === current && s.syncAgain) {
+      const forced = s.syncAgainForced;
       s.syncAgain = false;
-      requestSync(s);
+      s.syncAgainForced = false;
+      requestSync(s, forced);
     }
   }
 }
@@ -654,27 +684,39 @@ function announceReceived(s: Session): void {
   }
 }
 
-/** Follows locally tracked sends of the session's wallet. */
-async function checkPending(s: Session, head: number, p: ChainParams): Promise<void> {
-  const open = pendingTxs.peek().filter((x) => x.walletId === s.walletId && x.status === 'pending');
+/** Looks up the open sends of the session's wallet on the server's network. */
+async function lookupPending(s: Session, head: number, p: ChainParams): Promise<Map<string, PendingTx>> {
+  const open = pendingTxs.peek().filter((x) => x.walletId === s.walletId && x.status === 'pending' && onNetwork(x, p.network));
   const updates = new Map<string, PendingTx>();
-  if (open.length > 0) {
-    const results = await Promise.allSettled(open.map((x) => rpc().transaction(x.txid, p)));
-    if (s !== current) return;
-    results.forEach((r, i) => {
-      if (r.status !== 'fulfilled') return;
-      const x = open[i]!;
-      const next = nextStatus(x, r.value, head);
-      if (next !== x) updates.set(x.txid, next);
-      if (r.value) cacheTx(r.value);
-    });
-  }
+  if (open.length === 0) return updates;
+  const results = await Promise.allSettled(open.map((x) => rpc().transaction(x.txid, p)));
+  if (s !== current) return updates;
+  results.forEach((r, i) => {
+    if (r.status !== 'fulfilled') return;
+    const x = open[i]!;
+    const next = nextStatus(x, r.value, head);
+    if (next !== x) updates.set(x.txid, next);
+    if (r.value) cacheTx(r.value);
+  });
+  return updates;
+}
+
+/**
+ * Applies the lookups once the history and balances read after them are
+ * published, drops the sends history now shows, and reports failures.
+ */
+function settlePending(updates: ReadonlyMap<string, PendingTx>): void {
   const historyTxids = new Set(historyItems.peek().map((i) => i.txid));
-  const merged = pendingTxs.peek().map((x) => updates.get(x.txid) ?? x);
+  const merged = pendingTxs.peek().map((x) => {
+    const next = updates.get(x.txid);
+    // Never expired while history shows it in a block.
+    if (!next || (next.status === 'expired' && historyTxids.has(x.txid))) return x;
+    return next;
+  });
   pendingTxs.value = prunePending(merged, historyTxids);
   for (const x of updates.values()) {
     if (x.status === 'failed') notify('A transfer failed. Check Activity for details.', 'error');
-    else if (x.status === 'expired') notify('A transfer expired and was not sent.', 'error');
+    else if (x.status === 'expired' && !historyTxids.has(x.txid)) notify('A transfer expired and was not sent.', 'error');
   }
 }
 

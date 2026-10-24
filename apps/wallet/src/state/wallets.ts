@@ -173,9 +173,10 @@ export async function lockedElsewhere(): Promise<void> {
 
 /**
  * Cleanup after locking. `local`: this window locked, so it always leaves
- * for the unlock screen when the active wallet is locked (also dropping
- * words typed into the import form); a lock from another tab only affects a
- * window that had a wallet open.
+ * for the unlock screen when the active wallet is locked; a lock from
+ * another tab only affects a window that had a wallet open. A setup in
+ * progress (create, or words typed into import) leaves for the welcome
+ * screen with `setupMessage`, which drops its words.
  */
 async function afterLock(setupMessage: string | null, local: boolean): Promise<void> {
   const before = new Set(wallets.value.filter((w) => !w.locked).map((w) => w.id));

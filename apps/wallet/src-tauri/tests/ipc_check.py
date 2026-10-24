@@ -43,7 +43,7 @@ ERROR_CODES = {
     "wallet_exists", "wallet_not_found", "locked", "invalid_address", "invalid_amount",
     "invalid_memo", "insufficient_funds", "insufficient_fee", "invalid_argument",
     "rpc_unreachable", "rpc_timeout", "rpc_not_synced", "rpc_network_mismatch",
-    "rpc_http_error", "rpc_response_invalid", "tx_rejected", "tx_expired",
+    "rpc_http_error", "rpc_response_invalid", "tx_rejected", "tx_expired", "tx_not_sent",
     "prepared_not_found", "io_error", "internal",
 }
 INVOKE = """

@@ -49,6 +49,23 @@ export interface MenuProps {
 
 const isItem = (entry: MenuEntry): entry is MenuItem => !('separator' in entry);
 
+/**
+ * Every item, unavailable ones included: they stay in the arrow-key and
+ * type-ahead order so they are announced (with their reason) as unavailable;
+ * choosing one does nothing.
+ */
+export const MENU_ITEM_SELECTOR = '[data-menu-item]';
+
+type ItemElement = Pick<HTMLElement, 'getAttribute'>;
+
+/** The item focused when the menu opens: one that can be chosen. */
+export function initialFocus<T extends ItemElement>(items: readonly T[], focusOn: 'first' | 'last' | 'checked'): T | undefined {
+  const list = items.filter((el) => el.getAttribute('aria-disabled') !== 'true');
+  if (focusOn === 'last') return list[list.length - 1];
+  if (focusOn === 'checked') return list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0];
+  return list[0];
+}
+
 /** Menu button pattern: arrow keys, Home/End, type-ahead, Esc and outside clicks close it. */
 export function Menu({ label, items, trigger, placement = 'bottom-start', matchWidth = false, class: className }: MenuProps) {
   const [open, setOpen] = useState(false);
@@ -75,17 +92,11 @@ export function Menu({ label, items, trigger, placement = 'bottom-start', matchW
   useFloatingPosition(open, triggerRef, panelRef, placement, matchWidth);
   useOutsidePress(open, [rootRef], onOutside);
 
-  const menuItems = (): HTMLElement[] =>
-    Array.from(panelRef.current?.querySelectorAll<HTMLElement>('[data-menu-item]:not([aria-disabled="true"])') ?? []);
+  const menuItems = (): HTMLElement[] => Array.from(panelRef.current?.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR) ?? []);
 
   useLayoutEffect(() => {
     if (!open) return;
-    const list = menuItems();
-    let target: HTMLElement | undefined;
-    if (focusOn === 'last') target = list[list.length - 1];
-    else if (focusOn === 'checked') target = list.find((el) => el.getAttribute('aria-checked') === 'true') ?? list[0];
-    else target = list[0];
-    (target ?? panelRef.current)?.focus({ preventScroll: true });
+    (initialFocus(menuItems(), focusOn) ?? panelRef.current)?.focus({ preventScroll: true });
   }, [open]);
 
   useEffect(() => {

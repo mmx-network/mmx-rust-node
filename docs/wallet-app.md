@@ -162,21 +162,28 @@ max_send(id, currency, memo, fee_level) -> String   // fresh balances less own p
 prepare_send(id, SendRequest) -> PreparedSend
             // fresh balances less own pending transfers; signed, verified (Transaction::verify)
             // and fee-checked locally (fee = static_cost × fee_ratio / 1024, fee payer covered).
-            // Nothing is sent: no /transaction/validate.
+            // Nothing is sent before "Send now".
 broadcast(id, txid)
-            // read-only /node/info: expires <= height → tx_expired without posting. Then posts the
-            // prepared bytes once to /transaction/broadcast and removes them. HTTP 4xx →
-            // tx_rejected / insufficient_funds / insufficient_fee / tx_expired (definite, funds
-            // released); transport errors, timeouts, 3xx/5xx → rpc_unreachable / rpc_timeout /
-            // rpc_http_error (uncertain, funds stay reserved).
+            // Removes the prepared bytes, then checks before sending anything: /node/info
+            // (synced, same network, expires <= height → tx_expired), then the node's dry run
+            // POST /transaction/validate. The node's broadcast accepts a transfer whose execution
+            // fails (it is included and charged its fee), so did_fail → insufficient_funds
+            // (error code INSUFFICIENT_FUNDS) / tx_expired (TX_EXPIRED) / tx_rejected, and nothing
+            // is sent. A fee above the shown fee, or a check without an answer → tx_not_sent
+            // (definite: nothing was sent). Then posts the bytes once to /transaction/broadcast.
+            // HTTP 4xx → tx_rejected / insufficient_funds / insufficient_fee / tx_expired
+            // (definite, funds released); transport errors, timeouts, 3xx/5xx →
+            // rpc_unreachable / rpc_timeout / rpc_http_error (uncertain, funds stay reserved).
 discard(txid)
 ```
 
 Reservations (decision 3, mirrors C++ `ECDSA_Wallet::update_from/update_cache`): per
-wallet, in memory, at most 256 broadcast transfers `{txid, expires, sender, sender
-static fee, own inputs}`, recorded before posting and kept on uncertain outcomes,
+wallet, in memory, at most 256 broadcast transfers `{txid, network, expires, sender,
+sender static fee, own inputs}`, recorded before posting and kept on uncertain outcomes,
 removed on a definite refusal. Before Max and Review they are subtracted (saturating)
-from fresh balances. An entry is dropped when `expires < height` or `/transaction?id=`
+from fresh balances of their own network only (addresses are the same on every
+network, and the chain server may be switched); entries of another network are kept
+untouched. An entry is dropped when `expires < height` or `/transaction?id=`
 shows a block at or below the height the balances were read at; unknown or failed
 lookups keep it. At most one lookup per entry per new block, 4 at a time, only while
 entries exist. Not persisted (C++ `pending_tx` is in memory too).
@@ -208,7 +215,10 @@ config, else 10; max 100 everywhere (`capabilities.max_num_addresses`); default
 `set-addresses <N>` (both honour `--wallet`); a corrupt key file no longer breaks
 `list`. `send` signs and verifies locally and makes no request before the y/N
 confirmation (or `--yes`); only then it calls `/transaction/validate` (did_fail →
-wallet_error, a fee above the shown fee → rpc_response_invalid) and broadcasts.
+insufficient_funds / transaction_expired by the node's error code, else wallet_error;
+a fee above the shown fee → rpc_response_invalid) and broadcasts. A `send` that is not
+broadcast reports `"status": "prepared"` (formerly `"validated"`, although no server
+check runs before confirmation).
 Node 4xx refusals map to tx_rejected / insufficient_funds / insufficient_fee /
 transaction_expired. Keep JSON output schema backwards compatible (only add fields).
 Update `tools/test_wallet_cli.py` and the help text.
@@ -277,8 +287,9 @@ presses "Send now". `maxSendable`/`prepareSend` read `/chain/info`, `/node/info`
 balances and `/transaction?id=` for own pending transfers, then sign, verify
 (`verify_transaction` / `Transaction::verify`) and check the fee payer locally; the
 fee shown is the static fee (equals the node's `total_fee` for plain transfers).
-`broadcast` posts the prepared bytes once; the node validates. Codes as in §5
-`broadcast`; both backends do the `/node/info` expiry check first.
+`broadcast` checks the confirmed transfer first (`/node/info` expiry check, then the
+node's dry run `/transaction/validate`, as in §5) and then posts the prepared bytes
+once. Codes as in §5 `broadcast`.
 
 ### 6.3 Passphrase detection (both platforms)
 A wallet's stored fingerprint is `fingerprint(seed, passphrase)` if created with a
@@ -314,7 +325,11 @@ passphrase, otherwise `fingerprint(seed, None)`.
   server returned − 5 (not the `/node/info` head); rows outside the requested
   since/until are rejected. The public RPC does not return
   pending entries; broadcast transactions are tracked locally as pending via
-  `/transaction?id=` until included (confirmed / failed) or `expires < height`.
+  `/transaction?id=` until included (confirmed / failed) or `expires + 6 < height`
+  (a lagging lookup must not mark an included send expired). Lookups run before
+  the history and balance reads of a sync; a confirmed send keeps being deducted
+  until history shows it. Each local send records its network and is shown and
+  deducted only while the server is on that network.
 - Grouping: one activity item per txid: net amount per contract over the wallet's own
   addresses; `TXFEE` shown as fee; SPEND+RECEIVE between own addresses with zero net
   → "Moved between your addresses"; REWARD → "Farming reward", VDF_REWARD → "Timelord
@@ -466,8 +481,8 @@ product name "MMX Wallet", min window 900×620.
 - Every value from the UI is re-validated in Rust/WASM before signing.
 - The transaction shown on the review screen is exactly the one broadcast
   (prepared id bound to wallet, amount, recipient, memo, fee).
-- No request carries a signed transaction before "Send now"; then exactly one POST to
-  `/transaction/broadcast`.
+- No request carries a signed transaction before "Send now"; then one dry run
+  (`/transaction/validate`) and at most one POST to `/transaction/broadcast`.
 - No automatic re-broadcast; no duplicate submission on double click.
 
 ## 7. Error codes
@@ -476,7 +491,7 @@ phrase does not belong to the selected wallet), wallet_exists,
 wallet_not_found, locked, invalid_address, invalid_amount, invalid_memo,
 insufficient_funds, insufficient_fee, invalid_argument, rpc_unreachable, rpc_timeout,
 rpc_not_synced, rpc_network_mismatch, rpc_http_error, rpc_response_invalid,
-tx_rejected, tx_expired, prepared_not_found, io_error, internal`.
+tx_rejected, tx_expired, tx_not_sent, prepared_not_found, io_error, internal`.
 
 ## 8. Themes (10 styles)
 Each style lives in `src/styles/themes/<id>/theme.css` (+ its fonts) and defines the

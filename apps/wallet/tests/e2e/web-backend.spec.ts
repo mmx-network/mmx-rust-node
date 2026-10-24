@@ -77,7 +77,7 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
   expect(broadcasts[0]!.outputs).toEqual([{ address: recipient, contract: NATIVE, amount: '2500000', memo: 'e2e' }]);
   const requests = await rpc.requests();
   expect(requests.filter((r) => r.method === 'OPTIONS')).toEqual([]);
-  expect(requests.filter((r) => r.method === 'POST').map((r) => r.path)).toEqual(['/transaction/broadcast']);
+  expect(requests.filter((r) => r.method === 'POST').map((r) => r.path)).toEqual(['/transaction/validate', '/transaction/broadcast']);
 
   await rpc.advance(1);
   expect((await rpc.broadcasts())[0]!.status).toBe('confirmed');

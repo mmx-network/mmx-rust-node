@@ -23,6 +23,7 @@ const MESSAGES: Record<ErrorCode, string> = {
   rpc_response_invalid: 'The network server sent an unexpected response. Try again later.',
   tx_rejected: 'The network rejected this transfer. Nothing was sent.',
   tx_expired: 'This transfer expired. Review it again.',
+  tx_not_sent: 'Could not check this transfer with the network. Nothing was sent. Try again.',
   prepared_not_found: 'This transfer expired. Review it again.',
   io_error: 'Could not save your changes. Check disk space and permissions.',
   internal: 'Something went wrong. Try again.',

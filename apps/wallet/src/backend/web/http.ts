@@ -104,11 +104,20 @@ export class RpcHttp {
   }
 
   /**
-   * POST /transaction/broadcast, the only request that carries a signed
-   * transfer (the node validates it before accepting). Resolves once the node
-   * accepted it; a refusal rejects with tx_rejected, insufficient_funds,
-   * insufficient_fee or tx_expired, and only the rpc_* codes leave the
-   * outcome open.
+   * POST /transaction/validate: the node's dry run of a confirmed transfer,
+   * sent right before its broadcast. A refusal rejects as for broadcast.
+   */
+  async validate(txJson: string): Promise<Reply> {
+    const text = await this.request('/transaction/validate', txJson, refusal);
+    return { text, value: parseJson(text) };
+  }
+
+  /**
+   * POST /transaction/broadcast. Resolves once the node accepted the
+   * transfer. The node accepts one whose execution fails (it is included and
+   * charged its fee), so `validate` must pass first. A refusal rejects with
+   * tx_rejected, insufficient_funds, insufficient_fee or tx_expired, and only
+   * the rpc_* codes leave the outcome open.
    */
   async broadcast(txJson: string): Promise<void> {
     await this.request('/transaction/broadcast', txJson, refusal);

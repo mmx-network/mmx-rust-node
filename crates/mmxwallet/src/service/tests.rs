@@ -1104,7 +1104,10 @@ fn prepare_then_broadcast_exactly_once() {
         svc.broadcast(&info.id, &prepared.txid).unwrap_err().code,
         "prepared_not_found"
     );
-    assert_eq!(mock.post_paths(), ["/transaction/broadcast"]);
+    assert_eq!(
+        mock.post_paths(),
+        ["/transaction/validate", "/transaction/broadcast"]
+    );
 
     // The broadcast transfer's funds are reserved: everything is spent.
     mock.set_mmx(&addresses[0], 5_000_000);
@@ -1154,7 +1157,10 @@ fn prepare_then_broadcast_exactly_once() {
         "prepared_not_found"
     );
     assert_eq!(svc.discard("xyz").unwrap_err().code, "invalid_argument");
-    assert_eq!(mock.post_paths(), ["/transaction/broadcast"]);
+    assert_eq!(
+        mock.post_paths(),
+        ["/transaction/validate", "/transaction/broadcast"]
+    );
 }
 
 #[test]
@@ -1179,8 +1185,16 @@ fn only_the_confirmed_transfer_reaches_the_server() {
         .unwrap();
     assert!(mock.post_paths().is_empty());
     svc.broadcast(&info.id, &last.txid).unwrap();
-    // Exactly one signed transfer left the device: the confirmed one.
-    assert_eq!(mock.post_paths(), ["/transaction/broadcast"]);
+    // Exactly one signed transfer left the device: the confirmed one,
+    // checked by the node's dry run first.
+    assert_eq!(
+        mock.post_paths(),
+        ["/transaction/validate", "/transaction/broadcast"]
+    );
+    assert_eq!(
+        mock.posts("/transaction/validate"),
+        mock.posts("/transaction/broadcast")
+    );
     let sent: Value = serde_json::from_slice(&mock.posts("/transaction/broadcast")[0]).unwrap();
     assert_eq!(sent["id"].as_str().unwrap().to_ascii_uppercase(), last.txid);
 }
@@ -1244,6 +1258,102 @@ fn refused_and_failed_broadcasts() {
 }
 
 #[test]
+fn transfers_that_would_fail_are_not_sent() {
+    let mock = Mock::start();
+    let (_dir, svc) = service(Some(&mock));
+    let (info, _) = create(&svc, "Main", None, 1);
+    mock.set_mmx(&svc.addresses(&info.id).unwrap()[0], 1_000_000);
+    let to = "mmx1hzz9tgs2dz9366t3p4ep8trmaejx7tk9al9ah3md2u37pkesa3qqfyepyw";
+    let fee = fee_one_input(None, 1);
+    let max = || -> u128 {
+        svc.max_send(&info.id, NATIVE, None, 1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    // The node's broadcast would accept these and charge the fee: the dry
+    // run stops them, nothing is posted and nothing stays reserved.
+    for (body, code) in [
+        (
+            json!({"did_fail": true, "total_fee": fee.to_string(),
+                   "error": {"code": 1_975_784_893u32, "message": "insufficient funds for mmx1"}}),
+            "insufficient_funds",
+        ),
+        (
+            json!({"did_fail": true, "total_fee": fee.to_string(),
+                   "error": {"code": 5, "message": "failed"}}),
+            "tx_rejected",
+        ),
+        // A fee above the one shown on review.
+        (
+            json!({"did_fail": false, "total_fee": (fee + 1).to_string()}),
+            "tx_not_sent",
+        ),
+    ] {
+        let p = svc
+            .prepare_send(&send_request(&info.id, to, "1000"))
+            .unwrap();
+        mock.respond("/transaction/validate", 200, body.to_string());
+        assert_eq!(svc.broadcast(&info.id, &p.txid).unwrap_err().code, code);
+        mock.with(|s| s.responses.clear());
+        assert_eq!(max(), 1_000_000 - fee, "{code}");
+    }
+    // An unanswered dry run sends nothing either, and says so.
+    let p = svc
+        .prepare_send(&send_request(&info.id, to, "1000"))
+        .unwrap();
+    mock.respond("/transaction/validate", 503, "busy");
+    assert_eq!(
+        svc.broadcast(&info.id, &p.txid).unwrap_err().code,
+        "tx_not_sent"
+    );
+    mock.with(|s| s.responses.clear());
+    assert_eq!(max(), 1_000_000 - fee);
+    assert!(mock.posts("/transaction/broadcast").is_empty());
+}
+
+#[test]
+fn a_server_on_another_network_keeps_its_own_reservations() {
+    let mock = Mock::start();
+    let (_dir, svc) = service(Some(&mock));
+    let (info, _) = create(&svc, "Main", None, 1);
+    mock.set_mmx(&svc.addresses(&info.id).unwrap()[0], 1_000_000);
+    let to = "mmx1hzz9tgs2dz9366t3p4ep8trmaejx7tk9al9ah3md2u37pkesa3qqfyepyw";
+    let fee = fee_one_input(None, 1);
+    let p = svc
+        .prepare_send(&send_request(&info.id, to, "1000"))
+        .unwrap();
+    svc.broadcast(&info.id, &p.txid).unwrap();
+    let reserved = |svc: &Service| guard(&svc.reserved).get(&info.id).map_or(0, Vec::len);
+    assert_eq!(reserved(&svc), 1);
+    // Reservations are tagged with their network and only reduce balances of
+    // that network.
+    let list = guard(&svc.reserved).get(&info.id).unwrap().clone();
+    assert_eq!(list[0].network, "mainnet");
+    let mut balances = mmx_wallet::Balances::new();
+    let key = (
+        svc.addresses(&info.id).unwrap()[0].parse().unwrap(),
+        mmx_wallet::Address::default(),
+    );
+    balances.insert(key, 1_000_000);
+    reserve::apply(&mut balances, &list, "testnet10");
+    assert_eq!(balances[&key], 1_000_000);
+    reserve::apply(&mut balances, &list, "mainnet");
+    assert_eq!(balances[&key], 1_000_000 - 1000 - fee);
+    // A transfer reviewed for one network is not sent to a server on another.
+    let p = svc
+        .prepare_send(&send_request(&info.id, to, "1000"))
+        .unwrap();
+    mock.with(|s| s.network = "testnet10".into());
+    assert_eq!(
+        svc.broadcast(&info.id, &p.txid).unwrap_err().code,
+        "tx_not_sent"
+    );
+    assert_eq!(mock.posts("/transaction/broadcast").len(), 1);
+    assert_eq!(reserved(&svc), 1);
+}
+
+#[test]
 fn expired_transfers_are_not_sent() {
     let mock = Mock::start();
     let (_dir, svc) = service(Some(&mock));
@@ -1262,15 +1372,26 @@ fn expired_transfers_are_not_sent() {
         "tx_expired"
     );
     assert!(mock.post_paths().is_empty());
-    // A failed height read leaves the decision to the node.
+    // A failed height read sends nothing, and says so.
     mock.with(|s| s.height = 1000);
     let p = svc
         .prepare_send(&send_request(&info.id, to, "1000"))
         .unwrap();
     mock.respond("/node/info", 500, "busy");
-    svc.broadcast(&info.id, &p.txid).unwrap();
-    assert_eq!(mock.post_paths(), ["/transaction/broadcast"]);
+    assert_eq!(
+        svc.broadcast(&info.id, &p.txid).unwrap_err().code,
+        "tx_not_sent"
+    );
+    assert!(mock.post_paths().is_empty());
     mock.with(|s| s.responses.clear());
+    let p = svc
+        .prepare_send(&send_request(&info.id, to, "1000"))
+        .unwrap();
+    svc.broadcast(&info.id, &p.txid).unwrap();
+    assert_eq!(
+        mock.post_paths(),
+        ["/transaction/validate", "/transaction/broadcast"]
+    );
     // Time asleep counts: the wall clock expires a review too.
     let p = svc
         .prepare_send(&send_request(&info.id, to, "1000"))
@@ -1280,7 +1401,7 @@ fn expired_transfers_are_not_sent() {
         svc.broadcast(&info.id, &p.txid).unwrap_err().code,
         "prepared_not_found"
     );
-    assert_eq!(mock.post_paths().len(), 1);
+    assert_eq!(mock.post_paths().len(), 2);
 }
 
 #[test]

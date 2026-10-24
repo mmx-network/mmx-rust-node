@@ -203,6 +203,21 @@ describe('onboarding actions', () => {
     expect(S.setupNotice.value).toBeNull();
   });
 
+  it('web: words typed into import count as an open wallet when none is unlocked', async () => {
+    const { S } = await boot('web');
+    expect(S.wallets.value.every((w) => w.locked)).toBe(true);
+    S.navigate('import');
+    expect(S.autoLockDelayMinutes()).toBeNull();
+    // What the import screen does while words sit in its form.
+    S.beginSetup();
+    S.markActivity(Date.now());
+    expect(S.autoLockDelayMinutes()).toBe(15);
+    expect(S.idleExpired(Date.now() + 15 * 60_000)).toBe(true);
+    await S.lock({ inactivity: true });
+    expect(S.route.value.name).toBe('welcome');
+    expect(S.setupNotice.value).toBe('Wallet setup was cancelled after inactivity.');
+  });
+
   it('web: auto-lock while adding a wallet also ends the setup', async () => {
     const { S, M } = await boot('web');
     const main = S.wallets.value[0]!;

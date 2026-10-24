@@ -156,13 +156,21 @@ impl Rpc {
         Ok(())
     }
     /// The node's dry run of a signed transaction. Fails when it would not
-    /// execute (`wallet_error`), or when the reported fee is above `max_fee`.
+    /// execute (`insufficient_funds` or `transaction_expired` when the node
+    /// says why, else `wallet_error`), or when the reported fee is above
+    /// `max_fee`. The node's broadcast accepts a transfer that fails (it is
+    /// included and charged its fee), so only this check stops one.
     pub fn validate(&self, bytes: &[u8], max_fee: u128) -> Result<u128> {
         let v: Value = serde_json::from_slice(&self.request("/transaction/validate", Some(bytes))?)
             .map_err(|_| rpc_invalid("invalid JSON response from RPC"))?;
         if boolean(&v, "did_fail")? {
+            let code = match v["error"]["code"].as_u64() {
+                Some(EXEC_INSUFFICIENT_FUNDS) => "insufficient_funds",
+                Some(EXEC_TX_EXPIRED) => "transaction_expired",
+                _ => "wallet_error",
+            };
             return Err(Error::new(
-                "wallet_error",
+                code,
                 format!("transaction execution would fail: {}", v["error"]),
             ));
         }
@@ -198,6 +206,10 @@ impl Rpc {
         u32_field(&node, "height")
     }
 }
+/// `error_code_e` values of a failed execution (`exec_error_t.code`).
+const EXEC_INSUFFICIENT_FUNDS: u64 = 1_975_784_893;
+const EXEC_TX_EXPIRED: u64 = 327_454_547;
+
 /// Error codes of a node that refused a submitted transaction (it was not
 /// accepted, so nothing is pending).
 const REFUSALS: [&str; 4] = [
@@ -386,6 +398,36 @@ mod tests {
             );
             assert_eq!(rpc.get("/node/info").unwrap_err().code, get, "{status}");
         }
+    }
+
+    #[test]
+    fn failed_dry_runs_are_classified() {
+        for (error, code) in [
+            (
+                r#"{"code":1975784893,"message":"insufficient funds for mmx1abc"}"#,
+                "insufficient_funds",
+            ),
+            (
+                r#"{"code":327454547,"message":"transaction expired at height 9"}"#,
+                "transaction_expired",
+            ),
+            (r#"{"code":1,"message":"failed"}"#, "wallet_error"),
+            (r#""failed""#, "wallet_error"),
+        ] {
+            let server = TcpListener::bind("127.0.0.1:0").unwrap();
+            let rpc = Rpc::new(&format!("http://{}", server.local_addr().unwrap())).unwrap();
+            let body = format!(r#"{{"did_fail":true,"total_fee":10,"error":{error}}}"#);
+            answer_all(server, 200, Box::leak(body.into_boxed_str()));
+            assert_eq!(rpc.validate(b"{}", 10).unwrap_err().code, code, "{error}");
+        }
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let rpc = Rpc::new(&format!("http://{}", server.local_addr().unwrap())).unwrap();
+        answer_all(server, 200, r#"{"did_fail":false,"total_fee":11}"#);
+        assert_eq!(
+            rpc.validate(b"{}", 10).unwrap_err().code,
+            "rpc_response_invalid"
+        );
+        assert_eq!(rpc.validate(b"{}", 11).unwrap(), 11);
     }
 
     #[test]

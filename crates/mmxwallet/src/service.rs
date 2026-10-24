@@ -52,7 +52,7 @@ const SYMBOL_MAX_CHARS: usize = 24;
 const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 /// The error codes of the wallet UI.
-pub const ERROR_CODES: [&str; 24] = [
+pub const ERROR_CODES: [&str; 25] = [
     "invalid_passphrase",
     "passphrase_required",
     "invalid_mnemonic",
@@ -74,6 +74,7 @@ pub const ERROR_CODES: [&str; 24] = [
     "rpc_response_invalid",
     "tx_rejected",
     "tx_expired",
+    "tx_not_sent",
     "prepared_not_found",
     "io_error",
     "internal",
@@ -193,8 +194,6 @@ struct Prepared {
     /// The signed transfer as broadcast.
     bytes: Vec<u8>,
     params: ChainParams,
-    /// Chain height of the balances it was built from.
-    height: u32,
     created: Instant,
     /// Wall-clock time, which (unlike `created`) also counts time asleep.
     created_at: SystemTime,
@@ -933,7 +932,7 @@ impl Service {
             let rpc = self.client();
             let params = rpc.params()?;
             let mut state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
-            self.reserve(&rpc, id, &mut state);
+            self.reserve(&rpc, id, &params.network, &mut state);
             match wallet.max_transfer_amount(
                 &state.balances,
                 &params,
@@ -964,7 +963,7 @@ impl Service {
             let rpc = self.client();
             let params = rpc.params()?;
             let mut state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
-            self.reserve(&rpc, &request.wallet_id, &mut state);
+            self.reserve(&rpc, &request.wallet_id, &params.network, &mut state);
             let native = currency == Address::default();
             let (decimals, symbol) = if native {
                 (params.decimals, "MMX".to_owned())
@@ -1017,7 +1016,6 @@ impl Service {
                     tx,
                     bytes,
                     params,
-                    height: state.height,
                     created: Instant::now(),
                     created_at: SystemTime::now(),
                 },
@@ -1039,7 +1037,9 @@ impl Service {
     }
 
     /// Sends a prepared transfer of this wallet, once: it is removed whatever
-    /// the outcome. Its funds stay reserved unless the node refused it.
+    /// the outcome. It is checked first (height, network, the node's dry run)
+    /// and not sent when a check fails (`tx_not_sent` when one cannot be
+    /// made). Its funds stay reserved unless the node refused it.
     pub fn broadcast(&self, id: &str, txid: &str) -> Result<()> {
         run(|| {
             let id = validate::wallet_id(id)?;
@@ -1051,17 +1051,34 @@ impl Service {
                     Error::new("prepared_not_found", "the transfer is no longer available")
                 })?;
             let rpc = self.client();
+            // Nothing is sent unless these checks pass, so a failure here is
+            // never reported as a transfer that may have been accepted.
+            let not_sent = |e: Error| match e.code {
+                _ if rpc::is_refusal(&e) => e,
+                "wallet_error" => Error::new("tx_rejected", "the transfer can no longer be sent"),
+                _ => Error::new(
+                    "tx_not_sent",
+                    format!(
+                        "the transfer could not be checked, nothing was sent: {}",
+                        e.message
+                    ),
+                ),
+            };
             // A cheap read first, so an expired transfer is never sent (the
-            // node runs it at the next height). If the read fails, the
-            // broadcast below reports the connection.
-            let height = rpc.height(&prepared.params).ok();
-            if height.is_some_and(|h| prepared.tx.expires <= h) {
+            // node runs it at the next height), nor one for another network.
+            let height = rpc.height(&prepared.params).map_err(not_sent)?;
+            if prepared.tx.expires <= height {
                 return Err(Error::new(
                     "tx_expired",
                     "the transfer expired before it was sent",
                 ));
             }
-            let reservation = Reservation::new(&prepared.tx, height.unwrap_or(prepared.height));
+            // The node's broadcast accepts a transfer whose execution fails
+            // (it is included and charged its fee), so the dry run must
+            // pass first, at no more than the fee shown on review.
+            rpc.validate(&prepared.bytes, prepared.tx.fee_amount())
+                .map_err(not_sent)?;
+            let reservation = Reservation::new(&prepared.tx, &prepared.params.network, height);
             let reserved_txid = reservation.txid.clone();
             // Reserved before sending, so a transfer prepared meanwhile
             // already leaves these funds alone.
@@ -1120,10 +1137,10 @@ impl Service {
     /// in a block yet from `state` (balances read at `state.height`). Those
     /// checked at an earlier height are looked up first; no lock is held
     /// meanwhile. A failed lookup keeps the funds reserved.
-    fn reserve(&self, rpc: &Rpc, id: &str, state: &mut remote::State) {
+    fn reserve(&self, rpc: &Rpc, id: &str, network: &str, state: &mut remote::State) {
         let height = state.height;
         let due = match guard(&self.reserved).get_mut(id) {
-            Some(list) => reserve::due(list, height),
+            Some(list) => reserve::due(list, network, height),
             None => return,
         };
         let statuses = if due.is_empty() {
@@ -1136,7 +1153,7 @@ impl Service {
             return;
         };
         reserve::update(list, &due, &statuses, height);
-        reserve::apply(&mut state.balances, list);
+        reserve::apply(&mut state.balances, list, network);
         if list.is_empty() {
             all.remove(id);
         }

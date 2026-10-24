@@ -157,7 +157,7 @@ export {
 } from './contacts';
 export { DEFAULT_RPC_URL, normalizeRpcUrl, setAutoLockMinutes, setDefaultFeeLevel, setRpcUrl, setTheme } from './settings';
 export { copyAddress, copyToClipboard, openAddress, openTransaction, sensitiveCopyMessage } from './actions';
-export { autoLockDelayMinutes, markActivity } from './idle';
+export { autoLockDelayMinutes, idleExpired, markActivity } from './idle';
 export { init, startRouteGuard, startRouter } from './init';
 export { credentialUsername, parseCredentialUsername } from '../backend/web/credentials';
 export {

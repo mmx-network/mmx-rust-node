@@ -1,13 +1,14 @@
 /**
  * Wallet setup in progress: the create flow holds new recovery words in
- * memory until they are confirmed (nothing is stored before). Auto-lock also
- * applies to it, and a lock ends it.
+ * memory until they are confirmed, and the import flow holds the words typed
+ * into it (nothing is stored before). Auto-lock also applies to it, and a
+ * lock ends it.
  */
 import { signal } from '@preact/signals';
 
 const holders = new Set<symbol>();
 
-/** A create flow holds recovery words that are not stored yet. */
+/** A create or import flow holds recovery words that are not stored yet. */
 export const setupActive = signal(false);
 
 /** One line for the welcome screen after a setup was cancelled by a lock. */

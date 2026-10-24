@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nextStatus, pendingOutgoing, pendingReserved, prunePending, SETTLED_RETENTION_MS, type PendingTx } from '../../src/chain/pending';
+import { EXPIRY_MARGIN, nextStatus, pendingOutgoing, pendingReserved, prunePending, SETTLED_RETENTION_MS, type PendingTx } from '../../src/chain/pending';
 import { buildSeries, estimateTime, rangeStart, RANGE_MS, rowDelta } from '../../src/chain/series';
 import { discoveredCount, findLastUsedIndex } from '../../src/chain/discovery';
 import { computeAssets, fetchBalances, sortAssets, type AddressBalance } from '../../src/chain/balances';
@@ -119,7 +119,11 @@ describe('pending', () => {
     expect(nextStatus(base, tx({ height: 60 }), 61, 5)).toMatchObject({ status: 'confirmed', includedHeight: 60, settledAt: 5 });
     expect(nextStatus(base, tx({ height: 60, didFail: true }), 61)).toMatchObject({ status: 'failed' });
     expect(nextStatus(base, null, 100)).toBe(base);
-    expect(nextStatus(base, null, 101)).toMatchObject({ status: 'expired' });
+    // A lookup without a height may come from a server a few blocks behind:
+    // not expired until the margin has passed.
+    expect(nextStatus(base, null, 101)).toBe(base);
+    expect(nextStatus(base, tx({ height: undefined }), 100 + EXPIRY_MARGIN)).toBe(base);
+    expect(nextStatus(base, null, 101 + EXPIRY_MARGIN)).toMatchObject({ status: 'expired' });
     const settled = { ...base, status: 'failed' as const };
     expect(nextStatus(settled, tx({ height: 1 }), 2)).toBe(settled);
   });
@@ -139,12 +143,25 @@ describe('pending', () => {
 
   it('totals pending outgoing including fees in MMX', () => {
     const totals = pendingOutgoing(
-      [base, { ...base, contract: TOKEN, amount: 7n }, { ...base, status: 'confirmed' }],
+      [base, { ...base, contract: TOKEN, amount: 7n }, { ...base, status: 'failed' }, { ...base, status: 'expired' }],
       NATIVE_CONTRACT,
       new Set([A]),
     );
     expect(totals.get(NATIVE_CONTRACT)).toBe(14n);
     expect(totals.get(TOKEN)).toBe(7n);
+  });
+
+  it('keeps counting a confirmed send until history shows it', () => {
+    const confirmed = nextStatus(base, tx({ height: 60 }), 61);
+    expect(confirmed.status).toBe('confirmed');
+    // Included, but the balances shown were read before: still deducted.
+    let list = prunePending([confirmed], new Set());
+    expect(pendingOutgoing(list, NATIVE_CONTRACT, new Set([A])).get(NATIVE_CONTRACT)).toBe(12n);
+    expect(pendingReserved(list, NATIVE_CONTRACT).get(NATIVE_CONTRACT)).toBe(12n);
+    // History (and the balances read with it) shows it: no longer deducted.
+    list = prunePending(list, new Set([base.txid]));
+    expect(pendingOutgoing(list, NATIVE_CONTRACT, new Set([A])).size).toBe(0);
+    expect(pendingReserved(list, NATIVE_CONTRACT).size).toBe(0);
   });
 
   it('counts only the fee of a move to an own address as outgoing', () => {

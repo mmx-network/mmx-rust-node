@@ -526,7 +526,7 @@ describe('sending', () => {
     const raw = rpc.broadcasts[0]!.raw;
     expect(raw).toMatch(/"nonce":\d+/u);
     expect(JSON.parse(raw).id.toUpperCase()).toBe(prepared.txid);
-    expect(posted).toEqual(['/transaction/broadcast']);
+    expect(posted).toEqual(['/transaction/validate', '/transaction/broadcast']);
   });
 
   it('sends only the transfer the user confirms', async () => {
@@ -548,9 +548,10 @@ describe('sending', () => {
     expect(new Set([standard.txid, faster.txid, final.txid]).size).toBe(3);
     expect(posted).toEqual([]);
     await b.broadcast(info.id, final.txid);
-    expect(posted).toHaveLength(1);
-    expect(posted[0]!.path).toBe('/transaction/broadcast');
-    expect(JSON.parse(posted[0]!.body).id.toUpperCase()).toBe(final.txid);
+    // The confirmed transfer only: the node's dry run, then the broadcast.
+    expect(posted.map((p) => p.path)).toEqual(['/transaction/validate', '/transaction/broadcast']);
+    expect(posted[0]!.body).toBe(posted[1]!.body);
+    expect(JSON.parse(posted[1]!.body).id.toUpperCase()).toBe(final.txid);
     expect(rpc.broadcasts.map((t) => t.txid)).toEqual([final.txid]);
   });
 
@@ -590,6 +591,39 @@ describe('sending', () => {
     expect(rpc.broadcasts).toHaveLength(1);
     expect(await code(b.broadcast(info.id, prepared.txid))).toBe('prepared_not_found');
     expect(rpc.broadcasts[0]!.submissions).toBe(1);
+  });
+
+  it('does not send a transfer whose dry run fails, and holds nothing for it', async () => {
+    const b = backend();
+    const { info } = await openWallet(b, [10n * MMX]);
+    const shown = fee(1, 1);
+    const cases: Array<[Record<string, unknown>, ErrorCode]> = [
+      [{ path: '/transaction/validate', mode: 'did_fail' }, 'tx_rejected'],
+      [
+        {
+          path: '/transaction/validate',
+          mode: 'status',
+          status: 200,
+          body: JSON.stringify({ did_fail: true, total_fee: Number(shown), error: { code: 1975784893, message: 'insufficient funds for mmx1' } }),
+        },
+        'insufficient_funds',
+      ],
+      // A fee above the one shown on review.
+      [{ path: '/transaction/validate', mode: 'status', status: 200, body: JSON.stringify({ did_fail: false, total_fee: Number(shown) + 1 }) }, 'tx_not_sent'],
+      // No answer: nothing was sent, so it is not reported as uncertain.
+      [{ path: '/transaction/validate', mode: 'status', status: 503, body: 'busy' }, 'tx_not_sent'],
+      [{ path: '/transaction/validate', mode: 'drop' }, 'tx_not_sent'],
+      [{ path: '/node/info', mode: 'status', status: 503, body: 'busy' }, 'tx_not_sent'],
+    ];
+    for (const [rule, expected] of cases) {
+      const prepared = await b.prepareSend(send(info.id, MMX));
+      rpc.handle('POST', '/__mock/fail', JSON.stringify(rule));
+      expect(await code(b.broadcast(info.id, prepared.txid)), JSON.stringify(rule)).toBe(expected);
+      const max = BigInt(await b.maxSendable({ walletId: info.id, to: '', contract: NATIVE, feeLevel: 1 }));
+      expect(max).toBe(10n * MMX - shown);
+    }
+    expect(rpc.broadcasts).toHaveLength(0);
+    expect(fetchFn.calls.filter((c) => c.includes('/transaction/broadcast'))).toEqual([]);
   });
 
   it('maps refusals by the node to definite errors', async () => {

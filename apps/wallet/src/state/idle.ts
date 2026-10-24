@@ -1,8 +1,8 @@
 /**
  * Auto-lock after inactivity (§6.6). Web: always (default 15 min) and on
  * `pagehide`; desktop: only passphrase wallets and only when
- * autoLockMinutes > 0. New recovery words held by the create flow count as
- * an open wallet: auto-lock cancels the setup.
+ * autoLockMinutes > 0. Recovery words held by the create or import flow
+ * count as an open wallet: auto-lock cancels the setup.
  */
 import { DEFAULT_AUTO_LOCK_MINUTES } from '../lib/appstate';
 import { platform, settings, wallets } from './core';

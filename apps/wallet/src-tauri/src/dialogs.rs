@@ -57,6 +57,8 @@ mod platform {
     use std::{cell::RefCell, path::PathBuf, sync::mpsc};
     use tauri::Window;
 
+    const ALL_FILES: &str = "All files";
+
     fn unavailable() -> Error {
         Error::new("internal", "the file dialog is not available")
     }
@@ -82,10 +84,22 @@ mod platform {
                 filter.set_name(Some(FILTER_NAME));
                 filter.add_pattern(&format!("*.{EXTENSION}"));
                 filter.add_pattern(&format!("*.{}", EXTENSION.to_uppercase()));
+                filter.add_mime_type("application/json");
                 dialog.add_filter(filter);
-                if let Choose::Save(name) = &choose {
-                    dialog.set_do_overwrite_confirmation(true);
-                    dialog.set_current_name(name);
+                match &choose {
+                    Choose::Save(name) => {
+                        dialog.set_do_overwrite_confirmation(true);
+                        dialog.set_current_name(name);
+                    }
+                    // GTK does not add the extension to a saved name, so a
+                    // file saved as "contacts backup" must still be found:
+                    // any file can be picked (reading checks its contents).
+                    Choose::Open => {
+                        let all = gtk::FileFilter::new();
+                        all.set_name(Some(ALL_FILES));
+                        all.add_pattern("*");
+                        dialog.add_filter(all);
+                    }
                 }
                 // The dialog keeps itself alive until it is answered.
                 let this = RefCell::new(Some(dialog.clone()));

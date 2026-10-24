@@ -285,7 +285,7 @@ class WalletCLI(unittest.TestCase):
         result, path = self.prepare('memo 世界')
         self.assertEqual(result['amount_atomic'], '1234567')
         self.assertFalse(result['broadcast'])
-        self.assertEqual(result['status'], 'validated')
+        self.assertEqual(result['status'], 'prepared')
         self.assertEqual(result['memo'], 'memo 世界')
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         # Nothing signed leaves the machine before a broadcast is confirmed.
@@ -422,9 +422,9 @@ class WalletCLI(unittest.TestCase):
                                     '--currency', 'all')['balances']
         self.assertEqual({r['currency_address'] for r in all_balances}, {self.server.currency, token})
         self.assertEqual(self.run_cli('send', '--file', str(self.file), '--rpc', self.url,
-                         '--target', self.wallet['address'], '--amount', '1')['status'], 'validated')
+                         '--target', self.wallet['address'], '--amount', '1')['status'], 'prepared')
         self.assertEqual(self.run_cli('send', '--file', str(self.file), '--rpc', self.url,
-                         '--target', self.wallet['address'], '--amount', '1', '--currency', token)['status'], 'validated')
+                         '--target', self.wallet['address'], '--amount', '1', '--currency', token)['status'], 'prepared')
 
     def test_missing_fungible_metadata_remains_an_rpc_error(self):
         for missing in ['decimals', 'symbol']:

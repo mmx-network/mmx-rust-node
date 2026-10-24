@@ -145,6 +145,23 @@ test('inactivity during wallet creation drops the new words and says why', async
   await expectNothingStored(page, created);
 });
 
+test('inactivity while recovery words are typed into import drops them', async ({ page }) => {
+  await page.clock.install();
+  await openApp(page);
+  await page.getByRole('button', { name: /Import with recovery phrase/u }).click();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const words = newMnemonic();
+  await page.getByLabel('Word 1', { exact: true }).fill(words);
+  await expect(page.getByLabel('Word 24', { exact: true })).toHaveValue(words.split(' ')[23]!);
+  // Let the screen's effects run (the page clock is installed) before the idle wait.
+  await page.clock.runFor(1000);
+  // No wallet is open, yet the typed words count as one for auto-lock.
+  await page.clock.fastForward('16:00');
+  await expect(page).toHaveURL(/#\/welcome$/u);
+  await expect(page.getByText('Wallet setup was cancelled after inactivity.')).toBeVisible();
+  await expect(page.getByLabel('Word 1', { exact: true })).toHaveCount(0);
+});
+
 test('imports a wallet with a passphrase and finds its used addresses', async ({ page, rpc }) => {
   const words = newMnemonic();
   const passphrase = 'correct horse';

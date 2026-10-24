@@ -156,6 +156,26 @@ describe('retry backoff', () => {
     expect(attempts.length).toBe(n + 1);
   });
 
+  it('a refresh by hand during a failing retry runs again as soon as it ends', async () => {
+    const { S, backend, types } = await boot();
+    const broken = S.addresses.value[2]!;
+    const attempts: number[] = [];
+    intercept(backend, (path) => {
+      if (!path.startsWith(`/address/history?id=${broken}&`) || !path.includes('&since=')) return undefined;
+      attempts.push(Date.now());
+      return new Promise((_, reject) => setTimeout(() => reject(new types.BackendError('rpc_http_error', 'HTTP 500')), 5000));
+    });
+    // Several failures: the next automatic retry is minutes away.
+    await settle(200_000);
+    const n = attempts.length;
+    while (attempts.length === n) await settle(1000);
+    // A retry is running; "Try again" now must not wait for the next delay.
+    S.refreshNow();
+    await settle(6000);
+    expect(attempts.length).toBe(n + 2);
+    expect(attempts[n + 1]! - attempts[n]!).toBeLessThan(6000);
+  });
+
   it('starts over at the minimum interval after a success', async () => {
     const { S, backend, types } = await boot();
     const broken = S.addresses.value[2]!;
@@ -363,6 +383,34 @@ describe('local sends', () => {
     expect(S.walletPending.value[0]).toMatchObject({ txid: txid('7'), status: 'pending', uncertain: true });
     expect(S.activity.value[0]).toMatchObject({ local: true, status: 'pending', kind: 'sent' });
     expect(session.pendingOutgoingTotals.value.get(NATIVE_CONTRACT)).toBe(1_050_000n);
+  });
+
+  it('shows and deducts a send only on the network it was made for', async () => {
+    const { S, session } = await boot();
+    const walletId = S.sessionWalletId.value!;
+    const net = S.params.value!.network;
+    session.trackPending(pending(walletId, { network: 'testnet-other' }));
+    session.trackPending(pending(walletId, { txid: txid('8'), network: net }));
+    expect(S.walletPending.value.map((p) => p.txid)).toEqual([txid('8')]);
+    expect(session.pendingReservedTotals.value.get(NATIVE_CONTRACT)).toBe(1_050_000n);
+    // Kept for when that network's server is used again.
+    expect(session.pendingTxs.value).toHaveLength(2);
+  });
+
+  it('looks up sends before reading history and balances', async () => {
+    const { S, backend, session } = await boot();
+    const walletId = S.sessionWalletId.value!;
+    session.trackPending(pending(walletId));
+    const order: string[] = [];
+    intercept(backend, (path) => {
+      if (path.startsWith('/transaction?')) order.push('tx');
+      else if (path.startsWith('/address')) order.push('chain');
+      return undefined;
+    });
+    S.refreshNow();
+    await settle(2000);
+    expect(order[0]).toBe('tx');
+    expect(order.lastIndexOf('tx')).toBeLessThan(order.indexOf('chain'));
   });
 
   it('counts only the fee of a move to an own address as outgoing, but holds back the amount', async () => {

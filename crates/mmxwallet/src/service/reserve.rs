@@ -14,6 +14,9 @@ pub const MAX_PER_WALLET: usize = 256;
 pub struct Reservation {
     /// Lowercase hexadecimal transaction ID.
     pub txid: String,
+    /// Network the transfer was made for. Addresses are the same on every
+    /// network, so only balances read from this one are reduced.
+    pub network: String,
     /// Last block height that can include the transfer.
     pub expires: u32,
     /// Chain height at which the transfer was last known not to be in a
@@ -24,8 +27,9 @@ pub struct Reservation {
 }
 
 impl Reservation {
-    /// The sender's static fee and all inputs of a transfer prepared at `height`.
-    pub fn new(tx: &Transaction, height: u32) -> Self {
+    /// The sender's static fee and all inputs of a transfer for `network`,
+    /// last known not to be in a block at `height`.
+    pub fn new(tx: &Transaction, network: &str, height: u32) -> Self {
         let mut amounts: BTreeMap<(Address, Address), u128> = BTreeMap::new();
         let mut add = |key, amount: u128| {
             let entry = amounts.entry(key).or_default();
@@ -39,6 +43,7 @@ impl Reservation {
         }
         Self {
             txid: tx.id_hex(),
+            network: network.to_owned(),
             expires: tx.expires,
             checked: height,
             amounts: amounts.into_iter().collect(),
@@ -57,13 +62,13 @@ pub fn add(list: &mut Vec<Reservation>, reservation: Reservation) {
     }
 }
 
-/// Drops transfers that expired before `height` (as C++ does) and returns
-/// the IDs worth asking the chain server about: those not checked at this
-/// height yet.
-pub fn due(list: &mut Vec<Reservation>, height: u32) -> Vec<String> {
-    list.retain(|r| r.expires >= height);
+/// Drops transfers for `network` that expired before `height` (as C++ does)
+/// and returns the IDs worth asking its chain server about: those not
+/// checked at this height yet. Other networks' transfers are left alone.
+pub fn due(list: &mut Vec<Reservation>, network: &str, height: u32) -> Vec<String> {
+    list.retain(|r| r.network != network || r.expires >= height);
     list.iter()
-        .filter(|r| r.checked < height)
+        .filter(|r| r.network == network && r.checked < height)
         .map(|r| r.txid.clone())
         .collect()
 }
@@ -86,9 +91,10 @@ pub fn update(list: &mut Vec<Reservation>, txids: &[String], statuses: &[TxStatu
     }
 }
 
-/// Subtracts the reserved amounts from fresh balances, never below zero.
-pub fn apply(balances: &mut Balances, list: &[Reservation]) {
-    for reservation in list {
+/// Subtracts the amounts reserved on `network` from fresh balances of that
+/// network, never below zero.
+pub fn apply(balances: &mut Balances, list: &[Reservation], network: &str) {
+    for reservation in list.iter().filter(|r| r.network == network) {
         for (key, amount) in &reservation.amounts {
             if let Some(balance) = balances.get_mut(key) {
                 *balance = balance.saturating_sub(*amount);
@@ -108,6 +114,7 @@ mod tests {
     fn reservation(txid: &str, expires: u32, checked: u32, amounts: &[(u8, u128)]) -> Reservation {
         Reservation {
             txid: txid.into(),
+            network: "mainnet".into(),
             expires,
             checked,
             amounts: amounts
@@ -129,6 +136,7 @@ mod tests {
                 reservation("a", 100, 0, &[(1, 4), (2, 9)]),
                 reservation("b", 100, 0, &[(1, 3), (3, 7)]),
             ],
+            "mainnet",
         );
         assert_eq!(
             balances,
@@ -151,7 +159,7 @@ mod tests {
         ];
         // Expired below the height (C++: expires < height); already checked
         // at this height: not asked again.
-        let due = due(&mut list, 100);
+        let due = due(&mut list, "mainnet", 100);
         assert_eq!(due, ["edge", "mined", "later", "lost"]);
         update(
             &mut list,
@@ -182,5 +190,26 @@ mod tests {
         }
         assert_eq!(list.len(), MAX_PER_WALLET);
         assert_eq!(list[0].txid, "t0");
+    }
+
+    #[test]
+    fn other_networks_are_left_alone() {
+        let mut other = reservation("other", 1_000_100, 1_000_000, &[(1, 4)]);
+        other.network = "testnet".into();
+        let mut list = vec![other, reservation("main", 100, 90, &[(1, 3)])];
+        // At a lower height on another network, nothing of it expires,
+        // is looked up or is subtracted.
+        assert_eq!(due(&mut list, "mainnet", 100), ["main"]);
+        let mut balances = Balances::from([((address(1), Address::default()), 10)]);
+        apply(&mut balances, &list, "mainnet");
+        assert_eq!(balances[&(address(1), Address::default())], 7);
+        // Back on its own network it still counts, until it expires there.
+        assert!(due(&mut list, "testnet", 1_000_000).is_empty());
+        let mut balances = Balances::from([((address(1), Address::default()), 10)]);
+        apply(&mut balances, &list, "testnet");
+        assert_eq!(balances[&(address(1), Address::default())], 6);
+        due(&mut list, "testnet", 1_000_101);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].txid, "main");
     }
 }

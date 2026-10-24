@@ -668,10 +668,15 @@ server rather than measured against C++.
   (web and desktop) so a transfer is never signed against stale balances.
 - Review signs and checks transfers locally (hashes, cost, signatures, fee payer
   coverage, static fee = static_cost × fee_ratio / 1024). No request carries a
-  signed transfer before "Send now"; then it is posted once to
-  `/transaction/broadcast`, after a read-only `/node/info` expiry check (web and
-  desktop). There is no `/transaction/validate` round trip before broadcast any
-  more. The CLI `send` calls `/transaction/validate` only after confirmation.
+  signed transfer before "Send now"; then a read-only `/node/info` expiry check
+  and the node's dry run `/transaction/validate` run before it is posted once to
+  `/transaction/broadcast` (web, desktop and CLI). The WebAPI broadcast ignores
+  `did_fail` (`add_transaction(tx, false)`), so this extra round trip after
+  confirmation is what the C++ wallet's `add_transaction(tx, true)` does in one
+  call; nothing is posted when it fails or cannot be checked.
+- A full balance read (every 5 min) runs beside the history refresh; addresses
+  whose refresh found new rows are read once more before publishing, so balances
+  never predate the history shown with them.
 - Own broadcast-but-unconfirmed transfers are reserved per wallet in memory, as in
   C++ `ECDSA_Wallet::update_from/update_cache`: sender static fee plus own inputs,
   subtracted (saturating) from fresh balances before Max and Review. Difference
@@ -680,7 +685,8 @@ server rather than measured against C++.
   pending transfer (4 at a time; the web runs them in parallel with `/chain/info`
   and `/node/info`, before balances; the desktop at most once per entry per new
   block), only while transfers are pending, and drop entries once included or
-  `expires < height`. Failed lookups keep the entry. At most 256 per wallet; not
+  `expires < height`. Desktop entries carry their network and only reduce
+  balances read from it (the chain server can be switched). Failed lookups keep the entry. At most 256 per wallet; not
   persisted across restarts or page loads (C++ `pending_tx` is in memory too).
 - Listing desktop wallets computes up to two fingerprints (16,384 SHA-256 rounds
   each) per key file with no cache; it runs only on user actions.

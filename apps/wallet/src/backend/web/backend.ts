@@ -152,6 +152,25 @@ function atomicOf(amount: unknown): bigint {
   return value;
 }
 
+/** `error_code_e` values of a failed execution (the node's `exec_error_t.code`). */
+const EXEC_INSUFFICIENT_FUNDS = 1975784893;
+const EXEC_TX_EXPIRED = 327454547;
+
+/** Error code for a dry run that failed, by the node's reason when it gives one. */
+function failedExecutionCode(error: unknown): ErrorCode {
+  const code = isRecord(error) ? error.code : undefined;
+  if (code === EXEC_INSUFFICIENT_FUNDS) return 'insufficient_funds';
+  if (code === EXEC_TX_EXPIRED) return 'tx_expired';
+  return 'tx_rejected';
+}
+
+/** A non-negative atomic amount sent as a number or a decimal string; null otherwise. */
+function atomicField(v: unknown): bigint | null {
+  if (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) return BigInt(v);
+  if (typeof v === 'string' && /^\d{1,39}$/u.test(v)) return BigInt(v);
+  return null;
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -766,13 +785,29 @@ export class WebBackend implements Backend {
     if (!p || p.walletId !== walletId || !this.vaults.has(walletId)) fail('prepared_not_found');
     // Removed before sending: a transfer is submitted at most once.
     this.prepared.delete(key);
-    // A cheap read first (as on desktop), so a transfer that can no longer be
-    // included is never sent. If the read fails, the broadcast reports the connection.
+    // Nothing is sent unless these checks pass (as on desktop), so a failure
+    // here is never reported as a transfer that may have been accepted.
+    const notSent = (e: unknown): never => {
+      if (e instanceof BackendError && REFUSED.has(e.code)) throw e;
+      fail('tx_not_sent');
+    };
+    // A cheap read first, so a transfer that can no longer be included is never sent.
     const height = await this.http
       .get('/node/info')
       .then((reply) => parseNodeInfo(reply.value).height)
-      .catch(() => null);
-    if (height !== null && p.reservation.expires <= height) fail('tx_expired');
+      .catch(notSent);
+    if (p.reservation.expires <= height) fail('tx_expired');
+    // The node's broadcast accepts a transfer whose execution fails (it is
+    // included and charged its fee), so its dry run must pass first, at no
+    // more than the fee shown on review.
+    const result = await this.http
+      .validate(p.txJson)
+      .then((reply) => reply.value)
+      .catch(notSent);
+    if (!isRecord(result) || typeof result.did_fail !== 'boolean') fail('tx_not_sent');
+    if (result.did_fail) fail(failedExecutionCode(result.error));
+    const totalFee = atomicField(result.total_fee);
+    if (totalFee === null || totalFee > p.reservation.senderFee) fail('tx_not_sent');
     // Reserved before sending: when the reply is lost the node may still have accepted it.
     this.reserve(walletId, p.reservation);
     try {
