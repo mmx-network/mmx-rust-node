@@ -44,7 +44,13 @@ export function FlowHeader({ title, subtitle, autoFocus = false, leading, align 
 export function useInitialFocus(ref: RefObject<HTMLElement>, enabled = true): void {
   useEffect(() => {
     if (!enabled) return;
-    const id = requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
+    // The frame can arrive late (background tab, slow machine): never take focus
+    // away from a field the user (or a password manager) is already filling.
+    const id = requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) return;
+      ref.current?.focus({ preventScroll: true });
+    });
     return () => cancelAnimationFrame(id);
   }, []);
 }

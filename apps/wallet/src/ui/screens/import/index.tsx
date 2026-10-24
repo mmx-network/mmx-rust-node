@@ -186,7 +186,11 @@ function WordsStep({ steps, words, latestWords, onWords, showErrors, error, canU
   // Start in the first empty box.
   useEffect(() => {
     const index = words.findIndex((w) => !w);
-    const id = requestAnimationFrame(() => inputs.current[index >= 0 ? index : 0]?.focus({ preventScroll: true }));
+    const id = requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) return;
+      inputs.current[index >= 0 ? index : 0]?.focus({ preventScroll: true });
+    });
     return () => cancelAnimationFrame(id);
   }, []);
 
