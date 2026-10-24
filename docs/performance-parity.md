@@ -1,5 +1,11 @@
 # C++ performance parity
 
+The [2026-10-25 review](cpp-port-audit.md#codebase-review-2026-10-25) records open
+issues found after the checkpoints below: permanent retention of unverified
+sync candidates, aggregate JSON-RPC/report memory limits, synchronous transaction
+admission, named GPU selection, and per-commit memtable recounting. Earlier
+fixture results must not be read as coverage of these gaps.
+
 Performance is part of the migration requirements for every component. Read the
 C++ counterpart before implementation and preserve the execution strategy as
 well as consensus results. Comparable measurements are required before claiming

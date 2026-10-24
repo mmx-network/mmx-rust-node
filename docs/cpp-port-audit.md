@@ -1,5 +1,7 @@
 # C++ port audit, 2026-10-20
 
+See also the [2026-10-25 codebase review](#codebase-review-2026-10-25) below.
+
 Reference: `mmx-node` at `5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2`;
 VNX submodule at `35be1ac0b4966e9e4686c87961e683a408b9ec2c`.
 This is a subsystem comparison of the implemented Rust runtime against the C++
@@ -511,3 +513,150 @@ progress derives both counters from authenticated headers and checked work rathe
 than sorting by signed start metadata. Positive trust requires a point that can
 actually extend the selected VDF path; native's weaker input-only bonus is not
 used for unusable metadata. Block/point verification and hashes are unchanged.
+
+## Codebase review, 2026-10-25
+
+Reviewed Rust source at `4efc6542abe0e643bd77208857b188a0304c0314`, native
+sources at `141054c398d2bab6802174379ce3b191d4f3a499`, and VNX integration at
+`35be1ac0b4966e9e4686c87961e683a408b9ec2c`. This pass includes the new desktop,
+browser and WASM wallets. Concurrent wallet theme/e2e edits were present in the
+working tree; they are not included in this review checkpoint. The findings
+below are open; this checkpoint documents the review without applying fixes.
+
+### P1: Historical sync permanently stores candidates before contextual checks
+
+`mmx-node/src/sync/peers.rs::publish_with` calls `ForkChain::admit_blocks`
+before `local.update()`. `mmx-execution/src/chain/forks.rs:538–576` checks the
+signed envelope/body commitment and immediately commits all supplied bodies to
+the durable fork archive. Contextual difficulty, space work and ledger checks
+happen later. Rejection adds `fork_invalid`; it does not remove the body or bound
+the retained invalid data. A single malicious observer among otherwise honest
+sync peers can keep advertising new, correctly signed but invalid candidates
+alongside the valid candidates. The multi-peer content policy still chooses the
+valid chain, but it does not protect disk space or archive I/O from that observer.
+
+A small temporary-database witness changes a synthetic height-one block's
+`time_diff` to `1 << 40`, recalculates its hash and signs it with the fixture
+farmer key. `block::prevalidate` and `admit_blocks` succeed;
+`update_sync_at` marks the block invalid, but `contains_block` remains true
+after closing and reopening the database. No live ledger was involved.
+
+Native `Node::add_block` keeps above-root candidates in its fork pool;
+root advancement only archives remaining forks when `is_proof_verified` is set.
+Preserve the requested three-observer/all-unique-content download policy, but
+quarantine unverified candidates with explicit byte/height bounds. Contextually
+invalid data must not accumulate in the permanent archive. Also bound and retire
+missing-parent candidates without repeatedly downloading identical content.
+
+### P1: JSON-RPC batches bypass aggregate response and work bounds
+
+`mmx-node/src/rpc.rs:412–416` accepts every element of an input array and collects
+every response. The HTTP transport bounds request bytes and connections, but
+neither batch call count nor cumulative output bytes/work. `http.rs::serve`
+then serializes and copies the complete result before writing it. Socket I/O
+deadlines do not stop the intervening RPC execution. Individual transaction or
+balance budgets restart for every element, so they do not bound one HTTP request.
+
+With the in-memory synthetic genesis, one `get_block_at(0)` request occupied
+72 bytes and returned 13,414 bytes; an eight-call batch occupied 569 bytes and
+returned 107,305 bytes. This was a bounded probe, not a saturation test. A client
+can fit thousands of these calls under the 1 MiB request limit, retaining all
+their expanded JSON results simultaneously. Larger real blocks amplify this
+further. A publicly exposed HTTP listener can therefore exhaust memory and keep
+workers doing reads after the client has disconnected.
+
+Limit batch elements, cumulative decoded/encoded output, and total work/time;
+stop processing when any shared request budget is exhausted. Apply the same
+aggregate budget to notifications, which currently execute without replies.
+
+### P1: Remote farm reports have an item cap but no byte budget
+
+`mmx-farming/src/farmer.rs:108–120` trusts a report's caller-selected identity
+and retains up to 4,096 complete `FarmInfo` values. Directory/name strings and
+maps are not size-limited, and there is no total retained-byte bound. The remote
+listener grants `harvester.info` publication without login by default;
+`mmx-tools/src/lib.rs` deserializes and stores each report. Per-value VNX decode
+limits are much larger than a normal report and do not bound the retained set.
+`farm_info()` additionally copies the aggregated directory strings.
+
+A RAM-only probe submitted 16 identities with one 128 KiB directory string
+each. All were accepted and the aggregate contained 2,097,440 directory bytes.
+Larger reports/identity counts scale this into process-killing allocations,
+without plot ownership, space proofs or a valid farmer signature.
+
+Enforce field/container limits and an aggregate byte budget before retention;
+limit identities per connection/session or otherwise bind report identity to
+the admitted harvester. Bound report work per event-loop iteration as well:
+the current unbounded report-drain loop can delay proof signing under a flood.
+
+### P1: Transaction admission runs VM execution while holding the node mutex
+
+`mmx-node/src/rpc.rs:161–166` takes the live node mutex before calling
+`add_transaction`. `transactions.rs:153` executes complete validation before
+the pool capacity checks at lines 190–193. Peer transaction admission reaches
+the same synchronous execution path from `Node::update`. The separate bounded
+`ReadTask` path protects dry-run validation, but not submissions. Rejected
+expensive submissions still consume execution time; full pool admission can
+therefore keep running contracts while blocking ticks, fork selection, VDF
+admission, production and other lock-taking RPCs.
+
+This is a source-confirmed scheduling gap, not a live flooding measurement.
+Native ordinary transaction admission queues work; `Node_update.cpp` processes
+it on its transaction worker pool with a `validate_interval_ms / 2` deadline.
+The Rust peer inbox's four-transactions-per-tick bound limits count, but does
+not reproduce that execution-time budget or move submissions off the mutex.
+
+Reject obvious capacity failures before execution. Use bounded off-lock
+validation with an exact parent/generation check before pool publication, and
+retain a native-style time/work budget for queued peer validation.
+
+### P2: Named OpenCL device selection uses the wrong index space
+
+`mmx-consensus/src/accelerator.rs:59–70` constructs the globally indexed device
+first and only then compares its name. Native `Node.cpp:70–103` numbers each
+device relative to others with the same name when `opencl_device_name` is set.
+For enumerated GPUs `[A, B]`, native configuration `name=B, index=0` selects B;
+Rust initializes A, detects the mismatch, and falls back to CPU despite B being
+available. The same helper is used by the node and harvester. This is a source
+comparison; no mixed-GPU hardware was required or modified for the review.
+
+Resolve the name/platform-filtered list before applying its relative index and
+before initializing/self-testing a device. Test mixed names and duplicate names.
+
+### P2: Every database commit rescans the complete memtable
+
+`mmx-db/src/native.rs:332–335` recomputes `mem_bytes` by walking every retained
+memtable entry after every publication, including a one-key commit. A growing
+memtable thus makes ordinary commits linear in unrelated retained entries.
+Native `DataBase.cpp::Table::insert_entry` maintains its size incrementally.
+
+With the existing debug-profile library and default native options, 100 one-key
+commits on a temporary **tmpfs** database took 0.575 ms after a ten-row seed and
+151.750 ms after a 50,000-row seed. Both remain below the normal 4 MiB memtable
+flush threshold. This isolates the scan without ledger reads, persistent-disk
+writes or full-node throughput claims; it is not a release C++/Rust comparison.
+Maintain the counter on insertion/replacement/removal and reserve full recounts
+for exceptional recovery/rewind paths where needed. Preserve snapshot visibility
+and test repeated versions, replacements, rollback and checkpoint resets.
+
+### Validation and scope
+
+- Workspace build and all-target tests: **464 passed, 6 ignored**, no failures.
+- Desktop platform-independent Rust tests: **23 passed** (`--no-default-features`).
+- Wallet unit tests: **483 passed**; TypeScript checking passed.
+- Wallet CLI suite: **36 passed**; systemd installer checks: **3 passed**.
+- Workspace all-target Clippy passed with warnings denied.
+
+Builds used two jobs, no incremental/debug output, and low CPU/I/O priority.
+Probes used synthetic fixtures, RAM, or small temporary databases. No node or
+harvester service was restarted; live ledger and plot data were not inspected.
+The six optional tests remained ignored; this was not a new GPU/ARM conformance,
+packaging or native GUI end-to-end run.
+
+Source coverage spans consensus/hash/authorization, VDF/space transitions,
+VM/contract execution and dependency scheduling, database recovery/collection,
+fork choice/rollback/purge, peer sync/gossip/RPC, wallet signing/spending,
+farmer/harvester/timelord, config/systemd, and desktop/web trust boundaries.
+Vendored VNX was checked at its decoding, session and transport integration
+boundaries. No new consensus acceptance mismatch was confirmed; passing native
+fixtures and this source review do not establish exhaustive protocol parity.
