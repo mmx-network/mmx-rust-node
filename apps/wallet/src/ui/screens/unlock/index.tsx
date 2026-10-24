@@ -30,7 +30,7 @@ export default function UnlockScreen() {
 function walletSubtitle(w: WalletInfo): string {
   if (w.error) return 'Can’t be opened';
   if (w.verified === false) return 'Setup not finished';
-  return `ID ${w.fingerprint}`;
+  return `Wallet ID ${w.fingerprint}`;
 }
 
 function onSelectError(e: unknown): void {
@@ -304,16 +304,20 @@ function WebWalletUnlock({ wallet, onChange, onOther }: { wallet: WalletInfo; on
           </Button>
           {unverified ? (
             <Button variant="ghost" onClick={() => setConfirmRemove(true)} disabled={open.busy}>
-              Remove wallet
+              Forget wallet
             </Button>
           ) : null}
         </div>
       </CredentialForm>
       <ConfirmDialog
         open={confirmRemove}
-        title={`Remove ${wallet.name}?`}
-        message="You can add it again later with its recovery phrase."
-        confirmLabel="Remove"
+        title={`Forget ${wallet.name}?`}
+        message={
+          wallet.withPassphrase
+            ? 'You can add it again later with its recovery phrase and passphrase.'
+            : 'You can add it again later with its recovery phrase.'
+        }
+        confirmLabel="Forget"
         tone="danger"
         busy={removing}
         onConfirm={() => void remove()}

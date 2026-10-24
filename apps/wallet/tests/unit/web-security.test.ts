@@ -54,7 +54,9 @@ describe('Content-Security-Policy', () => {
     const permissions = new Map(securityHeaders(ORIGIN)).get('Permissions-Policy')!;
     expect(permissions).toContain('camera=()');
     expect(permissions).toContain('clipboard-write=(self)');
-    expect(permissions).toContain('clipboard-read=()');
+    // The Paste buttons read the clipboard; a policy of () makes them fail silently in Chromium.
+    expect(permissions).toContain('clipboard-read=(self)');
+    for (const feature of ['camera', 'microphone', 'geolocation', 'payment', 'usb']) expect(permissions).toContain(`${feature}=()`);
   });
 });
 
@@ -101,6 +103,9 @@ describe('deployment files', () => {
     }
     const site = deploy('nginx.conf');
     expect(site).toContain('application/wasm');
+    // `http2 on;` needs nginx 1.25.1+, newer than Ubuntu 24.04 and Debian 12 ship.
+    expect(site).not.toMatch(/^\s*http2\s+on\s*;/mu);
+    expect(site.match(/^\s*listen\s+(\[::\]:)?443\s+ssl\s+http2;/gmu)).toHaveLength(2);
     expect(site.match(/include snippets\/mmx-wallet-security-headers\.conf;/gu)).toHaveLength(site.match(/location /gu)!.length);
   });
 });

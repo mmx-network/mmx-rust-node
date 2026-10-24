@@ -12,9 +12,11 @@ import { errorMessage, isTransportError, messageForCode } from '../lib/errors';
 import { isFeeLevel } from '../lib/fees';
 import { getSeparators } from '../lib/locale';
 import { memoState } from '../lib/memo';
-import { activeWallet, activeWalletId, backend, contacts, settings, upsertWallet } from './core';
+import { sanitizeSymbol, shortenHash } from '../lib/text';
+import { activeWallet, activeWalletId, backend, contacts, sessionWalletId, settings, upsertWallet } from './core';
 import { navigate } from './router';
-import { assets, ownAddressSet, refreshNow, trackPending } from './session';
+import { assets, ownAddressSet, pendingReservedTotals, refreshNow, trackPending } from './session';
+import { notify } from './toasts';
 
 export interface SendDraft {
   /** Recipient address (or text being searched in contacts). */
@@ -30,7 +32,7 @@ const EMPTY_DRAFT: SendDraft = { to: '', contract: NATIVE_CONTRACT, amount: '', 
 export const sendDraft = signal<SendDraft>({ ...EMPTY_DRAFT });
 
 export type SendStep = 'edit' | 'review' | 'done' | 'uncertain';
-export type SendField = 'to' | 'amount' | 'memo' | 'passphrase';
+export type SendField = 'to' | 'amount' | 'memo' | 'passphrase' | 'fee';
 
 export interface SendFlowState {
   step: SendStep;
@@ -110,12 +112,29 @@ export function amountErrorMessage(error: AmountError | 'zero' | 'balance', symb
   }
 }
 
-/** Validates a draft against the wallet's balances and contacts. Empty fields report errors too; show them once touched. */
+const NO_PENDING: ReadonlyMap<string, bigint> = new Map();
+
+/**
+ * What can still be sent of an asset: its balance minus what this wallet's
+ * sends that are not included yet hold back (`pendingReservedTotals`; MMX
+ * includes their fees).
+ */
+export function spendableBalance(asset: AssetBalance, pending: ReadonlyMap<string, bigint> = NO_PENDING): bigint {
+  const left = asset.total - (pending.get(asset.contract) ?? 0n);
+  return left > 0n ? left : 0n;
+}
+
+/**
+ * Validates a draft against the wallet's balances (minus `pending` outgoing
+ * amounts per contract) and contacts. Empty fields report errors too; show
+ * them once touched.
+ */
 export function checkDraft(
   draft: SendDraft,
   assetList: readonly AssetBalance[] | null,
   contactList: readonly Contact[],
   own: ReadonlySet<string>,
+  pending: ReadonlyMap<string, bigint> = NO_PENDING,
 ): DraftCheck {
   const errors: DraftCheck['errors'] = {};
   const result: DraftCheck = { ownAddress: false, errors, ready: false };
@@ -139,12 +158,12 @@ export function checkDraft(
     const parsed = parseAmount(draft.amount, asset.decimals);
     if (!parsed.ok) errors.amount = amountErrorMessage(parsed.error, asset.symbol, asset.decimals);
     else if (parsed.value === 0n) errors.amount = amountErrorMessage('zero', asset.symbol, asset.decimals);
-    else if (parsed.value > asset.total) errors.amount = amountErrorMessage('balance', asset.symbol, asset.decimals);
+    else if (parsed.value > spendableBalance(asset, pending)) errors.amount = amountErrorMessage('balance', asset.symbol, asset.decimals);
     else result.amountAtomic = parsed.value;
   }
 
   const memo = memoState(draft.memo);
-  if (memo.error === 'too_long') errors.memo = 'The memo is limited to 64 bytes.';
+  if (memo.error === 'too_long') errors.memo = 'The memo is too long.';
   else if (memo.error === 'invalid') errors.memo = 'Remove line breaks and special characters from the memo.';
   else if (draft.memo !== '') result.memo = draft.memo;
 
@@ -152,7 +171,9 @@ export function checkDraft(
   return result;
 }
 
-export const draftCheck = computed(() => checkDraft(sendDraft.value, assets.value, contacts.value, ownAddressSet.value));
+export const draftCheck = computed(() =>
+  checkDraft(sendDraft.value, assets.value, contacts.value, ownAddressSet.value, pendingReservedTotals.value),
+);
 
 /** Sendable assets: MMX plus tokens with a balance. */
 export const sendableAssets = computed(() => (assets.value ?? []).filter((a) => a.native || a.total > 0n));
@@ -189,21 +210,26 @@ function clearExpiry(): void {
   expiryTimer = null;
 }
 
-function armExpiry(txid: string): void {
+/** Leaves an expired review: the backend no longer keeps the transaction. */
+function expireReview(txid: string): void {
+  const flow = sendFlow.value;
+  if (flow.step !== 'review' || flow.prepared?.txid !== txid || flow.busy) return;
+  void backend().discardPrepared(txid).catch(() => undefined);
+  sendFlow.value = {
+    step: 'edit',
+    busy: false,
+    feeLevel: flow.feeLevel,
+    needsPassphrase: false,
+    error: { code: 'prepared_not_found', message: messageForCode('prepared_not_found') },
+  };
+}
+
+function armExpiry(txid: string, delay = PREPARED_TTL_MS): void {
   clearExpiry();
   expiryTimer = setTimeout(() => {
-    const flow = sendFlow.value;
-    if (flow.step === 'review' && flow.prepared?.txid === txid && !flow.busy) {
-      void backend().discardPrepared(txid).catch(() => undefined);
-      sendFlow.value = {
-        step: 'edit',
-        busy: false,
-        feeLevel: flow.feeLevel,
-        needsPassphrase: false,
-        error: { code: 'prepared_not_found', message: messageForCode('prepared_not_found') },
-      };
-    }
-  }, PREPARED_TTL_MS);
+    expiryTimer = null;
+    expireReview(txid);
+  }, Math.max(0, delay));
 }
 
 async function prepare(request: SendRequest): Promise<void> {
@@ -267,13 +293,62 @@ export async function reviewSend(): Promise<boolean> {
   return sendFlow.value.step === 'review';
 }
 
-/** Changes the fee priority on review (prepares a new transaction). */
+const PRIORITY_TOO_HIGH = 'Not enough MMX for this priority.';
+
+/**
+ * Changes the fee priority on review by preparing a new transaction. The
+ * current one stays until the new one is ready; when the balance cannot pay
+ * the higher fee, the review keeps the current priority and says so.
+ */
 export async function setSendFeeLevel(level: FeeLevel): Promise<void> {
   const flow = sendFlow.value;
   if (flow.busy || flow.step !== 'review' || !flow.request || !flow.prepared || flow.feeLevel === level) return;
+  const current = flow.prepared;
+  const started = epoch;
+  const { error: _error, ...review } = flow;
+  const request: SendRequest = { ...flow.request, feeLevel: level };
+  // "Send now" is disabled while busy, so the current transaction cannot be sent meanwhile.
+  sendFlow.value = { ...review, busy: 'preparing' };
+  let prepared: PreparedSend;
+  try {
+    prepared = await backend().prepareSend(request);
+  } catch (e) {
+    if (started !== epoch) return;
+    const err = toBackendError(e);
+    if (err.code === 'insufficient_funds' || err.code === 'insufficient_fee') {
+      sendFlow.value = { ...review, busy: false, error: { code: err.code, message: PRIORITY_TOO_HIGH, field: 'fee' } };
+      // The expiry timer does nothing while busy: catch up if it was due.
+      const age = Date.now() - (review.preparedAt ?? 0);
+      if (age >= PREPARED_TTL_MS) expireReview(current.txid);
+      else if (expiryTimer === null) armExpiry(current.txid, PREPARED_TTL_MS - age);
+      return;
+    }
+    clearExpiry();
+    void backend().discardPrepared(current.txid).catch(() => undefined);
+    const state = errorState(e);
+    sendFlow.value = {
+      step: 'edit',
+      busy: false,
+      feeLevel: flow.feeLevel,
+      request: flow.request,
+      needsPassphrase: needsUnlock(state.code),
+      ...(needsUnlock(state.code) ? {} : { error: state }),
+    };
+    return;
+  }
+  if (started !== epoch) {
+    void backend().discardPrepared(prepared.txid).catch(() => undefined);
+    return;
+  }
   clearExpiry();
-  void backend().discardPrepared(flow.prepared.txid).catch(() => undefined);
-  await prepare({ ...flow.request, feeLevel: level });
+  void backend().discardPrepared(current.txid).catch(() => undefined);
+  if (activeWalletId.value !== request.walletId || !matchesRequest(prepared, request)) {
+    void backend().discardPrepared(prepared.txid).catch(() => undefined);
+    sendFlow.value = { step: 'edit', busy: false, feeLevel: flow.feeLevel, needsPassphrase: false, error: errorState(null) };
+    return;
+  }
+  sendFlow.value = { step: 'review', busy: false, feeLevel: level, request, prepared, preparedAt: Date.now(), needsPassphrase: false };
+  armExpiry(prepared.txid);
 }
 
 /** Unlocks the wallet with its passphrase, then continues to review. */
@@ -298,11 +373,35 @@ export async function unlockForSend(passphrase: string): Promise<boolean> {
   return reviewSend();
 }
 
+/**
+ * Symbol shown for a prepared transfer: MMX, the token's symbol, or (for a
+ * token whose symbol is empty) its shortened contract, as in the asset list.
+ */
+export function preparedSymbol(prepared: Pick<PreparedSend, 'contract' | 'symbol'>): string {
+  if (prepared.contract === NATIVE_CONTRACT) return 'MMX';
+  return (
+    sanitizeSymbol(prepared.symbol) ||
+    assets.value?.find((a) => a.contract === prepared.contract)?.symbol ||
+    shortenHash(prepared.contract, 8, 4)
+  );
+}
+
+const UNCERTAIN_MESSAGE = 'We couldn’t confirm the transfer. Check Activity before sending again.';
+
+/**
+ * A broadcast finished after the user switched wallets or locked: the result
+ * belongs to the earlier wallet, so it is reported in a toast only.
+ */
+function reportLateResult(message: string, kind: 'success' | 'warning' | 'error'): void {
+  if (sessionWalletId.value !== null) notify(message, kind);
+}
+
 /** Broadcasts the reviewed transaction once. */
 export async function confirmSend(): Promise<void> {
   const flow = sendFlow.value;
   if (flow.busy || flow.step !== 'review' || !flow.prepared || !flow.request) return;
   const { prepared, request } = flow;
+  const started = epoch;
   // Set synchronously: a second click sees busy and returns.
   sendFlow.value = { ...flow, busy: 'sending' };
   clearExpiry();
@@ -311,7 +410,7 @@ export async function confirmSend(): Promise<void> {
     walletId: request.walletId,
     to: normalizeAddress(prepared.to) ?? prepared.to,
     contract: prepared.contract,
-    symbol: prepared.symbol,
+    symbol: preparedSymbol(prepared),
     decimals: prepared.decimals,
     amount: parseAtomic(prepared.amount) ?? 0n,
     fee: parseAtomic(prepared.fee) ?? 0n,
@@ -322,18 +421,23 @@ export async function confirmSend(): Promise<void> {
   };
   try {
     await backend().broadcast(request.walletId, prepared.txid);
-    trackPending(pending);
-    sendFlow.value = { ...flow, step: 'done', busy: false };
-    refreshNow();
   } catch (e) {
     if (isTransportError(e)) {
+      // Tracked for its wallet even when another one is open now.
       trackPending({ ...pending, uncertain: true });
-      sendFlow.value = { ...flow, step: 'uncertain', busy: false };
+      if (started !== epoch) reportLateResult(UNCERTAIN_MESSAGE, 'warning');
+      else sendFlow.value = { ...flow, step: 'uncertain', busy: false };
       return;
     }
     // The backend consumed or rejected the prepared transaction.
-    sendFlow.value = { step: 'edit', busy: false, feeLevel: flow.feeLevel, request, needsPassphrase: false, error: errorState(e) };
+    if (started !== epoch) reportLateResult(errorMessage(e), 'error');
+    else sendFlow.value = { step: 'edit', busy: false, feeLevel: flow.feeLevel, request, needsPassphrase: false, error: errorState(e) };
+    return;
   }
+  trackPending(pending);
+  refreshNow();
+  if (started !== epoch) reportLateResult('Transfer sent', 'success');
+  else sendFlow.value = { ...flow, step: 'done', busy: false };
 }
 
 /** Leaves review without sending. */
@@ -365,7 +469,10 @@ export async function discardSend(): Promise<void> {
     sendDraft.value = { ...EMPTY_DRAFT };
     sendFlow.value = initialFlow();
   });
-  if (flow.prepared && flow.step === 'review') await backend().discardPrepared(flow.prepared.txid).catch(() => undefined);
+  // A transaction being sent belongs to its broadcast now.
+  if (flow.prepared && flow.step === 'review' && flow.busy !== 'sending') {
+    await backend().discardPrepared(flow.prepared.txid).catch(() => undefined);
+  }
 }
 
 /** Fills the amount with the maximum sendable for the selected asset (after fees). */

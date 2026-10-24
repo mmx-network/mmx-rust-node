@@ -143,7 +143,7 @@ describe('contacts', () => {
     expect(parseContactsFile('not json')).toBeNull();
     expect(parseContactsFile('{"foo": 1}')).toBeNull();
     expect(parseContactsFile('42')).toBeNull();
-    expect(parseContactsFile(' '.repeat(1024 * 1024 + 1))).toBeNull();
+    expect(parseContactsFile(' '.repeat(2 * 1024 * 1024 + 1))).toBeNull();
     expect(parseContactsFile('{"contacts": [{"name": "x", "address": "bad"}]}')).toEqual([]);
   });
 
@@ -156,8 +156,21 @@ describe('contacts', () => {
     const r = mergeContacts(existing, incoming);
     expect(r.added).toBe(2);
     expect(r.skipped).toBe(1);
+    expect(r.full).toBe(0);
     expect(r.contacts.map((c) => c.name)).toEqual(['Alice', 'Bob', 'Carol']);
     expect(new Set(r.contacts.map((c) => c.id)).size).toBe(3);
+  });
+
+  it('counts contacts left out by the limit apart from those already saved', () => {
+    const book: Contact[] = Array.from({ length: MAX_CONTACTS - 2 }, (_, i) => ({ id: `c-${i}`, name: `n${i}`, address: fakeAddress(i) }));
+    const incoming: Contact[] = [
+      { id: 'x-0', name: 'Saved', address: fakeAddress(0) },
+      ...Array.from({ length: 5 }, (_, i) => ({ id: `x-${i + 1}`, name: `new${i}`, address: fakeAddress(MAX_CONTACTS + i) })),
+    ];
+    const r = mergeContacts(book, incoming);
+    expect(r).toMatchObject({ added: 2, skipped: 1, full: 3 });
+    expect(r.contacts).toHaveLength(MAX_CONTACTS);
+    expect(mergeContacts(r.contacts, incoming)).toMatchObject({ added: 0, skipped: 3, full: 3 });
   });
 });
 

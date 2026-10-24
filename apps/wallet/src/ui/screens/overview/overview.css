@@ -67,7 +67,16 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
   .overview-hero__actions .btn {
+    width: 100%;
     min-width: 0;
+    padding-inline: var(--s4);
+  }
+}
+
+/* Too narrow for two labelled buttons side by side: stack them. */
+@media (max-width: 359.98px) {
+  .overview-hero__actions {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -1,0 +1,1782 @@
+/*
+ * Ledger — editorial ledger, fine print finance.
+ *
+ * Newspaper typography on paper: Newsreader for headlines and figures (its
+ * default figures are lining and tabular), Public Sans for the interface,
+ * IBM Plex Mono for addresses and IDs. Hairline rules instead of boxes, a fine
+ * double rule under page titles, the grand total double-underlined as in an
+ * account book, dot leaders in key/value rows and a sidebar set like a book's
+ * contents. Radii stay between 0 and 3 px; nothing floats except overlays.
+ */
+
+@import '@fontsource-variable/newsreader/opsz.css';
+@import '@fontsource-variable/newsreader/opsz-italic.css';
+@import '@fontsource-variable/public-sans/wght.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+/* ------------------------------------------------------ scheme-independent */
+
+/* Shape, type and the recipes built from colour tokens. Declared on every
+   [data-scheme] element (as base.css does for its derived tokens) so a scoped
+   scheme, such as a dark preview pane inside a light page, keeps them. */
+:root,
+[data-scheme] {
+  --font-ui: 'Public Sans Variable', 'Public Sans', -apple-system, 'Segoe UI', system-ui, Roboto, Arial, sans-serif;
+  --font-display: 'Newsreader Variable', 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+
+  --radius-s: 2px;
+  --radius-m: 2px;
+  --radius-l: 3px;
+  --shadow-1: none;
+
+  --space-unit: 4px;
+  --nav-width: 256px;
+  --layout: sidebar;
+
+  --icon-stroke: 1.5;
+  --weight-display: 500;
+  --tracking-display: -0.014em;
+  /* Whole pixels: fractional tracking at 11-12 px renders unevenly. */
+  --tracking-caps: 1px;
+  --text-display: clamp(2.75rem, 1.7rem + 2.9vw, 4.375rem);
+
+  --card-border: var(--border);
+  --card-shadow: none;
+  --nav-bg: var(--bg);
+  --nav-border: var(--border);
+  --nav-item-fg: var(--text-muted);
+  --nav-item-hover: transparent;
+  --nav-item-active-bg: transparent;
+  --nav-item-active-fg: var(--text);
+  --nav-item-active-icon: var(--accent);
+  --nav-item-active-shadow: inset 2px 0 0 var(--accent);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+  --qr-frame: #ffffff;
+  --identicon-radius: 2px;
+}
+
+/* ------------------------------------------------------------ light: paper */
+
+:root,
+[data-scheme='light'] {
+  --bg: #fbf8f2;
+  --bg-elevated: #fffdf9;
+  --bg-sunken: #f3eee4;
+  --surface: #fffdf9;
+  --surface-2: #f4efe6;
+  --border: #d8d1c2;
+  --border-strong: #8a8272;
+  --text: #172338;
+  --text-muted: #4f5869;
+  --text-faint: #626a78;
+  --accent: #8e2b33;
+  --accent-contrast: #fbf8f2;
+  --accent-soft: #f4e5e2;
+  --positive: #2f6b3a;
+  --negative: #b03a0e;
+  --warning: #835808;
+  --focus: #2457a8;
+
+  --shadow-2: 0 1px 0 rgba(23, 35, 56, 0.05), 0 18px 40px -20px rgba(23, 35, 56, 0.34), 0 4px 12px -6px rgba(23, 35, 56, 0.12);
+
+  --chart-line: #172338;
+  --chart-fill: rgba(23, 35, 56, 0.06);
+  --chart-grid: #e4ddcf;
+
+  /* Ledger-specific: hairline rules, ink rules, dot leaders and the lightest
+     outline that still marks a control (3:1). */
+  --rule: #d8d1c2;
+  --rule-ink: #172338;
+  --rule-head: #172338;
+  --rule-control: #958c7a;
+  --leader: #a79f8f;
+
+  --control-bg: #fffdf9;
+  --control-border: #8a8272;
+  --card-bg: #fffdf9;
+  /* A light, warm scrim: the paper stays paper under an open panel. */
+  --backdrop: rgba(48, 40, 30, 0.26);
+  --brand-disc: #8e2b33;
+  --brand-glyph: #fbf8f2;
+
+  --positive-soft: #e7eee3;
+  --negative-soft: #f7e6dd;
+  --warning-soft: #f5ecd9;
+  --info-soft: #f0ebe1;
+  --on-negative: #fffdf9;
+}
+
+/* -------------------------------------------------------------- dark: ink */
+
+[data-scheme='dark'] {
+  /* Newsprint at night: a warm graphite ink, not navy, with paper-toned type
+     and the rules picked out in rose. */
+  --bg: #141413;
+  --bg-elevated: #1d1c1a;
+  --bg-sunken: #0e0e0d;
+  --surface: #181816;
+  --surface-2: #201f1c;
+  --border: #33312d;
+  --border-strong: #77726a;
+  --text: #ede6d8;
+  --text-muted: #b5ad9e;
+  --text-faint: #979083;
+  --accent: #d4737b;
+  --accent-contrast: #141413;
+  --accent-soft: #331e20;
+  --positive: #86c290;
+  --negative: #ee7d62;
+  --warning: #dfb15e;
+  --focus: #8fb3ee;
+
+  --shadow-2: 0 0 0 1px rgba(0, 0, 0, 0.3), 0 24px 52px -18px rgba(0, 0, 0, 0.8), 0 6px 16px -8px rgba(0, 0, 0, 0.55);
+
+  --chart-line: #ede6d8;
+  --chart-fill: rgba(237, 230, 216, 0.06);
+  --chart-grid: #2a2926;
+
+  --rule: #33312d;
+  --rule-ink: #b9b1a2;
+  --rule-head: #d4737b;
+  --rule-control: #6f6a62;
+  --leader: #5f5a53;
+
+  --control-bg: #171715;
+  --control-border: #7a756c;
+  --card-bg: #181816;
+  --backdrop: rgba(0, 0, 0, 0.62);
+  --brand-disc: #d4737b;
+  --brand-glyph: #141413;
+
+  --positive-soft: #19251b;
+  --negative-soft: #2d1c17;
+  --warning-soft: #2a2416;
+  --info-soft: #201f1c;
+  --on-negative: #1d0d09;
+}
+
+/* ------------------------------------------------------------- typography */
+
+body {
+  font-optical-sizing: auto;
+  font-kerning: normal;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.heading,
+.page-header__title,
+.section__title,
+.dialog__title {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+}
+
+.heading--xl {
+  font-size: 2.25rem;
+  font-weight: 500;
+}
+.heading--lg {
+  font-size: 1.75rem;
+  font-weight: 500;
+}
+.heading--md {
+  font-size: 1.375rem;
+  font-weight: 600;
+}
+.heading--sm {
+  font-size: 1.1875rem;
+  font-weight: 600;
+}
+
+.text--mono {
+  font-size: 0.9em;
+}
+
+/* --------------------------------------------- page title + double rule */
+
+.page {
+  gap: var(--s8);
+}
+
+.page-header {
+  gap: var(--s2);
+}
+.page-header::after {
+  content: '';
+  display: block;
+  height: 4px;
+  margin-top: var(--s2);
+  border-top: 1px solid var(--rule-head);
+  border-bottom: 1px solid var(--rule-head);
+}
+.page-header__row {
+  align-items: flex-end;
+}
+.page-header__title {
+  font-size: clamp(2.125rem, 1.55rem + 1.5vw, 2.875rem);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.04;
+}
+.page-header__subtitle {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1.125rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.page-header__back {
+  gap: var(--s1);
+  padding: 0 var(--s2) 0 var(--s1);
+  border-radius: var(--radius-s);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+.page-header__back:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
+@media (max-width: 719.98px) {
+  .page {
+    gap: var(--s6);
+  }
+  .page-header__title {
+    font-size: 2rem;
+  }
+}
+
+/* ---------------------------------------------------------------- section */
+
+.section {
+  gap: var(--s3);
+}
+.section__header {
+  min-height: var(--control-h-sm);
+  align-items: flex-end;
+}
+.section__title {
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 1.15;
+}
+h3.section__title {
+  font-size: 1.125rem;
+}
+.section__description {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 0.9375rem;
+}
+/* Secondary text actions (View all, Manage, Change, Switch wallet) are one
+   style: oxblood small caps, aligned with the column edge. */
+.section__actions .btn--ghost,
+.field__top .btn--ghost,
+.focus-layout__header .btn--ghost {
+  height: auto;
+  min-height: 28px;
+  padding-inline: var(--s1);
+  /* Shifted, not narrowed: the label meets the column edge. */
+  inset-inline-end: calc(var(--s1) * -1);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+/* The same voice for the text actions under a form (Open another wallet). */
+.onboarding-actions__secondary .btn--ghost {
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+.section__actions .btn--ghost:hover:not(:disabled),
+.field__top .btn--ghost:hover:not(:disabled),
+.focus-layout__header .btn--ghost:hover:not(:disabled),
+.onboarding-actions__secondary .btn--ghost:hover:not(:disabled) {
+  background: transparent;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+/* Touch targets stay 44 px; the negative margin keeps the header compact. */
+@media (max-width: 719.98px) {
+  .section__actions .btn--ghost,
+  .field__top .btn--ghost,
+  .focus-layout__header .btn--ghost {
+    min-height: 44px;
+    margin-block: -8px;
+  }
+}
+
+/* A section with a card body is printed flat: an ink rule, then the rows. */
+.section--card > .section__body {
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--rule-ink);
+  border-radius: 0;
+  box-shadow: none;
+  padding: var(--s1) 0 0;
+}
+.section--card > .section__body > .option-row:first-child {
+  padding-top: var(--s4);
+}
+
+/* ------------------------------------------------------------------- card */
+
+.card {
+  border-radius: var(--radius-l);
+}
+/* Printed forms: a heavier ink rule heads every plain card. It is two ink
+   lines, the border and a shadow above it, so it runs the card's full outer
+   width and is cut square: no pale side border shows beside it. */
+.card:where(:not(.card--hero, .card--sunken, .card--outline)) {
+  border-top-color: var(--rule-ink);
+  border-radius: 0 0 var(--radius-l) var(--radius-l);
+  box-shadow: 0 -1px 0 var(--rule-ink);
+}
+.card--sunken {
+  background: var(--bg-sunken);
+}
+.card--outline {
+  border-style: solid;
+  border-color: var(--border);
+}
+
+/* ------------------------------------------------------------------ labels */
+
+/* Small caps: tracked capitals at a small size, for labels and kickers. */
+.field__label,
+.kv__label,
+.list-group__title,
+.overview-hero__label,
+.send-review__eyebrow,
+.badge,
+.disclosure__toggle,
+.net-status,
+.segmented__item,
+.steps__count {
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.field__label {
+  font-size: 0.71875rem;
+  font-weight: 650;
+  color: var(--text);
+}
+.field__optional {
+  margin-left: var(--s2);
+  font-family: var(--font-display);
+  font-size: 0.9375rem;
+  font-style: italic;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-muted);
+}
+.field__top {
+  align-items: flex-end;
+}
+.field__aside {
+  font-size: var(--text-sm);
+}
+
+/* ----------------------------------------------------------------- buttons */
+
+.btn {
+  border-radius: var(--radius-s);
+  font-weight: 600;
+}
+.btn--sm {
+  border-radius: var(--radius-s);
+}
+.btn--lg {
+  font-size: 1rem;
+  padding: 0 var(--s6);
+}
+.btn--primary,
+.btn--danger,
+.btn--secondary {
+  box-shadow: none;
+}
+.btn--secondary {
+  background: transparent;
+  border-color: var(--control-border);
+}
+.btn--secondary:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--surface-2);
+  border-color: var(--text);
+}
+.btn--ghost:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--state-hover);
+}
+.btn:focus-visible {
+  box-shadow: var(--ring);
+}
+.btn:disabled {
+  opacity: 0.5;
+}
+
+/* Destructive actions are told apart by form, not only by hue: an outlined
+   stamp in the danger colour, never a second solid fill beside the primary. */
+.btn--danger {
+  background: transparent;
+  border-color: var(--negative);
+  color: var(--negative);
+}
+.btn--danger:hover:not(:disabled):not([aria-disabled='true']) {
+  filter: none;
+  background: var(--negative-soft);
+}
+/* The last step of a destructive confirmation carries a tint. */
+.confirm-dialog .btn--danger {
+  background: var(--negative-soft);
+}
+.confirm-dialog .btn--danger:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--negative-soft);
+  background: color-mix(in srgb, var(--negative) 15%, var(--bg-elevated));
+}
+
+/* Unavailable filled buttons go quiet instead of fading their colour. */
+.btn--primary:disabled,
+.btn--danger:disabled,
+.btn--primary[aria-disabled='true']:not(.btn--loading),
+.btn--danger[aria-disabled='true']:not(.btn--loading) {
+  opacity: 1;
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
+.icon-btn,
+.icon-btn--sm {
+  border-radius: var(--radius-s);
+}
+.icon-btn--secondary {
+  background: transparent;
+  border-color: var(--control-border);
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------ inputs */
+
+.input,
+.select__control,
+.stepper {
+  border-radius: var(--radius-s);
+}
+.input:hover:not(.input--disabled),
+.select__control:hover:not(:disabled) {
+  border-color: var(--text);
+}
+.input:focus-within,
+.stepper:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+.select__control:focus-visible {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+.input--invalid:focus-within {
+  border-color: var(--negative);
+  box-shadow: 0 0 0 1px var(--negative);
+}
+.input--readonly {
+  background: var(--bg-sunken);
+}
+.input--mono .input__control {
+  font-size: 0.875em;
+  letter-spacing: 0;
+}
+.input__control::placeholder {
+  color: var(--text-faint);
+}
+
+/* ------------------------------------------------------- switch, segmented */
+
+.switch__track {
+  width: 38px;
+  height: 22px;
+  border-radius: var(--radius-s);
+  background: var(--border-strong);
+}
+.switch__thumb {
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 1px;
+  background: var(--bg-elevated);
+  box-shadow: none;
+}
+.switch--on .switch__track {
+  background: var(--accent);
+}
+.switch--on .switch__thumb {
+  transform: translateX(16px);
+  background: var(--accent-contrast);
+}
+
+/* Segmented controls read as a row of printed tabs: the choice is underlined. */
+.segmented {
+  padding: 0;
+  gap: 0;
+  background: transparent;
+  border-radius: 0;
+}
+.segmented__item {
+  position: relative;
+  padding: 0 var(--s3);
+  border-radius: 0;
+  font-size: 0.71875rem;
+  font-weight: 650;
+  color: var(--text-muted);
+}
+.segmented__item + .segmented__item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 14px;
+  margin-top: -7px;
+  border-left: 1px solid var(--rule);
+}
+.segmented__item:hover:not(:disabled):not(.segmented__item--active) {
+  color: var(--text);
+}
+.segmented__item--active {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 7px;
+}
+.segmented__item:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+/* Printed tabs align with the column edge, not with their hit area. */
+@media (min-width: 720px) {
+  .segmented:not(.segmented--block) {
+    margin-inline: calc(var(--s3) * -1);
+    max-width: calc(100% + var(--s6));
+  }
+  /* A full-width strip (fee priority) is set like the other printed tabs:
+     packed from the column edge, each label as wide as its word. */
+  .segmented.segmented--block {
+    margin-inline-start: calc(var(--s3) * -1);
+    width: calc(100% + var(--s3));
+    max-width: none;
+  }
+  .segmented--block .segmented__item {
+    flex: 0 0 auto;
+  }
+}
+
+/* -------------------------------------------------------------- key/value */
+
+/* Dot leaders run from the label to the figure, as in a statement. */
+.kv__row {
+  gap: var(--s2);
+  padding: 9px 0;
+}
+.kv--rows > .kv__row + .kv__row {
+  border-top: 0;
+}
+.kv__label {
+  order: 0;
+  font-size: 0.71875rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.kv__row:not(.kv__row--stacked)::after {
+  content: '';
+  order: 1;
+  flex: 1 1 var(--s6);
+  min-width: var(--s4);
+  height: 1px;
+  align-self: baseline;
+  background-image: linear-gradient(to right, var(--leader) 1px, transparent 1px);
+  background-size: 4px 1px;
+  background-repeat: repeat-x;
+}
+.kv__value {
+  order: 2;
+  font-weight: 500;
+}
+.kv__hint {
+  line-height: 1.35;
+}
+/* The leader runs to the figure, so the second line (a hint such as
+   "23,587 confirmations") must not widen the value box: it hangs under the
+   figure instead, out of the width calculation. */
+@supports selector(:has(*)) {
+  .kv__row:not(.kv__row--stacked):has(> .kv__value > .kv__hint) {
+    position: relative;
+    padding-bottom: calc(9px + var(--text-sm) * 1.35 + 2px);
+  }
+  .kv__row:not(.kv__row--stacked) > .kv__value > .kv__hint {
+    position: absolute;
+    right: 0;
+    bottom: 9px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* A two-line entry (a name over its address, several own addresses) has no
+     single figure to lead to; it is set without dots. */
+  .kv__row:has(.activity-detail__party > :nth-child(2), .activity-detail__own > :nth-child(2))::after {
+    visibility: hidden;
+  }
+}
+.kv__row--stacked {
+  gap: var(--s2);
+}
+/* The total, as in an account book: the label in the headline face, a single
+   rule over the figure and a double rule under it. */
+.kv .kv__row.kv__row--emphasis {
+  margin-top: var(--s1);
+  padding-top: var(--s3);
+}
+.kv__row--emphasis .kv__label {
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+}
+.kv__row--emphasis .kv__value {
+  font-size: var(--text-lg);
+}
+.kv__row--emphasis .amount__number {
+  padding: 5px 0 5px;
+  background:
+    linear-gradient(var(--rule-ink), var(--rule-ink)) 0 0 / 100% 1px no-repeat,
+    linear-gradient(var(--rule-ink), var(--rule-ink)) 0 100% / 100% 1px no-repeat,
+    linear-gradient(var(--rule-ink), var(--rule-ink)) 0 calc(100% - 3px) / 100% 1px no-repeat;
+}
+
+/* ------------------------------------------------------------------ amount */
+
+.amount {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+}
+.amount__sign {
+  font-family: var(--font-ui);
+  font-weight: 450;
+  margin-right: 0.06em;
+}
+.amount__symbol {
+  font-family: var(--font-ui);
+  font-size: 0.7em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.amount--md,
+.amount--lg,
+.amount--xl,
+.amount--display {
+  font-family: var(--font-display);
+}
+.amount--md .amount__number,
+.amount--lg .amount__number {
+  font-weight: 550;
+}
+.amount--md {
+  font-size: 1.0625rem;
+}
+.amount--md .amount__symbol,
+.amount--lg .amount__symbol,
+.amount--xl .amount__symbol {
+  font-size: 0.62em;
+}
+.amount--xl {
+  font-size: 2.5rem;
+  letter-spacing: -0.018em;
+}
+.amount--xl .amount__number {
+  font-weight: 500;
+}
+.amount--xl .amount__symbol {
+  font-size: 0.36em;
+  letter-spacing: 0.1em;
+}
+.amount--display {
+  letter-spacing: -0.022em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+}
+.amount--display .amount__number {
+  font-weight: 500;
+}
+.amount--display .amount__symbol {
+  font-size: 0.24em;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+}
+
+/* ----------------------------------------------------------------- address */
+
+.address {
+  font-size: 0.875em;
+}
+.address__chunks {
+  letter-spacing: 0;
+}
+
+/* --------------------------------------------------- lists: ruled tables */
+
+.list--inset {
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--rule-ink);
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.list--divided > .list-item + .list-item,
+.list--inset.list--divided > .list-item + .list-item {
+  margin-inline: 0;
+  border-top: 1px solid var(--rule);
+  box-shadow: none;
+}
+.list--inset.list--divided > .list-item + .list-item > .list-item__body {
+  margin-inline: 0;
+}
+.list-item__body {
+  min-height: 60px;
+  padding: 10px var(--s2);
+  border-radius: 0;
+}
+.list-item--interactive .list-item__body:hover:not(:disabled) {
+  background: var(--state-hover);
+}
+.list-item--selected .list-item__body {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.list-item__title {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: 550;
+  letter-spacing: -0.004em;
+  line-height: 1.3;
+}
+.list-item__subtitle {
+  font-size: var(--text-sm);
+}
+.list-item__trailing-main {
+  font-weight: 550;
+  line-height: 1.3;
+}
+.list-item__trailing-sub {
+  font-size: 0.78125rem;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.list-group {
+  gap: 0;
+}
+.list-group + .list-group {
+  margin-top: var(--s8);
+}
+.list-group__header {
+  align-items: flex-end;
+  padding: 0 0 var(--s2);
+  border-bottom: 1px solid var(--rule-ink);
+}
+.list-group__title {
+  font-size: 0.71875rem;
+  font-weight: 650;
+  color: var(--text);
+}
+.list-group__aside {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.list-group > .list--inset {
+  border-top: 0;
+}
+
+/* -------------------------------------------------------------- icon tile */
+
+.icon-tile {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-s);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--rule);
+  color: var(--text-muted);
+}
+.icon-tile--sm {
+  width: 30px;
+  height: 30px;
+}
+.icon-tile--lg {
+  width: 52px;
+  height: 52px;
+}
+.icon-tile--positive {
+  color: var(--positive);
+}
+.icon-tile--negative {
+  color: var(--negative);
+}
+.icon-tile--warning {
+  color: var(--warning);
+}
+.icon-tile--accent {
+  color: var(--accent);
+}
+.icon-tile--positive,
+.icon-tile--negative,
+.icon-tile--warning,
+.icon-tile--accent {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 42%, transparent);
+}
+
+/* ------------------------------------------------------------------ badge */
+
+/* A rubber stamp: outlined capitals in the tone colour. */
+.badge {
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-s);
+  font-size: 0.65625rem;
+  font-weight: 650;
+  background: transparent;
+  color: var(--text-muted);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+/* The neutral colour above outranks base's tone rules by order, so the tones
+   are restated here; the outline follows through currentColor. */
+.badge--positive,
+.badge--negative,
+.badge--warning,
+.badge--accent {
+  background: transparent;
+}
+.badge--positive {
+  color: var(--positive);
+}
+.badge--negative {
+  color: var(--negative);
+}
+.badge--warning {
+  color: var(--warning);
+}
+/* An "active" stamp is inked, not red: filled with the accent tint and set in
+   ink, so it never reads as a failure stamp beside an outlined danger one. */
+.badge--accent {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* ----------------------------------------------------------------- banner */
+
+.banner {
+  border: 0;
+  border-left: 3px solid var(--rule-ink);
+  border-radius: 0 var(--radius-s) var(--radius-s) 0;
+  background: var(--info-soft);
+}
+.banner--info .banner__icon {
+  color: var(--text);
+}
+/* Tones keep their tint (restated after the paper tint above) and their rule. */
+.banner--positive {
+  border-left-color: var(--positive);
+  background: var(--positive-soft);
+}
+.banner--warning {
+  border-left-color: var(--warning);
+  background: var(--warning-soft);
+}
+.banner--danger {
+  border-left-color: var(--negative);
+  background: var(--negative-soft);
+}
+.banner--danger .banner__title {
+  color: var(--negative);
+}
+.banner__title {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------ empty state */
+
+.empty-state__icon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-s);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.empty-state--positive .empty-state__icon,
+.empty-state--warning .empty-state__icon,
+.empty-state--negative .empty-state__icon,
+.empty-state--neutral .empty-state__icon {
+  background: transparent;
+}
+.empty-state__title {
+  font-family: var(--font-display);
+  font-size: 1.375rem;
+  font-weight: 550;
+  letter-spacing: -0.01em;
+}
+.empty-state__message {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1.0625rem;
+}
+
+/* ------------------------------------------------- disclosure, option row */
+
+.disclosure__toggle {
+  border-radius: 0;
+  font-size: 0.71875rem;
+  font-weight: 650;
+  color: var(--text-muted);
+}
+.disclosure__toggle:hover {
+  background: var(--state-hover);
+}
+/* Option rows are entries in a ruled table: the title in the book face, the
+   explanation in italic fine print. */
+.option-row {
+  padding: 14px 0;
+}
+.option-row__title {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: 550;
+  letter-spacing: -0.004em;
+  line-height: 1.3;
+}
+.option-row__description {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 0.9375rem;
+  line-height: 1.4;
+}
+.option-row + .option-row {
+  border-top-color: var(--rule);
+}
+/* Codes and IDs in a description stay upright in the mono face. */
+.option-row__description :where(.settings__mono, .text--mono, .address) {
+  font-style: normal;
+  font-size: 0.875rem;
+}
+/* Rows of a ruled table sit directly on their rules: the column gap would
+   leave more space above each rule than below it. */
+.section__body > .option-row + .option-row {
+  margin-top: calc(var(--s4) * -1);
+}
+
+/* --------------------------------------------------------------- progress */
+
+.steps__count {
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+.steps__current {
+  font-family: var(--font-display);
+  font-size: 1rem;
+}
+.steps__bars {
+  gap: 3px;
+}
+.steps__item {
+  height: 3px;
+  border-radius: 0;
+  background: var(--rule);
+}
+.steps__item--done {
+  background: var(--text);
+}
+.steps__item--current {
+  background: var(--accent);
+}
+
+/* -------------------------------------------------------------- word grid */
+
+.word-grid__item {
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.word-grid__index {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+.word-grid__word {
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------- QR, misc */
+
+.qr {
+  border-radius: var(--radius-s);
+}
+.identicon {
+  box-shadow: inset 0 0 0 1px rgba(23, 35, 56, 0.1);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
+}
+.skeleton {
+  border-radius: 1px;
+}
+
+/* ------------------------------------------------------- floating panels */
+
+.menu,
+.combobox__list {
+  padding: var(--s1) 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+}
+.menu__item,
+.combobox__option {
+  border-radius: 0;
+  padding: var(--s2) var(--s3);
+}
+.menu__label {
+  font-weight: 550;
+}
+/* Choices from a list (wallets, the More pages) are entries in the book face,
+   as in the switcher and the contents page. */
+.menu__item[role='menuitemradio'] .menu__label {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  line-height: 1.25;
+}
+/* The wallet menu is at least as wide as the switcher that opens it (the menu
+   sets that from the trigger) and grows to fit an entry; IDs never wrap. */
+.menu__description {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.menu__separator {
+  margin: var(--s1) 0;
+  background: var(--rule);
+}
+
+.tooltip {
+  border-radius: var(--radius-s);
+  box-shadow: none;
+  font-weight: 550;
+}
+
+.toast {
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--rule-ink);
+}
+.toast--info .toast__icon {
+  color: var(--text);
+}
+.toast--positive {
+  border-left-color: var(--positive);
+}
+.toast--warning {
+  border-left-color: var(--warning);
+}
+.toast--negative {
+  border-left-color: var(--negative);
+}
+.toast__title {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: 600;
+}
+.toast__action {
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  font-size: 0.71875rem;
+}
+
+/* ------------------------------------------------------------------ dialog */
+
+.dialog__panel {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-l);
+}
+.dialog__header {
+  position: relative;
+  padding-bottom: var(--s4);
+}
+.dialog__header:not(.dialog__header--hidden)::after {
+  content: '';
+  position: absolute;
+  left: var(--s6);
+  right: var(--s6);
+  bottom: 0;
+  height: 4px;
+  border-top: 1px solid var(--rule-head);
+  border-bottom: 1px solid var(--rule-head);
+}
+.dialog__header--hidden {
+  padding-bottom: 0;
+}
+.dialog__title {
+  font-size: 1.75rem;
+  font-weight: 500;
+  letter-spacing: -0.018em;
+}
+.dialog__description,
+.confirm-dialog__message {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1.0625rem;
+}
+.dialog__footer {
+  border-top-color: var(--rule);
+}
+@media (max-width: 719.98px) {
+  .dialog .dialog__panel,
+  .dialog--sheet .dialog__panel {
+    border-radius: var(--radius-l) var(--radius-l) 0 0;
+  }
+  .dialog__header:not(.dialog__header--hidden)::after {
+    left: var(--s5);
+    right: var(--s5);
+  }
+  .dialog__grabber {
+    border-radius: 0;
+  }
+}
+
+/* ------------------------------------------------------------------ shell */
+
+.skip-link {
+  border-radius: var(--radius-s);
+}
+
+.shell__nav {
+  gap: var(--s2);
+  padding: var(--s6) var(--s5) var(--s5);
+  border-right: 1px solid var(--nav-border);
+}
+
+/* Masthead: the name set in the headline face over a double rule. */
+.shell__brand {
+  position: relative;
+  padding: 0 0 var(--s5);
+  margin-bottom: var(--s3);
+}
+.shell__brand::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  border-top: 1px solid var(--rule-head);
+  border-bottom: 1px solid var(--rule-head);
+}
+.brand__name {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.shell__lockup .brand__name {
+  font-size: 1.375rem;
+}
+
+/* At rest the switcher keeps the lightest outline that still reads as a
+   control (3:1); hover and open go to ink. */
+.switcher {
+  border-radius: var(--radius-s);
+  background: transparent;
+  border-color: var(--rule-control);
+  box-shadow: none;
+}
+.shell__switcher .switcher:not(.switcher--compact) {
+  min-height: 54px;
+}
+.switcher:hover,
+.switcher--open {
+  border-color: var(--text);
+}
+.switcher__name {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.switcher__meta {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0;
+}
+.switcher__avatar--empty {
+  border-radius: var(--radius-s);
+}
+.switcher--compact,
+.shell__mobileswitcher .switcher {
+  border-color: transparent;
+}
+.switcher--compact:hover,
+.switcher--compact.switcher--open {
+  border-color: transparent;
+}
+
+.nav-item {
+  border-radius: 0;
+}
+.nav-item:hover {
+  color: var(--text);
+}
+.nav-item:hover .nav-item__label {
+  text-decoration: underline;
+  text-decoration-color: var(--text-muted);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+.nav-item--active .nav-item__label,
+.nav-item--active:hover .nav-item__label {
+  text-decoration: none;
+}
+.nav-item--quiet {
+  font-size: var(--text-sm);
+  font-weight: 550;
+}
+
+.shell__status {
+  padding: var(--s3) var(--s2) var(--s2);
+  border-top: 1px solid var(--rule);
+}
+.net-status {
+  font-size: 0.6875rem;
+  font-weight: 650;
+}
+.net-status__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+}
+.net-status--online .net-status__dot,
+.net-status--syncing .net-status__dot,
+.net-status--offline .net-status__dot {
+  box-shadow: none;
+}
+
+/* The contents page: entries in the book face, dot leaders, folio numerals. */
+@media (min-width: 1024px) {
+  [data-layout='sidebar'] .shell__navitems {
+    counter-reset: ledger-folio;
+    gap: 0;
+  }
+  [data-layout='sidebar'] .shell__navitems > li {
+    counter-increment: ledger-folio;
+  }
+  /* Entry, leader and folio share one baseline, as set type does. */
+  [data-layout='sidebar'] .shell__navitems .nav-item {
+    align-items: baseline;
+    gap: 0;
+    height: auto;
+    min-height: 42px;
+    padding: 8px var(--s2) 8px var(--s3);
+    font-family: var(--font-display);
+    font-size: 1.125rem;
+    font-weight: 450;
+    line-height: 26px;
+    letter-spacing: -0.003em;
+  }
+  [data-layout='sidebar'] .shell__navitems .nav-item__icon {
+    display: none;
+  }
+  [data-layout='sidebar'] .shell__navitems .nav-item__label {
+    flex: 0 1 auto;
+  }
+  [data-layout='sidebar'] .shell__navitems .nav-item::before {
+    content: '';
+    order: 2;
+    flex: 1 1 auto;
+    min-width: var(--s4);
+    height: 1px;
+    /* A fixed short space before every folio, as a set contents page has. */
+    margin: 0 var(--s2);
+    background-image: linear-gradient(to right, var(--leader) 1px, transparent 1px);
+    background-size: 4px 1px;
+    background-repeat: repeat-x;
+    /* Dots counted from the folio, so they line up from entry to entry. */
+    background-position: right bottom;
+  }
+  /* The folio is decoration, so it carries empty alt text. Engines without
+     alt-text support drop the declaration and show no folio; the leader then
+     simply runs to the edge. */
+  [data-layout='sidebar'] .shell__navitems .nav-item::after {
+    content: counter(ledger-folio, lower-roman) / '';
+    order: 3;
+    min-width: 0;
+    font-style: italic;
+    font-size: 0.9375rem;
+    text-align: right;
+    color: var(--text-faint);
+  }
+  [data-layout='sidebar'] .shell__navitems .nav-item:hover::after {
+    color: var(--text);
+  }
+  [data-layout='sidebar'] .shell__navitems .nav-item--active {
+    font-weight: 600;
+  }
+  [data-layout='sidebar'] .shell__navitems .nav-item--active::after {
+    color: var(--accent);
+  }
+  [data-layout='sidebar'] .shell__lock .nav-item {
+    padding: 0 var(--s3);
+  }
+}
+
+/* Icon-only navigation (the sidebar between 720 and 1024 px) has no label to
+   underline, and its masthead rule spans the rail rather than the mark. */
+@media (min-width: 720px) and (max-width: 1023.98px) {
+  [data-layout='sidebar'] .nav-item:hover {
+    background: var(--state-hover);
+  }
+  [data-layout='sidebar'] .shell__brand {
+    align-self: stretch;
+    justify-content: center;
+  }
+}
+[data-layout='rail'] .nav-item:hover {
+  background: var(--state-hover);
+}
+@media (min-width: 720px) {
+  [data-layout='rail'] .shell__brand {
+    align-self: stretch;
+    justify-content: center;
+  }
+}
+
+/* The top-bar layout (development override) has no room for the masthead rules. */
+@media (min-width: 720px) {
+  [data-layout='topbar'] .shell__brand {
+    margin-bottom: 0;
+    padding-bottom: 0;
+  }
+  [data-layout='topbar'] .shell__brand::after {
+    display: none;
+  }
+  [data-layout='topbar'] .shell__status {
+    border-top: 0;
+    padding: 0 var(--s3);
+  }
+}
+
+/* Mobile: masthead bar on top, a ruled tab bar below. */
+@media (max-width: 719.98px) {
+  .shell__mobilebar {
+    background: var(--bg);
+    border-bottom: 0;
+  }
+  .shell__mobilebar::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 4px;
+    border-top: 1px solid var(--rule-head);
+    border-bottom: 1px solid var(--rule-head);
+    pointer-events: none;
+  }
+  .tabbar {
+    background: var(--bg);
+    border-top: 1px solid var(--rule-ink);
+  }
+  .tabbar__item {
+    gap: 4px;
+    font-size: 0.65625rem;
+    font-weight: 650;
+    letter-spacing: var(--tracking-caps);
+    text-transform: uppercase;
+  }
+  .tabbar__icon {
+    width: 22px;
+    height: 22px;
+  }
+  .tabbar__item--active {
+    color: var(--accent);
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .tabbar__item:focus-visible {
+    border-radius: 0;
+  }
+}
+
+/* ----------------------------------------------------------- focus layout */
+
+.focus-layout__header {
+  position: relative;
+}
+.focus-layout__footer {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 0.9375rem;
+  color: var(--text-muted);
+}
+
+/* Screen stylesheets can load after the theme, so screen rules are scoped to
+   the active style ([data-style] on <html>), which also outranks them. */
+
+/* ===================================================== screen: overview */
+
+/* The balance as a front-page figure: a heavy rule above, a hairline below,
+   and the total double-underlined as in an account book. */
+[data-style='ledger'] .overview-hero.card--hero {
+  overflow: visible;
+  padding: var(--s6) 0 var(--s8);
+  background: transparent;
+  border: 0;
+  border-top: 3px solid var(--rule-head);
+  border-bottom: 1px solid var(--rule-ink);
+  border-radius: 0;
+  box-shadow: none;
+}
+@media (min-width: 720px) {
+  [data-style='ledger'] .overview-hero.card--hero {
+    align-items: flex-end;
+  }
+}
+@media (max-width: 719.98px) {
+  [data-style='ledger'] .overview-hero.card--hero {
+    padding: var(--s2) 0 var(--s6);
+    border-top: 0;
+  }
+  [data-style='ledger'] .overview-hero__actions .btn {
+    width: 100%;
+  }
+}
+[data-style='ledger'] .overview-hero__balance {
+  gap: var(--s3);
+}
+[data-style='ledger'] .overview-hero__label {
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: var(--accent);
+}
+[data-style='ledger'] .overview-hero__amount {
+  align-self: flex-start;
+}
+/* On desktop the symbol stays on the figure's line and the figure is sized to
+   its column, so the double rule never gets a stray "MMX" under it. Where the
+   figure may still wrap (phones, engines without container units) the symbol
+   clears the rules. Container sizing is limited to the row layout: in the
+   stacked phone layout Chrome sizes a container before its units resolve. */
+[data-style='ledger'] .overview-hero__amount .amount__symbol {
+  margin-top: var(--s2);
+}
+@supports (width: 1cqi) {
+  @media (min-width: 720px) {
+    [data-style='ledger'] .overview-hero__balance {
+      container-type: inline-size;
+    }
+    [data-style='ledger'] .overview-hero__amount.amount--display {
+      flex-wrap: nowrap;
+      font-size: min(var(--text-display), 12.5cqi);
+    }
+    [data-style='ledger'] .overview-hero__amount--long.amount--display {
+      font-size: min(var(--text-display), 9cqi);
+    }
+    [data-style='ledger'] .overview-hero__amount .amount__symbol {
+      margin-top: 0;
+    }
+  }
+}
+[data-style='ledger'] .overview-hero__amount .amount__number {
+  padding-bottom: 6px;
+  background:
+    linear-gradient(var(--rule-ink), var(--rule-ink)) 0 100% / 100% 1px no-repeat,
+    linear-gradient(var(--rule-ink), var(--rule-ink)) 0 calc(100% - 4px) / 100% 1px no-repeat;
+}
+[data-style='ledger'] .overview-hero__pending {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1rem;
+}
+[data-style='ledger'] .overview-hero__pending .amount {
+  font-style: normal;
+}
+[data-style='ledger'] .overview-hero__actions {
+  gap: var(--s2);
+}
+
+[data-style='ledger'] .overview-history__card.card {
+  gap: var(--s3);
+  padding: var(--s3) 0 0;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--rule-ink);
+  border-radius: 0;
+}
+[data-style='ledger'] .overview-history__change {
+  align-items: baseline;
+}
+[data-style='ledger'] .overview-history__change .amount {
+  font-family: var(--font-display);
+  font-size: 1.1875rem;
+}
+[data-style='ledger'] .overview-history__phrase,
+[data-style='ledger'] .overview-history__flat {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1rem;
+  font-weight: 400;
+}
+
+[data-style='ledger'] .overview-chart__plot {
+  border-radius: 0;
+}
+[data-style='ledger'] .overview-chart__gridline {
+  stroke: var(--chart-grid);
+}
+/* The chart lists its value ticks upwards from the floor of the scale, so the
+   first gridline is always the baseline: it is ruled in ink. */
+[data-style='ledger'] .overview-chart__grid > .overview-chart__gridline:first-child {
+  stroke: var(--rule-ink);
+}
+[data-style='ledger'] .overview-chart__ytick,
+[data-style='ledger'] .overview-chart__xtick {
+  fill: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+[data-style='ledger'] .overview-chart__xtick {
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+/* The value scale sits inside the plot, over the area tint: its halo is that
+   tint, thin enough not to show as a box, and the figures read as a scale. */
+[data-style='ledger'] .overview-chart__ytick {
+  stroke: var(--bg);
+  stroke: color-mix(in srgb, var(--chart-line) 5%, var(--bg));
+  stroke-width: 2px;
+  fill-opacity: 0.9;
+}
+[data-style='ledger'] .overview-chart__line {
+  stroke-width: 1.5;
+  stroke-linejoin: miter;
+  stroke-linecap: square;
+}
+[data-style='ledger'] .overview-chart__end {
+  fill: var(--accent);
+  stroke: var(--bg);
+}
+[data-style='ledger'] .overview-chart__dot {
+  fill: var(--bg);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+[data-style='ledger'] .overview-chart__crosshair {
+  stroke: var(--text-muted);
+  stroke-dasharray: 1 3;
+}
+[data-style='ledger'] .overview-chart__tooltip {
+  border-radius: var(--radius-s);
+  border-color: var(--rule-ink);
+  box-shadow: none;
+}
+[data-style='ledger'] .overview-chart__tooltip-value {
+  font-family: var(--font-display);
+  font-size: 1rem;
+}
+
+[data-style='ledger'] .overview-tokens__card {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--rule-ink);
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  box-shadow: none;
+}
+[data-style='ledger'] .overview-tokens__card > .list--inset,
+[data-style='ledger'] .overview-tokens__card .list {
+  border: 0;
+}
+[data-style='ledger'] .overview-tokens__list + .overview-tokens__other {
+  margin: 0;
+  border-top-color: var(--rule);
+}
+[data-style='ledger'] .overview-tokens__list + .overview-tokens__other .disclosure__toggle {
+  margin-inline: 0;
+}
+[data-style='ledger'] .overview-tokens__other .disclosure__toggle {
+  padding-inline: var(--s2);
+}
+[data-style='ledger'] .overview-recent__loading,
+[data-style='ledger'] .overview-recent__empty {
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--rule-ink);
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* ===================================================== screen: activity */
+
+[data-style='ledger'] .activity-row__memo {
+  font-family: var(--font-display);
+  font-size: 1.0625em;
+  color: var(--text-muted);
+}
+[data-style='ledger'] .activity-loading__card {
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--rule-ink);
+  border-radius: 0;
+  box-shadow: none;
+}
+[data-style='ledger'] .activity-detail__summary {
+  gap: var(--s3);
+  padding: var(--s3) 0 var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+[data-style='ledger'] .activity-detail__memo,
+[data-style='ledger'] .send-review__memo {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1.0625rem;
+  font-weight: 400;
+}
+[data-style='ledger'] .activity-detail__party-name {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+}
+[data-style='ledger'] .activity-save__address {
+  border-radius: var(--radius-s);
+}
+
+/* ========================================================= screen: send */
+
+[data-style='ledger'] .send-review__hero {
+  padding: var(--s2) 0 var(--s5);
+  border-bottom-color: var(--rule);
+}
+[data-style='ledger'] .send-review__eyebrow {
+  font-size: 0.71875rem;
+  font-weight: 650;
+  color: var(--accent);
+}
+[data-style='ledger'] .send-review__recipient-name {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+}
+[data-style='ledger'] .send-review__address,
+[data-style='ledger'] .contact-dialog__recipient {
+  border-radius: var(--radius-s);
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+[data-style='ledger'] .send-result__details {
+  border-top-color: var(--rule-ink);
+  border-bottom-color: var(--rule);
+}
+
+/* The figure being entered and the balance beside it use the ledger's
+   figures: Newsreader, lining and tabular. */
+[data-style='ledger'] .send-form__amount .input__control {
+  font-family: var(--font-display);
+  font-size: 1.1875rem;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+}
+[data-style='ledger'] .send-form__available .amount {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+}
+[data-style='ledger'] .send-form__available .amount__number {
+  font-weight: 550;
+}
+
+/* ====================================================== screen: receive */
+
+[data-style='ledger'] .receive-card__qr {
+  border-radius: var(--radius-s);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+[data-style='ledger'] .receive-card__qr-skeleton {
+  border-radius: var(--radius-s);
+}
+[data-style='ledger'] .receive-card__name {
+  font-family: var(--font-display);
+  font-size: 1.375rem;
+  font-weight: 550;
+}
+
+/* ===================================================== screen: settings */
+
+[data-style='ledger'] .settings__mono {
+  letter-spacing: 0;
+}
+
+/* ============================================== screen: welcome, create */
+
+[data-style='ledger'] .onboarding-header__title {
+  font-weight: 500;
+}
+[data-style='ledger'] .onboarding-header--center::after {
+  align-self: center;
+  width: 5.5rem;
+}
+[data-style='ledger'] .welcome-hero__mark {
+  filter: none;
+}
+[data-style='ledger'] .welcome-choice__button {
+  border-radius: var(--radius-l);
+  box-shadow: none;
+  border-color: var(--rule-control);
+}
+[data-style='ledger'] .welcome-choice__button:hover {
+  border-color: var(--text);
+}
+[data-style='ledger'] .welcome-choice__title {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+[data-style='ledger'] .create-pick__label {
+  border-radius: var(--radius-s);
+}
+[data-style='ledger'] .import-progress__bar,
+[data-style='ledger'] .import-progress__fill {
+  border-radius: 0;
+}
+[data-style='ledger'] .import-word__number {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}

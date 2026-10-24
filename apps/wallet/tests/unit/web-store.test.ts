@@ -32,13 +32,20 @@ describe('wallet entries', () => {
       name: 'Wallet',
       withPassphrase: true,
       addressCount: 10,
-      verified: false,
+      verified: true,
       added: 0,
     });
     expect(parseWalletRecord({ name: 'a\u{202e}b\n'.repeat(30) })?.name.length).toBeLessThanOrEqual(64);
     expect(parseWalletRecord(null)).toBeNull();
     expect(parseWalletRecord([])).toBeNull();
     expect(parseWalletRecord('x')).toBeNull();
+  });
+
+  it('marks only wallets stored unconfirmed by an earlier version as unverified', () => {
+    const base = { name: 'Main', withPassphrase: false, addressCount: 10, added: 1 };
+    expect(parseWalletRecord(base)?.verified).toBe(true);
+    expect(parseWalletRecord({ ...base, verified: true })?.verified).toBe(true);
+    expect(parseWalletRecord({ ...base, verified: false })?.verified).toBe(false);
   });
 });
 
@@ -53,6 +60,18 @@ describe('MetadataStore', () => {
     expect(store.list().map((w) => w.record.name)).toEqual(['A', 'B', 'C']);
     expect(store.get('5')?.addressCount).toBe(3);
     expect(store.has('6')).toBe(false);
+    expect(store.appState().activeWallet).toBeUndefined();
+  });
+
+  it('adds a wallet and makes it active in one write', () => {
+    const writes: string[] = [];
+    const inner = memoryStorage();
+    const storage = { ...inner, setItem: (key: string, value: string) => (writes.push(key), inner.setItem(key, value)) };
+    const store = new MetadataStore(storage);
+    store.putWallet('42', { name: 'New', withPassphrase: false, addressCount: 10, verified: true, added: 1 }, { active: true });
+    expect(writes).toEqual([STORAGE_KEY]);
+    expect(store.appState().activeWallet).toBe('42');
+    expect(store.list().map((w) => w.id)).toEqual(['42']);
   });
 
   it('skips damaged entries but keeps them, and other wallets, when writing', () => {

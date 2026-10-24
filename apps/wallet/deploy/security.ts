@@ -18,15 +18,17 @@ import { DEFAULT_RPC_URL, parseRpcUrl } from '../src/backend/web/rpc-url';
 export { DEFAULT_RPC_URL };
 
 /**
- * Features the wallet does not use are disabled; copying to the clipboard stays
- * available. Only features every Chromium platform knows are listed (unknown
- * names are reported as errors in the browser console).
+ * Features the wallet does not use are disabled. Copying to and pasting from
+ * the clipboard stay available to the wallet itself (Paste buttons for
+ * addresses; the browser still asks before the first read). Only features
+ * every Chromium platform knows are listed (unknown names are reported as
+ * errors in the browser console).
  */
 const PERMISSIONS_POLICY = [
   'accelerometer=()',
   'autoplay=()',
   'camera=()',
-  'clipboard-read=()',
+  'clipboard-read=(self)',
   'clipboard-write=(self)',
   'display-capture=()',
   'encrypted-media=()',
@@ -138,7 +140,7 @@ export function injectCspMeta(html: string, rpcOrigin: string): string {
   return `${html.slice(0, end)}\n    ${tag}${html.slice(end)}`;
 }
 
-/** Vite plugin for VITE_PLATFORM=web builds (see the file header). */
+/** Vite plugin for web builds (`vite build --mode web`, see the file header). */
 export function webSecurityPlugin(): Plugin {
   let origin = '';
   return {

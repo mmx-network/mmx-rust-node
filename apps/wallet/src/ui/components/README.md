@@ -113,7 +113,7 @@ Wrap every control in `Field`; it wires the label, hint and error to the control
 | `Spinner` | `size?`, `label?` | Decorative unless `label` is given. |
 | `Skeleton` | `width?`, `height?`, `lines?`, `shape? 'text'\|'rect'\|'circle'` | Put `aria-busy="true"` on the loading container. |
 | `ProgressSteps` | `steps: string[]`, `current` (0-based), `label?` | "Step 2 of 4 · Name" over a segmented bar. `steps`, `steps__item--done/current/upcoming`. |
-| `ToastViewport` | `toasts: Toast[]`, `onDismiss(id)` | Render once at the app root, after `<Shell>` (on mobile it then sits above the tab bar). `Toast = {id, tone?, title, message?, action?: {label,onClick}, timeout? (ms, default 5000, 0 = sticky)}`. The viewport runs the timers (paused on hover/focus) and calls `onDismiss`; the store only adds/removes. |
+| `ToastViewport` | `toasts: Toast[]`, `onDismiss(id)` | Render once at the app root, after `<Shell>` (on mobile it then sits above the tab bar). `Toast = {id, tone?, title, message?, action?: {label,onClick}, timeout? (ms, default 5000, 0 = sticky)}`. The viewport runs the timers (paused on hover/focus) and calls `onDismiss`; the store only adds/removes. The viewport itself is the live region (errors assertive, others polite) and adds a new toast one frame after showing itself on top, so screen readers announce it; toasts carry no role of their own. |
 
 ## Overlays
 
@@ -131,11 +131,15 @@ available, so they are never clipped by scroll containers.
 ## Shell (`src/ui/shell`)
 
 - `Shell` — `{ route, onNavigate, wallets, activeWalletId?, onSelectWallet, onAddWallet, network: {state, height?, network?}, canLock, onLock, children }`.
-  Brand, wallet switcher (menu: wallets with ID, lock state, "Add wallet"), navigation,
+  Brand, wallet switcher (menu: wallets with ID, lock state, "Add wallet"; a wallet that
+  can't be opened is listed but disabled), navigation,
   network status (tooltip shows the block height), lock. Layout from `data-layout`:
   `sidebar` (collapses to icons 720–1024 px), `rail`, `topbar`; below 720 px a top bar
   plus bottom tabs (Overview, Send, Receive, Activity, More → Contacts, Settings).
-  Includes a "Skip to content" button and scrolls to the top on route changes.
+  Includes a "Skip to content" button. On route changes it sets the document title
+  ("Send · MMX Wallet"), scrolls to the top and, when the focused control went away with
+  the old page, focuses the new page's `h1` (or `<main>`). A page that focuses a field on
+  mount keeps that focus.
 - `FocusLayout` — `{ onBack?, backLabel?, headerAction?, width? 'narrow'|'wide', footer?, children }`:
   full-page layout without navigation for welcome, unlock, create and import flows.
 - `NetworkStatus`, `WalletSwitcher`, `networkName('testnet12') → 'Testnet 12'`, `networkLabel`.

@@ -3,7 +3,7 @@
  *
  * Endpoints (as served by the C++ node's WebAPI, CORS *):
  *   GET  /node/info, /chain/info (real mainnet parameters), /address,
- *        /balance, /address/history (exact since/until/limit paging),
+ *        /address/history (exact since/until/limit paging),
  *        /transaction
  *   POST /transaction/validate  checks the transfer's shape, cost, balances
  *        and fee payer; total_fee = static_cost × fee_ratio / 1024
@@ -13,7 +13,7 @@
  * Test control (JSON bodies), see MockRpcControl in fixtures.ts:
  *   POST /__mock/reset {height?, network?, confirmBlocks?}
  *   POST /__mock/fund {address, amount, contract?, memo?, from?, type?, height?} -> {txid, height}
- *   POST /__mock/token {contract, symbol, decimals?, validated?}
+ *   POST /__mock/token {contract, symbol, decimals?}
  *   POST /__mock/advance {blocks?} -> {height}
  *   POST /__mock/node {synced?, network?, confirmBlocks?}
  *   POST /__mock/fail {path, method?, mode, status?, body?, after?, times?}
@@ -166,7 +166,6 @@ const ENTRY_TYPES: readonly EntryType[] = ['SPEND', 'RECEIVE', 'TXFEE', 'REWARD'
 interface Token {
   symbol: string;
   decimals: number;
-  validated: boolean;
 }
 
 interface Entry {
@@ -343,7 +342,8 @@ export class MockRpc {
   private pending = new Map<string, { tx: ParsedTx; broadcast: Broadcast }>();
   readonly broadcasts: Broadcast[] = [];
   private rules: Array<FailRule & { times: number }> = [];
-  readonly requests: Array<{ method: string; path: string; status: number }> = [];
+  /** Chain requests: method, path with query, reply status and request body size in bytes. */
+  readonly requests: Array<{ method: string; path: string; status: number; bytes: number }> = [];
 
   constructor(options: MockOptions = {}) {
     this.now = options.now ?? (() => Date.now());
@@ -400,16 +400,16 @@ export class MockRpc {
   }
 
   private token(contract: string): Token {
-    if (contract === NATIVE) return { symbol: 'MMX', decimals: 6, validated: false };
+    if (contract === NATIVE) return { symbol: 'MMX', decimals: 6 };
     const t = this.tokens.get(contract);
     if (!t) throw bad(`unknown currency ${contract}`);
     return t;
   }
 
-  registerToken(contract: string, symbol: string, decimals = 6, validated = false): void {
+  registerToken(contract: string, symbol: string, decimals = 6): void {
     if (!isAddress(contract) || contract === NATIVE) throw bad('invalid token contract');
     if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw bad('invalid decimals');
-    this.tokens.set(contract, { symbol, decimals, validated });
+    this.tokens.set(contract, { symbol, decimals });
   }
 
   /** Credits an address (a received transfer or a reward) at the current or an earlier height. */
@@ -656,13 +656,13 @@ export class MockRpc {
         reply = rule.mode === 'drop' ? { status: 0, body: '', drop: true } : { status: rule.status ?? 500, body: rule.body ?? 'mock failure', contentType: 'text/plain' };
       }
     }
-    if (!path.startsWith('/__mock/')) this.log(method, url, reply.drop ? 0 : reply.status);
+    if (!path.startsWith('/__mock/')) this.log(method, url, reply.drop ? 0 : reply.status, Buffer.byteLength(body));
     return reply;
   }
 
   /** Records a request (also CORS preflights, which never reach `handle`). */
-  log(method: string, path: string, status: number): void {
-    this.requests.push({ method, path, status });
+  log(method: string, path: string, status: number, bytes = 0): void {
+    this.requests.push({ method, path, status, bytes });
     if (this.requests.length > 2000) this.requests.splice(0, this.requests.length - 2000);
   }
 
@@ -716,15 +716,6 @@ export class MockRpc {
         });
         return json({ balances, contract: null });
       }
-      case '/balance': {
-        const address = addressParam();
-        const balances = [...(this.balances.get(address) ?? new Map<string, bigint>())].map(([contract, amount]) => {
-          const t = this.token(contract);
-          const v = valueOf(amount, t.decimals);
-          return { contract, decimals: t.decimals, ...(contract === NATIVE ? { is_native: true } : {}), is_validated: t.validated, locked: 0, reserved: 0, spendable: v, symbol: t.symbol, total: v };
-        });
-        return json({ balances, nfts: [] });
-      }
       case '/address/history': {
         const address = addressParam();
         const limit = uint('limit', 100);
@@ -734,7 +725,7 @@ export class MockRpc {
           rows.map((e) => {
             const t = this.token(e.contract);
             const ts = this.timeOf(e.height);
-            return { __type: 'mmx.tx_entry_t', address: e.address, amount: e.amount.toString(), contract: e.contract, decimals: t.decimals, height: e.height, is_native: e.contract === NATIVE, is_pending: false, is_validated: t.validated, memo: e.memo ?? null, symbol: t.symbol, time: ts / 1000, time_stamp: ts, txid: e.txid, type: e.type, value: valueOf(e.amount, t.decimals) };
+            return { __type: 'mmx.tx_entry_t', address: e.address, amount: e.amount.toString(), contract: e.contract, decimals: t.decimals, height: e.height, is_native: e.contract === NATIVE, is_pending: false, is_validated: false, memo: e.memo ?? null, symbol: t.symbol, time: ts / 1000, time_stamp: ts, txid: e.txid, type: e.type, value: valueOf(e.amount, t.decimals) };
           }),
         );
       }
@@ -810,7 +801,7 @@ export class MockRpc {
       case '/__mock/fund':
         return this.fund(input as unknown as FundRequest);
       case '/__mock/token':
-        this.registerToken(String(input.contract), String(input.symbol), typeof input.decimals === 'number' ? input.decimals : 6, input.validated === true);
+        this.registerToken(String(input.contract), String(input.symbol), typeof input.decimals === 'number' ? input.decimals : 6);
         return { ok: true };
       case '/__mock/advance':
         return { height: this.advance(typeof input.blocks === 'number' ? input.blocks : 1) };

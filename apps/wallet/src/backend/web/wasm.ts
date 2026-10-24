@@ -19,6 +19,7 @@ export interface VaultHandle {
     memo: string | null | undefined,
     feeLevel: number,
   ): string;
+  /** Signs a transfer; throws insufficient_fee when the fee payer cannot cover the fee (fee_payer_covered). */
   sign_transfer(
     balancesJson: string,
     paramsJson: string,
@@ -38,6 +39,8 @@ export interface WasmApi {
   normalize_mnemonic(words: string): string;
   fingerprint(words: string, passphrase?: string | null): string;
   validate_address(address: string): boolean;
+  /** Checks hashes, cost and signatures of a signed transfer; throws when they do not hold. */
+  verify_transaction(txJson: string, paramsJson: string): void;
   Vault: {
     open(
       words: string,

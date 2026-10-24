@@ -101,6 +101,7 @@ export async function importWallet(
   if (options.passphrase) {
     await page.getByRole('switch', { name: 'This wallet has a passphrase' }).click();
     await page.locator('input[name=wallet-passphrase]').fill(options.passphrase);
+    await page.locator('input[name=wallet-passphrase-repeat]').fill(options.passphrase);
   }
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByLabel('Word 1', { exact: true }).fill(options.words);
@@ -130,6 +131,22 @@ export async function unlockWithWords(page: Page, words: string, passphrase?: st
 export async function lockWallet(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Lock', exact: true }).first().click();
   await expect(page).toHaveURL(/#\/unlock$/u);
+}
+
+/** Everything this origin keeps in localStorage, as one string. */
+export function storedText(page: Page): Promise<string> {
+  return page.evaluate(() => JSON.stringify({ ...localStorage }));
+}
+
+/**
+ * Fails when the stored text contains the recovery words. Checks each pair of
+ * consecutive words: single words (such as "wallet") also occur in ordinary
+ * stored text.
+ */
+export function expectNoWords(stored: string, words: string): void {
+  const list = words.split(' ');
+  // Words are lowercase letters only; any short separator (space, '","', …) counts.
+  for (let i = 0; i + 1 < list.length; i++) expect(stored).not.toMatch(new RegExp(`\\b${list[i]}[^a-z]{1,4}${list[i + 1]}\\b`, 'u'));
 }
 
 /** Makes the app check the chain server now instead of at its next poll. */

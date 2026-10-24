@@ -157,6 +157,16 @@ pub fn scan(dir: &Path) -> Result<(Vec<Entry>, Vec<Unreadable>)> {
 pub fn wallets(dir: &Path) -> Result<Vec<Entry>> {
     Ok(scan(dir)?.0)
 }
+/// The name of the wallet directory's key file that `path` refers to, so a
+/// wallet opened with `--file` keeps its settings.
+pub fn wallet_file_name(dir: &Path, path: &Path) -> Option<String> {
+    let target = fs::canonicalize(path).ok()?;
+    let name = target.file_name()?.to_str()?;
+    (target.parent()? == fs::canonicalize(dir).ok()?
+        && validate::is_wallet_file_name(name)
+        && fs::metadata(&target).ok()?.is_file())
+    .then(|| name.to_owned())
+}
 pub fn active(dir: &Path) -> Result<Option<String>> {
     Ok(config::active(&config::read(dir)?).map(str::to_owned))
 }
@@ -202,13 +212,33 @@ pub fn move_to_removed(dir: &Path, name: &str) -> Result<PathBuf> {
     }
     Ok(target)
 }
+fn file_name(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|n| n.to_str())
+}
+/// The error of an unreadable key file, naming the file.
+fn unreadable_error(u: &Unreadable) -> Error {
+    Error::new(
+        u.error.code,
+        format!(
+            "{}: {}",
+            file_name(&u.path).unwrap_or("wallet file"),
+            u.error.message
+        ),
+    )
+}
+/// The wallet named by `selector` (a fingerprint, or with `allow_index` a
+/// list index), else the `active` one, else the only one. An unreadable key
+/// file never makes another wallet the selected one: when it is the one
+/// named, its error is returned, and it counts as a wallet when there is
+/// nothing to choose by.
 pub fn select(
     entries: &[Entry],
+    unreadable: &[Unreadable],
     selector: Option<&str>,
     active: Option<&str>,
     allow_index: bool,
 ) -> Result<Entry> {
-    if entries.is_empty() {
+    if entries.is_empty() && unreadable.is_empty() {
         return Err(Error::new(
             "wallet_error",
             "no wallets found; run 'mmxwallet create' or 'mmxwallet import'",
@@ -231,22 +261,135 @@ pub fn select(
                 }
             }
         }
+        let key_file = format!("wallet_{s}.dat");
+        if let Some(u) = unreadable
+            .iter()
+            .find(|u| file_name(&u.path).is_some_and(|n| n == s || n == key_file))
+        {
+            return Err(unreadable_error(u));
+        }
         return Err(invalid("no wallet matches selector"));
     }
     if let Some(a) = active {
-        if let Some(e) = entries
-            .iter()
-            .find(|e| e.path.file_name().is_some_and(|n| n == a))
-        {
+        if let Some(e) = entries.iter().find(|e| file_name(&e.path) == Some(a)) {
             return Ok(e.clone());
         }
-        return select(entries, Some(a), None, false);
+        if let Some(u) = unreadable.iter().find(|u| file_name(&u.path) == Some(a)) {
+            return Err(unreadable_error(u));
+        }
+        return select(entries, unreadable, Some(a), None, false);
     }
-    if entries.len() == 1 {
-        return Ok(entries[0].clone());
+    match (entries, unreadable) {
+        ([only], []) => Ok(only.clone()),
+        ([], [only]) => Err(unreadable_error(only)),
+        _ => Err(Error::new(
+            "wallet_error",
+            "multiple wallets found; select with 'mmxwallet use' or --wallet",
+        )),
     }
-    Err(Error::new(
-        "wallet_error",
-        "multiple wallets found; select with 'mmxwallet use' or --wallet",
-    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, fingerprint: &str) -> Entry {
+        Entry {
+            path: PathBuf::from("/w").join(name),
+            fingerprint: fingerprint.into(),
+            with_passphrase: false,
+        }
+    }
+    fn broken(name: &str) -> Unreadable {
+        Unreadable {
+            path: PathBuf::from("/w").join(name),
+            error: Error::new("wallet_error", "invalid or unsupported wallet key file"),
+        }
+    }
+    fn picked(r: Result<Entry>) -> String {
+        file_name(&r.unwrap().path).unwrap().to_owned()
+    }
+    fn failed(r: Result<Entry>) -> (&'static str, String) {
+        let e = r.err().unwrap();
+        (e.code, e.message)
+    }
+
+    #[test]
+    fn unreadable_key_files_are_never_skipped_over() {
+        let good = [entry("wallet_1.dat", "1")];
+        let bad = [broken("wallet_2.dat")];
+        // Nothing to choose by: the broken file counts as a wallet.
+        assert_eq!(
+            failed(select(&good, &bad, None, None, false)).1,
+            "multiple wallets found; select with 'mmxwallet use' or --wallet"
+        );
+        assert_eq!(
+            failed(select(&[], &bad, None, None, false)),
+            (
+                "wallet_error",
+                "wallet_2.dat: invalid or unsupported wallet key file".into()
+            )
+        );
+        // The active or selected wallet is the broken one: its own error.
+        for (selector, active) in [
+            (None, Some("wallet_2.dat")),
+            (Some("2"), None),
+            (Some("wallet_2.dat"), Some("wallet_1.dat")),
+        ] {
+            assert_eq!(
+                failed(select(&good, &bad, selector, active, false)).1,
+                "wallet_2.dat: invalid or unsupported wallet key file",
+                "{selector:?} {active:?}"
+            );
+        }
+        // A readable active or selected wallet is still used.
+        assert_eq!(
+            picked(select(&good, &bad, None, Some("wallet_1.dat"), false)),
+            "wallet_1.dat"
+        );
+        assert_eq!(
+            picked(select(&good, &bad, Some("1"), None, false)),
+            "wallet_1.dat"
+        );
+        assert_eq!(
+            picked(select(&good, &[], None, None, false)),
+            "wallet_1.dat"
+        );
+        assert_eq!(
+            failed(select(&good, &bad, Some("3"), None, false)).0,
+            "invalid_argument"
+        );
+        assert_eq!(
+            failed(select(&[], &[], None, None, false)).0,
+            "wallet_error"
+        );
+    }
+
+    #[test]
+    fn key_files_are_found_by_any_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallets = dir.path().join("wallets");
+        create_private_directory(&wallets).unwrap();
+        fs::write(wallets.join("wallet_7.dat"), b"x").unwrap();
+        fs::write(wallets.join("notes.dat"), b"x").unwrap();
+        fs::write(dir.path().join("wallet_8.dat"), b"x").unwrap();
+        let name = |p: PathBuf| wallet_file_name(&wallets, &p);
+        assert_eq!(
+            name(wallets.join("wallet_7.dat")).as_deref(),
+            Some("wallet_7.dat")
+        );
+        assert_eq!(
+            name(wallets.join("..").join("wallets").join("wallet_7.dat")).as_deref(),
+            Some("wallet_7.dat")
+        );
+        assert_eq!(name(wallets.join("notes.dat")), None);
+        assert_eq!(name(dir.path().join("wallet_8.dat")), None);
+        assert_eq!(name(wallets.join("wallet_9.dat")), None);
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.dat");
+            std::os::unix::fs::symlink(wallets.join("wallet_7.dat"), &link).unwrap();
+            assert_eq!(name(link).as_deref(), Some("wallet_7.dat"));
+        }
+    }
 }

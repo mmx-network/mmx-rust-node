@@ -54,13 +54,40 @@ export function prunePending(list: readonly PendingTx[], historyTxids: ReadonlyS
   });
 }
 
-/** Total pending outgoing per contract (native includes the fees). */
-export function pendingOutgoing(list: readonly PendingTx[], nativeContract: string): Map<string, bigint> {
+function addTo(out: Map<string, bigint>, contract: string, amount: bigint): void {
+  if (amount > 0n) out.set(contract, (out.get(contract) ?? 0n) + amount);
+}
+
+/**
+ * What open sends will take out of the wallet, per contract: fees always, the
+ * amount only when it goes to someone else (a move between the wallet's own
+ * addresses costs just the fee).
+ */
+export function pendingOutgoing(
+  list: readonly PendingTx[],
+  nativeContract: string,
+  ownAddresses: ReadonlySet<string>,
+): Map<string, bigint> {
   const out = new Map<string, bigint>();
   for (const p of list) {
     if (p.status !== 'pending') continue;
-    out.set(p.contract, (out.get(p.contract) ?? 0n) + p.amount);
-    if (p.fee > 0n) out.set(nativeContract, (out.get(nativeContract) ?? 0n) + p.fee);
+    if (!ownAddresses.has(p.to)) addTo(out, p.contract, p.amount);
+    addTo(out, nativeContract, p.fee);
+  }
+  return out;
+}
+
+/**
+ * What open sends hold back from spending until they are included, per
+ * contract: amount plus fee for every send, moves to own addresses included
+ * (the moved amount is not spendable before the transaction confirms).
+ */
+export function pendingReserved(list: readonly PendingTx[], nativeContract: string): Map<string, bigint> {
+  const out = new Map<string, bigint>();
+  for (const p of list) {
+    if (p.status !== 'pending') continue;
+    addTo(out, p.contract, p.amount);
+    addTo(out, nativeContract, p.fee);
   }
   return out;
 }

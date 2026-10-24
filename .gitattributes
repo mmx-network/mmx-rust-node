@@ -1,2 +1,16 @@
+# Text files keep LF in every checkout, Windows included (core.autocrlf would
+# otherwise turn them into CRLF): word lists, scripts and deployment files are
+# read byte for byte.
+* text=auto eol=lf
+
+# Binary fixtures, plots, images and build outputs are never converted.
+*.dat binary
+*.plot binary
+*.png binary
+*.ico binary
+*.icns binary
+*.wasm binary
+*.woff2 binary
+
 # Preserve upstream VNI snapshots, including their original whitespace.
 schema/**/*.vni -whitespace

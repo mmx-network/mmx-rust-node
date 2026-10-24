@@ -4,6 +4,8 @@
  *   "mmx-wallet/v1" = { wallets: { [fingerprint]: { name, withPassphrase,
  *                       addressCount, verified, added } },
  *                       activeWallet, labels, contacts, settings }
+ *   "mmx-wallet/lock" = changes when "Lock" was chosen in a tab, so the other
+ *                       tabs lock too (the value itself means nothing)
  *
  * Never contains recovery words, passphrases or keys. Every read validates
  * the data; a damaged wallet entry is skipped without affecting the others
@@ -17,6 +19,8 @@ import { sanitizeText } from '../../lib/text';
 export const STORAGE_KEY = 'mmx-wallet/v1';
 /** An unreadable value is moved here before it would be overwritten. */
 export const DAMAGED_KEY = 'mmx-wallet/v1.damaged';
+/** Written by an explicit "Lock" so that the other tabs lock as well. */
+export const LOCK_SIGNAL_KEY = 'mmx-wallet/lock';
 
 export interface StorageLike {
   getItem(key: string): string | null;
@@ -28,7 +32,10 @@ export interface WalletRecord {
   name: string;
   withPassphrase: boolean;
   addressCount: number;
-  /** The saved credential was opened once on this device. */
+  /**
+   * False only for wallets stored by older versions before their recovery
+   * phrase was confirmed; such a wallet asks to be opened once more.
+   */
   verified: boolean;
   /** When the wallet was added (ms); orders the wallet list. */
   added: number;
@@ -48,8 +55,9 @@ export function isFingerprint(v: unknown): v is string {
 /**
  * Validates one stored wallet entry. Returns null when it cannot be used.
  * Damaged fields fall back to safe values: an unknown passphrase state counts
- * as "with passphrase" (the user is asked rather than told the words are wrong)
- * and an unknown verification state as unverified.
+ * as "with passphrase" (the user is asked rather than told the words are
+ * wrong). Only an explicit `verified: false` marks an unconfirmed wallet:
+ * wallets are stored after their recovery phrase was confirmed.
  */
 export function parseWalletRecord(v: unknown): WalletRecord | null {
   if (!isRecord(v)) return null;
@@ -63,7 +71,7 @@ export function parseWalletRecord(v: unknown): WalletRecord | null {
       typeof count === 'number' && Number.isInteger(count) && count >= 1 && count <= MAX_ADDRESSES
         ? count
         : DEFAULT_ADDRESS_COUNT,
-    verified: v.verified === true,
+    verified: v.verified !== false,
     added: typeof added === 'number' && Number.isFinite(added) && added >= 0 ? added : 0,
   };
 }
@@ -140,12 +148,16 @@ export class MetadataStore {
     return this.read().wallets.has(id);
   }
 
-  /** Adds or replaces a wallet entry (unknown fields of an existing entry are kept). */
-  putWallet(id: WalletId, record: WalletRecord): void {
+  /**
+   * Adds or replaces a wallet entry (unknown fields of an existing entry are
+   * kept); with `active` it also becomes the active wallet, in the same write.
+   */
+  putWallet(id: WalletId, record: WalletRecord, options: { active?: boolean } = {}): void {
     if (!isFingerprint(id)) throw new BackendError('internal');
-    this.update((_, wallets) => {
+    this.update((root, wallets) => {
       const existing = wallets[id];
       wallets[id] = { ...(isRecord(existing) ? existing : {}), ...record };
+      if (options.active === true) root.activeWallet = id;
     });
   }
 

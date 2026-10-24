@@ -6,13 +6,13 @@ use mmx_wallet::{format_amount, Address, ChainParams};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-/// Concurrent balance requests per wallet (the UI's chain client uses the same).
+/// Concurrent requests per wallet (the UI's chain client uses the same).
 const FETCH_WORKERS: usize = 4;
 
-/// `/address` for every address, up to FETCH_WORKERS requests at a time.
-/// Responses are returned in address order; on failure the error of the
-/// first failed address is returned and no new requests are started.
-fn fetch_balances(rpc: &Rpc, addresses: &[Address]) -> Result<Vec<Value>> {
+/// GETs every path, up to FETCH_WORKERS requests at a time. Results are in
+/// path order. With `fail_fast`, no new request starts after one failed and
+/// the paths not requested are `None`.
+fn get_each(rpc: &Rpc, paths: &[String], fail_fast: bool) -> Vec<Option<Result<Value>>> {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
@@ -20,11 +20,11 @@ fn fetch_balances(rpc: &Rpc, addresses: &[Address]) -> Result<Vec<Value>> {
         let mut done = Vec::new();
         while !failed.load(Ordering::Relaxed) {
             let i = next.fetch_add(1, Ordering::Relaxed);
-            let Some(address) = addresses.get(i) else {
+            let Some(path) = paths.get(i) else {
                 break;
             };
-            let result = rpc.get(&format!("/address?id={address}&limit=1000"));
-            if result.is_err() {
+            let result = rpc.get(path);
+            if fail_fast && result.is_err() {
                 failed.store(true, Ordering::Relaxed);
             }
             done.push((i, result));
@@ -32,9 +32,9 @@ fn fetch_balances(rpc: &Rpc, addresses: &[Address]) -> Result<Vec<Value>> {
         done
     };
     let mut results: Vec<Option<Result<Value>>> = Vec::new();
-    results.resize_with(addresses.len(), || None);
+    results.resize_with(paths.len(), || None);
     std::thread::scope(|scope| {
-        let helpers: Vec<_> = (1..FETCH_WORKERS.min(addresses.len()))
+        let helpers: Vec<_> = (1..FETCH_WORKERS.min(paths.len()))
             .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
             .collect();
         // This thread works too, so progress never depends on spawning.
@@ -48,8 +48,18 @@ fn fetch_balances(rpc: &Rpc, addresses: &[Address]) -> Result<Vec<Value>> {
             results[i] = Some(result);
         }
     });
+    results
+}
+
+/// `/address` for every address, in address order; on failure the error of
+/// the first failed address is returned and no new requests are started.
+fn fetch_balances(rpc: &Rpc, addresses: &[Address]) -> Result<Vec<Value>> {
+    let paths: Vec<String> = addresses
+        .iter()
+        .map(|a| format!("/address?id={a}&limit=1000"))
+        .collect();
     let mut values = Vec::with_capacity(addresses.len());
-    for result in results {
+    for result in get_each(rpc, &paths, true) {
         match result {
             Some(Ok(value)) => values.push(value),
             Some(Err(e)) => return Err(e),
@@ -62,6 +72,41 @@ fn fetch_balances(rpc: &Rpc, addresses: &[Address]) -> Result<Vec<Value>> {
         return Err(rpc_invalid("incomplete balances response"));
     }
     Ok(values)
+}
+
+/// What the chain server knows about a transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxStatus {
+    /// The request failed or the answer was not understood.
+    Unavailable,
+    /// Not in a block (waiting, or unknown to the server).
+    NotIncluded,
+    /// In the block at this height (executed or failed).
+    Included(u32),
+}
+
+/// `/transaction?id=` for every (lowercase hexadecimal) transaction ID, up
+/// to FETCH_WORKERS requests at a time, in ID order.
+pub fn tx_statuses(rpc: &Rpc, txids: &[String]) -> Vec<TxStatus> {
+    let paths: Vec<String> = txids
+        .iter()
+        .map(|id| format!("/transaction?id={id}"))
+        .collect();
+    get_each(rpc, &paths, false)
+        .into_iter()
+        .zip(txids)
+        .map(|(result, id)| match result {
+            Some(Ok(Value::Null)) => TxStatus::NotIncluded,
+            Some(Ok(tx)) if rpc::text(&tx, "id").is_ok_and(|t| t.eq_ignore_ascii_case(id)) => {
+                if tx["height"].is_null() {
+                    TxStatus::NotIncluded
+                } else {
+                    rpc::u32_field(&tx, "height").map_or(TxStatus::Unavailable, TxStatus::Included)
+                }
+            }
+            _ => TxStatus::Unavailable,
+        })
+        .collect()
 }
 
 pub struct Balance {

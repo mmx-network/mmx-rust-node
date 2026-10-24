@@ -1,5 +1,17 @@
 // Creating, importing and opening wallets in the web wallet.
-import { capture, createWallet, expectOverview, importWallet, lockWallet, openApp, unlockWithWords, walletSwitcher } from './app';
+import type { Page } from '@playwright/test';
+import {
+  capture,
+  createWallet,
+  expectNoWords,
+  expectOverview,
+  importWallet,
+  lockWallet,
+  openApp,
+  storedText,
+  unlockWithWords,
+  walletSwitcher,
+} from './app';
 import { expect, test } from './fixtures';
 import { newMnemonic, walletAddresses, walletId } from './wallet';
 
@@ -13,9 +25,9 @@ test('creates a wallet, saves it and confirms it by opening it once', async ({ p
   await expect(page.getByText('No activity yet')).toBeVisible();
 
   // Only the wallet's public details are stored on this device.
-  const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }));
+  const stored = await storedText(page);
   expect(stored).toContain(id);
-  for (const word of new Set(words.split(' '))) expect(stored).not.toMatch(new RegExp(`\\b${word}\\b`, 'u'));
+  expectNoWords(stored, words);
   expect(await page.locator('input[name=password]').count()).toBe(0);
 
   // A new page load asks for the words again.
@@ -46,34 +58,90 @@ test('creates a wallet with a passphrase', async ({ page }) => {
   await expectOverview(page, 'Vault');
 });
 
-test('returns to the confirm step when a new wallet was saved but never opened', async ({ page }) => {
-  await openApp(page);
+/** Starts creating a wallet and stops on the password manager step; returns the new words and their wallet ID. */
+async function startCreate(page: Page, name: string): Promise<{ words: string; id: string }> {
   await page.getByRole('button', { name: /Create a new wallet/u }).click();
-  await page.getByLabel('Wallet name').fill('Later');
-  await page.getByRole('button', { name: 'Continue' }).click();
-  const words = await page.locator('form.create-save input[name=password]').inputValue();
-  await page.getByRole('button', { name: 'Save to password manager' }).click();
-  await expect(page.getByRole('heading', { name: 'Open your new wallet' })).toBeVisible();
-
-  await page.reload();
-  await expect(page.getByRole('heading', { name: 'Finish setting up' })).toBeVisible();
-  await capture(page, 'unlock-unfinished');
-  await page.locator('input[name=password]').fill(words);
-  await page.getByRole('button', { name: 'Open wallet' }).click();
-  await expectOverview(page, 'Later');
-  await expect(page.getByText('Wallet created')).toBeVisible();
-});
-
-test('leaving wallet creation before saving removes the new wallet', async ({ page }) => {
-  await openApp(page);
-  await page.getByRole('button', { name: /Create a new wallet/u }).click();
+  await page.getByLabel('Wallet name').fill(name);
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page.getByRole('heading', { name: 'Save your recovery phrase' })).toBeVisible();
+  const words = await page.locator('form.create-save input[name=password]').inputValue();
+  const id = walletId(words);
+  await expect(page.locator('form.create-save input[name=username]')).toHaveValue(`${name} (${id})`);
+  return { words, id };
+}
+
+/** Nothing about a wallet that was never confirmed is on this device. */
+async function expectNothingStored(page: Page, created: { words: string; id: string }): Promise<void> {
+  const stored = await storedText(page);
+  expect(stored).not.toContain(created.id);
+  expectNoWords(stored, created.words);
+}
+
+test('a reload before the new wallet is opened stores nothing; the saved wallet opens later', async ({ page }) => {
+  await openApp(page);
+  const created = await startCreate(page, 'Later');
+  await page.getByRole('button', { name: 'Save to password manager' }).click();
+  await expect(page.getByRole('heading', { name: 'Open your new wallet' })).toBeVisible();
+  await expectNothingStored(page, created);
+
+  // The words lived only in the page: a reload starts over and the wallet is not on this device.
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Create a wallet' })).toBeVisible();
+  await expect(page.getByLabel('Wallet name')).not.toHaveValue('Later');
+  await expectNothingStored(page, created);
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page).toHaveURL(/#\/welcome$/u);
+
+  // The password manager kept it: "Open a saved wallet" adds it.
+  await page.getByRole('button', { name: /Open a saved wallet/u }).click();
+  await expect(page.getByRole('heading', { name: 'Open a saved wallet' })).toBeVisible();
+  await page.locator('input[name=username]').fill(`Later (${created.id})`);
+  await page.locator('input[name=password]').fill(created.words);
+  await capture(page, 'open-saved');
+  await page.getByRole('button', { name: 'Open wallet' }).click();
+  await expectOverview(page, 'Later');
+  expect(await storedText(page)).toContain(created.id);
+});
+
+test('abandoning wallet creation stores nothing', async ({ page }) => {
+  await openApp(page);
+  // Cancel on the password manager step.
+  const first = await startCreate(page, 'Abandoned');
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect(page).toHaveURL(/#\/welcome$/u);
-  await page.reload();
+  await expectNothingStored(page, first);
+
+  // Cancel on the confirmation step, after saving.
+  const second = await startCreate(page, 'Abandoned too');
+  expect(second.words).not.toBe(first.words);
+  await page.getByRole('button', { name: 'Save to password manager' }).click();
+  await expect(page.getByRole('heading', { name: 'Open your new wallet' })).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel' }).click();
   await expect(page).toHaveURL(/#\/welcome$/u);
-  expect(await page.evaluate(() => localStorage.getItem('mmx-wallet/v1') ?? '')).not.toMatch(/"wallets":\{"\d/u);
+  await expectNothingStored(page, second);
+
+  // Wrong words on the confirmation step store nothing either.
+  const third = await startCreate(page, 'Mistyped');
+  await page.getByRole('button', { name: 'Save to password manager' }).click();
+  await page.locator('input[name=password]').fill(newMnemonic());
+  await page.getByRole('button', { name: 'Open wallet' }).click();
+  await expect(page.getByRole('heading', { name: 'Open your new wallet' })).toBeVisible();
+  await expect(page.locator('.field__error, [role=alert]').first()).toBeVisible();
+  await expectNothingStored(page, third);
+
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Create a wallet' })).toBeVisible();
+  for (const created of [first, second, third]) await expectNothingStored(page, created);
+});
+
+test('inactivity during wallet creation drops the new words and says why', async ({ page }) => {
+  await page.clock.install();
+  await openApp(page);
+  const created = await startCreate(page, 'Idle');
+  await page.clock.fastForward('16:00');
+  await expect(page).toHaveURL(/#\/welcome$/u);
+  await expect(page.getByText('Wallet setup was cancelled after inactivity.')).toBeVisible();
+  await expectNothingStored(page, created);
 });
 
 test('imports a wallet with a passphrase and finds its used addresses', async ({ page, rpc }) => {

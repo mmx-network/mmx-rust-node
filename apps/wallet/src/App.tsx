@@ -78,8 +78,9 @@ function onSelectWallet(id: string): void {
   selectWallet(id).catch((e: unknown) => notify(errorMessage(e), 'error'));
 }
 
+/** The shell's Lock button: on the web it also locks other tabs and windows. */
 function onLock(): void {
-  lock().catch((e: unknown) => notify(errorMessage(e), 'error'));
+  lock({ everywhere: true }).catch((e: unknown) => notify(errorMessage(e), 'error'));
 }
 
 function StartError({ message }: { message: string }) {

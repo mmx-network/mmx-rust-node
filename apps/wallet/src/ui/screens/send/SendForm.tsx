@@ -14,12 +14,14 @@ import {
   draftCheck,
   fillMaxAmount,
   ownAddressIndex,
+  pendingReservedTotals,
   reviewSend,
   searchContacts,
   sendableAssets,
   sendDraft,
   sendFlow,
   sendNeedsPassphrase,
+  spendableBalance,
   unlockForSend,
   updateDraft,
 } from '../../../state';
@@ -46,7 +48,7 @@ import {
   type ComboboxOption,
   type SelectOption,
 } from '../../components';
-
+import { PASSPHRASE_FIELD } from '../welcome/flow';
 
 /** Contacts offered in the To field. */
 const SUGGESTIONS = 8;
@@ -105,13 +107,11 @@ function PassphraseDialog() {
         {other ? <Banner tone="danger">{other}</Banner> : null}
         <Field label="Passphrase" error={error}>
           <PasswordInput
+            name="wallet-passphrase"
+            {...PASSPHRASE_FIELD}
             value={passphrase}
             onValue={setPassphrase}
             inputRef={inputRef}
-            autocomplete="off"
-            data-1p-ignore=""
-            data-lpignore="true"
-            data-bwignore=""
             data-autofocus=""
           />
         </Field>
@@ -141,6 +141,8 @@ export function SendForm() {
   const current = assets.value?.find((a) => a.contract === draft.contract);
   if (current && !choices.includes(current)) choices.push(current);
   const asset = check.asset;
+  // What is left after this wallet's sends that are not included yet.
+  const spendable = asset ? spendableBalance(asset, pendingReservedTotals.value) : 0n;
   const held = choices.some((a) => a.contract === draft.contract);
   const assetOptions: SelectOption[] = choices.map((a) => ({ value: a.contract, label: assetLabel(a) }));
   // An asset prefilled from elsewhere that this wallet does not hold: keep it visible but ask for another.
@@ -192,7 +194,7 @@ export function SendForm() {
     const text = draft.amount.trim();
     const parsed = text ? parseAmount(text, asset.decimals) : null;
     // Format, precision and balance problems show while typing; an empty or zero amount once left.
-    const immediate = parsed !== null && (!parsed.ok || parsed.value > asset.total);
+    const immediate = parsed !== null && (!parsed.ok || parsed.value > spendable);
     if (submitted || touched.amount || immediate) amountError = check.errors.amount;
   }
 
@@ -245,7 +247,7 @@ export function SendForm() {
 
   const available = asset ? (
     <span class="send-form__available">
-      Available <Amount value={asset.total} decimals={asset.decimals} symbol={asset.symbol} size="sm" />
+      Available <Amount value={spendable} decimals={asset.decimals} symbol={asset.symbol} size="sm" />
     </span>
   ) : !loaded ? (
     <Skeleton width="8rem" />

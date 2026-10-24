@@ -60,18 +60,27 @@ Build rules (AGENTS.md): `CARGO_INCREMENTAL=0`, debug symbols off, `--jobs 2`,
    BTreeMap) and the mmx-consensus/mmx-types/vnx dependencies behind it.
    `cargo build -p mmx-wallet --no-default-features --target wasm32-unknown-unknown`
    must succeed. Existing tests keep passing with default features.
-2. `Wallet::max_transfer_amount(&self, balances, params, currency, memo: Option<&str>, fee_ratio) -> Result<u128>`:
-   - Native currency: let `fee(k) = static cost with k inputs, 1 output (with memo), k
-     signatures (sender is one of the inputs)` × fee_ratio / 1024. Let `k` = number of
-     owned addresses whose native balance ≥ fee(k) (iterate: compute with candidate k,
-     shrink until consistent). Result = sum of those k balances − fee(k). Returns 0 if
-     k = 0 or the sum ≤ fee. The result MUST be accepted by `transfer` with the same
-     params and leave the fee payer (address with the largest remaining native
-     balance) holding ≥ fee: prove with tests over random balance sets (incl. balances
-     below the fee, ties, a single address, memo of 1, 32, 33, 64 bytes).
-   - Token: full token balance across owned addresses; error
-     `InsufficientFunds("transaction fee")` when no owned address holds ≥ the fee in
-     native currency.
+2. `Wallet::max_transfer_amount(&self, balances, params, currency, memo: Option<&str>, fee_ratio) -> Result<u128>`
+   (`fee.rs`) returns the largest amount that `transfer` accepts while its fee payer
+   keeps the fee. It reuses `transfer`'s own input selection (`select`: owned balances
+   of the currency, largest first, the last input possibly partial; fee payer = owned
+   address with the largest native balance left after its inputs) and fee check
+   (`covers_fee`: fee payer's native balance ≥ its own native input +
+   `static_fee(inputs, owners, memo) × fee_ratio / 1024`, static cost ≤ u32::MAX).
+   Only owned, nonzero balances of the currency and of MMX are considered.
+   - Native currency: sort the owned MMX balances descending; for each prefix of the
+     j largest (sum `P_j`, next balance `n`, `fee_j` = fee with j inputs and j
+     owners) the candidates are `P_j − keep` for keep ∈ {0, 1, fee_j, n, n + 1}
+     (all of them, or all minus the smallest remainder that leaves the last input
+     able to pay). Candidates are tried from the largest down; the first one that
+     selection + `covers_fee` accept is the result, else 0. Property tests over
+     random balance sets (balances below the fee, ties, a single address, memos of
+     1, 32, 33, 64 bytes) check that `transfer` accepts the result.
+   - Token: the whole owned token balance if `covers_fee` accepts it, else
+     `InsufficientFunds("transaction fee")`; 0 for no balance.
+   - Errors: memo > 64 bytes or fee_ratio < 1024 → `InvalidArgument`.
+   The balances passed in are fresh chain balances less the wallet's own pending
+   transfers (§6.4 Reservations).
 3. `Wallet::transfer` stays consensus-identical (keep `transactions_match_cpp`).
 4. Helper `pub fn static_fee(params, inputs, owners, memo) -> u128` used by the above
    and by the UI fee preview, matching `Transaction::calc_cost` exactly.
@@ -131,7 +140,10 @@ plain file name, no separators, matches the wallet patterns, exists in the listi
 ```
 Service::open(dir: Option<PathBuf>) -> Result<Service>        // default storage::directory()
 wallets() -> Vec<WalletInfo>        // unreadable files are listed with `error` instead of failing the list
-create(name, passphrase: Option<Zeroizing<String>>, count) -> (WalletInfo, Zeroizing<String> mnemonic)
+new_mnemonic() -> Zeroizing<String>  // 24 words (OsRng via KeyFile::generate); stores nothing
+create(name, mnemonic: Zeroizing<String>, passphrase, count) -> WalletInfo
+                                    // after the backup check; writes the key file, unlocks it,
+                                    // makes it active; wallet_exists if the fingerprint exists
 import(name, mnemonic: Zeroizing<String>, passphrase, count) -> WalletInfo
 unlock(id, passphrase: Zeroizing<String>) -> WalletInfo      // invalid_passphrase on fingerprint mismatch
 lock(id) / lock_all()
@@ -141,17 +153,37 @@ remove(id)                          // moves the file to <dir>/removed/<id>.<uni
 mnemonic(id) -> Zeroizing<String>
 addresses(id) -> Vec<Address>       // locked → error `locked`
 set_active(id)
-app_state() -> AppState / set_app_state(AppState)            // contacts, labels, settings (validated)
-rpc_get(path) -> serde_json::Value  // allowlist: /node/info /chain/info /address /balance
+app_state() -> AppState / set_app_state(AppState)            // contacts (≤ 1000), labels, settings (validated);
+                                    // set_app_state never writes active_wallet (only set_active does)
+rpc_get(path) -> serde_json::Value  // allowlist: /node/info /chain/info /address
                                     // /address/history /transaction; query chars [A-Za-z0-9=&_-]
-set_rpc(url) / rpc() -> String      // validated by Rpc::new + /node/info probe
-max_send(id, currency, memo, fee_level) -> String
-prepare_send(id, SendRequest) -> PreparedSend   // fresh balances (remote::State), transfer, /transaction/validate
-broadcast(id, txid)                 // posts the prepared bytes once; removes it
+set_rpc(url) / rpc() -> String      // validated by Rpc::new + /node/info probe before it is saved
+max_send(id, currency, memo, fee_level) -> String   // fresh balances less own pending transfers
+prepare_send(id, SendRequest) -> PreparedSend
+            // fresh balances less own pending transfers; signed, verified (Transaction::verify)
+            // and fee-checked locally (fee = static_cost × fee_ratio / 1024, fee payer covered).
+            // Nothing is sent: no /transaction/validate.
+broadcast(id, txid)
+            // read-only /node/info: expires <= height → tx_expired without posting. Then posts the
+            // prepared bytes once to /transaction/broadcast and removes them. HTTP 4xx →
+            // tx_rejected / insufficient_funds / insufficient_fee / tx_expired (definite, funds
+            // released); transport errors, timeouts, 3xx/5xx → rpc_unreachable / rpc_timeout /
+            // rpc_http_error (uncertain, funds stay reserved).
 discard(txid)
 ```
-Desktop file export/import (contacts) uses the Tauri dialog plugin from Rust
-commands; web uses a Blob download and a file input.
+
+Reservations (decision 3, mirrors C++ `ECDSA_Wallet::update_from/update_cache`): per
+wallet, in memory, at most 256 broadcast transfers `{txid, expires, sender, sender
+static fee, own inputs}`, recorded before posting and kept on uncertain outcomes,
+removed on a definite refusal. Before Max and Review they are subtracted (saturating)
+from fresh balances. An entry is dropped when `expires < height` or `/transaction?id=`
+shows a block at or below the height the balances were read at; unknown or failed
+lookups keep it. At most one lookup per entry per new block, 4 at a time, only while
+entries exist. Not persisted (C++ `pending_tx` is in memory too).
+Desktop file export/import (contacts, JSON ≤ 2 MiB) runs from Rust commands: GTK
+file dialogs attached to the window on Linux, the Tauri dialog plugin on Windows and
+macOS; a second request waits for the open dialog. Web uses a Blob download and a
+file input (same 2 MiB cap).
 
 Empty passphrase handling: a key file whose fingerprint equals
 `fingerprint(seed, Some(""))` unlocks automatically (no prompt). New wallets never
@@ -174,8 +206,12 @@ CLI changes: default `--num-addresses` = the wallet's `num_addresses` from the
 config, else 10; max 100 everywhere (`capabilities.max_num_addresses`); default
 `--rpc` = config `rpc` if set; `list` shows names; new commands `rename <NAME>` and
 `set-addresses <N>` (both honour `--wallet`); a corrupt key file no longer breaks
-`list`. Keep JSON output schema backwards compatible (only add fields). Update
-`tools/test_wallet_cli.py` and the help text.
+`list`. `send` signs and verifies locally and makes no request before the y/N
+confirmation (or `--yes`); only then it calls `/transaction/validate` (did_fail →
+wallet_error, a fee above the shown fee → rpc_response_invalid) and broadcasts.
+Node 4xx refusals map to tx_rejected / insufficient_funds / insufficient_fee /
+transaction_expired. Keep JSON output schema backwards compatible (only add fields).
+Update `tools/test_wallet_cli.py` and the help text.
 
 ## 6. Shared UI
 
@@ -206,10 +242,15 @@ interface Backend {
   readonly platform: 'desktop' | 'web';
   loadAppState(): Promise<AppState>; saveAppState(s: AppState): Promise<void>;
   listWallets(): Promise<WalletInfo[]>;
-  createWallet(r: {name; passphrase?; addressCount}): Promise<{wallet: WalletInfo; mnemonic: string}>;
-  importWallet(r: {name; mnemonic; passphrase?; addressCount}): Promise<WalletInfo>;
+  newRecoveryPhrase(): Promise<string>;                 // 24 fresh words; stores nothing
+  createWallet(r: {name; mnemonic; passphrase?; addressCount}): Promise<WalletInfo>;
+                       // only after the backup was confirmed; stores, opens, makes active;
+                       // wallet_exists if already on this device
+  walletFingerprint?(r: {mnemonic; passphrase?}): Promise<string>; // web: username of a new wallet
+  importWallet(r: {name; mnemonic; passphrase?; addressCount; expectedFingerprint?}): Promise<WalletInfo>;
   unlockWallet(id, r: {passphrase?: string; mnemonic?: string}): Promise<WalletInfo>;
-  lockWallet(id): Promise<void>; lockAll(): Promise<void>;
+  lockWallet(id): Promise<void>;
+  lockAll(opts?: {everywhere?: boolean}): Promise<void>; // web: everywhere also locks other tabs
   renameWallet(id, name): Promise<void>;
   setAddressCount(id, n): Promise<string[]>;
   removeWallet(id): Promise<void>;
@@ -221,12 +262,23 @@ interface Backend {
   prepareSend(r: SendRequest): Promise<PreparedSend>;
   broadcast(walletId, txid): Promise<void>;
   discardPrepared(txid): Promise<void>;
-  copyText(text: string, sensitive?: boolean): Promise<void>;   // sensitive → cleared after 60 s
+  copyText(text: string, sensitive?: boolean): Promise<void>;   // sensitive: desktop clears after 60 s,
+                                                                // web best effort (§6.8)
   openExternal(url: string): Promise<void>;                     // explorer links only
   exportFile(suggestedName: string, contents: string): Promise<boolean>; // false = cancelled
-  importFile(): Promise<string | null>;                          // JSON ≤ 1 MiB, null = cancelled
+  importFile(): Promise<string | null>;                          // JSON ≤ 2 MiB, null = cancelled
+  onExternalChange?(listener): () => void;   // web: storage event from another tab
+  onExternalLock?(listener): () => void;     // web: another tab pressed Lock; keys already freed
 }
 ```
+
+Send contract (decision 1): no signed transaction leaves the device before the user
+presses "Send now". `maxSendable`/`prepareSend` read `/chain/info`, `/node/info`,
+balances and `/transaction?id=` for own pending transfers, then sign, verify
+(`verify_transaction` / `Transaction::verify`) and check the fee payer locally; the
+fee shown is the static fee (equals the node's `total_fee` for plain transfers).
+`broadcast` posts the prepared bytes once; the node validates. Codes as in §5
+`broadcast`; both backends do the `/node/info` expiry check first.
 
 ### 6.3 Passphrase detection (both platforms)
 A wallet's stored fingerprint is `fingerprint(seed, passphrase)` if created with a
@@ -244,15 +296,23 @@ passphrase, otherwise `fingerprint(seed, None)`.
   (`mmx1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdgytev`) only — never by
   symbol. Concurrency limit 4 requests, in-flight dedupe of identical GETs, 20 s
   timeout, exponential backoff when unreachable.
-- Balances: `/address?id=…&limit=1000` per address (skip `is_nft`). For addresses
-  holding non-native tokens also `/balance?id=…` to read `is_validated`. Total per
-  contract plus per-address amounts.
+- Balances: `/address?id=…&limit=1000` per address (skip `is_nft`). Total per
+  contract plus per-address amounts. Tokens are "verified" only by the bundled
+  per-network list in `src/chain/tokens.ts` (mainnet: native MMX only, like the C++
+  `token_whitelist`); the node's `is_validated` flag is never used.
+- Reservations: the backends subtract the wallet's own broadcast-but-unconfirmed
+  transfers (§5) before Max and Review. The UI's "Available" and amount checks use
+  total − `pendingReservedTotals` (amount + fee of every open send, own moves
+  included) for that asset, clamped at 0.
 - History cache per wallet: per address, a contiguous fully-fetched height range.
   `until` and `since` are inclusive; the node completes the last block of a page, so
   next `until = minHeight − 1`. Merge pages across addresses: rows above the highest
   "page-full" boundary are complete. First page 25 rows per address, "load more" and
   balance-history coverage extend downward (1000 per request, cap 20 000 rows per
-  wallet). Refresh uses `since = topHeight + 1`. The public RPC does not return
+  wallet). A page is full when the node returned `limit` entries (NFT rows
+  included). Refresh re-reads the last 6 blocks: `since` = newest height the history
+  server returned − 5 (not the `/node/info` head); rows outside the requested
+  since/until are rejected. The public RPC does not return
   pending entries; broadcast transactions are tracked locally as pending via
   `/transaction?id=` until included (confirmed / failed) or `expires < height`.
 - Grouping: one activity item per txid: net amount per contract over the wallet's own
@@ -267,7 +327,8 @@ passphrase, otherwise `fingerprint(seed, None)`.
   and TXFEE subtract) producing step points; ranges 1W, 1M, 3M, 1Y, All.
 - Refresh: poll `/node/info` every 10 s while visible (30 s hidden/backgrounded). On
   a new height, at most every 20 s: history `since` for each address; balances for
-  addresses with new rows (all addresses every 5 min); pending statuses.
+  addresses with new rows (all addresses every 5 min); pending statuses. Failed syncs
+  back off from 20 s, doubling up to 5 min; a manual refresh skips the wait.
 
 ### 6.5 Screens
 Shell: wallet switcher (name; list of wallets, add wallet), navigation (Overview,
@@ -276,14 +337,20 @@ Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
 
 - Onboarding: Create new wallet / Import with recovery phrase (web adds: Open a wallet
   saved in your password manager).
-- Create: name → optional passphrase (confirm twice, warning it cannot be recovered)
-  → recovery phrase (24 numbered words, copy with auto-clear) → verify (desktop: pick
-  words #a, #b, #c from shuffled options; web: §6.6) → done.
+- Create (decision 2: stored only after the backup is confirmed): name → optional
+  passphrase (typed twice, warning it cannot be recovered) → `newRecoveryPhrase()`.
+  Desktop: 24 numbered words (copy with auto-clear) → pick words #a, #b, #c from
+  shuffled options → `createWallet`. Web: words + save-to-password-manager form →
+  fill the phrase in again inside the flow (compared with the in-memory words) →
+  `createWallet`. Changing name or passphrase keeps the same words. Leaving the flow,
+  a reload or a lock drops the words (nothing to delete); an idle auto-lock during
+  setup shows "Wallet setup was cancelled after inactivity." on the welcome screen.
 - Import: name, 24 words (per-word validation and suggestions from the BIP39 list,
-  paste splits), optional passphrase. After import scan up to 100 addresses
+  paste splits), optional passphrase (typed twice). After import scan up to 100 addresses
   (`/address/history?limit=1`, concurrency 4) and set the address count to
   max(10, last used index + 1).
-- Overview: total MMX (large), pending outgoing, verified token list, "other tokens"
+- Overview: total MMX (large), pending outgoing, verified token list (empty on
+  mainnet), "other tokens"
   (unverified, collapsed, warning icon, symbol + short contract), balance chart with
   ranges, recent activity (5), Send/Receive actions.
 - Send: To (address or contact search; shows the contact name on match; invalid
@@ -301,12 +368,17 @@ Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
 - Activity: date-grouped list, filter All/Received/Sent/Rewards and asset, load more;
   detail panel: status, confirmations, amount, fee, counterparty (+ save to contacts),
   memo, txid (copy), height, time, explorer link.
-- Contacts: search, add/edit/delete (name ≤ 64, valid address, unique address), send
-  to, copy; export/import JSON (validated, merge by address).
+- Contacts: search, add/edit/delete (name ≤ 64, valid address, unique address, at
+  most 1000 contacts), send to, copy; export/import JSON ≤ 2 MiB (validated, merge by
+  address, import stops at the cap and reports what was skipped).
 - Settings: wallet (name, fingerprint, address count 1–100 with warning when hiding
-  addresses that hold funds, show recovery phrase, remove wallet); security (auto-lock
-  5/15/30/60 min, desktop also Never; Lock now); network (desktop: RPC server URL,
-  test + reset to default); appearance (System/Light/Dark); about (version).
+  addresses that hold funds, show recovery phrase — a passphrase wallet asks for its
+  passphrase first, on both platforms; remove wallet); security (auto-lock
+  5/15/30/60 min, desktop also Never; Lock now = Lock everywhere on web); network
+  (desktop: server URL — Connect checks the server (`/node/info` synced, network
+  matches) before anything is saved; a failure keeps the typed URL with the error
+  and the old server; reset to default); appearance (System/Light/Dark); about
+  (version).
 
 Copy rules: short, task-focused, second person. No implementation details, no
 "WASM", "Tauri", "RPC" (say "network"), no "fingerprint" jargon outside wallet
@@ -325,31 +397,43 @@ error; scientific notation rejected; more fractional digits than `decimals` → 
   fields; on submit: `preventDefault`, call `navigator.credentials.store(new
   PasswordCredential(...))` when available (Chromium), then route away and remove the
   form from the DOM (triggers save prompts in Safari and password manager extensions).
-- Verify (completes creation): the new wallet opens through the normal unlock form,
-  filled by the password manager (or typed words). Until verified the wallet is
-  marked unverified on this device and the user is returned to this step.
+- Verify (completes creation): a credential form inside the create flow, filled by
+  the password manager (or typed), compared with the in-memory words; only then
+  `createWallet` stores the metadata and opens the Vault. Nothing is stored before.
+  The `verified` flag is only read from metadata written by older versions (missing =
+  verified; `false` returns the user to a "Finish setting up" step).
 - Unlock: wallets known on this device are listed; selecting one shows a form with
   the username prefilled (readonly) and `autocomplete="current-password"`; Chromium
   also tries `navigator.credentials.get({password: true, mediation: 'optional'})`.
   "Open another wallet" shows username + password fields empty. Passphrase is asked
-  in a separate step (`autocomplete="off"`, `data-1p-ignore`, `data-lpignore`,
+  in a separate step (`autocomplete="one-time-code"`, `data-1p-ignore`, `data-lpignore`,
   `data-bwignore`) only when §6.3 says locked; on a new device the fingerprint from
   the username is the expected fingerprint; if the username has none, the passphrase
   step is shown as optional.
 - After unlock the password input value is cleared; the seed is held only inside the
-  WASM `Vault`. Lock / auto-lock (default 15 min idle, also on `pagehide`) frees every
-  Vault and clears unlocked UI state.
+  WASM `Vault` of that tab. Lock / auto-lock (default 15 min idle, also on `pagehide`)
+  frees every Vault of the tab and clears unlocked UI state.
+- Cross-tab lock (decision 4): explicit Lock (shell button, Settings "Lock now") calls
+  `lockAll({everywhere: true})`, which also writes `mmx-wallet/lock` (a unique value
+  per write). Other tabs free their Vaults on the `storage` event and run the local
+  lock cleanup without signalling again. Idle and `pagehide` locks stay local.
 - localStorage key `mmx-wallet/v1`: `{ wallets: { [fp]: { name, withPassphrase,
-  addressCount, verified } }, activeWallet, labels, contacts, settings }`; sync across
+  addressCount, verified? } }, activeWallet, labels, contacts, settings }`; sync across
   tabs via the `storage` event.
-- Hosting: relative base (`./`), CSP via headers and `<meta>`:
+- Hosting: relative base (`./`), CSP via headers and `<meta>` (`deploy/security.ts`
+  is the source; `_headers`, Caddyfile and nginx config are checked against it):
   `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self';
-  font-src 'self'; img-src 'self' data:; connect-src https://rpc.mmx.network;
+  font-src 'self'; img-src 'self' data:; connect-src 'self' <rpc origin>;
   manifest-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none';
-  frame-ancestors 'none'` plus `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer`, `Permissions-Policy` (all off),
-  `Cross-Origin-Opener-Policy: same-origin`, HSTS. RPC URL is fixed at build time
-  (`VITE_RPC_URL`, default `https://rpc.mmx.network`).
+  require-trusted-types-for 'script'; trusted-types 'none'; frame-ancestors 'none'`
+  (`connect-src 'self'` fetches the .wasm; the `<meta>` omits `frame-ancestors`)
+  plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `Permissions-Policy` (all off except `clipboard-read=(self)`,
+  `clipboard-write=(self)`), `Cross-Origin-Opener-Policy: same-origin`,
+  `Cross-Origin-Resource-Policy: same-origin`, `X-Frame-Options: DENY`, HSTS
+  (2 years, includeSubDomains). The build fails on inline script/style. RPC URL is
+  fixed at build time (`VITE_RPC_URL`, default `https://rpc.mmx.network`; web builds
+  use Vite mode `web`, so `.env.web` is read).
 
 ### 6.7 Desktop specifics
 Tauri 2 (2.12.x). Plugins: clipboard-manager, opener (explorer URLs only:
@@ -358,20 +442,32 @@ single-instance. `withGlobalTauri: false`; CSP `default-src 'self'; script-src
 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src ipc:
 http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none';
 frame-src 'none'`. Capabilities grant only the app's own commands and the plugin
-permissions actually used. Commands map 1:1 to `Service` methods and return
-`{code, message}` errors. Identifier `network.mmx.wallet`, product name "MMX Wallet",
-min window 900×620.
+permissions actually used (plus `core:webview:allow-set-webview-zoom` for the zoom
+keys). Commands map 1:1 to `Service` methods (`new_recovery_phrase`, `create_wallet
+{name, mnemonic, passphrase?, addressCount}`, `lock_all` ignores its body, …) and
+return `{code, message}` errors; unknown fields are rejected. The window runs
+`page_guard.js` (no reload, history, print, save or view-source; no page context menu
+outside text fields). Binary `mmx-wallet-gui`, identifier `network.mmx.wallet`,
+product name "MMX Wallet", min window 900×620.
 
 ### 6.8 Security invariants (review checklist)
-- No secret (words, passphrase, seed, key) in logs, errors, panics, URLs, storage
-  other than the key file (desktop) / password manager (web), or the clipboard
-  without auto-clear.
+- No secret (words, passphrase, seed, key) in logs, errors, panics, URLs, or storage
+  other than the key file (desktop) / password manager (web). A new wallet is stored
+  only after its backup was confirmed.
+- Clipboard (decision 5): a copied recovery phrase is cleared after 60 s on desktop
+  ("Copied. The clipboard clears in 1 minute."). Browsers allow clipboard writes
+  only around user actions, so the web clears best effort: 60 s timer, then retried
+  on the next trusted pointerdown/pointerup/keydown/focus in the page, on `pagehide`
+  and on lock; its toast promises no time ("Copied. Clear your clipboard after
+  pasting.").
 - All RPC-provided text (memo, symbol, names) rendered as text, control and bidi
   override characters stripped, length-capped. No `innerHTML`/`dangerouslySetInnerHTML`.
 - Native MMX identified only by the zero contract address.
 - Every value from the UI is re-validated in Rust/WASM before signing.
 - The transaction shown on the review screen is exactly the one broadcast
   (prepared id bound to wallet, amount, recipient, memo, fee).
+- No request carries a signed transaction before "Send now"; then exactly one POST to
+  `/transaction/broadcast`.
 - No automatic re-broadcast; no duplicate submission on double click.
 
 ## 7. Error codes
@@ -401,8 +497,11 @@ for screenshots. Token contract: `--font-ui, --font-display, --font-mono,
 - WASM parity under Node (vitest): fixtures + signed tx byte equality.
 - TS unit (vitest): amounts/locale parsing, address check vectors, history merge and
   pagination edges, grouping, balance series, persisted-state validation.
-- E2E (Playwright, web build + mock RPC): create→save→verify, import with passphrase,
-  wrong passphrase, switch wallets, receive, send review/broadcast, pending→confirmed,
+- E2E (Playwright, web build + mock RPC): create→save→verify, abandoning creation
+  (cancel, reload, wrong words, idle) stores nothing, import with passphrase, wrong
+  passphrase, switch wallets, receive, send review/broadcast (Review makes no request
+  with a body; one POST after "Send now"), a second send while the first is pending
+  uses only free funds, node refusal after "Send now", pending→confirmed,
   activity/detail/save contact, contacts CRUD, settings (address count, rename,
-  remove), auto-lock, mobile viewport.
+  remove), auto-lock, explicit Lock in one tab locks another, mobile viewport.
 - Desktop: container build of deb + AppImage; launch smoke test under Xvfb.

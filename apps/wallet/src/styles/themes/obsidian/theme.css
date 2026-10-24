@@ -1,0 +1,1266 @@
+/*
+ * Obsidian — night glass with MMX violet heritage.
+ *
+ * Near-black canvas with a faint violet aurora, translucent glass surfaces
+ * edged by 1px of light, and one luminous violet gradient reserved for the
+ * primary action and the balance chart. Light scheme: frosted white on a
+ * lavender-tinted paper.
+ *
+ * Space Grotesk (display, balances) · Inter (UI) · JetBrains Mono (addresses).
+ * Blur is only used on layers that float over moving content (menus, dialogs,
+ * toasts, the mobile bars). Cards and the sticky rail sit on a static
+ * background, where blur would cost GPU time without a visible change.
+ * Every colour lives in the two token blocks below; component rules only
+ * reference tokens, so a palette change is a token change.
+ */
+
+@import '@fontsource-variable/space-grotesk/wght.css';
+@import '@fontsource-variable/inter/wght.css';
+@import '@fontsource-variable/jetbrains-mono/wght.css';
+
+/* ================================================================ tokens */
+
+:root,
+[data-scheme='light'] {
+  --font-ui: 'Inter Variable', 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Space Grotesk Variable', 'Space Grotesk', 'Inter Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --bg: #f6f5fb;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #eeecf6;
+  --surface: rgba(255, 255, 255, 0.82);
+  --surface-2: #f1eff8;
+  --border: #e4e1ee;
+  --border-strong: #87819c;
+  --text: #15121f;
+  --text-muted: #4e4864;
+  --text-faint: #645e7c;
+  --accent: #6d28d9;
+  --accent-contrast: #ffffff;
+  --accent-soft: #efe8fd;
+  --positive: #047857;
+  --negative: #be123c;
+  --warning: #9a4d00;
+  --focus: #7c3aed;
+
+  --radius-s: 8px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+  --shadow-1: 0 1px 2px rgba(40, 24, 90, 0.06), 0 6px 18px -10px rgba(60, 30, 130, 0.14);
+  --shadow-2: 0 28px 64px -20px rgba(48, 22, 110, 0.32), 0 8px 20px -8px rgba(30, 18, 70, 0.12);
+
+  --chart-line: #7c3aed;
+  --chart-fill: rgba(147, 51, 234, 0.2);
+  --chart-grid: rgba(60, 40, 120, 0.08);
+
+  --space-unit: 4px;
+  --layout: rail;
+
+  /* derived overrides */
+  --weight-display: 560;
+  --text-display: clamp(2.5rem, 1.7rem + 2.6vw, 3.5rem);
+  --tracking-display: -0.025em;
+  --tracking-caps: 0.08em;
+  --control-radius: var(--radius-m);
+  --control-bg: rgba(255, 255, 255, 0.9);
+  --control-border: #8b85a1;
+  --card-radius: var(--radius-l);
+  --card-bg: rgba(255, 255, 255, 0.8);
+  --card-border: rgba(76, 52, 150, 0.1);
+  --card-shadow: 0 1px 2px rgba(40, 24, 90, 0.04), 0 12px 32px -18px rgba(70, 36, 150, 0.2);
+  --positive-soft: #e1f4ec;
+  --negative-soft: #fde8ec;
+  --warning-soft: #fcefdc;
+  --info-soft: #f1ebfd;
+  --on-negative: #ffffff;
+  --backdrop: rgba(36, 24, 72, 0.22);
+  --ring: 0 0 0 2px var(--bg-elevated), 0 0 0 4px var(--focus), 0 0 20px 4px var(--ob-focus-glow);
+  --nav-bg: rgba(255, 255, 255, 0.6);
+  --nav-border: rgba(76, 52, 150, 0.1);
+  --nav-item-fg: #5d5774;
+  --nav-item-hover: rgba(109, 40, 217, 0.06);
+  --nav-item-active-bg: #ffffff;
+  --nav-item-active-fg: var(--accent);
+  --nav-item-active-icon: var(--accent);
+  --nav-item-active-shadow: 0 1px 2px rgba(40, 24, 90, 0.08), 0 6px 16px -6px rgba(109, 40, 217, 0.35),
+    inset 0 0 0 1px rgba(109, 40, 217, 0.14);
+  /* 12px window inset + a 68px glass rail: 3px gutter + 60px tiles + 3px gutter + 2px border. */
+  --rail-width: 80px;
+  --qr-frame: #ffffff;
+  --identicon-radius: 50%;
+  --brand-disc: #6d28d9;
+  --brand-glyph: #ffffff;
+  --icon-stroke: 1.7;
+
+  /* ---- Obsidian private tokens */
+  /* geometry */
+  --ob-rail-inset: 12px;
+  --ob-rail-pad: 3px;
+  --ob-tile-radius: 12px;
+
+  /* canvas */
+  --ob-glow-1: rgba(139, 92, 246, 0.13);
+  --ob-glow-2: rgba(192, 132, 252, 0.1);
+  --ob-glow-3: rgba(99, 102, 241, 0.06);
+  --ob-halo: rgba(167, 139, 250, 0.16);
+  /* A faint grain (about two 8-bit levels) dithers the large soft glows so
+     they fall off smoothly instead of in visible bands. */
+  --ob-grain: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='160'%20height='160'%3E%3Cfilter%20id='g'%20color-interpolation-filters='sRGB'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.8'%20numOctaves='2'%20stitchTiles='stitch'/%3E%3CfeColorMatrix%20values='-0.25%200%200%200%201%20%20-0.25%200%200%200%201%20%20-0.25%200%200%200%201%20%200%200%200%200%200.06'/%3E%3C/filter%3E%3Crect%20width='160'%20height='160'%20filter='url(%23g)'/%3E%3C/svg%3E");
+  --ob-selection: rgba(109, 40, 217, 0.18);
+  --ob-scroll: rgba(60, 40, 120, 0.22);
+
+  /* glass */
+  /* Rim light: the 1px top edge brightens towards the centre, like light
+     caught on the rim of polished glass. */
+  --ob-glass-fill: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.74));
+  --ob-rim: linear-gradient(90deg, transparent 4%, rgba(139, 92, 246, 0.34) 50%, transparent 96%) top / 100% 1px no-repeat border-box;
+  --ob-glass: var(--ob-rim), var(--ob-glass-fill);
+  --ob-edge: rgba(76, 52, 150, 0.1);
+  --ob-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  --ob-solid: #ffffff;
+  --ob-float: rgba(255, 255, 255, 0.86);
+  --ob-float-solid: #ffffff;
+  --ob-float-edge: rgba(76, 52, 150, 0.12);
+  --ob-bar: rgba(246, 245, 251, 0.78);
+  --ob-bar-shadow: 0 -10px 30px -16px rgba(40, 24, 90, 0.22);
+  --ob-hover: rgba(109, 40, 217, 0.05);
+
+  /* the violet light */
+  --ob-grad: linear-gradient(135deg, #6d28d9 0%, #8b3fe8 55%, #9333ea 100%);
+  --ob-grad-hover: linear-gradient(135deg, #5b21b6 0%, #7c33d6 55%, #8227d6 100%);
+  --ob-ink: #ffffff;
+  --ob-btn-glow: 0 1px 2px rgba(60, 20, 140, 0.25), 0 8px 22px -8px rgba(109, 40, 217, 0.55);
+  --ob-btn-glow-hover: 0 1px 2px rgba(60, 20, 140, 0.25), 0 12px 28px -8px rgba(109, 40, 217, 0.65);
+  --ob-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  --ob-ind-a: #9333ea;
+  --ob-ind-b: #6d28d9;
+  --ob-glow-accent: rgba(109, 40, 217, 0.45);
+  --ob-glow-accent-soft: rgba(109, 40, 217, 0.22);
+  --ob-focus-glow: rgba(124, 58, 237, 0.28);
+
+  /* tinted 1px rings and glows for toned elements */
+  --ob-ring-accent: rgba(109, 40, 217, 0.2);
+  --ob-ring-accent-strong: rgba(109, 40, 217, 0.4);
+  --ob-ring-positive: rgba(4, 120, 87, 0.2);
+  --ob-ring-negative: rgba(190, 18, 60, 0.2);
+  --ob-ring-warning: rgba(154, 77, 0, 0.22);
+  --ob-glow-positive: rgba(4, 120, 87, 0.35);
+  --ob-glow-negative: rgba(190, 18, 60, 0.3);
+  --ob-glow-warning: rgba(154, 77, 0, 0.28);
+  --ob-tile-ring: rgba(76, 52, 150, 0.08);
+
+  /* controls */
+  --ob-track: #ebe8f4;
+  --ob-track-edge: rgba(60, 40, 120, 0.07);
+  --ob-step-track: #e2deee;
+  --ob-seg-active: #ffffff;
+  --ob-seg-active-edge: rgba(109, 40, 217, 0.72);
+  --ob-seg-active-fg: var(--accent);
+  --ob-seg-active-shadow: 0 1px 2px rgba(40, 24, 90, 0.08), 0 4px 12px -4px rgba(109, 40, 217, 0.3);
+  --ob-tooltip-bg: #1b1530;
+  --ob-tooltip-fg: #f4f0ff;
+  --ob-tooltip-edge: rgba(255, 255, 255, 0.08);
+  --ob-avatar-ring: rgba(109, 40, 217, 0.35);
+
+  /* hero */
+  --ob-amount-grad: linear-gradient(180deg, #1d1630 0%, #4c1d95 120%);
+  --ob-title-grad: linear-gradient(180deg, #15121f 35%, #3b2470 140%);
+  --ob-number-glow: none;
+  --ob-hero-a: rgba(167, 139, 250, 0.28);
+  --ob-hero-b: rgba(232, 121, 249, 0.12);
+  --ob-hero-frac: var(--text-muted);
+  --ob-hero-glow: rgba(109, 40, 217, 0.32);
+  --ob-symbol: var(--accent);
+  --ob-hero-edge: linear-gradient(135deg, rgba(139, 92, 246, 0.45), rgba(139, 92, 246, 0.08) 40%, rgba(192, 132, 252, 0.35));
+  --ob-glyph-ink: rgba(109, 40, 217, 0.05);
+
+  /* chart: the brief's #8B5CF6 → #C084FC light, top to bottom */
+  --ob-chart-top: rgba(139, 92, 246, 0.27);
+  --ob-chart-bottom: rgba(109, 40, 217, 0.02);
+  --ob-chart-glow: rgba(139, 92, 246, 0.08);
+  --ob-line-glow: drop-shadow(0 0 3px rgba(124, 58, 237, 0.35)) drop-shadow(0 5px 10px rgba(109, 40, 217, 0.3));
+  --ob-dot-halo: rgba(124, 58, 237, 0.2);
+  --ob-tick-halo: rgba(255, 255, 255, 0.8);
+  --ob-qr-glow: rgba(109, 40, 217, 0.35);
+
+  /* reading panels (dialogs, sheets) are denser than menus so the content
+     behind them stays quiet */
+  --ob-panel: rgba(255, 255, 255, 0.95);
+  /* rows: hover stays lighter than the selected tint */
+  --ob-row-hover: rgba(109, 40, 217, 0.035);
+  --ob-readonly-bg: var(--bg-sunken);
+  --ob-readonly-edge: var(--control-border);
+
+  /* small shadows and edges */
+  --ob-inset: inset 0 1px 2px rgba(20, 16, 40, 0.06);
+  --ob-danger-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --ob-identicon-ring: rgba(20, 16, 40, 0.08);
+  --ob-tooltip-shadow: 0 10px 28px -8px rgba(30, 18, 70, 0.35);
+  --ob-switch-inset: inset 0 1px 2px rgba(20, 16, 40, 0.18);
+  --ob-thumb-shadow: 0 1px 3px rgba(20, 16, 40, 0.3);
+}
+
+[data-scheme='dark'] {
+  --bg: #07060b;
+  --bg-elevated: #15121d;
+  --bg-sunken: rgba(0, 0, 0, 0.32);
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-2: rgba(255, 255, 255, 0.075);
+  --border: rgba(255, 255, 255, 0.075);
+  --border-strong: #7b7596;
+  --text: #efecf8;
+  --text-muted: #b4aecb;
+  --text-faint: #9d96b6;
+  --accent: #b197fc;
+  --accent-contrast: #0b0716;
+  --accent-soft: rgba(139, 92, 246, 0.17);
+  --positive: #34d399;
+  --negative: #fb7185;
+  --warning: #fbbf24;
+  --focus: #b9a1ff;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 32px 72px -16px rgba(0, 0, 0, 0.8), 0 10px 24px -10px rgba(0, 0, 0, 0.6);
+
+  --chart-line: #c4b5fd;
+  --chart-fill: rgba(192, 132, 252, 0.3);
+  --chart-grid: rgba(255, 255, 255, 0.05);
+
+  --control-bg: rgba(255, 255, 255, 0.035);
+  --control-border: #7e7899;
+  --card-bg: rgba(255, 255, 255, 0.04);
+  --card-border: rgba(255, 255, 255, 0.075);
+  --card-shadow: 0 1px 0 rgba(0, 0, 0, 0.4), 0 18px 40px -24px rgba(0, 0, 0, 0.9);
+  --positive-soft: rgba(52, 211, 153, 0.13);
+  --negative-soft: rgba(251, 113, 133, 0.13);
+  --warning-soft: rgba(251, 191, 36, 0.12);
+  --info-soft: rgba(139, 92, 246, 0.14);
+  --on-negative: #1c0509;
+  --backdrop: rgba(3, 2, 7, 0.62);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus), 0 0 22px 4px var(--ob-focus-glow);
+  --nav-bg: rgba(255, 255, 255, 0.03);
+  --nav-border: rgba(255, 255, 255, 0.07);
+  --nav-item-fg: #a19bb7;
+  --nav-item-hover: rgba(255, 255, 255, 0.05);
+  --nav-item-active-bg: rgba(139, 92, 246, 0.16);
+  --nav-item-active-fg: #f4efff;
+  --nav-item-active-icon: #d2c2ff;
+  --nav-item-active-shadow: inset 0 0 0 1px rgba(177, 151, 252, 0.28), 0 0 24px -4px rgba(139, 92, 246, 0.55);
+  --brand-disc: #7c3aed;
+
+  --ob-glow-1: rgba(124, 77, 255, 0.14);
+  --ob-glow-2: rgba(192, 132, 252, 0.07);
+  --ob-glow-3: rgba(76, 29, 149, 0.16);
+  --ob-halo: rgba(124, 77, 255, 0.12);
+  --ob-grain: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='160'%20height='160'%3E%3Cfilter%20id='g'%20color-interpolation-filters='sRGB'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.8'%20numOctaves='2'%20stitchTiles='stitch'/%3E%3CfeColorMatrix%20values='0.25%200%200%200%200%20%200.25%200%200%200%200%20%200.25%200%200%200%200%20%200%200%200%200%200.06'/%3E%3C/filter%3E%3Crect%20width='160'%20height='160'%20filter='url(%23g)'/%3E%3C/svg%3E");
+  --ob-selection: rgba(139, 92, 246, 0.32);
+  --ob-scroll: rgba(255, 255, 255, 0.16);
+
+  --ob-glass-fill: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025));
+  --ob-rim: linear-gradient(90deg, transparent 4%, rgba(214, 200, 255, 0.36) 50%, transparent 96%) top / 100% 1px no-repeat border-box;
+  --ob-glass: var(--ob-rim), var(--ob-glass-fill);
+  --ob-edge: rgba(255, 255, 255, 0.075);
+  --ob-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --ob-solid: #111016;
+  --ob-float: rgba(20, 17, 29, 0.84);
+  --ob-float-solid: #15121d;
+  --ob-float-edge: rgba(255, 255, 255, 0.1);
+  --ob-bar: rgba(7, 6, 11, 0.78);
+  --ob-bar-shadow: 0 -10px 30px -16px rgba(0, 0, 0, 0.6);
+  --ob-hover: rgba(255, 255, 255, 0.05);
+
+  --ob-grad: linear-gradient(135deg, #8b5cf6 0%, #a670fa 50%, #c084fc 100%);
+  --ob-grad-hover: linear-gradient(135deg, #9b72f8 0%, #b383fb 50%, #cc97fd 100%);
+  --ob-ink: #0b0716;
+  --ob-btn-glow: 0 0 0 1px rgba(192, 132, 252, 0.22), 0 8px 26px -10px rgba(139, 92, 246, 0.7);
+  --ob-btn-glow-hover: 0 0 0 1px rgba(192, 132, 252, 0.4), 0 10px 32px -8px rgba(160, 110, 250, 0.8);
+  --ob-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  --ob-ind-a: #c084fc;
+  --ob-ind-b: #8b5cf6;
+  --ob-glow-accent: rgba(139, 92, 246, 0.6);
+  --ob-glow-accent-soft: rgba(139, 92, 246, 0.3);
+  --ob-focus-glow: rgba(139, 92, 246, 0.45);
+
+  --ob-ring-accent: rgba(167, 139, 250, 0.3);
+  --ob-ring-accent-strong: rgba(167, 139, 250, 0.45);
+  --ob-ring-positive: rgba(52, 211, 153, 0.24);
+  --ob-ring-negative: rgba(251, 113, 133, 0.26);
+  --ob-ring-warning: rgba(251, 191, 36, 0.26);
+  --ob-glow-positive: rgba(52, 211, 153, 0.5);
+  --ob-glow-negative: rgba(251, 113, 133, 0.4);
+  --ob-glow-warning: rgba(251, 191, 36, 0.42);
+  --ob-tile-ring: rgba(255, 255, 255, 0.07);
+
+  --ob-track: rgba(0, 0, 0, 0.3);
+  --ob-track-edge: rgba(255, 255, 255, 0.06);
+  --ob-step-track: rgba(255, 255, 255, 0.12);
+  --ob-seg-active: linear-gradient(180deg, rgba(167, 139, 250, 0.26), rgba(139, 92, 246, 0.16));
+  --ob-seg-active-edge: rgba(177, 151, 252, 0.62);
+  --ob-seg-active-fg: #f4efff;
+  --ob-seg-active-shadow: 0 0 18px -6px rgba(139, 92, 246, 0.7);
+  --ob-tooltip-bg: rgba(28, 24, 40, 0.92);
+  --ob-tooltip-fg: #f4f0ff;
+  --ob-tooltip-edge: rgba(255, 255, 255, 0.12);
+  --ob-avatar-ring: rgba(177, 151, 252, 0.45);
+
+  --ob-amount-grad: linear-gradient(180deg, #ffffff 15%, #cbb9ff 115%);
+  --ob-title-grad: linear-gradient(180deg, #ffffff 25%, #d4c6ff 130%);
+  --ob-number-glow: drop-shadow(0 0 22px rgba(167, 139, 250, 0.28));
+  --ob-hero-a: rgba(139, 92, 246, 0.26);
+  --ob-hero-b: rgba(192, 132, 252, 0.12);
+  --ob-hero-frac: #b6afcb;
+  --ob-hero-glow: rgba(139, 92, 246, 0.55);
+  --ob-symbol: #c3b1ff;
+  --ob-hero-edge: linear-gradient(135deg, rgba(192, 132, 252, 0.55), rgba(255, 255, 255, 0.06) 38%, rgba(255, 255, 255, 0.04) 62%, rgba(139, 92, 246, 0.45));
+  --ob-glyph-ink: rgba(255, 255, 255, 0.03);
+
+  --ob-chart-top: rgba(167, 139, 250, 0.42);
+  --ob-chart-bottom: rgba(139, 92, 246, 0.03);
+  --ob-chart-glow: rgba(139, 92, 246, 0.14);
+  --ob-line-glow: drop-shadow(0 0 6px rgba(167, 139, 250, 0.7)) drop-shadow(0 6px 14px rgba(139, 92, 246, 0.5));
+  --ob-dot-halo: rgba(196, 181, 253, 0.26);
+  --ob-tick-halo: rgba(14, 12, 20, 0.62);
+  --ob-qr-glow: rgba(139, 92, 246, 0.55);
+
+  --ob-panel: rgba(20, 17, 29, 0.95);
+  --ob-row-hover: rgba(255, 255, 255, 0.035);
+  --ob-readonly-bg: rgba(255, 255, 255, 0.025);
+  --ob-readonly-edge: rgba(255, 255, 255, 0.14);
+
+  --ob-inset: inset 0 1px 2px rgba(0, 0, 0, 0.22);
+  --ob-danger-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  --ob-identicon-ring: rgba(255, 255, 255, 0.12);
+  --ob-tooltip-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.5);
+  --ob-switch-inset: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+  --ob-thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* ============================================================ canvas */
+
+body {
+  background-color: var(--bg);
+}
+/* The aurora sits on its own fixed layer: it is composited once instead of
+   being repainted on every scroll (background-attachment: fixed). */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    var(--ob-grain) 0 0 / 160px 160px repeat,
+    radial-gradient(820px 520px at 62% -14%, var(--ob-glow-1),
+      color-mix(in srgb, var(--ob-glow-1) 90%, transparent) 18%,
+      color-mix(in srgb, var(--ob-glow-1) 66%, transparent) 36%,
+      color-mix(in srgb, var(--ob-glow-1) 42%, transparent) 52%,
+      color-mix(in srgb, var(--ob-glow-1) 21%, transparent) 68%,
+      color-mix(in srgb, var(--ob-glow-1) 7%, transparent) 84%, transparent),
+    radial-gradient(740px 520px at -8% 108%, var(--ob-glow-3),
+      color-mix(in srgb, var(--ob-glow-3) 90%, transparent) 18%,
+      color-mix(in srgb, var(--ob-glow-3) 66%, transparent) 36%,
+      color-mix(in srgb, var(--ob-glow-3) 42%, transparent) 52%,
+      color-mix(in srgb, var(--ob-glow-3) 21%, transparent) 68%,
+      color-mix(in srgb, var(--ob-glow-3) 7%, transparent) 84%, transparent),
+    radial-gradient(640px 480px at 38% 46%, var(--ob-glow-2),
+      color-mix(in srgb, var(--ob-glow-2) 90%, transparent) 18%,
+      color-mix(in srgb, var(--ob-glow-2) 66%, transparent) 36%,
+      color-mix(in srgb, var(--ob-glow-2) 42%, transparent) 52%,
+      color-mix(in srgb, var(--ob-glow-2) 21%, transparent) 68%,
+      color-mix(in srgb, var(--ob-glow-2) 7%, transparent) 84%, transparent);
+}
+html {
+  scrollbar-color: var(--ob-scroll) transparent;
+}
+
+::selection {
+  background: var(--ob-selection);
+  color: var(--text);
+}
+
+/* The halo behind centred content lives on the full-viewport layout, not on
+   <main>, so no box edge ever cuts through it. */
+.focus-layout {
+  background:
+    radial-gradient(640px 500px at 50% 50%, var(--ob-halo),
+      color-mix(in srgb, var(--ob-halo) 90%, transparent) 18%,
+      color-mix(in srgb, var(--ob-halo) 66%, transparent) 36%,
+      color-mix(in srgb, var(--ob-halo) 42%, transparent) 52%,
+      color-mix(in srgb, var(--ob-halo) 21%, transparent) 68%,
+      color-mix(in srgb, var(--ob-halo) 7%, transparent) 84%, transparent) no-repeat;
+}
+
+/* ======================================================== typography */
+
+.page-header__title,
+.heading,
+.section__title,
+.dialog__title,
+.brand__name,
+.empty-state__title,
+.welcome-choice__title {
+  font-family: var(--font-display);
+}
+.page-header__title {
+  font-weight: 560;
+  letter-spacing: -0.03em;
+}
+/* Luminous type: page titles share the balance's white-to-lavender light. */
+@media (forced-colors: none) {
+  .page-header__title {
+    background: var(--ob-title-grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+  .page-header__title::selection,
+  .card--hero .amount--display .amount__int::selection,
+  .card--hero .amount--display .amount__sign::selection {
+    -webkit-text-fill-color: var(--text);
+    color: var(--text);
+  }
+}
+/* Headings and regions the app focuses after a route change are not
+   controls; they take focus without a ring. */
+.page-header__title[tabindex='-1']:focus-visible,
+.onboarding-header__title[tabindex='-1']:focus-visible,
+.send-review[tabindex='-1']:focus-visible,
+.send-result[tabindex='-1']:focus-visible,
+.activity-detail__saved[tabindex='-1']:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.section__title {
+  font-weight: 580;
+  letter-spacing: -0.015em;
+}
+.dialog__title {
+  font-weight: 580;
+  letter-spacing: -0.02em;
+}
+.empty-state__title {
+  font-weight: 580;
+  letter-spacing: -0.01em;
+}
+.brand__name {
+  font-weight: 620;
+  letter-spacing: -0.02em;
+}
+
+/* ================================================================ glass */
+
+.card,
+.section--card > .section__body,
+.list--inset,
+.overview-tokens__card,
+.overview-recent__loading,
+.overview-recent__empty,
+.activity-loading__card,
+.welcome-choice__button {
+  background: var(--ob-glass);
+  border-color: var(--ob-edge);
+  box-shadow: var(--ob-highlight), var(--card-shadow);
+}
+.card--sunken {
+  background: var(--bg-sunken);
+  border-color: transparent;
+  box-shadow: none;
+}
+.card--outline {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Floating layers: frosted glass where supported, solid otherwise. */
+.menu,
+.combobox__list,
+.toast,
+.dialog__panel,
+.overview-chart__tooltip {
+  background: var(--ob-float-solid);
+  border-color: var(--ob-float-edge);
+  box-shadow: var(--ob-highlight), var(--shadow-2);
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .menu,
+  .combobox__list,
+  .toast,
+  .dialog__panel,
+  .overview-chart__tooltip {
+    background: var(--ob-float);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    backdrop-filter: blur(24px) saturate(160%);
+  }
+  .dialog__panel {
+    background: var(--ob-panel);
+  }
+}
+
+/* ========================================================== shell: rail */
+
+/*
+ * A floating glass dock. Its tiles fill the rail with a 3px gutter (the same
+ * inset as the segmented control), so tooltips and the wallet menu, which
+ * open 6px from their anchor, land just outside the glass.
+ */
+@media (min-width: 720px) {
+  [data-layout='rail'] .shell__nav {
+    top: var(--ob-rail-inset);
+    height: calc(100vh - 2 * var(--ob-rail-inset));
+    height: calc(100dvh - 2 * var(--ob-rail-inset));
+    margin: var(--ob-rail-inset) 0 var(--ob-rail-inset) var(--ob-rail-inset);
+    padding: var(--s4) var(--ob-rail-pad) var(--ob-rail-pad);
+    gap: var(--s2);
+    align-items: stretch;
+    border: 1px solid var(--nav-border);
+    border-radius: calc(var(--ob-tile-radius) + var(--ob-rail-pad));
+    background: var(--ob-rim), var(--nav-bg);
+    box-shadow: var(--ob-highlight), var(--card-shadow);
+    scrollbar-width: none;
+  }
+  [data-layout='rail'] .shell__brand {
+    justify-content: center;
+    padding: var(--s1) 0 var(--s3);
+  }
+  [data-layout='rail'] .shell__brand .brand-mark {
+    width: 30px;
+    height: 30px;
+    filter: drop-shadow(0 0 10px var(--ob-glow-accent));
+  }
+  /* Inset hairlines: dividers that stop short of the glass edge. */
+  [data-layout='rail'] .shell__switcher {
+    margin-bottom: var(--s2);
+    padding-bottom: var(--s3);
+    background: linear-gradient(var(--nav-border), var(--nav-border)) center bottom / calc(100% - 2 * var(--s2)) 1px no-repeat;
+  }
+  [data-layout='rail'] .shell__switcher .switcher-root {
+    display: flex;
+    width: 100%;
+  }
+  [data-layout='rail'] .shell__switcher .switcher--compact {
+    justify-content: center;
+    width: 100%;
+    min-height: 44px;
+    border-radius: var(--ob-tile-radius);
+  }
+  [data-layout='rail'] .shell__navitems {
+    gap: var(--s1);
+  }
+  [data-layout='rail'] .shell__navitems .tooltip-anchor,
+  [data-layout='rail'] .shell__lock .tooltip-anchor {
+    display: flex;
+    width: 100%;
+  }
+  [data-layout='rail'] .nav-item {
+    position: relative;
+    width: 100%;
+    height: 44px;
+    border-radius: var(--ob-tile-radius);
+  }
+  /* Active edge: a glowing filament in the gutter between glass and tile. */
+  [data-layout='rail'] .nav-item--active::before {
+    content: '';
+    position: absolute;
+    left: calc(-1 * var(--ob-rail-pad));
+    top: 50%;
+    width: 2px;
+    height: 20px;
+    margin-top: -10px;
+    border-radius: 0 2px 2px 0;
+    background: linear-gradient(180deg, var(--ob-ind-a), var(--ob-ind-b));
+    box-shadow: 0 0 10px 1px var(--ob-glow-accent);
+  }
+  [data-layout='rail'] .shell__status {
+    padding: var(--s3) 0 var(--s2);
+  }
+  [data-layout='rail'] .shell__lock {
+    width: 100%;
+    padding-top: var(--s2);
+    background: linear-gradient(var(--nav-border), var(--nav-border)) center top / calc(100% - 2 * var(--s2)) 1px no-repeat;
+  }
+  [data-layout='rail'] .shell__lock .icon-btn {
+    width: 100%;
+    height: 44px;
+    border-radius: var(--ob-tile-radius);
+  }
+  /* Tiles touch the rail's clipping edge, so their focus ring is drawn inside. */
+  [data-layout='rail'] .shell__nav .nav-item:focus-visible,
+  [data-layout='rail'] .shell__nav .switcher:focus-visible,
+  [data-layout='rail'] .shell__lock .icon-btn:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--focus), 0 0 18px -4px var(--ob-focus-glow);
+  }
+  [data-layout='rail'] .shell__main {
+    padding: var(--s8) var(--s10) var(--s12) var(--s8);
+  }
+}
+
+.nav-item:hover {
+  color: var(--text);
+}
+.nav-item--active,
+.nav-item--active:hover {
+  background: var(--nav-item-active-bg);
+}
+.nav-item:focus-visible,
+.nav-item--active:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus), 0 0 18px -4px var(--ob-focus-glow);
+}
+
+/* Wallet switcher */
+.switcher {
+  background: var(--surface);
+  border-color: var(--ob-edge);
+  box-shadow: var(--ob-highlight);
+}
+.switcher--compact {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  border-radius: 999px;
+}
+.switcher--compact:hover,
+.switcher--compact.switcher--open {
+  background: var(--ob-hover);
+}
+@media (min-width: 720px) {
+  .shell__nav .switcher__avatar.identicon,
+  .shell__nav .switcher__avatar .identicon {
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--ob-avatar-ring);
+  }
+}
+
+/* Network status */
+.net-status--online .net-status__dot {
+  box-shadow: 0 0 0 3px var(--positive-soft), 0 0 10px 1px var(--ob-glow-positive);
+}
+
+/* Tooltip: dark glass in both schemes */
+.tooltip {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--ob-tooltip-bg);
+  color: var(--ob-tooltip-fg);
+  border: 1px solid var(--ob-tooltip-edge);
+  box-shadow: var(--ob-tooltip-shadow);
+  letter-spacing: 0.01em;
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .tooltip {
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+  }
+}
+
+/* ============================================================ buttons */
+
+.btn {
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.btn--primary,
+.icon-btn--primary {
+  background: var(--ob-grad);
+  color: var(--ob-ink);
+  border-color: transparent;
+  box-shadow: var(--ob-sheen), var(--ob-btn-glow);
+}
+.btn--primary:hover:not(:disabled):not([aria-disabled='true']),
+.icon-btn--primary:hover:not(:disabled) {
+  background: var(--ob-grad-hover);
+  color: var(--ob-ink);
+  box-shadow: var(--ob-sheen), var(--ob-btn-glow-hover);
+}
+.btn--primary:active:not(:disabled):not([aria-disabled='true']) {
+  background: var(--ob-grad);
+  box-shadow: var(--ob-sheen);
+}
+/* Disabled: the light goes out — a quiet violet glass slab instead of a dimmed
+   gradient. A loading button is busy, not disabled, so it keeps its light. */
+.btn--primary:disabled,
+.btn--primary[aria-disabled='true']:not(.btn--loading),
+.icon-btn--primary:disabled {
+  background: var(--accent-soft);
+  color: var(--text-muted);
+  box-shadow: inset 0 0 0 1px var(--ob-ring-accent);
+  opacity: 0.7;
+}
+.btn--primary.btn--loading:not(:disabled) {
+  background: var(--ob-grad);
+  color: var(--ob-ink);
+  box-shadow: var(--ob-sheen), var(--ob-btn-glow);
+  opacity: 1;
+}
+/* Focus ring wins over hover/press/loading so a keyboard user never loses it. */
+.btn--primary:focus-visible,
+.btn--primary.btn--loading:focus-visible,
+.btn--primary:focus-visible:hover:not(:disabled):not([aria-disabled='true']),
+.btn--primary:focus-visible:active:not(:disabled):not([aria-disabled='true']),
+.icon-btn--primary:focus-visible,
+.icon-btn--primary:focus-visible:hover:not(:disabled) {
+  box-shadow: var(--ob-sheen), var(--ring);
+}
+
+.btn--secondary,
+.icon-btn--secondary {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  box-shadow: var(--ob-highlight);
+}
+.btn--secondary:hover:not(:disabled):not([aria-disabled='true']),
+.icon-btn--secondary:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+.btn--secondary:focus-visible,
+.icon-btn--secondary:focus-visible {
+  box-shadow: var(--ring);
+}
+
+.btn--ghost:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--ob-hover);
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--ob-hover);
+}
+
+.btn--danger {
+  box-shadow: var(--ob-danger-sheen);
+}
+/* The inline settings action is a tinted ghost; the solid red slab is kept
+   for the confirm dialog, where the destructive step actually happens. */
+.settings .btn--danger:not(.dialog .btn--danger) {
+  background: var(--negative-soft);
+  color: var(--negative);
+  box-shadow: inset 0 0 0 1px var(--ob-ring-negative);
+}
+.settings .btn--danger:not(.dialog .btn--danger):hover:not(:disabled):not([aria-disabled='true']) {
+  filter: none;
+  box-shadow: inset 0 0 0 1px var(--negative), 0 0 18px -6px var(--ob-glow-negative);
+}
+.settings .btn--danger:not(.dialog .btn--danger):focus-visible {
+  box-shadow: var(--ring);
+}
+
+/* ============================================================== forms */
+
+.input,
+.select__control,
+.stepper {
+  background: var(--control-bg);
+  box-shadow: var(--ob-inset);
+}
+.input:hover:not(.input--disabled),
+.select__control:hover:not(:disabled) {
+  border-color: var(--text-faint);
+}
+.input:focus-within,
+.input:focus-within:hover:not(.input--disabled),
+.stepper:focus-within,
+.select__control:focus-visible,
+.select__control:focus-visible:hover:not(:disabled) {
+  border-color: var(--focus);
+  /* inset 1px line + border = a 2px focus edge, then the soft violet glow */
+  box-shadow: inset 0 0 0 1px var(--focus), 0 0 0 3px var(--accent-soft), 0 0 22px -2px var(--ob-focus-glow);
+}
+/* An error stays red through hover and focus; focus adds a red glow. */
+.input--invalid,
+.input--invalid:hover:not(.input--disabled),
+.input--invalid:focus-within,
+.input--invalid:focus-within:hover:not(.input--disabled),
+.stepper--invalid,
+.stepper--invalid:focus-within,
+.select--invalid .select__control,
+.select--invalid .select__control:hover:not(:disabled),
+.select--invalid .select__control:focus-visible,
+.select--invalid .select__control:focus-visible:hover:not(:disabled) {
+  border-color: var(--negative);
+}
+.input--invalid:focus-within,
+.input--invalid:focus-within:hover:not(.input--disabled),
+.stepper--invalid:focus-within,
+.select--invalid .select__control:focus-visible,
+.select--invalid .select__control:focus-visible:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 1px var(--negative), 0 0 0 3px var(--negative-soft), 0 0 22px -4px var(--ob-glow-negative);
+}
+.input--readonly,
+.input--readonly:hover:not(.input--disabled) {
+  background: var(--ob-readonly-bg);
+  border-color: var(--ob-readonly-edge);
+  border-style: dashed;
+  box-shadow: none;
+}
+.input--mono .input__control {
+  font-size: 0.875em;
+  letter-spacing: 0;
+}
+.field__label {
+  font-weight: 560;
+  letter-spacing: 0.005em;
+}
+
+.switch__track {
+  background: var(--border-strong);
+  box-shadow: var(--ob-switch-inset);
+}
+.switch--on .switch__track {
+  background: var(--ob-grad);
+  box-shadow: var(--ob-sheen), 0 0 16px -2px var(--ob-glow-accent);
+}
+.switch__thumb {
+  box-shadow: var(--ob-thumb-shadow);
+}
+
+.segmented {
+  background: var(--ob-track);
+  box-shadow: inset 0 0 0 1px var(--ob-track-edge);
+  border-radius: 12px;
+}
+.segmented__item {
+  border-radius: 9px;
+  border: 1px solid transparent;
+}
+.segmented__item--active {
+  background: var(--ob-seg-active);
+  color: var(--ob-seg-active-fg);
+  border-color: var(--ob-seg-active-edge);
+  box-shadow: var(--ob-seg-active-shadow);
+}
+.segmented__item:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus), 0 0 14px -2px var(--ob-focus-glow);
+}
+
+/* =============================================================== hero */
+
+.card--hero {
+  border-color: transparent;
+  background:
+    radial-gradient(80% 140% at 100% 0%, var(--ob-hero-a) 0%, transparent 60%),
+    radial-gradient(60% 120% at 0% 110%, var(--ob-hero-b) 0%, transparent 60%),
+    var(--ob-glass-fill);
+  box-shadow: var(--ob-highlight), var(--card-shadow), 0 30px 80px -40px var(--ob-hero-glow);
+}
+/* Luminous 1px edge: brighter where the light catches the glass. */
+.card--hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: var(--ob-hero-edge);
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+/* The MMX glyph, etched faintly into the glass. */
+.card--hero::after {
+  content: '';
+  position: absolute;
+  right: -64px;
+  top: 50%;
+  width: min(340px, 42%);
+  aspect-ratio: 1;
+  transform: translateY(-50%);
+  background: var(--ob-glyph-ink);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='28 28 200 200'%3E%3Cpath d='M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='28 28 200 200'%3E%3Cpath d='M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  pointer-events: none;
+}
+.card--hero > * {
+  position: relative;
+  z-index: 1;
+}
+.overview-hero.card--pad-lg {
+  padding: var(--s10) var(--s10);
+}
+.overview-hero__label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.amount--display {
+  line-height: 1;
+}
+.amount--xl {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+.amount--xl .amount__number {
+  font-weight: 560;
+}
+.amount--display .amount__number {
+  font-weight: var(--weight-display);
+}
+@media (forced-colors: none) {
+  .card--hero .amount--display .amount__int,
+  .card--hero .amount--display .amount__sign {
+    background: var(--ob-amount-grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+}
+.amount--display .amount__symbol {
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+/* Violet symbol for neutral display amounts only; toned ones keep their tone. */
+.amount--display:not(.amount--positive):not(.amount--negative):not(.amount--muted) .amount__symbol {
+  color: var(--ob-symbol);
+}
+.card--hero .amount--display .amount__frac {
+  color: var(--ob-hero-frac);
+}
+.card--hero .amount--display .amount__number {
+  filter: var(--ob-number-glow);
+}
+
+@media (max-width: 719.98px) {
+  .overview-hero.card--pad-lg {
+    padding: var(--s6) var(--s5);
+  }
+  /* On a phone the balance and the two actions fill the card edge to edge,
+     so any etching would run through text or a button: the corner glow
+     carries the hero on its own. */
+  .card--hero::after {
+    display: none;
+  }
+}
+
+/* ============================================================== chart */
+
+.overview-history__card.card {
+  background:
+    radial-gradient(70% 90% at 50% 120%, var(--ob-chart-glow), transparent 70%),
+    var(--ob-glass);
+}
+.overview-chart__stop--top {
+  stop-color: var(--ob-chart-top);
+  stop-opacity: 1;
+}
+.overview-chart__stop--bottom {
+  stop-color: var(--ob-chart-bottom);
+  stop-opacity: 1;
+}
+.overview-chart__line {
+  stroke-width: 2.25;
+  filter: var(--ob-line-glow);
+}
+.overview-chart__end {
+  fill: var(--chart-line);
+  stroke: var(--ob-dot-halo);
+  stroke-width: 8;
+  paint-order: stroke;
+}
+.overview-chart__dot {
+  fill: var(--ob-solid);
+  stroke: var(--chart-line);
+}
+.overview-chart__ytick {
+  stroke: var(--ob-tick-halo);
+}
+.overview-chart__ytick,
+.overview-chart__xtick {
+  font-family: var(--font-ui);
+}
+.overview-chart__crosshair {
+  stroke: var(--accent);
+  stroke-opacity: 0.6;
+}
+.overview-chart__tooltip {
+  border-radius: 10px;
+}
+
+/* ============================================================== lists */
+
+.list-item__body {
+  border-radius: 10px;
+}
+/* Base pulls only the row body back to the list edge on divided inset lists;
+   pull row actions back too so they line up with the first row's. */
+.list--inset.list--divided > .list-item + .list-item > .list-item__body:not(:last-child) {
+  margin-right: 0;
+}
+.list--inset.list--divided > .list-item + .list-item > .list-item__actions {
+  margin-right: calc(var(--s3) * -1);
+}
+.list-item--interactive .list-item__body:hover:not(:disabled) {
+  background: var(--ob-row-hover);
+}
+.list-item--selected .list-item__body {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--ob-ring-accent);
+}
+.list-item__title {
+  font-weight: 560;
+}
+.list-item__trailing-main {
+  font-weight: 600;
+}
+.list-group__title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.icon-tile {
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--ob-tile-ring);
+}
+.icon-tile--positive {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-positive);
+}
+.icon-tile--negative {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-negative);
+}
+.icon-tile--warning {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-warning);
+}
+.icon-tile--accent {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--ob-ring-accent);
+}
+
+.identicon {
+  box-shadow: inset 0 0 0 1px var(--ob-identicon-ring);
+}
+
+.badge {
+  height: 22px;
+  padding: 0 9px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--ob-tile-ring);
+}
+.badge--positive {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-positive);
+}
+.badge--negative {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-negative);
+}
+.badge--warning {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-warning);
+}
+.badge--accent {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-accent);
+}
+
+/* ======================================================= data display */
+
+.address {
+  font-size: 0.88em;
+  letter-spacing: 0;
+}
+.address__chunks {
+  letter-spacing: 0;
+}
+.amount__symbol {
+  letter-spacing: 0.04em;
+}
+
+.kv--rows > .kv__row + .kv__row {
+  border-top-color: var(--border);
+}
+
+.receive-card__qr {
+  background: var(--qr-frame);
+  box-shadow: 0 0 0 1px var(--ob-edge), 0 24px 60px -24px var(--ob-qr-glow);
+}
+
+.word-grid__item {
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--ob-track-edge);
+}
+
+.steps__item {
+  background: var(--ob-step-track);
+  box-shadow: none;
+}
+.steps__item--done,
+.steps__item--current {
+  background: var(--ob-grad);
+  box-shadow: 0 0 10px -1px var(--ob-glow-accent);
+}
+.import-progress__fill {
+  background: var(--ob-grad);
+  box-shadow: 0 0 12px var(--ob-glow-accent);
+}
+
+/* ========================================================== feedback */
+
+.empty-state__icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--ob-ring-accent), 0 0 36px -6px var(--ob-glow-accent);
+}
+.empty-state--positive .empty-state__icon {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-positive), 0 0 36px -8px var(--ob-glow-positive);
+}
+.empty-state--warning .empty-state__icon {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-warning), 0 0 36px -8px var(--ob-glow-warning);
+}
+.empty-state--negative .empty-state__icon {
+  box-shadow: inset 0 0 0 1px var(--ob-ring-negative), 0 0 36px -8px var(--ob-glow-negative);
+}
+.empty-state--neutral .empty-state__icon {
+  box-shadow: inset 0 0 0 1px var(--ob-tile-ring);
+}
+
+.banner {
+  border-radius: 12px;
+  border-color: var(--ob-ring-accent);
+}
+.banner--positive {
+  border-color: var(--ob-ring-positive);
+}
+.banner--warning {
+  border-color: var(--ob-ring-warning);
+}
+.banner--danger {
+  border-color: var(--ob-ring-negative);
+}
+
+.skeleton {
+  background-color: var(--surface-2);
+}
+
+.disclosure__toggle:hover {
+  background: var(--ob-hover);
+}
+
+/* ========================================================= overlays */
+
+.menu {
+  border-radius: 12px;
+  padding: 5px;
+}
+.menu__item {
+  border-radius: 8px;
+}
+.menu__item:hover:not([aria-disabled='true']),
+.menu__item:focus {
+  background: var(--ob-hover);
+}
+.menu__separator {
+  margin: 5px -5px;
+}
+.combobox__list {
+  border-radius: 12px;
+}
+.combobox__option {
+  border-radius: 8px;
+}
+.combobox__option--active {
+  background: var(--ob-hover);
+}
+/* The suggestion descriptions are shortened addresses: mono, like everywhere else. */
+.send-form .combobox__description {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0;
+}
+
+.dialog::backdrop {
+  background: var(--backdrop);
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .dialog::backdrop {
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
+}
+.dialog__footer {
+  background: transparent;
+  border-top-color: var(--border);
+}
+@media (min-width: 720px) {
+  .dialog__panel,
+  .dialog--sheet .dialog__panel {
+    border-radius: 18px;
+  }
+}
+@media (max-width: 719.98px) {
+  .dialog .dialog__panel,
+  .dialog--sheet .dialog__panel {
+    border-radius: 20px 20px 0 0;
+  }
+}
+
+.toast {
+  border-radius: 12px;
+}
+
+/* ============================================================ welcome */
+
+.welcome-hero__mark {
+  filter: drop-shadow(0 0 28px var(--ob-glow-accent)) drop-shadow(0 12px 24px var(--ob-glow-accent-soft));
+}
+.welcome-choice__button:hover {
+  border-color: var(--ob-ring-accent-strong);
+  box-shadow: var(--ob-highlight), var(--card-shadow), 0 0 30px -10px var(--ob-glow-accent);
+}
+.welcome-choice__button:focus-visible {
+  box-shadow: var(--ring);
+}
+
+/* ============================================================= mobile */
+
+@media (max-width: 719.98px) {
+  .shell__mobilebar {
+    background: var(--ob-float-solid);
+    border-bottom-color: var(--ob-edge);
+  }
+  .tabbar {
+    background: var(--ob-float-solid);
+    border-top-color: var(--ob-float-edge);
+    box-shadow: var(--ob-bar-shadow);
+  }
+  @supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    .shell__mobilebar {
+      background: var(--ob-bar);
+      -webkit-backdrop-filter: blur(18px) saturate(160%);
+      backdrop-filter: blur(18px) saturate(160%);
+    }
+    .tabbar {
+      background: var(--ob-float);
+      -webkit-backdrop-filter: blur(22px) saturate(160%);
+      backdrop-filter: blur(22px) saturate(160%);
+    }
+  }
+  .tabbar__item {
+    position: relative;
+  }
+  .tabbar__item--active::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: 22px;
+    height: 3px;
+    margin-left: -11px;
+    border-radius: 0 0 3px 3px;
+    background: linear-gradient(90deg, var(--ob-ind-b), var(--ob-ind-a));
+    box-shadow: 0 0 12px 1px var(--ob-glow-accent);
+  }
+  .tabbar__item--active .tabbar__icon {
+    filter: drop-shadow(0 0 8px var(--ob-glow-accent-soft));
+  }
+  .shell__mobilebrand {
+    filter: drop-shadow(0 0 8px var(--ob-glow-accent-soft));
+  }
+}

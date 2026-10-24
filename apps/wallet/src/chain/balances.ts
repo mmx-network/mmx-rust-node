@@ -1,20 +1,19 @@
 /**
- * Wallet balances: `/address?id=…&limit=1000` per address (NFTs skipped) and,
- * for addresses holding tokens, `/balance?id=…` for the whitelist flag.
- * Totals per contract plus per-address amounts.
+ * Wallet balances: `/address?id=…&limit=1000` per address (NFTs skipped).
+ * Totals per contract plus per-address amounts. Tokens are verified by the
+ * bundled list (chain/tokens.ts), never by a server flag.
  */
 import { NATIVE_CONTRACT } from '../lib/address';
 import type { RpcClient } from './rpc';
+import { tokenVerifier } from './tokens';
 import type { BalanceRow, ChainParams, Currency } from './types';
 
 export interface AddressBalance {
   rows: BalanceRow[];
-  /** contract → whitelisted, for the tokens this address holds. */
-  validated: Map<string, boolean>;
 }
 
 export interface AssetBalance extends Currency {
-  /** Native MMX or a whitelisted token. */
+  /** Native MMX or a token on the bundled list. */
   verified: boolean;
   total: bigint;
   /** address → amount (only addresses holding it). */
@@ -22,9 +21,7 @@ export interface AssetBalance extends Currency {
 }
 
 export async function fetchAddressBalance(rpc: RpcClient, address: string, params: ChainParams): Promise<AddressBalance> {
-  const rows = await rpc.addressBalances(address, params);
-  const validated = rows.some((r) => !r.native && r.amount > 0n) ? await rpc.tokenValidation(address) : new Map<string, boolean>();
-  return { rows, validated };
+  return { rows: await rpc.addressBalances(address, params) };
 }
 
 /**
@@ -45,12 +42,14 @@ export async function fetchBalances(
 /**
  * Sums per contract over the given addresses. Native MMX is always present
  * (possibly zero). Order: MMX, verified tokens by symbol, other tokens by symbol.
- * Currency metadata comes from the first address reporting it.
+ * Currency metadata comes from the first address reporting it. Tokens are
+ * verified by the bundled list of the server's network unless a lookup is given.
  */
 export function computeAssets(
   byAddress: ReadonlyMap<string, AddressBalance>,
   addresses: readonly string[],
   params: ChainParams,
+  isVerified: (contract: string) => boolean = tokenVerifier(params.network),
 ): AssetBalance[] {
   const assets = new Map<string, AssetBalance>();
   assets.set(NATIVE_CONTRACT, {
@@ -73,13 +72,12 @@ export function computeAssets(
           symbol: row.symbol,
           decimals: row.decimals,
           native: false,
-          verified: false,
+          verified: isVerified(row.contract),
           total: 0n,
           byAddress: new Map(),
         };
         assets.set(row.contract, asset);
       }
-      if (!asset.native && entry.validated.get(row.contract) === true) asset.verified = true;
       if (row.amount > 0n) {
         asset.total += row.amount;
         asset.byAddress.set(address, (asset.byAddress.get(address) ?? 0n) + row.amount);

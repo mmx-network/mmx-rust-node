@@ -19,7 +19,6 @@ const READ_ROUTES: ReadonlySet<string> = new Set([
   '/node/info',
   '/chain/info',
   '/address',
-  '/balance',
   '/address/history',
   '/transaction',
 ]);
@@ -36,8 +35,8 @@ export function checkReadPath(path: string): string {
 }
 
 /**
- * Error code for a transfer the node refused (HTTP 400 on validate or
- * broadcast). The node's text only selects the code; it is never shown.
+ * Error code for a transfer the node refused (HTTP 4xx on broadcast). The
+ * node's text only selects the code; it is never shown.
  */
 export function rejectionCode(text: string): ErrorCode {
   const t = text.toLowerCase();
@@ -104,13 +103,13 @@ export class RpcHttp {
     return { text, value: parseJson(text) };
   }
 
-  /** POST /transaction/validate: the node's execution result for a signed transfer. */
-  async validate(txJson: string): Promise<Reply> {
-    const text = await this.request('/transaction/validate', txJson, refusal);
-    return { text, value: parseJson(text) };
-  }
-
-  /** POST /transaction/broadcast. Resolves once the node accepted the transfer. */
+  /**
+   * POST /transaction/broadcast, the only request that carries a signed
+   * transfer (the node validates it before accepting). Resolves once the node
+   * accepted it; a refusal rejects with tx_rejected, insufficient_funds,
+   * insufficient_fee or tx_expired, and only the rpc_* codes leave the
+   * outcome open.
+   */
   async broadcast(txJson: string): Promise<void> {
     await this.request('/transaction/broadcast', txJson, refusal);
   }
@@ -163,9 +162,13 @@ export class RpcHttp {
   }
 }
 
-/** Validate/broadcast: 400 means the node refused the transfer; anything else is a server problem. */
+/**
+ * Broadcast: a 4xx reply means the transfer was not accepted (the node
+ * answers 400 with its reason); 5xx is a server problem and the transfer may
+ * or may not have been accepted.
+ */
 function refusal(status: number, text: string): BackendError {
-  return status === 400 ? new BackendError(rejectionCode(text)) : new BackendError('rpc_http_error');
+  return status >= 400 && status <= 499 ? new BackendError(rejectionCode(text)) : new BackendError('rpc_http_error');
 }
 
 function parseJson(text: string): unknown {

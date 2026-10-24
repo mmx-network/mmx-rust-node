@@ -1,6 +1,7 @@
 # Builds the MMX Wallet for Windows 10/11 x64 as an NSIS installer in
 # artifacts/packages. Run from PowerShell 7 on Windows with the Visual Studio
-# C++ build tools, rustup (MSVC toolchain) and Node.js.
+# C++ build tools, rustup (MSVC toolchain), Node.js and Git for Windows, after
+# `npm run build:wasm` (it runs the WebAssembly build in Git for Windows' bash).
 #
 # The installer installs for the current user (no administrator rights) and
 # installs Microsoft WebView2 if it is missing (needs internet access).
@@ -8,6 +9,7 @@
 # Signing (optional): WINDOWS_CERTIFICATE_THUMBPRINT selects a code signing
 # certificate in the certificate store; WINDOWS_TIMESTAMP_URL sets the
 # timestamp server (default http://timestamp.digicert.com).
+#Requires -Version 7.0
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'

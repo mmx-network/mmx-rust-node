@@ -1,11 +1,13 @@
 /**
  * In-memory backend for development, screenshots and tests. Emulates the
  * wallet service and the public chain server (/node/info, /chain/info,
- * /address, /balance, /address/history, /transaction) with deterministic
+ * /address, /address/history, /transaction) with deterministic
  * fake data. No network access. Never part of web or desktop builds.
  */
+import { CONTACTS_FILE_MAX_BYTES } from '../lib/appstate';
 import { encodeAddress, NATIVE_CONTRACT, normalizeAddress } from '../lib/address';
 import { isExplorerUrl } from '../lib/explorer';
+import { isTransportError } from '../lib/errors';
 import { utf8Length } from '../lib/memo';
 import { hasUnsafeCharacters } from '../lib/text';
 import { WORDS, isWord } from '../lib/wordlist';
@@ -14,6 +16,7 @@ import {
   type AppState,
   type Backend,
   type CreateWalletRequest,
+  type FingerprintRequest,
   type ImportWalletRequest,
   type Platform,
   type PreparedSend,
@@ -250,7 +253,6 @@ interface TxRecord {
 interface Token {
   symbol: string;
   decimals: number;
-  validated: boolean;
 }
 
 interface MempoolTx {
@@ -263,9 +265,9 @@ const USDM = seededAddress('token|USDM');
 const FAKE_MMX = seededAddress('token|fake-mmx');
 
 const TOKENS = new Map<string, Token>([
-  [NATIVE_CONTRACT, { symbol: 'MMX', decimals: DECIMALS, validated: false }],
-  [USDM, { symbol: 'USDM', decimals: 6, validated: true }],
-  [FAKE_MMX, { symbol: 'MMX', decimals: 6, validated: false }],
+  [NATIVE_CONTRACT, { symbol: 'MMX', decimals: DECIMALS }],
+  [USDM, { symbol: 'USDM', decimals: 6 }],
+  [FAKE_MMX, { symbol: 'MMX', decimals: 6 }],
 ]);
 
 const FOREIGN = Array.from({ length: 16 }, (_, i) => seededAddress(`foreign|${i}`));
@@ -563,6 +565,16 @@ interface MockWallet {
   verified: boolean;
 }
 
+/** Funds of a broadcast transfer that is not included yet (like ECDSA_Wallet's reserved funds). */
+interface Reservation {
+  txid: string;
+  expires: number;
+  sender: string;
+  /** Static fee, paid by `sender`. */
+  fee: bigint;
+  inputs: Io[];
+}
+
 interface Prepared {
   walletId: WalletId;
   request: SendRequest;
@@ -643,12 +655,17 @@ export class MockBackend implements Backend {
   private activeWallet: WalletId | undefined;
   private appState: AppState;
   private readonly prepared = new Map<string, Prepared>();
+  private readonly reserved = new Map<WalletId, Reservation[]>();
   /** Test hooks. */
   clipboard = '';
   lastOpened: string | null = null;
   exported: { name: string; contents: string } | null = null;
   nextImport: string | null = null;
-  /** When set, the next broadcast fails with this error after reaching the server. */
+  /**
+   * When set, the next broadcast fails with this error. A connection error is
+   * raised after the transfer reached the server (outcome unknown); any other
+   * error is a refusal and nothing is submitted.
+   */
   failNextBroadcast: BackendError | null = null;
 
   constructor(options: MockOptions = {}) {
@@ -770,21 +787,31 @@ export class MockBackend implements Backend {
     if (!Number.isInteger(n) || n < 1 || n > 100) throw new BackendError('invalid_argument');
   }
 
-  async createWallet(r: CreateWalletRequest): Promise<{ wallet: WalletInfo; mnemonic: string }> {
+  async newRecoveryPhrase(): Promise<string> {
+    await this.delay();
+    return randomMnemonic();
+  }
+
+  async createWallet(r: CreateWalletRequest): Promise<WalletInfo> {
     await this.delay();
     const name = this.checkName(r.name);
     this.checkCount(r.addressCount);
-    const mnemonic = randomMnemonic();
+    if (typeof r.mnemonic !== 'string') throw new BackendError('invalid_mnemonic');
+    const mnemonic = normalizeMnemonic(r.mnemonic);
     const wallet = this.makeWallet(name, mnemonic, r.passphrase ? r.passphrase : null, r.addressCount);
-    if (this.platform === 'web') {
-      wallet.locked = true;
-      wallet.verified = false;
-    } else {
-      wallet.locked = false;
-    }
-    if (this.wallets.some((w) => w.id === wallet.id)) throw new BackendError('wallet_exists');
+    if (this.wallets.some((w) => w.fingerprint === wallet.fingerprint)) throw new BackendError('wallet_exists');
+    // Stored only after the words were confirmed: open and active right away.
+    wallet.locked = false;
+    wallet.verified = true;
     this.wallets.push(wallet);
-    return { wallet: this.info(wallet), mnemonic };
+    this.activeWallet = wallet.id;
+    return this.info(wallet);
+  }
+
+  async walletFingerprint(r: FingerprintRequest): Promise<string> {
+    await this.delay();
+    if (typeof r.mnemonic !== 'string') throw new BackendError('invalid_mnemonic');
+    return fingerprintOf(normalizeMnemonic(r.mnemonic), r.passphrase ? r.passphrase : null);
   }
 
   /** §6.3 detection; returns the passphrase that opens the wallet (null = none). */
@@ -874,6 +901,7 @@ export class MockBackend implements Backend {
     this.wallets = this.wallets.filter((w) => w.id !== id);
     if (this.activeWallet === id) this.activeWallet = this.wallets[0]?.id;
     for (const [txid, p] of this.prepared) if (p.walletId === id) this.prepared.delete(txid);
+    this.reserved.delete(id);
   }
 
   async revealMnemonic(id: WalletId): Promise<string> {
@@ -903,7 +931,7 @@ export class MockBackend implements Backend {
     const q = path.indexOf('?');
     const route = q >= 0 ? path.slice(0, q) : path;
     const query = q >= 0 ? path.slice(q + 1) : '';
-    const allowed = ['/node/info', '/chain/info', '/address', '/balance', '/address/history', '/transaction'];
+    const allowed = ['/node/info', '/chain/info', '/address', '/address/history', '/transaction'];
     if (!allowed.includes(route) || !/^[A-Za-z0-9=&_-]*$/.test(query)) throw new BackendError('invalid_argument');
     const params = new URLSearchParams(query);
     this.chain.tick();
@@ -953,25 +981,6 @@ export class MockBackend implements Backend {
         });
         return { balances, contract: null };
       }
-      case '/balance': {
-        const address = addressParam();
-        const balances = [...(this.chain.balances.get(address) ?? new Map<string, bigint>())].map(([contract, amount]) => {
-          const t = TOKENS.get(contract)!;
-          const v = toValue(amount, t.decimals);
-          return {
-            contract,
-            decimals: t.decimals,
-            ...(contract === NATIVE_CONTRACT ? { is_native: true } : {}),
-            is_validated: t.validated,
-            locked: 0,
-            reserved: 0,
-            spendable: v,
-            symbol: t.symbol,
-            total: v,
-          };
-        });
-        return { balances, nfts: [] };
-      }
       case '/address/history': {
         const address = addressParam();
         const limit = uint('limit', 100);
@@ -988,7 +997,8 @@ export class MockBackend implements Backend {
             height: e.height,
             is_native: e.contract === NATIVE_CONTRACT,
             is_pending: false,
-            is_validated: t.validated,
+            // The wallet never trusts this flag (src/chain/tokens.ts).
+            is_validated: false,
             memo: e.memo ?? null,
             symbol: t.symbol,
             time: e.time / 1000,
@@ -1024,9 +1034,39 @@ export class MockBackend implements Backend {
     return { w, token };
   }
 
-  private nativeBalances(addresses: string[]): Array<{ address: string; amount: bigint }> {
+  /**
+   * Amounts held back for the wallet's broadcast transfers that are not
+   * included yet, per `address|contract`. Included or expired ones are dropped.
+   */
+  private reservedAmounts(walletId: WalletId): Map<string, bigint> {
+    const height = this.chain.height();
+    const live = (this.reserved.get(walletId) ?? []).filter((r) => r.expires >= height && this.chain.txs.get(r.txid)?.height === undefined);
+    if (live.length > 0) this.reserved.set(walletId, live);
+    else this.reserved.delete(walletId);
+    const out = new Map<string, bigint>();
+    const add = (address: string, contract: string, amount: bigint): void => {
+      const key = `${address}|${contract}`;
+      out.set(key, (out.get(key) ?? 0n) + amount);
+    };
+    for (const r of live) {
+      add(r.sender, NATIVE_CONTRACT, r.fee);
+      for (const i of r.inputs) add(i.address, i.contract, i.amount);
+    }
+    return out;
+  }
+
+  /** Balances minus reserved funds (never below zero). */
+  private spendable(walletId: WalletId): (address: string, contract: string) => bigint {
+    const reserved = this.reservedAmounts(walletId);
+    return (address, contract) => {
+      const left = this.chain.balance(address, contract) - (reserved.get(`${address}|${contract}`) ?? 0n);
+      return left > 0n ? left : 0n;
+    };
+  }
+
+  private nativeBalances(addresses: string[], balance: (address: string, contract: string) => bigint): Array<{ address: string; amount: bigint }> {
     return addresses
-      .map((address) => ({ address, amount: this.chain.balance(address, NATIVE_CONTRACT) }))
+      .map((address) => ({ address, amount: balance(address, NATIVE_CONTRACT) }))
       .sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0));
   }
 
@@ -1035,8 +1075,9 @@ export class MockBackend implements Backend {
     this.chain.tick();
     const { w } = this.checkRequest(r, false);
     const addresses = this.addressesOf(w);
+    const balance = this.spendable(w.id);
     if (r.contract === NATIVE_CONTRACT) {
-      const balances = this.nativeBalances(addresses).filter((b) => b.amount > 0n);
+      const balances = this.nativeBalances(addresses, balance).filter((b) => b.amount > 0n);
       let k = balances.length;
       while (k > 0) {
         const fee = staticFee(k, r.memo, k, r.feeLevel);
@@ -1049,10 +1090,10 @@ export class MockBackend implements Backend {
       }
       return '0';
     }
-    const holders = addresses.filter((a) => this.chain.balance(a, r.contract) > 0n);
-    const total = holders.reduce((s, a) => s + this.chain.balance(a, r.contract), 0n);
+    const holders = addresses.filter((a) => balance(a, r.contract) > 0n);
+    const total = holders.reduce((s, a) => s + balance(a, r.contract), 0n);
     const fee = staticFee(holders.length, r.memo, holders.length + 1, r.feeLevel);
-    if (!this.nativeBalances(addresses).some((b) => b.amount >= fee)) throw new BackendError('insufficient_fee');
+    if (!this.nativeBalances(addresses, balance).some((b) => b.amount >= fee)) throw new BackendError('insufficient_fee');
     return total.toString();
   }
 
@@ -1064,8 +1105,9 @@ export class MockBackend implements Backend {
     const amount = BigInt(r.amount);
     if (amount <= 0n) throw new BackendError('invalid_amount');
     const addresses = this.addressesOf(w);
+    const balance = this.spendable(w.id);
     const holders = addresses
-      .map((address) => ({ address, amount: this.chain.balance(address, r.contract) }))
+      .map((address) => ({ address, amount: balance(address, r.contract) }))
       .filter((h) => h.amount > 0n)
       .sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0));
     const inputs: Io[] = [];
@@ -1078,7 +1120,7 @@ export class MockBackend implements Backend {
     }
     if (left !== 0n) throw new BackendError('insufficient_funds');
     const spent = new Map(inputs.map((i) => [i.address, i.amount]));
-    const remaining = this.nativeBalances(addresses)
+    const remaining = this.nativeBalances(addresses, balance)
       .map((b) => ({ ...b, amount: r.contract === NATIVE_CONTRACT ? b.amount - (spent.get(b.address) ?? 0n) : b.amount }))
       .sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0));
     const sender = remaining[0]!;
@@ -1147,12 +1189,15 @@ export class MockBackend implements Backend {
       inputs: p.inputs,
       outputs: [{ address: request.to, contract: request.contract, amount, ...(memo ? { memo } : {}) }],
     };
+    const failure = this.failNextBroadcast;
+    this.failNextBroadcast = null;
+    // A refused transfer never reaches the chain.
+    if (failure && !isTransportError(failure)) throw failure;
     this.chain.submit({ record, rows, includeAt: height + 2 });
-    if (this.failNextBroadcast) {
-      const e = this.failNextBroadcast;
-      this.failNextBroadcast = null;
-      throw e;
-    }
+    const reservations = this.reserved.get(walletId) ?? [];
+    reservations.push({ txid, expires: p.expires, sender: p.sender, fee: p.fee, inputs: p.inputs });
+    this.reserved.set(walletId, reservations);
+    if (failure) throw failure;
   }
 
   async discardPrepared(txid: string): Promise<void> {
@@ -1211,7 +1256,7 @@ export class MockBackend implements Backend {
       input.addEventListener('change', () => {
         const file = input.files?.[0];
         if (!file) return resolve(null);
-        if (file.size > 1024 * 1024) return reject(new BackendError('invalid_argument'));
+        if (file.size > CONTACTS_FILE_MAX_BYTES) return reject(new BackendError('invalid_argument'));
         file.text().then(resolve, () => reject(new BackendError('io_error')));
       });
       input.click();

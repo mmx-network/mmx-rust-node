@@ -13,16 +13,16 @@ import {
   platform,
   reloadAppState,
   refreshWallets,
+  sessionWalletId,
   setBackend,
   setWallets,
   usableWallets,
-  activeWallet,
 } from './core';
 import { startIdleLock } from './idle';
 import { homeRoute, navigate, route, routeAllowed, startRouter } from './router';
 import { finishSend } from './send';
 import { closeSession, openSession, resetChain, startSessionEffects } from './session';
-import { activateWallet } from './wallets';
+import { activateWallet, lockedElsewhere, reconcileAddresses } from './wallets';
 
 let started: Promise<void> | null = null;
 
@@ -46,7 +46,7 @@ async function start(override?: Backend): Promise<void> {
     setWallets(list);
     finishSend();
     const usable = list.filter((w) => !w.error);
-    // Web: a wallet whose saved credential was never opened returns the user to that step.
+    // Web: a wallet an earlier version stored before its credential was confirmed returns the user to that step.
     const unverified = b.platform === 'web' ? usable.find((w) => w.verified === false) : undefined;
     const preferred = unverified ?? usable.find((w) => w.id === appState.value.activeWallet) ?? usable[0];
     if (unverified) navigate('unlock', undefined, { replace: true });
@@ -63,6 +63,7 @@ async function start(override?: Backend): Promise<void> {
     }
     // Started once for the lifetime of the page.
     if (b.onExternalChange) b.onExternalChange(() => void onExternalChange());
+    if (b.onExternalLock) b.onExternalLock(() => void lockedElsewhere().catch(() => undefined));
     startSessionEffects();
     startIdleLock();
     startRouteGuard();
@@ -88,6 +89,7 @@ export function startRouteGuard(): () => void {
 /** Another window changed persisted state (web: other tab). */
 async function onExternalChange(): Promise<void> {
   try {
+    const open = sessionWalletId.value;
     await reloadAppState();
     const list = await refreshWallets();
     const active = list.find((w) => w.id === activeWalletId.value);
@@ -96,8 +98,12 @@ async function onExternalChange(): Promise<void> {
       const next = usableWallets.value[0];
       if (next) await activateWallet(next.id);
       else activeWalletId.value = undefined;
-    } else if (active?.locked && activeWallet.value?.id === active.id) {
-      closeSession();
+    } else if (open && list.find((w) => w.id === open)?.locked) {
+      // The open wallet was locked from another tab: clean up as for a local lock.
+      await lockedElsewhere();
+    } else {
+      // The address count may have been changed in another tab.
+      await reconcileAddresses();
     }
   } catch {
     // Keep the current state; the next change retries.

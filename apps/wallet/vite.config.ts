@@ -2,13 +2,33 @@ import { existsSync } from 'node:fs';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { webSecurityPlugin } from './deploy/security';
 
-const platform = process.env.VITE_PLATFORM ?? 'web';
-if (!['web', 'desktop', 'mock'].includes(platform)) {
-  throw new Error(`unknown VITE_PLATFORM: ${platform}`);
+export const PLATFORMS = ['web', 'desktop', 'mock'] as const;
+export type Platform = (typeof PLATFORMS)[number];
+
+function isPlatform(value: string): value is Platform {
+  return (PLATFORMS as readonly string[]).includes(value);
+}
+
+/**
+ * The platform to build for. The npm scripts select it with the Vite mode
+ * (`--mode web|desktop|mock`), which works in every shell. For other modes
+ * (plain `vite`, `vite build`) VITE_PLATFORM chooses it, default web. Both
+ * set to different platforms is an error rather than a silent choice.
+ */
+export function resolvePlatform(mode: string, override: string | undefined): Platform {
+  const requested = override?.trim() ?? '';
+  if (requested !== '' && !isPlatform(requested)) throw new Error(`unknown VITE_PLATFORM: ${requested}`);
+  if (isPlatform(mode)) {
+    if (requested !== '' && requested !== mode) {
+      throw new Error(`VITE_PLATFORM=${requested} does not match --mode ${mode}: unset VITE_PLATFORM`);
+    }
+    return mode;
+  }
+  return requested === '' ? 'web' : (requested as Platform);
 }
 
 /** Backend modules imported by src/backend/index.ts, by platform. */
-const BACKEND_MODULES: Record<string, string> = { mock: './mock', desktop: './desktop', web: './web/index' };
+const BACKEND_MODULES: Record<Platform, string> = { mock: './mock', desktop: './desktop', web: './web/index' };
 const UNAVAILABLE_BACKEND = '\0mmx-wallet:unavailable-backend';
 const UNUSED_THEME = '\0mmx-wallet:unused-theme';
 
@@ -18,7 +38,7 @@ const UNUSED_THEME = '\0mmx-wallet:unused-theme';
  * without this a desktop build would still emit the web wallet's WASM file and
  * every style's stylesheet and fonts.
  */
-function buildScope(style: string): Plugin {
+function buildScope(style: string, platform: Platform): Plugin {
   let building = false;
   return {
     name: 'mmx-wallet:build-scope',
@@ -50,6 +70,7 @@ function buildScope(style: string): Plugin {
 }
 
 export default defineConfig(({ mode }) => {
+  const platform = resolvePlatform(mode, process.env.VITE_PLATFORM);
   const env = loadEnv(mode, process.cwd(), 'VITE_');
   const style = (process.env.VITE_WALLET_STYLE ?? env.VITE_WALLET_STYLE ?? 'draft').trim() || 'draft';
   if (!/^[a-z0-9-]+$/.test(style) || !existsSync(new URL(`./src/styles/themes/${style}/theme.css`, import.meta.url))) {
@@ -64,7 +85,7 @@ export default defineConfig(({ mode }) => {
     },
     esbuild: { jsx: 'automatic', jsxImportSource: 'preact' },
     // Web: Content-Security-Policy <meta>, inline-code check, _headers, preview headers.
-    plugins: [buildScope(style), ...(platform === 'web' ? [webSecurityPlugin()] : [])],
+    plugins: [buildScope(style, platform), ...(platform === 'web' ? [webSecurityPlugin()] : [])],
     build: {
       target: 'es2022',
       sourcemap: false,

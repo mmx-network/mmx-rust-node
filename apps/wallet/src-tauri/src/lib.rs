@@ -5,13 +5,16 @@
 //! The UI calls one command per backend operation. Each command takes one
 //! JSON object, decoded strictly (see [`args`]), and runs on a blocking
 //! thread. Errors reach the UI as `{code, message}` with the wallet UI's
-//! error codes. The window may only call these commands; it has no direct
-//! access to the clipboard, files or other system services.
+//! error codes. The window may only call these commands and set its own
+//! zoom (zoom keys); it has no direct access to the clipboard, files or
+//! other system services.
 #![cfg_attr(not(feature = "app"), allow(dead_code))]
 
 mod args;
 mod clipboard;
 mod commands;
+#[cfg(feature = "app")]
+mod dialogs;
 mod files;
 mod links;
 
@@ -20,20 +23,19 @@ pub use desktop::run;
 
 pub use commands::COMMANDS;
 
+/// Runs in the window before the page: keeps the web view's browser
+/// functions (reload, history, print, save) out of it; see page_guard.js.
+fn page_guard(macos: bool) -> String {
+    include_str!("page_guard.js").replace("__MACOS__", if macos { "true" } else { "false" })
+}
+
 #[cfg(feature = "app")]
 mod desktop {
-    use crate::{args, clipboard, files, links};
+    use crate::{args, clipboard, dialogs::Dialogs, files, links};
     use mmxwallet::service::{AppState, Error, PreparedSend, Result, Service, WalletInfo};
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::de::DeserializeOwned;
     use serde_json::Value;
-    use std::{
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        },
-        thread,
-        time::Duration,
-    };
+    use std::{sync::Arc, thread, time::Duration};
     use tauri::{
         ipc::{InvokeBody, Request},
         plugin::TauriPlugin,
@@ -41,7 +43,6 @@ mod desktop {
         AppHandle, Manager, RunEvent, State, Url, Window, Wry,
     };
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    use tauri_plugin_dialog::DialogExt;
     use tauri_plugin_window_state::StateFlags;
     use zeroize::Zeroizing;
 
@@ -54,8 +55,7 @@ mod desktop {
         /// The wallet service, or why the wallet directory is unavailable.
         service: std::result::Result<Arc<Service>, Error>,
         clipboard: Arc<clipboard::Guard>,
-        /// A file dialog is open (only one at a time).
-        dialog_open: Arc<AtomicBool>,
+        dialogs: Arc<Dialogs>,
     }
 
     impl Session {
@@ -107,25 +107,30 @@ mod desktop {
         blocking(move || service.wallets()).await
     }
 
-    #[derive(Serialize)]
-    struct Created {
-        wallet: WalletInfo,
-        mnemonic: Zeroizing<String>,
+    /// 24 new recovery words for a new wallet. Nothing is stored: the wallet
+    /// is saved by `create_wallet` once the user has confirmed the words.
+    #[tauri::command]
+    async fn new_recovery_phrase(session: State<'_, Session>) -> Result<Zeroizing<String>> {
+        // Words for a wallet that could not be saved would be no use.
+        session.service()?;
+        blocking(|| Ok(Service::new_mnemonic())).await
     }
 
+    /// Saves a new wallet from the confirmed words of `new_recovery_phrase`
+    /// and makes it active.
     #[tauri::command]
-    async fn create_wallet(session: State<'_, Session>, request: Request<'_>) -> Result<Created> {
+    async fn create_wallet(
+        session: State<'_, Session>,
+        request: Request<'_>,
+    ) -> Result<WalletInfo> {
         let args::Create {
             name,
+            mnemonic,
             passphrase,
             address_count,
         } = decode(&request)?;
         let service = session.service()?;
-        blocking(move || {
-            let (wallet, mnemonic) = service.create(&name, passphrase, address_count)?;
-            Ok(Created { wallet, mnemonic })
-        })
-        .await
+        blocking(move || service.create(&name, mnemonic, passphrase, address_count)).await
     }
 
     #[tauri::command]
@@ -161,6 +166,9 @@ mod desktop {
         blocking(move || service.lock(&id)).await
     }
 
+    /// Locks every wallet. The request is not read: locking never fails
+    /// because of its arguments, and the web wallet's `everywhere` option
+    /// (lock other tabs too) has nothing to reach on the desktop.
     #[tauri::command]
     async fn lock_all(session: State<'_, Session>) -> Result<()> {
         let service = session.service()?;
@@ -330,23 +338,7 @@ mod desktop {
             .await
     }
 
-    /// Allows one file dialog at a time; released when dropped.
-    struct DialogSlot(Arc<AtomicBool>);
-
-    impl DialogSlot {
-        fn take(flag: &Arc<AtomicBool>) -> Option<Self> {
-            flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .ok()
-                .map(|_| Self(Arc::clone(flag)))
-        }
-    }
-
-    impl Drop for DialogSlot {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::Release);
-        }
-    }
-
+    /// `false`: the user cancelled.
     #[tauri::command]
     async fn export_file(
         window: Window,
@@ -359,48 +351,25 @@ mod desktop {
         } = decode(&request)?;
         files::check_export(&contents)?;
         let name = files::export_name(&suggested_name);
-        let Some(slot) = DialogSlot::take(&session.dialog_open) else {
-            return Ok(false);
-        };
+        let dialogs = Arc::clone(&session.dialogs);
         blocking(move || {
-            let _slot = slot;
-            let chosen = window
-                .dialog()
-                .file()
-                .set_file_name(name)
-                .add_filter("JSON", &["json"])
-                .set_parent(&window)
-                .blocking_save_file();
-            let Some(chosen) = chosen else {
+            let Some(path) = dialogs.save(&window, name)? else {
                 return Ok(false);
             };
-            let path = chosen
-                .into_path()
-                .map_err(|_| Error::new("io_error", "the file cannot be saved there"))?;
             files::write_export(&path, &contents)?;
             Ok(true)
         })
         .await
     }
 
+    /// `None`: the user cancelled.
     #[tauri::command]
     async fn import_file(window: Window, session: State<'_, Session>) -> Result<Option<String>> {
-        let Some(slot) = DialogSlot::take(&session.dialog_open) else {
-            return Ok(None);
-        };
+        let dialogs = Arc::clone(&session.dialogs);
         blocking(move || {
-            let _slot = slot;
-            let dialog = window.dialog().file().add_filter("JSON", &["json"]);
-            // Like the dialog plugin's own open command: GTK file choosers
-            // are not attached to the window.
-            #[cfg(any(windows, target_os = "macos"))]
-            let dialog = dialog.set_parent(&window);
-            let Some(chosen) = dialog.blocking_pick_file() else {
+            let Some(path) = dialogs.open(&window)? else {
                 return Ok(None);
             };
-            let path = chosen
-                .into_path()
-                .map_err(|_| Error::new("io_error", "the file cannot be read"))?;
             files::read_import(&path).map(Some)
         })
         .await
@@ -487,15 +456,17 @@ mod desktop {
         let session = Session {
             service: Service::open(None).map(Arc::new),
             clipboard: Arc::default(),
-            dialog_open: Arc::default(),
+            dialogs: Arc::default(),
         };
-        let result = tauri::Builder::default()
+        let builder = tauri::Builder::default()
             .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
                 show_main(app)
             }))
             .plugin(session_plugin())
-            .plugin(tauri_plugin_clipboard_manager::init())
-            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_clipboard_manager::init());
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.plugin(tauri_plugin_dialog::init());
+        let result = builder
             .plugin(
                 tauri_plugin_window_state::Builder::new()
                     .with_state_flags(
@@ -523,6 +494,7 @@ mod desktop {
                     .ok_or("the main window is not configured")?;
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
                     .enable_clipboard_access()
+                    .initialization_script(crate::page_guard(cfg!(target_os = "macos")))
                     .build()?;
                 let handle = app.handle().clone();
                 thread::spawn(move || {
@@ -539,6 +511,7 @@ mod desktop {
                 load_app_state,
                 save_app_state,
                 list_wallets,
+                new_recovery_phrase,
                 create_wallet,
                 import_wallet,
                 unlock_wallet,
@@ -572,7 +545,11 @@ mod desktop {
 mod tests {
     use super::COMMANDS;
     use serde_json::{json, Value};
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, fs, path::Path};
+
+    /// Plugin permissions granted besides the app's own commands: zoom keys
+    /// (Linux, macOS) set the window's zoom through the webview plugin.
+    const PLUGIN_PERMISSIONS: &[&str] = &["core:webview:allow-set-webview-zoom"];
 
     fn json_file(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
@@ -592,6 +569,7 @@ mod tests {
         let expected: BTreeSet<String> = COMMANDS
             .iter()
             .map(|c| format!("allow-{}", c.replace('_', "-")))
+            .chain(PLUGIN_PERMISSIONS.iter().map(|p| p.to_string()))
             .collect();
         assert_eq!(
             granted,
@@ -642,18 +620,20 @@ mod tests {
         );
         for (command, body) in payloads {
             let decoded = match command.as_str() {
-                "load_app_state" | "list_wallets" | "lock_all" | "import_file" => {
-                    *body == json!({})
-                }
+                "load_app_state"
+                | "list_wallets"
+                | "new_recovery_phrase"
+                | "lock_all"
+                | "import_file" => *body == json!({}),
                 "save_app_state" => parse::<args::SaveState>(body).is_ok_and(|s| {
                     s.state.contacts.len() == 2
                         && s.state.labels.values().next().is_some_and(|l| l.len() == 2)
                         && s.state.settings.rpc_url.is_some()
                         && s.state.active_wallet.is_some()
                 }),
-                "create_wallet" => {
-                    parse::<args::Create>(body).is_ok_and(|c| c.passphrase.is_some())
-                }
+                "create_wallet" => parse::<args::Create>(body).is_ok_and(|c| {
+                    c.passphrase.is_some() && c.mnemonic.split_whitespace().count() == 24
+                }),
                 "import_wallet" => {
                     parse::<args::Import>(body).is_ok_and(|i| i.passphrase.is_some())
                 }
@@ -714,6 +694,23 @@ mod tests {
             ),
             (Some(900), Some(620))
         );
+        // Ctrl/Cmd + and - enlarge and shrink the window's content.
+        assert_eq!(windows[0]["zoomHotkeysEnabled"], true);
+        // Package metadata: a Debian section, and a maintainer with an
+        // address (from the Cargo authors) rather than the publisher.
+        assert_eq!(config["bundle"]["linux"]["deb"]["section"], "utils");
+        let manifest = include_str!("../Cargo.toml");
+        let authors = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("authors = "))
+            .expect("Cargo authors");
+        assert!(
+            authors.starts_with("[\"")
+                && authors.contains(" <")
+                && authors.contains("@")
+                && authors.ends_with(">\"]"),
+            "{authors}"
+        );
         // The bundles take their version from package.json.
         let package = json_file(include_str!("../../package.json"));
         let version = package["version"].as_str().unwrap();
@@ -724,5 +721,60 @@ mod tests {
                     .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
             "{version}"
         );
+    }
+
+    /// The value of the first `name = "..."` line in `text`.
+    fn toml_name(text: &str) -> Option<&str> {
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix("name = "))
+            .map(|n| n.trim_matches('"'))
+    }
+
+    /// The deb installs the app as /usr/bin/<binary>: it must not take the
+    /// name of one of the node's programs (such as the `mmx-wallet` wallet
+    /// service), which may come first on PATH.
+    #[test]
+    fn the_binary_name_is_not_a_node_program() {
+        let manifest = include_str!("../Cargo.toml");
+        let binary = manifest
+            .split("[[bin]]")
+            .nth(1)
+            .and_then(toml_name)
+            .expect("[[bin]] name");
+        assert!(manifest.contains(&format!("default-run = \"{binary}\"")));
+
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../crates");
+        let mut programs = BTreeSet::new();
+        for entry in fs::read_dir(crates).unwrap() {
+            let dir = entry.unwrap().path();
+            if let Ok(bins) = fs::read_dir(dir.join("src/bin")) {
+                for bin in bins {
+                    let path = bin.unwrap().path();
+                    if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+                        programs.insert(name.to_owned());
+                    }
+                }
+            }
+            let Ok(cargo) = fs::read_to_string(dir.join("Cargo.toml")) else {
+                continue;
+            };
+            if dir.join("src/main.rs").exists() {
+                programs.extend(toml_name(&cargo).map(str::to_owned));
+            }
+            for bin in cargo.split("[[bin]]").skip(1) {
+                programs.extend(toml_name(bin).map(str::to_owned));
+            }
+        }
+        assert!(programs.contains("mmx-wallet"), "{programs:?}");
+        assert!(!programs.contains(binary), "{binary} is a node program");
+    }
+
+    #[test]
+    fn page_guard_is_complete() {
+        for macos in [false, true] {
+            let script = super::page_guard(macos);
+            assert!(!script.contains("__"), "unfilled template");
+            assert!(script.contains(&format!("const MACOS = {macos};")));
+        }
     }
 }

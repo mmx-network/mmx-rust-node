@@ -41,7 +41,8 @@ function SecuritySettings() {
     if (locking) return;
     setLocking(true);
     try {
-      await lock();
+      // An explicit lock also locks the wallet in other tabs and windows (web).
+      await lock({ everywhere: true });
     } catch (e) {
       notify(errorMessage(e), 'error');
     } finally {

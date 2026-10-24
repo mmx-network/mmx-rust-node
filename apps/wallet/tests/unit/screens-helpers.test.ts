@@ -36,17 +36,28 @@ describe('recipientFromText', () => {
 
 describe('importSummary', () => {
   it('reports added and already saved contacts', () => {
-    expect(importSummary({ status: 'imported', added: 3, skipped: 2 })).toEqual({
+    expect(importSummary({ status: 'imported', added: 3, skipped: 2, full: 0 })).toEqual({
       message: 'Added 3 contacts. 2 were already saved.',
       kind: 'success',
     });
-    expect(importSummary({ status: 'imported', added: 1, skipped: 1 })!.message).toBe('Added 1 contact. 1 was already saved.');
-    expect(importSummary({ status: 'imported', added: 2, skipped: 0 })!.message).toBe('Added 2 contacts.');
+    expect(importSummary({ status: 'imported', added: 1, skipped: 1, full: 0 })!.message).toBe('Added 1 contact. 1 was already saved.');
+    expect(importSummary({ status: 'imported', added: 2, skipped: 0, full: 0 })!.message).toBe('Added 2 contacts.');
+  });
+
+  it('says when the address book is full instead of "already saved"', () => {
+    expect(importSummary({ status: 'imported', added: 0, skipped: 0, full: 5 })).toEqual({
+      message: `You can save up to ${(1000).toLocaleString()} contacts. Delete some to import more.`,
+      kind: 'warning',
+    });
+    expect(importSummary({ status: 'imported', added: 2, skipped: 1, full: 3 })).toEqual({
+      message: 'Added 2 contacts. 1 was already saved. 3 more didn’t fit because your contacts are full.',
+      kind: 'warning',
+    });
   });
 
   it('handles nothing new, invalid files and cancel', () => {
-    expect(importSummary({ status: 'imported', added: 0, skipped: 4 })!.kind).toBe('info');
-    expect(importSummary({ status: 'imported', added: 0, skipped: 0 })!.message).toBe('This file has no contacts to import.');
+    expect(importSummary({ status: 'imported', added: 0, skipped: 4, full: 0 })!.kind).toBe('info');
+    expect(importSummary({ status: 'imported', added: 0, skipped: 0, full: 0 })!.message).toBe('This file has no contacts to import.');
     expect(importSummary({ status: 'invalid' })!.kind).toBe('error');
     expect(importSummary({ status: 'cancelled' })).toBeNull();
   });

@@ -2,6 +2,8 @@
 # Builds the Linux desktop packages (deb and AppImage) in a container and
 # checks that both start. Packages: apps/wallet/artifacts/packages.
 # Arguments are passed to build-linux.sh (e.g. --no-launch-check).
+# REQUIRE_CHAIN=1 fails the command check instead of skipping its chain
+# server checks when the server cannot be reached.
 set -euo pipefail
 wallet=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 repository=$(cd -- "$wallet/../.." && pwd)
@@ -35,4 +37,5 @@ docker run --rm --init \
     --env XDG_CACHE_HOME="$wallet/artifacts/cache" \
     --env npm_config_cache="$wallet/artifacts/cache/npm" \
     --env CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+    --env REQUIRE_CHAIN \
     "$image" nice -n 19 ionice -c 3 "$wallet/scripts/build-linux.sh" "$@"

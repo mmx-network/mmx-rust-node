@@ -46,7 +46,8 @@ const calls: Record<Command, (b: Backend) => Promise<unknown>> = {
   load_app_state: (b) => b.loadAppState(),
   save_app_state: (b) => b.saveAppState(state),
   list_wallets: (b) => b.listWallets(),
-  create_wallet: (b) => b.createWallet({ name: 'Main', passphrase: 'correct horse', addressCount: 10 }),
+  new_recovery_phrase: (b) => b.newRecoveryPhrase(),
+  create_wallet: (b) => b.createWallet({ name: 'Main', mnemonic: WORDS, passphrase: 'correct horse', addressCount: 10 }),
   import_wallet: (b) => b.importWallet({ name: 'Main', mnemonic: WORDS, passphrase: 'correct horse', addressCount: 100 }),
   unlock_wallet: (b) => b.unlockWallet(W, { passphrase: 'correct horse' }),
   lock_wallet: (b) => b.lockWallet(W),
@@ -75,14 +76,15 @@ describe('desktop backend', () => {
 
   for (const command of Object.keys(payloads) as Command[]) {
     it(`sends ${command} with exactly the expected fields`, async () => {
-      await calls[command](backend);
+      // Only the request matters here; the fake app answers null to everything.
+      await calls[command](backend).catch(() => undefined);
       expect(sent()).toEqual({ command, args: payloads[command] });
     });
   }
 
   it('leaves out optional fields that are not set', async () => {
-    await backend.createWallet({ name: 'Main', addressCount: 10 });
-    expect(sent().args).toEqual({ name: 'Main', addressCount: 10 });
+    await backend.createWallet({ name: 'Main', mnemonic: WORDS, addressCount: 10 });
+    expect(sent().args).toEqual({ name: 'Main', mnemonic: WORDS, addressCount: 10 });
     ipc.invoke.mockClear();
     await backend.unlockWallet(W, {});
     expect(sent().args).toEqual({ id: W });
@@ -139,6 +141,18 @@ describe('desktop backend', () => {
       contacts: [],
       settings: { theme: 'system', autoLockMinutes: 15, feeLevel: 1 },
     });
+  });
+
+  it('returns new recovery words only as text', async () => {
+    ipc.invoke.mockResolvedValueOnce(WORDS);
+    expect(await backend.newRecoveryPhrase()).toBe(WORDS);
+    ipc.invoke.mockResolvedValueOnce({ words: WORDS });
+    await expect(backend.newRecoveryPhrase()).rejects.toMatchObject({ code: 'internal' });
+  });
+
+  it('locks its single window only', async () => {
+    await backend.lockAll({ everywhere: true });
+    expect(sent()).toEqual({ command: 'lock_all', args: {} });
   });
 
   it('is unavailable outside the desktop app', async () => {

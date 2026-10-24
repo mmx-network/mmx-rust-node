@@ -24,6 +24,16 @@ test('creates a wallet and moves through every screen', async ({ page }) => {
     await capture(page, `screen-${name.toLowerCase()}`);
   }
 
+  // Narrow phones: the Overview action labels are not cut off.
+  for (const width of [360, 320]) {
+    await page.setViewportSize({ width, height: MOBILE.height });
+    await expectNoSideScroll(page);
+    const labels = page.locator('.overview-hero__actions .btn__label');
+    expect(await labels.count()).toBeGreaterThan(0);
+    for (const fit of await labels.evaluateAll((els) => els.map((el) => el.scrollWidth <= el.clientWidth))) expect(fit).toBe(true);
+  }
+  await page.setViewportSize(MOBILE);
+
   await page.getByRole('button', { name: 'Lock', exact: true }).click();
   await expect(page).toHaveURL(/#\/unlock$/u);
   await expectNoSideScroll(page);

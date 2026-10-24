@@ -182,13 +182,16 @@ export function serializeContacts(contacts: readonly Contact[]): string {
   );
 }
 
+/** Largest contacts file accepted for import, on every platform (desktop: src-tauri files.rs). */
+export const CONTACTS_FILE_MAX_BYTES = 2 * 1024 * 1024;
+
 /**
  * Parses a contacts file: this app's format, or a plain array of
  * `{name, address, note?}`. Returns null when the file is not a contacts file.
  * Invalid entries are dropped.
  */
 export function parseContactsFile(text: string): Contact[] | null {
-  if (text.length > 1024 * 1024) return null;
+  if (text.length > CONTACTS_FILE_MAX_BYTES) return null;
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -207,7 +210,10 @@ export function parseContactsFile(text: string): Contact[] | null {
 export interface MergeResult {
   contacts: Contact[];
   added: number;
+  /** Addresses already saved (or repeated in the file). */
   skipped: number;
+  /** New addresses left out because the address book is full. */
+  full: number;
 }
 
 /** Adds incoming contacts whose address is not saved yet; existing contacts are kept unchanged. */
@@ -217,9 +223,14 @@ export function mergeContacts(existing: readonly Contact[], incoming: readonly C
   const ids = new Set(existing.map((c) => c.id));
   let added = 0;
   let skipped = 0;
+  let full = 0;
   for (const c of incoming) {
-    if (addresses.has(c.address) || contacts.length >= MAX_CONTACTS) {
+    if (addresses.has(c.address)) {
       skipped++;
+      continue;
+    }
+    if (contacts.length >= MAX_CONTACTS) {
+      full++;
       continue;
     }
     const id = ids.has(c.id) ? randomId('c-') : c.id;
@@ -228,5 +239,5 @@ export function mergeContacts(existing: readonly Contact[], incoming: readonly C
     ids.add(id);
     added++;
   }
-  return { contacts, added, skipped };
+  return { contacts, added, skipped, full };
 }

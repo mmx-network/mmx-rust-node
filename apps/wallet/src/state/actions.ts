@@ -1,14 +1,23 @@
 /** Small UI actions: clipboard and explorer links. */
 import { addressUrl, transactionUrl } from '../lib/explorer';
 import { errorMessage } from '../lib/errors';
-import { backend } from './core';
+import { backend, platform } from './core';
 import { notify } from './toasts';
 
-/** Copies text. Sensitive text (recovery words) is cleared from the clipboard after a minute. */
+/**
+ * Confirmation for copied recovery words. The desktop app clears the
+ * clipboard after a minute; browsers allow that only around user actions, so
+ * the web promises no time.
+ */
+export function sensitiveCopyMessage(): string {
+  return platform.value === 'web' ? 'Copied. Clear your clipboard after pasting.' : 'Copied. The clipboard clears in 1 minute.';
+}
+
+/** Copies text. Sensitive text (recovery words) is cleared from the clipboard as soon as possible. */
 export async function copyToClipboard(text: string, options: { sensitive?: boolean; message?: string } = {}): Promise<boolean> {
   try {
     await backend().copyText(text, options.sensitive === true);
-    notify(options.message ?? (options.sensitive ? 'Copied. The clipboard clears in 1 minute.' : 'Copied'), 'success', 2500);
+    notify(options.message ?? (options.sensitive ? sensitiveCopyMessage() : 'Copied'), 'success', options.sensitive ? 5000 : 2500);
     return true;
   } catch (e) {
     notify(errorMessage(e), 'error');

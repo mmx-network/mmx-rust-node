@@ -1,6 +1,6 @@
 /** Address book and address labels. */
 import { computed } from '@preact/signals';
-import { BackendError, type Contact } from '../backend/types';
+import { BackendError, isBackendError, type Contact } from '../backend/types';
 import {
   cleanLabel,
   hasErrors,
@@ -77,11 +77,14 @@ export async function deleteContact(id: string): Promise<Contact | undefined> {
   return contact;
 }
 
-/** Re-adds a deleted contact unless its address was saved again meanwhile. */
-export async function restoreContact(contact: Contact): Promise<boolean> {
-  if (contacts.value.some((c) => c.address === contact.address) || contacts.value.length >= MAX_CONTACTS) return false;
+export type RestoreResult = 'restored' | 'duplicate' | 'full';
+
+/** Re-adds a deleted contact unless its address was saved again meanwhile or the address book is full. */
+export async function restoreContact(contact: Contact): Promise<RestoreResult> {
+  if (contacts.value.some((c) => c.address === contact.address)) return 'duplicate';
+  if (contacts.value.length >= MAX_CONTACTS) return 'full';
   await persistAppState((s) => ({ ...s, contacts: [...s.contacts, contact] }));
-  return true;
+  return 'restored';
 }
 
 /** Saves contacts to a file. Resolves false when cancelled. */
@@ -91,12 +94,21 @@ export async function exportContacts(): Promise<boolean> {
 
 export type ImportContactsResult =
   | { status: 'cancelled' }
+  /** The file could not be read (desktop: permissions, a folder, a broken link). */
+  | { status: 'unreadable' }
   | { status: 'invalid' }
-  | { status: 'imported'; added: number; skipped: number };
+  /** skipped: already saved or one of your addresses; full: left out because the address book is full. */
+  | { status: 'imported'; added: number; skipped: number; full: number };
 
 /** Reads a contacts file and adds contacts whose address is not saved yet. */
 export async function importContacts(): Promise<ImportContactsResult> {
-  const text = await backend().importFile();
+  let text: string | null;
+  try {
+    text = await backend().importFile();
+  } catch (e) {
+    if (isBackendError(e, 'io_error')) return { status: 'unreadable' };
+    throw e;
+  }
   if (text === null) return { status: 'cancelled' };
   const incoming = parseContactsFile(text);
   if (!incoming) return { status: 'invalid' };
@@ -104,7 +116,7 @@ export async function importContacts(): Promise<ImportContactsResult> {
   const candidates = incoming.filter((c) => !own.has(c.address));
   const result = mergeContacts(contacts.value, candidates);
   if (result.added > 0) await persistAppState((s) => ({ ...s, contacts: mergeContacts(s.contacts, candidates).contacts }));
-  return { status: 'imported', added: result.added, skipped: result.skipped + (incoming.length - candidates.length) };
+  return { status: 'imported', added: result.added, skipped: result.skipped + (incoming.length - candidates.length), full: result.full };
 }
 
 /** Sets or clears (empty text) the label of an address of the active wallet. */

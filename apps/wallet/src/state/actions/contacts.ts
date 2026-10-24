@@ -1,4 +1,5 @@
 /** Contacts screen: user-facing validation messages, import/export and delete with undo. */
+import { signal } from '@preact/signals';
 import { isBackendError, type Contact } from '../../backend/types';
 import { CONTACT_NAME_MAX, CONTACT_NOTE_MAX, MAX_CONTACTS, type ContactErrors } from '../../lib/appstate';
 import { errorMessage } from '../../lib/errors';
@@ -57,23 +58,46 @@ export function contactErrorMessages(errors: ContactErrors, address = ''): Conta
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
+const FULL_MESSAGE = `You can save up to ${MAX_CONTACTS.toLocaleString()} contacts.`;
+
 /** Toast for an import result; null when the user cancelled. */
 export function importSummary(result: ImportContactsResult): { message: string; kind: ToastKind } | null {
   switch (result.status) {
     case 'cancelled':
       return null;
+    case 'unreadable':
+      return { message: 'This file can’t be opened. Choose another file.', kind: 'error' };
     case 'invalid':
       return { message: 'This file has no contacts to import.', kind: 'error' };
     case 'imported': {
-      const { added, skipped } = result;
+      const { added, skipped, full } = result;
       if (added === 0) {
+        if (full > 0) return { message: `${FULL_MESSAGE} Delete some to import more.`, kind: 'warning' };
         return skipped > 0
           ? { message: 'No new contacts. They are all saved already.', kind: 'info' }
           : { message: 'This file has no contacts to import.', kind: 'info' };
       }
       const already = skipped > 0 ? ` ${plural(skipped, 'was', 'were')} already saved.` : '';
-      return { message: `Added ${plural(added, 'contact', 'contacts')}.${already}`, kind: 'success' };
+      const left = full > 0 ? ` ${full} more didn’t fit because your contacts are full.` : '';
+      return { message: `Added ${plural(added, 'contact', 'contacts')}.${already}${left}`, kind: full > 0 ? 'warning' : 'success' };
     }
+  }
+}
+
+/**
+ * A contacts file dialog or import is in progress. Module-level so the
+ * spinner survives leaving and reopening the Contacts screen.
+ */
+export const contactsTransferring = signal(false);
+
+/** Runs one import or export at a time; a second request while one runs is ignored. */
+export async function runContactsTransfer(task: () => Promise<void>): Promise<void> {
+  if (contactsTransferring.value) return;
+  contactsTransferring.value = true;
+  try {
+    await task();
+  } finally {
+    contactsTransferring.value = false;
   }
 }
 
@@ -83,7 +107,12 @@ export async function importContactsFromFile(): Promise<void> {
   try {
     result = await importContacts();
   } catch (e) {
-    notify(isBackendError(e, 'invalid_argument') ? 'This file has no contacts to import.' : errorMessage(e), 'error');
+    const message = isBackendError(e, 'invalid_argument')
+      ? 'This file has no contacts to import.'
+      : isBackendError(e, 'io_error')
+        ? "This file can't be opened."
+        : errorMessage(e);
+    notify(message, 'error');
     return;
   }
   const summary = importSummary(result);
@@ -116,8 +145,9 @@ export async function deleteContactWithUndo(id: string): Promise<boolean> {
       label: 'Undo',
       onClick: () => {
         restoreContact(contact).then(
-          (restored) => {
-            if (!restored) notify('This address is saved again already.', 'info');
+          (result) => {
+            if (result === 'duplicate') notify('This address is saved again already.', 'info');
+            else if (result === 'full') notify(`${FULL_MESSAGE} Delete one to add another.`, 'info');
           },
           (e: unknown) => notify(errorMessage(e), 'error'),
         );

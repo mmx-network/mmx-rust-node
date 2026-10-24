@@ -11,6 +11,7 @@ import {
   groupRows,
   memoFromTx,
   mergeActivity,
+  repeatRecipient,
   type ActivityFilter,
   type ActivityItem,
   type ActivityStatus,
@@ -23,15 +24,17 @@ import {
   frontier,
   loadFirstPage,
   loadOlderPage,
+  maxHeight,
   PAGE_LIMIT,
   refreshAddress,
   totalRows,
   WALLET_ROW_CAP,
   type AddressHistory,
 } from '../chain/history';
-import { nextStatus, pendingOutgoing, prunePending, type PendingTx } from '../chain/pending';
+import { nextStatus, pendingOutgoing, pendingReserved, prunePending, type PendingTx } from '../chain/pending';
 import { Backoff, checkNode, RpcClient } from '../chain/rpc';
 import { buildSeries, coverageTarget, estimateTime, type BalanceSeries, type SeriesRange } from '../chain/series';
+import { tokenVerifier } from '../chain/tokens';
 import type { ChainParams, TxInfo } from '../chain/types';
 import { NATIVE_CONTRACT, normalizeAddress } from '../lib/address';
 import { formatAmount } from '../lib/amount';
@@ -91,6 +94,18 @@ interface Session {
   addresses: string[];
   balances: Map<string, AddressBalance>;
   history: Map<string, AddressHistory>;
+  /**
+   * Addresses whose history changed since their balance was last fetched.
+   * Kept on the session so a failed sync cannot lose a needed refetch.
+   */
+  balanceDirty: Set<string>;
+  /**
+   * Per address, the newest history height already shown after a sync. Only
+   * rows above it can be announced as received, so older rows revealed by
+   * "load more", chart coverage or a newly added address never are, and rows
+   * a lagging server hid for a while are not announced twice.
+   */
+  seenTop: Map<string, number>;
   head?: number;
   headTimeMs: number;
   lastSeenHeight?: number;
@@ -100,6 +115,10 @@ interface Session {
   syncing: boolean;
   syncAgain: boolean;
   syncTimer: ReturnType<typeof setTimeout> | null;
+  /** Retry delay after failed syncs (starts at the minimum sync interval). */
+  syncBackoff: Backoff;
+  /** No automatic sync before this time (ms) after a failure. */
+  syncRetryAt: number;
   synced: boolean;
   lock: Promise<unknown>;
 }
@@ -139,25 +158,36 @@ export const nativeAsset = computed(() => assets.value?.find((a) => a.native) ??
 export const verifiedAssets = computed(() => assets.value?.filter((a) => a.verified) ?? []);
 /** Tokens not on the whitelist ("Other tokens"). */
 export const otherAssets = computed(() => assets.value?.filter((a) => !a.verified) ?? []);
-const verifiedContracts = computed(() => new Set(verifiedAssets.value.map((a) => a.contract)));
+/** Whether a contract is native MMX or a verified token on the server's network. */
+const isVerified = computed(() => tokenVerifier(params.value?.network));
 
+/** Lowest height down to which activity is complete for the whole wallet (Infinity until loaded). */
+const historyFrontier = computed(() => frontier(historyMap.value, addresses.value));
 /** First pages of all addresses are loaded. */
-export const historyLoaded = computed(() => frontier(historyMap.value, addresses.value) !== Infinity);
+export const historyLoaded = computed(() => historyFrontier.value !== Infinity);
 export const balancesLoaded = computed(() => assets.value !== null);
 
 const completeHistoryRows = computed(() => completeRows(historyMap.value, addresses.value));
-const historyItems = computed(() => groupRows(completeHistoryRows.value, (c) => verifiedContracts.value.has(c)));
+const historyItems = computed(() => groupRows(completeHistoryRows.value, isVerified.value));
 export const walletPending = computed(() => pendingTxs.value.filter((p) => p.walletId === sessionWalletId.value));
 /** All activity items, newest first (local sends on top). */
-export const activity = computed<ActivityItem[]>(() => mergeActivity(historyItems.value, walletPending.value, ownAddressSet.value));
+export const activity = computed<ActivityItem[]>(() =>
+  mergeActivity(historyItems.value, walletPending.value, ownAddressSet.value, isVerified.value),
+);
 export const filteredActivity = computed(() => filterItems(activity.value, activityFilter.value));
 export const visibleActivity = computed(() => filteredActivity.value.slice(0, activityLimit.value));
 export const activityHasMore = computed(
   () => filteredActivity.value.length > activityLimit.value || canExtend(historyMap.value, addresses.value),
 );
 export const recentActivity = computed(() => activity.value.slice(0, 5));
-/** Pending outgoing per contract (MMX includes fees). */
-export const pendingOutgoingTotals = computed(() => pendingOutgoing(walletPending.value, NATIVE_CONTRACT));
+/** What open sends will take out of the wallet, per contract (MMX includes fees; moves count only the fee). */
+export const pendingOutgoingTotals = computed(() => pendingOutgoing(walletPending.value, NATIVE_CONTRACT, ownAddressSet.value));
+/**
+ * What open sends hold back from spending until they confirm, per contract
+ * (amount plus fee, moves to own addresses included). Subtract it from the
+ * balance for the amount that can be sent now.
+ */
+export const pendingReservedTotals = computed(() => pendingReserved(walletPending.value, NATIVE_CONTRACT));
 
 export interface AddressRow {
   index: number;
@@ -234,6 +264,8 @@ export async function openSession(walletId: string): Promise<boolean> {
     addresses: list as string[],
     balances: new Map(),
     history: new Map(),
+    balanceDirty: new Set(),
+    seenTop: new Map(),
     headTimeMs: 0,
     lastSyncAt: 0,
     lastFullBalanceAt: 0,
@@ -241,6 +273,8 @@ export async function openSession(walletId: string): Promise<boolean> {
     syncing: false,
     syncAgain: false,
     syncTimer: null,
+    syncBackoff: new Backoff(MIN_SYNC_INTERVAL_MS, MAX_SYNC_RETRY_MS),
+    syncRetryAt: 0,
     synced: false,
     lock: Promise.resolve(),
   };
@@ -250,6 +284,9 @@ export async function openSession(walletId: string): Promise<boolean> {
     balanceMap.value = null;
     historyMap.value = new Map();
     chainError.value = null;
+    // Requests of the previous wallet may still run; they no longer own these flags.
+    activityLoadingMore.value = false;
+    seriesLoading.value = false;
     activityFilter.value = { kind: 'all', contract: null };
     activityLimit.value = ACTIVITY_PAGE;
     seriesContract.value = NATIVE_CONTRACT;
@@ -282,12 +319,22 @@ export function closeSession(): void {
   });
 }
 
-/** Clears cached transaction details and local sends of the given wallets (on lock). */
-export function forgetWalletData(walletIds: ReadonlySet<string> | 'all'): void {
+/**
+ * Clears cached transaction details and the local sends of the given wallets.
+ * On lock (the default) sends still on their way are kept: the server does not
+ * report them, so dropping them would hide a just-sent or unconfirmed transfer
+ * after unlocking and invite sending it twice. They stay hidden while the
+ * wallet is locked and are followed again once it is open. Removing a wallet
+ * passes `keepPending: false` to drop everything.
+ */
+export function forgetWalletData(walletIds: ReadonlySet<string> | 'all', options: { keepPending?: boolean } = {}): void {
+  const keepPending = options.keepPending ?? true;
   txCache.clear();
   batch(() => {
     txCacheVersion.value++;
-    pendingTxs.value = walletIds === 'all' ? [] : pendingTxs.value.filter((p) => !walletIds.has(p.walletId));
+    pendingTxs.value = pendingTxs.value.filter(
+      (p) => (keepPending && p.status === 'pending') || (walletIds !== 'all' && !walletIds.has(p.walletId)),
+    );
   });
 }
 
@@ -295,6 +342,42 @@ function withLock<T>(s: Session, fn: () => Promise<T>): Promise<T> {
   const run = s.lock.then(fn);
   s.lock = run.catch(() => undefined);
   return run;
+}
+
+/** Notes the newest rows of an address as already shown (see Session.seenTop). */
+function markSeen(s: Session, address: string): void {
+  const h = s.history.get(address);
+  if (!h) return;
+  s.seenTop.set(address, Math.max(s.seenTop.get(address) ?? -1, maxHeight(h.rows)));
+}
+
+/**
+ * Pages newly loaded addresses down to `floor` (the wallet's frontier before
+ * they were added) so adding them does not cut the activity short. Stops at
+ * the wallet row cap; a failed page keeps what was loaded, which is still
+ * contiguous. Returns null when the session was replaced meanwhile.
+ */
+async function pageDownTo(
+  s: Session,
+  added: readonly string[],
+  pages: readonly AddressHistory[],
+  floor: number,
+  p: ChainParams,
+): Promise<AddressHistory[] | null> {
+  const out = pages.slice();
+  for (;;) {
+    const open = out.flatMap((h, i) => (!h.exhausted && h.bottom > floor ? [i] : []));
+    const rows = totalRows(s.history, s.addresses) + out.reduce((n, h) => n + h.rows.length, 0);
+    if (open.length === 0 || rows >= WALLET_ROW_CAP) return out;
+    const results = await Promise.allSettled(open.map((i) => loadOlderPage(rpc(), added[i]!, out[i]!, p)));
+    if (s !== current) return null;
+    let failed = false;
+    results.forEach((r, k) => {
+      if (r.status === 'fulfilled') out[open[k]!] = r.value;
+      else failed = true;
+    });
+    if (failed) return out;
+  }
 }
 
 /**
@@ -313,14 +396,22 @@ export async function applyAddresses(raw: readonly string[]): Promise<void> {
     if (added.length > 0 && s.head !== undefined) {
       try {
         const p = await ensureParams();
-        const head = s.head;
-        const [pages, balances] = await Promise.all([
-          Promise.all(added.map((a) => loadFirstPage(rpc(), a, p, head))),
+        const floor = frontier(s.history, s.addresses);
+        const [firstPages, balances] = await Promise.all([
+          Promise.all(added.map((a) => loadFirstPage(rpc(), a, p))),
           fetchBalances(rpc(), added, p),
         ]);
         if (s !== current) return;
-        added.forEach((a, i) => s.history.set(a, pages[i]!));
-        for (const [a, b] of balances) s.balances.set(a, b);
+        const pages = await pageDownTo(s, added, firstPages, floor, p);
+        if (!pages) return;
+        added.forEach((a, i) => {
+          s.history.set(a, pages[i]!);
+          markSeen(s, a);
+        });
+        for (const [a, b] of balances) {
+          s.balances.set(a, b);
+          s.balanceDirty.delete(a);
+        }
       } catch {
         s.needsSync = true;
       }
@@ -329,6 +420,8 @@ export async function applyAddresses(raw: readonly string[]): Promise<void> {
     const keep = new Set(next);
     for (const a of [...s.history.keys()]) if (!keep.has(a)) s.history.delete(a);
     for (const a of [...s.balances.keys()]) if (!keep.has(a)) s.balances.delete(a);
+    for (const a of [...s.balanceDirty]) if (!keep.has(a)) s.balanceDirty.delete(a);
+    for (const a of [...s.seenTop.keys()]) if (!keep.has(a)) s.seenTop.delete(a);
     s.addresses = next;
     batch(() => {
       addresses.value = next.slice();
@@ -345,6 +438,8 @@ export async function applyAddresses(raw: readonly string[]): Promise<void> {
 const POLL_VISIBLE_MS = 10_000;
 const POLL_HIDDEN_MS = 30_000;
 const MIN_SYNC_INTERVAL_MS = 20_000;
+/** Longest wait between automatic retries of a failing sync. */
+const MAX_SYNC_RETRY_MS = 5 * 60_000;
 const FULL_BALANCE_INTERVAL_MS = 5 * 60_000;
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -403,9 +498,14 @@ async function poll(): Promise<void> {
   }
 }
 
+/**
+ * Runs a sync now or arms a timer for it: at most every 20 s, and after
+ * failures not before the backoff allows. `force` (user refresh, address
+ * change) skips both.
+ */
 function requestSync(s: Session, force = false): void {
   if (s !== current) return;
-  const wait = force ? 0 : s.lastSyncAt + MIN_SYNC_INTERVAL_MS - Date.now();
+  const wait = force ? 0 : Math.max(s.lastSyncAt + MIN_SYNC_INTERVAL_MS, s.syncRetryAt) - Date.now();
   if (wait <= 0) {
     if (s.syncTimer) {
       clearTimeout(s.syncTimer);
@@ -446,32 +546,29 @@ async function runSync(s: Session): Promise<void> {
   const startedAt = Date.now();
   try {
     const p = await ensureParams();
-    const before = new Set(historyItems.peek().map((i) => i.key));
-    const wasSynced = s.synced;
     await withLock(s, async () => {
-      const changed = new Set<string>();
       const historyTask = firstError(
         s.addresses.map(async (a) => {
           const h = s.history.get(a);
           if (!h) {
-            const fresh = await loadFirstPage(rpc(), a, p, head);
+            const fresh = await loadFirstPage(rpc(), a, p);
             if (s === current) {
               s.history.set(a, fresh);
-              changed.add(a);
+              s.balanceDirty.add(a);
             }
             return;
           }
           let result: { history: AddressHistory; changed: boolean };
           try {
-            result = await refreshAddress(rpc(), a, h, p, head);
+            result = await refreshAddress(rpc(), a, h, p);
           } catch (e) {
             // Too many new rows to page through: start this address over.
             if (!(e instanceof RangeError)) throw e;
-            result = { history: await loadFirstPage(rpc(), a, p, head), changed: true };
+            result = { history: await loadFirstPage(rpc(), a, p), changed: true };
           }
           if (s === current) {
             s.history.set(a, result.history);
-            if (result.changed) changed.add(a);
+            if (result.changed) s.balanceDirty.add(a);
           }
         }),
       );
@@ -479,18 +576,26 @@ async function runSync(s: Session): Promise<void> {
       if (full) {
         // Wait for both so no request mutates the session after the lock is released.
         const [history, balances] = await Promise.allSettled([historyTask, fetchBalances(rpc(), s.addresses, p)]);
+        if (s !== current) return;
+        // A complete snapshot is kept even when history failed, so the retry
+        // does not fetch every balance again; it is published with the history.
+        if (balances.status === 'fulfilled') {
+          s.balances = new Map(balances.value);
+          s.lastFullBalanceAt = startedAt;
+          s.balanceDirty.clear();
+        }
         if (history.status === 'rejected') throw history.reason;
         if (balances.status === 'rejected') throw balances.reason;
-        if (s !== current) return;
-        s.balances = new Map(balances.value);
-        s.lastFullBalanceAt = startedAt;
       } else {
         await historyTask;
-        const targets = s.addresses.filter((a) => changed.has(a) || !s.balances.has(a));
+        const targets = s.addresses.filter((a) => s.balanceDirty.has(a) || !s.balances.has(a));
         if (targets.length > 0) {
           const balances = await fetchBalances(rpc(), targets, p);
           if (s !== current) return;
-          for (const [a, b] of balances) s.balances.set(a, b);
+          for (const [a, b] of balances) {
+            s.balances.set(a, b);
+            s.balanceDirty.delete(a);
+          }
         }
       }
       if (s !== current) return;
@@ -505,11 +610,14 @@ async function runSync(s: Session): Promise<void> {
     s.lastSyncAt = Date.now();
     s.needsSync = false;
     s.synced = true;
+    s.syncBackoff.reset();
+    s.syncRetryAt = 0;
     chainError.value = null;
-    if (wasSynced) announceReceived(before);
+    announceReceived(s);
   } catch (e) {
     if (s === current) {
       s.needsSync = true;
+      s.syncRetryAt = Date.now() + s.syncBackoff.fail();
       chainError.value = toBackendError(e).code;
     }
   } finally {
@@ -521,8 +629,23 @@ async function runSync(s: Session): Promise<void> {
   }
 }
 
-function announceReceived(before: ReadonlySet<string>): void {
-  const fresh = historyItems.peek().filter((i) => !before.has(i.key) && i.kind === 'received' && i.primary?.verified);
+/**
+ * Announces verified transfers received since the previous successful sync:
+ * items with a row above what each address had already shown (Session.seenTop),
+ * then records the new tops. Addresses seen for the first time are recorded
+ * without announcing, so nothing is announced on the first sync.
+ */
+function announceReceived(s: Session): void {
+  const items = historyItems.peek();
+  const fresh = items.filter((i) => {
+    const height = i.height;
+    if (i.kind !== 'received' || !i.primary?.verified || height === undefined) return false;
+    return i.ownAddresses.some((a) => {
+      const top = s.seenTop.get(a);
+      return top !== undefined && height > top;
+    });
+  });
+  for (const a of s.addresses) markSeen(s, a);
   if (fresh.length === 1) {
     const a = fresh[0]!.primary!;
     notify(`Received ${formatAmount(a.amount, a.decimals)} ${a.symbol}`, 'success');
@@ -609,10 +732,21 @@ export function setActivityFilter(filter: Partial<ActivityFilter>): void {
   });
 }
 
-/** Fetches older history until the chart range is covered (or nothing more exists). */
+/** The coverage run in progress and the range to check again once it ends. */
+let coverageRun: { session: Session; range: SeriesRange; again: SeriesRange | null } | null = null;
+
+/**
+ * Fetches older history until the chart range is covered (or nothing more
+ * exists). Called whenever the range or the wallet's frontier changes; while a
+ * run is in progress later calls only ask it to check again when it ends.
+ */
 async function ensureCoverage(range: SeriesRange): Promise<void> {
   const s = current;
   if (!s) return;
+  if (coverageRun?.session === s) {
+    coverageRun.again = range;
+    return;
+  }
   const target = coverageTarget(range, Date.now());
   const done = () => {
     const f = frontier(s.history, s.addresses);
@@ -621,14 +755,21 @@ async function ensureCoverage(range: SeriesRange): Promise<void> {
     return frontierTime(s.history, s.addresses, f) <= target;
   };
   if (done() || !canExtend(s.history, s.addresses)) return;
+  const run = { session: s, range, again: null as SeriesRange | null };
+  coverageRun = run;
   seriesLoading.value = true;
+  let failed = false;
   try {
     await extendHistory(s, done, 40);
   } catch {
-    // The chart shows the covered part; the next range change retries.
+    // The chart shows the covered part; the next range or frontier change retries.
+    failed = true;
   } finally {
+    if (coverageRun === run) coverageRun = null;
     if (s === current) seriesLoading.value = false;
   }
+  // After a failure only a different range (a new choice) is tried right away.
+  if (run.again && s === current && (!failed || run.again !== range)) await ensureCoverage(run.again);
 }
 
 export function setSeriesRange(range: SeriesRange): void {
@@ -722,6 +863,25 @@ export function counterpartyFor(item: ActivityItem): Counterparty | null | undef
   return address ? describeAddress(address) : null;
 }
 
+/**
+ * Recipient for repeating a sent item as a plain transfer ("Send again").
+ * undefined while transaction details load (a lookup is started), null when
+ * the item cannot be repeated that way: not a send, a send to the wallet
+ * itself, a contract call such as an NFT purchase, or a payment to several
+ * recipients.
+ */
+export function repeatRecipientFor(item: ActivityItem): string | null | undefined {
+  if (item.kind !== 'sent') return null;
+  if (item.local) return item.to && !ownAddressSet.value.has(item.to) ? item.to : null;
+  const tx = cachedTx(item.txid);
+  if (tx === undefined) {
+    requestTx(item.txid);
+    return undefined;
+  }
+  if (tx === null) return null;
+  return repeatRecipient(item, tx, ownAddressSet.value) ?? null;
+}
+
 /** Memo of an item, using transaction details when history lacks it. */
 export function memoFor(item: ActivityItem): string | undefined {
   if (item.memo) return item.memo;
@@ -749,9 +909,13 @@ export function activityItem(key: string): ActivityItem | undefined {
 
 /** Starts visibility handling and chart coverage; returns a stop function. */
 export function startSessionEffects(): () => void {
+  // Follows the frontier, not just "loaded": an added address or an address
+  // reloaded after a burst of activity raises it, and the chart range must be
+  // covered again.
   const stopCoverage = effect(() => {
     const range = seriesRange.value;
-    if (!historyLoaded.value || !sessionWalletId.value) return;
+    const f = historyFrontier.value;
+    if (f === Infinity || !sessionWalletId.value) return;
     untracked(() => void ensureCoverage(range));
   });
   if (typeof document === 'undefined') return stopCoverage;

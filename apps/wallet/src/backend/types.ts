@@ -18,7 +18,10 @@ export interface WalletInfo {
   addressCount: number;
   /** Set when the wallet cannot be read (desktop: corrupt key file). */
   error?: string;
-  /** Web only: false until the saved credential has been opened once on this device. */
+  /**
+   * Web only: false for a wallet that an earlier version stored before its
+   * saved credential was confirmed. Missing means confirmed.
+   */
   verified?: boolean;
 }
 
@@ -79,8 +82,20 @@ export interface PreparedSend {
 
 export interface CreateWalletRequest {
   name: string;
+  /** Recovery words from `newRecoveryPhrase()`, already confirmed by the user. */
+  mnemonic: string;
   passphrase?: string;
   addressCount: number;
+}
+
+export interface FingerprintRequest {
+  mnemonic: string;
+  passphrase?: string;
+}
+
+export interface LockOptions {
+  /** Web: also lock the wallets open in other tabs and windows (explicit Lock only). */
+  everywhere?: boolean;
 }
 
 export interface ImportWalletRequest {
@@ -109,11 +124,24 @@ export interface Backend {
   saveAppState(s: AppState): Promise<void>;
 
   listWallets(): Promise<WalletInfo[]>;
-  createWallet(r: CreateWalletRequest): Promise<{ wallet: WalletInfo; mnemonic: string }>;
+  /** 24 new recovery words (lowercase, single spaces). Stores nothing. */
+  newRecoveryPhrase(): Promise<string>;
+  /**
+   * Stores a new wallet once its recovery words were confirmed, opens it and
+   * makes it the active wallet. Fails with `wallet_exists` when the wallet is
+   * already on this device.
+   */
+  createWallet(r: CreateWalletRequest): Promise<WalletInfo>;
+  /**
+   * Web only: the wallet ID (fingerprint) that the words open with this
+   * passphrase, for the password manager username of a new wallet. Stores nothing.
+   */
+  walletFingerprint?(r: FingerprintRequest): Promise<string>;
   importWallet(r: ImportWalletRequest): Promise<WalletInfo>;
   unlockWallet(id: WalletId, r: UnlockRequest): Promise<WalletInfo>;
   lockWallet(id: WalletId): Promise<void>;
-  lockAll(): Promise<void>;
+  /** Locks every wallet of this window; `everywhere` also signals other tabs (web). */
+  lockAll(opts?: LockOptions): Promise<void>;
   renameWallet(id: WalletId, name: string): Promise<void>;
   /** Returns the wallet's addresses after the change. */
   setAddressCount(id: WalletId, n: number): Promise<string[]>;
@@ -130,13 +158,17 @@ export interface Backend {
   broadcast(walletId: WalletId, txid: string): Promise<void>;
   discardPrepared(txid: string): Promise<void>;
 
-  /** sensitive → the clipboard is cleared after 60 s (if it still holds the text). */
+  /**
+   * sensitive → the clipboard is cleared after 60 s if it still holds the text
+   * (desktop). Browsers allow that only around user actions, so the web clears
+   * it on a best-effort basis.
+   */
   copyText(text: string, sensitive?: boolean): Promise<void>;
   /** Explorer links only. */
   openExternal(url: string): Promise<void>;
   /** Resolves false when the user cancelled. */
   exportFile(suggestedName: string, contents: string): Promise<boolean>;
-  /** JSON text ≤ 1 MiB, null when the user cancelled. */
+  /** JSON text ≤ 2 MiB, null when the user cancelled. */
   importFile(): Promise<string | null>;
 
   /**
@@ -144,6 +176,13 @@ export interface Backend {
    * window (web: `storage` event from another tab). Returns an unsubscribe function.
    */
   onExternalChange?(listener: () => void): () => void;
+
+  /**
+   * Optional: notifies when another tab or window locked every wallet with an
+   * explicit Lock (web). The keys of this window are already freed when the
+   * listener runs. Returns an unsubscribe function.
+   */
+  onExternalLock?(listener: () => void): () => void;
 }
 
 export const ERROR_CODES = [

@@ -166,11 +166,10 @@ pub fn contact_id(id: &str) -> Result<&str> {
 /// Chain server reads the UI may make: a fixed set of endpoints with a plain
 /// query string.
 pub fn rpc_path(path: &str) -> Result<&str> {
-    const ALLOWED: [&str; 6] = [
+    const ALLOWED: [&str; 5] = [
         "/node/info",
         "/chain/info",
         "/address",
-        "/balance",
         "/address/history",
         "/transaction",
     ];
@@ -297,7 +296,6 @@ mod tests {
             "/node/info",
             "/chain/info",
             "/address?id=mmx1abc&limit=1000",
-            "/balance?id=mmx1abc",
             "/address/history?id=mmx1abc&limit=25&until=99",
             "/transaction?id=ABCDEF0123",
         ] {
@@ -307,6 +305,7 @@ mod tests {
             "",
             "/",
             "/wallet/keys",
+            "/balance?id=mmx1abc",
             "/transaction/broadcast",
             "/node/info/",
             "//node/info",

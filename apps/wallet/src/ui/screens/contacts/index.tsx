@@ -2,7 +2,13 @@ import { useRef, useState } from 'preact/hooks';
 import type { Contact } from '../../../backend/types';
 import { MAX_CONTACTS } from '../../../lib/appstate';
 import { copyAddress, searchContacts, sortedContacts, startSend } from '../../../state';
-import { deleteContactWithUndo, exportContactsToFile, importContactsFromFile } from '../../../state/actions/contacts';
+import {
+  contactsTransferring,
+  deleteContactWithUndo,
+  exportContactsToFile,
+  importContactsFromFile,
+  runContactsTransfer,
+} from '../../../state/actions/contacts';
 import {
   AddressText,
   Button,
@@ -31,7 +37,7 @@ export default function ContactsScreen() {
   const [editor, setEditor] = useState<Editor>(null);
   const [toDelete, setToDelete] = useState<Contact | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [transferring, setTransferring] = useState(false);
+  const transferring = contactsTransferring.value;
   const searchRef = useRef<HTMLInputElement>(null);
 
   const searching = query.trim() !== '';
@@ -39,16 +45,6 @@ export default function ContactsScreen() {
 
   const sendTo = (contact: Contact): void => {
     void startSend({ to: contact.address });
-  };
-
-  const runTransfer = async (task: () => Promise<void>): Promise<void> => {
-    if (transferring) return;
-    setTransferring(true);
-    try {
-      await task();
-    } finally {
-      setTransferring(false);
-    }
   };
 
   const confirmDelete = async (): Promise<void> => {
@@ -66,13 +62,13 @@ export default function ContactsScreen() {
       label="Contact file"
       placement="bottom-end"
       items={[
-        { id: 'import', label: 'Import contacts', icon: 'upload', onSelect: () => void runTransfer(importContactsFromFile) },
+        { id: 'import', label: 'Import contacts', icon: 'upload', onSelect: () => void runContactsTransfer(importContactsFromFile) },
         {
           id: 'export',
           label: 'Export contacts',
           icon: 'download',
           disabled: all.length === 0,
-          onSelect: () => void runTransfer(exportContactsToFile),
+          onSelect: () => void runContactsTransfer(exportContactsToFile),
         },
       ]}
       trigger={(props) => <IconButton {...props} icon="more" label="Import or export" variant="secondary" loading={transferring} />}
@@ -106,7 +102,7 @@ export default function ContactsScreen() {
                 <Button variant="primary" icon="user-plus" onClick={() => setEditor({ mode: 'add' })}>
                   Add contact
                 </Button>
-                <Button icon="upload" loading={transferring} onClick={() => void runTransfer(importContactsFromFile)}>
+                <Button icon="upload" loading={transferring} onClick={() => void runContactsTransfer(importContactsFromFile)}>
                   Import
                 </Button>
               </Stack>

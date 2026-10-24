@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { nextStatus, pendingOutgoing, prunePending, SETTLED_RETENTION_MS, type PendingTx } from '../../src/chain/pending';
+import { nextStatus, pendingOutgoing, pendingReserved, prunePending, SETTLED_RETENTION_MS, type PendingTx } from '../../src/chain/pending';
 import { buildSeries, estimateTime, rangeStart, RANGE_MS, rowDelta } from '../../src/chain/series';
 import { discoveredCount, findLastUsedIndex } from '../../src/chain/discovery';
-import { computeAssets, sortAssets, type AddressBalance } from '../../src/chain/balances';
+import { computeAssets, fetchBalances, sortAssets, type AddressBalance } from '../../src/chain/balances';
 import { RpcClient } from '../../src/chain/rpc';
+import { isVerifiedToken, tokenVerifier } from '../../src/chain/tokens';
 import type { ChainParams, HistoryRow, TxInfo, TxType } from '../../src/chain/types';
 import { NATIVE_CONTRACT } from '../../src/lib/address';
 import { FakeNode, testAddress, testTxid } from './helpers/fake-node';
@@ -25,7 +26,6 @@ function row(type: TxType, amount: bigint, daysAgo: number, height: number, cont
     symbol: 'MMX',
     decimals: 6,
     native: contract === NATIVE_CONTRACT,
-    validated: false,
   };
 }
 
@@ -111,7 +111,7 @@ describe('pending', () => {
     createdAt: 0,
     status: 'pending',
   };
-  const tx = (over: Partial<TxInfo>): TxInfo => ({ id: base.txid, expires: 100, didFail: false, fee: 2n, inputs: [], outputs: [], ...over });
+  const tx = (over: Partial<TxInfo>): TxInfo => ({ id: base.txid, expires: 100, didFail: false, fee: 2n, inputs: [], outputs: [], contractCall: false, ...over });
 
   it('moves to confirmed, failed or expired', () => {
     expect(nextStatus(base, null, 50)).toBe(base);
@@ -141,9 +141,24 @@ describe('pending', () => {
     const totals = pendingOutgoing(
       [base, { ...base, contract: TOKEN, amount: 7n }, { ...base, status: 'confirmed' }],
       NATIVE_CONTRACT,
+      new Set([A]),
     );
     expect(totals.get(NATIVE_CONTRACT)).toBe(14n);
     expect(totals.get(TOKEN)).toBe(7n);
+  });
+
+  it('counts only the fee of a move to an own address as outgoing', () => {
+    const own = new Set([A, testAddress(9)]);
+    const move = { ...base, to: A, amount: 1_000_000_000n, fee: 100n };
+    const tokenMove = { ...base, txid: testTxid('t'), to: A, contract: TOKEN, amount: 50n, fee: 3n };
+    const outgoing = pendingOutgoing([move, tokenMove], NATIVE_CONTRACT, new Set([A]));
+    expect(outgoing.get(NATIVE_CONTRACT)).toBe(103n);
+    expect(outgoing.has(TOKEN)).toBe(false);
+    expect(pendingOutgoing([base], NATIVE_CONTRACT, own).get(NATIVE_CONTRACT)).toBe(2n);
+    // Until it confirms, the moved amount is still held back from spending.
+    const reserved = pendingReserved([move, tokenMove, { ...base, status: 'expired' }], NATIVE_CONTRACT);
+    expect(reserved.get(NATIVE_CONTRACT)).toBe(1_000_000_103n);
+    expect(reserved.get(TOKEN)).toBe(50n);
   });
 });
 
@@ -187,12 +202,37 @@ describe('balances', () => {
   const B = testAddress(2);
   const FAKE = testAddress(91);
   const map = new Map<string, AddressBalance>([
-    [A, { rows: [{ contract: NATIVE_CONTRACT, symbol: 'MMX', decimals: 6, native: true, amount: 5n }, { contract: TOKEN, symbol: 'USDM', decimals: 6, native: false, amount: 3n }], validated: new Map([[TOKEN, true]]) }],
-    [B, { rows: [{ contract: NATIVE_CONTRACT, symbol: 'MMX', decimals: 6, native: true, amount: 7n }, { contract: FAKE, symbol: 'MMX', decimals: 6, native: false, amount: 1000n }, { contract: TOKEN, symbol: 'USDM', decimals: 6, native: false, amount: 1n }], validated: new Map([[FAKE, false]]) }],
+    [A, { rows: [{ contract: NATIVE_CONTRACT, symbol: 'MMX', decimals: 6, native: true, amount: 5n }, { contract: TOKEN, symbol: 'USDM', decimals: 6, native: false, amount: 3n }] }],
+    [B, { rows: [{ contract: NATIVE_CONTRACT, symbol: 'MMX', decimals: 6, native: true, amount: 7n }, { contract: FAKE, symbol: 'MMX', decimals: 6, native: false, amount: 1000n }, { contract: TOKEN, symbol: 'USDM', decimals: 6, native: false, amount: 1n }] }],
   ]);
 
-  it('totals per contract with native first and unverified last', () => {
+  it('verifies only native MMX on mainnet; the server flag is not used', () => {
+    expect(isVerifiedToken('mainnet', NATIVE_CONTRACT)).toBe(true);
+    expect(isVerifiedToken('mainnet', TOKEN)).toBe(false);
+    expect(isVerifiedToken(undefined, TOKEN)).toBe(false);
+    expect(isVerifiedToken('constructor', TOKEN)).toBe(false);
+    expect(tokenVerifier('testnet-x')(NATIVE_CONTRACT)).toBe(true);
     const assets = computeAssets(map, [A, B], params);
+    expect(assets.map((a) => [a.symbol, a.native, a.verified])).toEqual([
+      ['MMX', true, true],
+      ['MMX', false, false],
+      ['USDM', false, false],
+    ]);
+  });
+
+  it('fetches one request per address and no whitelist flags', async () => {
+    const paths: string[] = [];
+    const rpc = new RpcClient(async (path) => {
+      paths.push(path);
+      return { balances: [{ amount: '5', contract: TOKEN, decimals: 6, symbol: 'USDM', is_validated: true }] };
+    });
+    const balances = await fetchBalances(rpc, [A, B], params);
+    expect(paths.sort()).toEqual([`/address?id=${A}&limit=1000`, `/address?id=${B}&limit=1000`].sort());
+    expect(computeAssets(balances, [A, B], params).find((a) => a.contract === TOKEN)).toMatchObject({ verified: false, total: 10n });
+  });
+
+  it('totals per contract with native first and unverified last', () => {
+    const assets = computeAssets(map, [A, B], params, (c) => c === TOKEN);
     expect(assets.map((a) => [a.symbol, a.contract === NATIVE_CONTRACT, a.verified, a.total])).toEqual([
       ['MMX', true, true, 12n],
       ['USDM', false, true, 4n],

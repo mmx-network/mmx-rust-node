@@ -38,6 +38,26 @@ test('switches between wallets and keeps each one apart', async ({ page, rpc }) 
   await expectOverview(page, 'Spending');
 });
 
+test('Lock in one tab locks the wallet in every tab', async ({ page, rpc }) => {
+  const wallet = await openFundedWallet(page, (address) => rpc.fund({ address, amount: '2000000' }), { name: 'Shared' });
+  // A second tab of the same site opens the wallet on its own.
+  const other = await page.context().newPage();
+  await openApp(other);
+  await unlockWithWords(other, wallet.words);
+  await expectOverview(other, 'Shared');
+  await goTo(other, 'Send');
+
+  await lockWallet(page);
+  await expect(other).toHaveURL(/#\/unlock$/u);
+  await expect(other.getByRole('heading', { name: 'Unlock your wallet' })).toBeVisible();
+  // The other tab dropped its keys too: it needs the words again.
+  await unlockWithWords(other, wallet.words);
+  await expectOverview(other, 'Shared');
+  // Unlocking there leaves this tab locked.
+  await expect(page).toHaveURL(/#\/unlock$/u);
+  await other.close();
+});
+
 test('locks after the chosen time without activity', async ({ page, rpc }) => {
   await page.clock.install();
   await openFundedWallet(page, (address) => rpc.fund({ address, amount: '1000000' }));

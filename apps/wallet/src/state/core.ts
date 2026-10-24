@@ -103,6 +103,25 @@ export async function persistAppState(update: (current: AppState) => AppState): 
   }
 }
 
+/**
+ * Like persistAppState, but the in-memory state changes only after the
+ * backend accepted the change (e.g. a new network server it checks first).
+ * Saves made meanwhile keep the previous value; on failure nothing changes.
+ */
+export async function commitAppState(update: (current: AppState) => AppState): Promise<void> {
+  const run = saveQueue.then(async () => {
+    await backend().saveAppState(update(appState.value));
+    // Re-applied to the newest state: edits made while saving are kept.
+    appState.value = update(appState.value);
+  });
+  saveQueue = run.catch(() => undefined);
+  try {
+    await run;
+  } catch (e) {
+    throw toBackendError(e);
+  }
+}
+
 export async function reloadAppState(): Promise<void> {
   const b = backend();
   const raw = await b.loadAppState();

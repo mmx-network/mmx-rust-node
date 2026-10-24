@@ -19,6 +19,7 @@ done
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { printf 'Build on Linux x86_64.\n' >&2; exit 1; }
 
 wallet=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+repository=$(cd -- "$wallet/../.." && pwd)
 artifacts=$wallet/artifacts
 stage=$artifacts/stage/wallet
 target_dir=$artifacts/build/desktop
@@ -66,7 +67,7 @@ install -m 0755 "$appimage" "$publish/$appimage_name"
 (cd "$publish" && sha256sum "$deb_name" "$appimage_name" > sha256sums-linux-amd64)
 for file in "$publish"/*; do mv -f -- "$file" "$packages/"; done
 rmdir -- "$publish"
-dpkg-deb --field "$packages/$deb_name" Package Version Architecture Depends Installed-Size
+dpkg-deb --field "$packages/$deb_name" Package Version Architecture Maintainer Section Depends Installed-Size
 
 # A free X display number.
 free_display() {
@@ -134,7 +135,7 @@ PY
 # its window, takes a screenshot and stops exactly the processes it started.
 check_launch() {
     local label=$1; shift
-    local home display xvfb app owner bus windows window="" colors status=0
+    local home display xvfb app owner="" bus="" windows=0 window="" colors=0 status=0
     home=$(app_home)
     display=$(free_display)
     start_display "$display"
@@ -205,6 +206,28 @@ check_launch() {
     return "$status"
 }
 
+# Prints the program the deb extracted at $1 starts from its menu entry. It
+# must be installed there and must not share a name with one of the node's
+# programs (binaries.yml), which may come first on PATH.
+menu_program() {
+    local binary node
+    binary=$(sed -n 's/^Exec=//p' "$1/usr/share/applications/$product.desktop" 2>/dev/null | head -n 1)
+    node=$(sed -n 's/^ *for bin in \([^;]*\);.*/\1/p' "$repository/.github/workflows/binaries.yml" | head -n 1)
+    if [[ -z $binary || ! -x $1/usr/bin/$binary ]]; then
+        printf 'deb: the menu entry does not start the installed app (%s)\n' "${binary:-no Exec}" >&2
+        return 1
+    fi
+    if [[ -z $node ]]; then
+        printf 'deb: the node programs are not listed in binaries.yml\n' >&2
+        return 1
+    fi
+    if [[ " $node " == *" $binary "* ]]; then
+        printf 'deb: %s is also the name of a node program\n' "$binary" >&2
+        return 1
+    fi
+    printf '%s' "$binary"
+}
+
 # Calls every command of the app at $1 through WebDriver (see ipc_check.py).
 check_commands() {
     local home display xvfb status=0
@@ -233,9 +256,16 @@ if (( launch_check )); then
     extract=$(mktemp -d)
     dpkg-deb -x "$packages/$deb_name" "$extract"
     result=0
-    check_launch deb "$extract/usr/bin/mmx-wallet" || result=1
+    if program=$(menu_program "$extract"); then
+        printf 'deb: the menu entry starts %s\n' "$program"
+        check_launch deb "$extract/usr/bin/$program" || result=1
+    else
+        program="" result=1
+    fi
     check_launch appimage "$packages/$appimage_name" || result=1
-    check_commands "$extract/usr/bin/mmx-wallet" || result=1
+    if [[ -n $program ]]; then
+        check_commands "$extract/usr/bin/$program" || result=1
+    fi
     rm -rf -- "$extract"
     (( result == 0 )) || exit 1
 fi

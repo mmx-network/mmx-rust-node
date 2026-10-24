@@ -1,6 +1,6 @@
-import { useState } from 'preact/hooks';
-import { leaveOnboarding, navigate, platform, usableWallets } from '../../../state';
-import { BrandMark, Icon, IconTile, type IconName } from '../../components';
+import { useEffect, useState } from 'preact/hooks';
+import { clearSetupNotice, leaveOnboarding, navigate, platform, setupNotice, usableWallets } from '../../../state';
+import { Banner, BrandMark, Icon, IconTile, type IconName } from '../../components';
 import { FocusLayout } from '../../shell';
 import { OpenSavedView } from '../unlock';
 import { FlowHeader } from './flow';
@@ -32,6 +32,9 @@ export default function WelcomeScreen() {
   const [openSaved, setOpenSaved] = useState(false);
   const web = platform.value === 'web';
   const adding = usableWallets.value.length > 0;
+  // Why a wallet setup ended (e.g. auto-lock); shown until the user leaves this screen.
+  const notice = setupNotice.value;
+  useEffect(() => clearSetupNotice, []);
 
   if (openSaved) return <OpenSavedView onBack={() => setOpenSaved(false)} />;
 
@@ -48,6 +51,7 @@ export default function WelcomeScreen() {
           subtitle="Send, receive and keep track of your MMX."
         />
       )}
+      {notice ? <Banner tone="info">{notice}</Banner> : null}
       <ul class="welcome-choices" aria-label="Get started">
         <Choice icon="plus" title="Create a new wallet" detail="Get a new recovery phrase" onClick={() => navigate('create')} />
         <Choice icon="key" title="Import with recovery phrase" detail="Use your 24 words" onClick={() => navigate('import')} />

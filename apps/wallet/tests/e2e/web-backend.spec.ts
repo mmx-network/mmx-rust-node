@@ -1,6 +1,7 @@
 // The web backend inside the real page (CSP, CORS requests to the chain
 // server, WASM loaded from the site), driven directly through its module.
 import { readdirSync, readFileSync } from 'node:fs';
+import { expectNoWords } from './app';
 import { APP_URL } from './env';
 import { expect, test } from './fixtures';
 import { NATIVE, testAddress } from './mock-rpc';
@@ -22,12 +23,18 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
   const created = await page.evaluate(async (url) => {
     const mod = (await import(url)) as { createBackend(): Promise<unknown> };
     const backend = (await mod.createBackend()) as {
-      createWallet(r: object): Promise<{ wallet: { id: string; locked: boolean; verified: boolean }; mnemonic: string }>;
+      newRecoveryPhrase(): Promise<string>;
+      createWallet(r: object): Promise<{ id: string; locked: boolean; verified: boolean }>;
     };
     (globalThis as Record<string, unknown>).__testBackend = backend;
-    return backend.createWallet({ name: 'Browser', addressCount: 10 });
+    const mnemonic = await backend.newRecoveryPhrase();
+    // Nothing is stored until createWallet.
+    const before = JSON.stringify({ ...localStorage });
+    const wallet = await backend.createWallet({ name: 'Browser', mnemonic, addressCount: 10 });
+    return { wallet, mnemonic, before };
   }, chunk);
-  expect(created.wallet).toMatchObject({ locked: true, verified: false });
+  expect(created.wallet).toMatchObject({ locked: false, verified: true });
+  expect(created.before).not.toContain(created.wallet.id);
   const addresses = walletAddresses(created.mnemonic);
   await rpc.fund({ address: addresses[0]!, amount: '10000000' });
 
@@ -42,6 +49,7 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
       };
       const backend = (globalThis as Record<string, unknown>).__testBackend as B;
       const codeOf = (p: Promise<unknown>) => p.then(() => 'ok', (e: { code?: string }) => e.code ?? 'unknown');
+      await backend.lockAll();
       const wrong = await codeOf(backend.unlockWallet(id, { mnemonic: words.split(' ').reverse().join(' ') }));
       const opened = await backend.unlockWallet(id, { mnemonic: words });
       const list = await backend.getAddresses(id);
@@ -61,7 +69,7 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
   expect(result.prepared.amount).toBe('2500000');
   expect(result.again).toBe('prepared_not_found');
   expect(result.locked).toBe('locked');
-  for (const word of new Set(created.mnemonic.split(' '))) expect(result.stored).not.toMatch(new RegExp(`\\b${word}\\b`, 'u'));
+  expectNoWords(result.stored, created.mnemonic);
 
   const broadcasts = await rpc.broadcasts();
   expect(broadcasts).toHaveLength(1);
@@ -69,7 +77,7 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
   expect(broadcasts[0]!.outputs).toEqual([{ address: recipient, contract: NATIVE, amount: '2500000', memo: 'e2e' }]);
   const requests = await rpc.requests();
   expect(requests.filter((r) => r.method === 'OPTIONS')).toEqual([]);
-  expect(requests.filter((r) => r.method === 'POST').map((r) => r.path)).toEqual(['/transaction/validate', '/transaction/broadcast']);
+  expect(requests.filter((r) => r.method === 'POST').map((r) => r.path)).toEqual(['/transaction/broadcast']);
 
   await rpc.advance(1);
   expect((await rpc.broadcasts())[0]!.status).toBe('confirmed');

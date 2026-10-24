@@ -99,13 +99,24 @@ impl Args {
             return Err(invalid("--file and --wallet cannot be used together"));
         }
         if let Some(path) = &self.file {
-            return Ok((path.clone(), None));
+            let name = storage::directory()
+                .ok()
+                .and_then(|dir| storage::wallet_file_name(&dir, path));
+            return Ok((path.clone(), name));
         }
         let dir = storage::directory()?;
+        let (entries, unreadable) = storage::scan(&dir)?;
+        // The configuration only names the active wallet, so a selected
+        // wallet stays usable when the file is damaged.
+        let active = match self.wallet {
+            None => storage::active(&dir)?,
+            Some(_) => None,
+        };
         let path = storage::select(
-            &storage::wallets(&dir)?,
+            &entries,
+            &unreadable,
             self.wallet.as_deref(),
-            storage::active(&dir)?.as_deref(),
+            active.as_deref(),
             false,
         )?
         .path;
@@ -196,6 +207,17 @@ fn run(a: &Args) -> Result<()> {
                     "--wallet cannot be used when creating or importing",
                 ));
             }
+            let dir = if a.file.is_none() {
+                Some(storage::directory()?)
+            } else {
+                None
+            };
+            // The new wallet becomes the active one in the configuration;
+            // a damaged file fails here, before any secret is entered or
+            // a key file is written.
+            if let Some(dir) = &dir {
+                config::read(dir)?;
+            }
             let pass = if a.with_passphrase {
                 let pass = secrets.value("passphrase", a.non_interactive())?;
                 if !a.non_interactive()
@@ -216,11 +238,6 @@ fn run(a: &Args) -> Result<()> {
                 KeyFile::new(words_to_seed(words.trim())?, pass_ref)
             };
             let fingerprint = key.fingerprint();
-            let dir = if a.file.is_none() {
-                Some(storage::directory()?)
-            } else {
-                None
-            };
             let path = a.file.clone().unwrap_or_else(|| {
                 dir.as_ref()
                     .unwrap()
@@ -270,6 +287,7 @@ fn run(a: &Args) -> Result<()> {
             if a.command == "use" {
                 let selected = storage::select(
                     &entries,
+                    &unreadable,
                     Some(
                         a.subject
                             .as_deref()
@@ -293,7 +311,9 @@ fn run(a: &Args) -> Result<()> {
                 }
             } else {
                 let config = config::read(&dir)?;
-                let selected = storage::select(&entries, None, config::active(&config), false).ok();
+                let selected =
+                    storage::select(&entries, &unreadable, None, config::active(&config), false)
+                        .ok();
                 let file_name = |path: &std::path::Path| {
                     path.file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -426,14 +446,15 @@ fn run(a: &Args) -> Result<()> {
             let rpc = a.rpc()?;
             let params = rpc.params()?;
             let height = rpc.height(&params)?;
-            if tx.expires < height {
+            // The node runs a transaction at the next height.
+            if tx.expires <= height {
                 return Err(Error::new(
                     "transaction_expired",
                     "saved transaction has expired; prepare and review a new transaction",
                 ));
             }
             tx.verify(&params)?;
-            rpc.validate(&bytes, tx.max_fee_amount)?;
+            rpc.validate(&bytes, tx.max_fee_amount.into())?;
             rpc.post("/transaction/broadcast", &bytes)?;
             if a.json {
                 print_json(
@@ -675,8 +696,23 @@ fn send(
         },
         &options,
     )?;
+    // Checked here so that nothing is sent before the transfer is confirmed.
+    if !tx.fee_payer_covered(&state.balances) {
+        return Err(if currency == Address::default() {
+            Error::new(
+                "insufficient_funds",
+                "insufficient funds: not enough MMX for the amount and the fee",
+            )
+        } else {
+            Error::new(
+                "insufficient_fee",
+                "insufficient funds: not enough MMX to pay the transaction fee",
+            )
+        });
+    }
+    // A simple transfer is charged exactly its static fee.
+    let fee = tx.fee_amount();
     let bytes = serde_json::to_vec(&tx).expect("transaction serialization");
-    let fee = rpc.validate(&bytes, tx.max_fee_amount)?;
     if let Some(path) = &a.transaction {
         storage::save(path, &bytes, Some("transaction_exists"))?;
     }
@@ -685,6 +721,10 @@ fn send(
     }
     let broadcast = a.yes || (!a.non_interactive() && confirm()?);
     if broadcast {
+        // Only the confirmed transfer reaches the server. Its dry run stops
+        // one that would fail (the node would still include it and charge
+        // the fee) or cost more than shown.
+        rpc.validate(&bytes, fee)?;
         rpc.post("/transaction/broadcast", &bytes)?;
     }
     if a.json {

@@ -14,10 +14,13 @@ export interface FakeEntry {
   contract?: string;
   memo?: string;
   time?: number;
+  /** An NFT row: the node renders `is_nft` and no currency metadata. */
+  nft?: boolean;
 }
 
-interface Stored extends Required<Omit<FakeEntry, 'memo'>> {
+interface Stored extends Required<Omit<FakeEntry, 'memo' | 'nft'>> {
   memo?: string;
+  nft: boolean;
   address: string;
   counter: number;
 }
@@ -59,6 +62,8 @@ export class FakeNode {
   private counter = 0;
   private readonly entries = new Map<string, Stored[]>();
   failNext: Error | null = null;
+  /** When set, /address/history answers like a lagging node at this height. */
+  historyHeight: number | null = null;
 
   add(address: string, e: FakeEntry): void {
     const list = this.entries.get(address) ?? [];
@@ -70,6 +75,7 @@ export class FakeNode {
       txid: e.txid ?? testTxid(`${address}|${this.counter}`),
       contract: e.contract ?? NATIVE_CONTRACT,
       time: e.time ?? 1_700_000_000_000 + e.height * 10_000,
+      nft: e.nft ?? false,
       counter: this.counter++,
       ...(e.memo !== undefined ? { memo: e.memo } : {}),
     });
@@ -97,17 +103,17 @@ export class FakeNode {
       const limit = Number(q.get('limit') ?? 100);
       const since = Number(q.get('since') ?? 0);
       const until = Number(q.get('until') ?? 0xffffffff);
-      return this.history(id, limit, since, until).map((e) => ({
+      const visible = Math.min(until, this.historyHeight ?? until);
+      return this.history(id, limit, since, visible).map((e) => ({
         address: e.address,
         amount: e.amount.toString(),
         contract: e.contract,
-        decimals: 6,
+        ...(e.nft ? { is_nft: true } : { decimals: 6, symbol: e.contract === NATIVE_CONTRACT ? 'MMX' : 'TOK' }),
         height: e.height,
         is_native: e.contract === NATIVE_CONTRACT,
         is_pending: false,
         is_validated: false,
         memo: e.memo ?? null,
-        symbol: e.contract === NATIVE_CONTRACT ? 'MMX' : 'TOK',
         time: e.time / 1000,
         time_stamp: e.time,
         txid: e.txid,

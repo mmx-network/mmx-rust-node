@@ -1,20 +1,18 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { toBackendError, type WalletInfo } from '../../../backend/types';
+import { toBackendError } from '../../../backend/types';
 import { errorMessage } from '../../../lib/errors';
-import { joinWords, splitWords } from '../../../lib/mnemonic';
 import {
-  createWallet,
+  beginSetup,
   credentialUsername,
-  discardNewWallet,
   finishCreate,
   leaveOnboarding,
   navigate,
+  newRecoveryPhrase,
+  newWalletFingerprint,
   platform,
-  renameWallet,
   suggestWalletName,
-  wallets,
 } from '../../../state';
-import { Button, ProgressSteps } from '../../components';
+import { Banner, Button, ProgressSteps } from '../../components';
 import { FocusLayout } from '../../shell';
 import { FlowHeader, useMounted } from '../welcome/flow';
 import { ConfirmWords } from './ConfirmWords';
@@ -27,76 +25,48 @@ import './create.css';
 
 type Step = 'details' | 'phrase' | 'confirm' | 'save' | 'verify';
 
-interface Created {
-  wallet: WalletInfo;
-  mnemonic: string;
+/** What the details step settled on. Changing it later keeps the same recovery words. */
+interface Chosen {
+  name: string;
   /** '' = no passphrase. */
   passphrase: string;
+  /** Web: wallet ID of the words with this passphrase (part of the saved username). */
+  fingerprint: string;
 }
 
 const STEPS = ['Name', 'Recovery phrase', 'Confirm'];
 const STEP_INDEX: Record<Step, number> = { details: 0, phrase: 1, save: 1, confirm: 2, verify: 2 };
 
+/**
+ * Creates a wallet: name and passphrase → recovery words → confirmation
+ * (desktop: pick three words; web: save to the password manager, then fill
+ * the phrase in again). The wallet is stored only after the confirmation;
+ * until then the words exist only in this screen and leaving drops them.
+ */
 export default function CreateScreen() {
   const web = platform.value === 'web';
   const [step, setStep] = useState<Step>('details');
   const [details, setDetails] = useState<DetailsValue>(() => emptyDetails(suggestWalletName()));
-  const [created, setCreatedState] = useState<Created | null>(null);
+  /** The new recovery words, lowercase, single spaces. */
+  const [phrase, setPhrase] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<Chosen | null>(null);
+  /** Web: the username last saved to the password manager. */
+  const [savedUsername, setSavedUsername] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [nameError, setNameError] = useState<string | undefined>(undefined);
   const mounted = useMounted();
-  const createdRef = useRef<Created | null>(null);
-  /** The new wallet stays when leaving: it was confirmed (desktop) or saved to the password manager (web). */
-  const keep = useRef(false);
-  /** A create, rename, discard or confirm call is running. */
+  /** Getting new words or storing the wallet is running. */
   const working = useRef(false);
-  // The ref is the source of truth for async handlers and the unmount cleanup.
-  const setCreated = (c: Created | null): void => {
-    createdRef.current = c;
-    setCreatedState(c);
-  };
 
-  // Leaving before the words were confirmed or saved removes the unfinished wallet.
-  useEffect(
-    () => () => {
-      const c = createdRef.current;
-      if (c && !keep.current) void discardNewWallet(c.wallet.id);
-    },
-    [],
-  );
+  // Held words count as an open wallet for auto-lock; a lock ends the setup and shows the welcome screen.
+  const holding = phrase !== null;
+  useEffect(() => (holding ? beginSetup() : undefined), [holding]);
 
   const goto = (next: Step): void => {
     setError(undefined);
     setStep(next);
-  };
-
-  const cancel = async (): Promise<void> => {
-    if (working.current) return;
-    const c = createdRef.current;
-    if (c) {
-      working.current = true;
-      setBusy(true);
-      setCreated(null);
-      await discardNewWallet(c.wallet.id);
-      working.current = false;
-      if (!mounted.current) return;
-      setBusy(false);
-    }
-    leaveOnboarding();
-  };
-
-  const backToStart = async (): Promise<void> => {
-    if (working.current) return;
-    const c = createdRef.current;
-    if (c) {
-      working.current = true;
-      setCreated(null);
-      await discardNewWallet(c.wallet.id);
-      working.current = false;
-    }
-    navigate('welcome');
   };
 
   const submitDetails = async (): Promise<void> => {
@@ -108,51 +78,14 @@ export default function CreateScreen() {
     setError(undefined);
     setNameError(undefined);
     try {
-      let c = createdRef.current;
-      if (c && c.passphrase !== passphrase) {
-        // A different passphrase makes a different wallet.
-        setCreated(null);
-        await discardNewWallet(c.wallet.id);
-        c = null;
-      }
-      if (c) {
-        if (c.wallet.name !== name) {
-          await renameWallet(c.wallet.id, name);
-          c = { ...c, wallet: { ...c.wallet, name } };
-        }
-      } else {
-        const result = await createWallet(passphrase ? { name, passphrase } : { name });
-        c = { wallet: result.wallet, mnemonic: result.mnemonic, passphrase };
-        keep.current = false;
-        setRevealed(false);
-      }
-      if (!mounted.current) {
-        if (!keep.current) void discardNewWallet(c.wallet.id);
-        return;
-      }
-      setCreated(c);
+      // The words stay the same when the name or passphrase is changed later.
+      const words = phrase ?? (await newRecoveryPhrase());
+      const fingerprint = web ? await newWalletFingerprint(words, passphrase) : '';
+      if (!mounted.current) return;
+      setPhrase(words);
+      setChosen({ name, passphrase, fingerprint });
       goto(web ? 'save' : 'phrase');
     } catch (e) {
-      if (!mounted.current) return;
-      if (toBackendError(e).code === 'invalid_argument') setNameError('Choose a different name.');
-      else setError(errorMessage(e));
-    } finally {
-      working.current = false;
-      if (mounted.current) setBusy(false);
-    }
-  };
-
-  const confirm = async (): Promise<void> => {
-    const c = createdRef.current;
-    if (!c || working.current) return;
-    working.current = true;
-    keep.current = true;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await finishCreate(c.wallet.id);
-    } catch (e) {
-      keep.current = false;
       if (mounted.current) setError(errorMessage(e));
     } finally {
       working.current = false;
@@ -160,18 +93,38 @@ export default function CreateScreen() {
     }
   };
 
-  // Canonical form (lowercase, single spaces): exactly what is saved and later typed or filled in.
-  const phrase = created ? joinWords(splitWords(created.mnemonic)) : '';
+  /** The words were confirmed: store the wallet and open it. */
+  const finish = async (): Promise<void> => {
+    if (!phrase || !chosen || working.current) return;
+    working.current = true;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await finishCreate({ name: chosen.name, mnemonic: phrase, ...(chosen.passphrase ? { passphrase: chosen.passphrase } : {}) });
+    } catch (e) {
+      if (!mounted.current) return;
+      if (toBackendError(e).code === 'invalid_argument') {
+        setNameError('Choose a different name.');
+        goto('details');
+      } else {
+        setError(errorMessage(e));
+      }
+    } finally {
+      working.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  };
+
   const words = phrase ? phrase.split(' ') : [];
-  const wallet = created ? (wallets.value.find((w) => w.id === created.wallet.id) ?? created.wallet) : null;
+  const username = chosen ? credentialUsername(chosen.name, chosen.fingerprint) : '';
   const cancelAction =
     step !== 'details' ? (
-      <Button variant="ghost" size="sm" onClick={() => void cancel()} disabled={busy}>
+      <Button variant="ghost" size="sm" onClick={leaveOnboarding} disabled={busy}>
         Cancel
       </Button>
     ) : undefined;
   const back: Record<Step, () => void> = {
-    details: () => void backToStart(),
+    details: () => navigate('welcome'),
     phrase: () => goto('details'),
     save: () => goto('details'),
     confirm: () => goto('phrase'),
@@ -208,13 +161,13 @@ export default function CreateScreen() {
         </>
       ) : null}
 
-      {step === 'phrase' && created ? (
+      {step === 'phrase' && phrase ? (
         <>
           <FlowHeader
             key="phrase"
             autoFocus
             title="Write down your recovery phrase"
-            subtitle="They’re the only way to restore your wallet. Never share them."
+            subtitle="It’s the only way to restore your wallet. Never share it."
           />
           <PhraseWords words={words} revealed={revealed} onRevealedChange={setRevealed} />
           <Button variant="primary" size="lg" block disabled={!revealed} onClick={() => goto('confirm')}>
@@ -223,20 +176,20 @@ export default function CreateScreen() {
         </>
       ) : null}
 
-      {step === 'confirm' && created ? (
+      {step === 'confirm' && phrase ? (
         <>
           <FlowHeader key="confirm" autoFocus title="Confirm your recovery phrase" subtitle="Pick the right word for each number." />
           <ConfirmWords
             words={words}
             busy={busy}
             error={error}
-            onConfirmed={() => void confirm()}
+            onConfirmed={() => void finish()}
             onShowWords={() => goto('phrase')}
           />
         </>
       ) : null}
 
-      {step === 'save' && created && wallet ? (
+      {step === 'save' && phrase && chosen ? (
         <>
           <FlowHeader
             key="save"
@@ -244,23 +197,35 @@ export default function CreateScreen() {
             title="Save your recovery phrase"
             subtitle="Save it in your password manager and keep a written copy."
           />
-          <PhraseWords words={words} revealed={revealed} onRevealedChange={setRevealed} />
+          {savedUsername !== null && savedUsername !== username ? (
+            <Banner tone="warning">Your wallet details changed. Save it again, then delete the older entry in your password manager.</Banner>
+          ) : null}
+          {/* The form below has its own copy button for the words. */}
+          <PhraseWords words={words} revealed={revealed} onRevealedChange={setRevealed} copyable={false} />
           <SaveCredential
-            username={credentialUsername(wallet.name, wallet.fingerprint)}
+            username={username}
             words={phrase}
             submitLabel="Save to password manager"
             onSaved={() => {
-              keep.current = true;
+              setSavedUsername(username);
               goto('verify');
             }}
           />
         </>
       ) : null}
 
-      {step === 'verify' && created && wallet ? (
+      {step === 'verify' && phrase && chosen ? (
         <>
           <FlowHeader key="verify" title="Open your new wallet" subtitle="This confirms your password manager saved it." />
-          <VerifyOpen wallet={wallet} passphrase={created.passphrase} onShowAgain={() => goto('save')} />
+          <VerifyOpen
+            username={username}
+            fingerprint={chosen.fingerprint}
+            words={phrase}
+            busy={busy}
+            error={error}
+            onVerified={() => void finish()}
+            onShowAgain={() => goto('save')}
+          />
         </>
       ) : null}
     </FocusLayout>

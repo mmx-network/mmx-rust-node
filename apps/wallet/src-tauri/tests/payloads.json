@@ -31,8 +31,10 @@
     }
   },
   "list_wallets": {},
+  "new_recovery_phrase": {},
   "create_wallet": {
     "name": "Main",
+    "mnemonic": "cactus wedding mansion deal random arrive gate tissue bench party setup captain abstract mandate crouch lift anxiety embark achieve army expect account amount claim",
     "addressCount": 10,
     "passphrase": "correct horse"
   },

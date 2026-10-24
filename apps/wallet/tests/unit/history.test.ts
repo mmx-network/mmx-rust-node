@@ -19,7 +19,7 @@ import {
   type AddressHistory,
 } from '../../src/chain/history';
 import { RpcClient } from '../../src/chain/rpc';
-import type { ChainParams, HistoryRow } from '../../src/chain/types';
+import type { ChainParams, HistoryPage, HistoryRow } from '../../src/chain/types';
 import { NATIVE_CONTRACT } from '../../src/lib/address';
 import { FakeNode, testAddress, testTxid } from './helpers/fake-node';
 
@@ -49,7 +49,17 @@ function row(height: number, n = 0, address = A): HistoryRow {
     symbol: 'MMX',
     decimals: 6,
     native: true,
-    validated: false,
+  };
+}
+
+/** A response holding `rows` plus `nftHeights` NFT entries (counted, not kept). */
+function page(rows: HistoryRow[], nftHeights: number[] = []): HistoryPage {
+  const heights = rows.map((r) => r.height).concat(nftHeights);
+  return {
+    rows,
+    count: heights.length,
+    minHeight: heights.length ? Math.min(...heights) : Infinity,
+    maxHeight: heights.length ? Math.max(...heights) : -1,
   };
 }
 
@@ -77,60 +87,94 @@ function prng(seed: number): () => number {
 
 describe('pure page logic', () => {
   it('first page shorter than the limit means the address is exhausted', () => {
-    const h = fromFirstPage([row(10), row(5)], 25, 100);
-    expect(h).toMatchObject({ top: 100, bottom: 0, exhausted: true });
+    const h = fromFirstPage(page([row(10), row(5)]), 25);
+    expect(h).toMatchObject({ top: 10, bottom: 0, exhausted: true });
     expect(h.rows.map((r) => r.height)).toEqual([10, 5]);
     expect(olderPageQuery(h)).toBeNull();
   });
 
   it('an empty address is exhausted and covers everything', () => {
-    const h = fromFirstPage([], 25, 100);
-    expect(h).toEqual({ rows: [], top: 100, bottom: 0, exhausted: true });
+    const h = fromFirstPage(page([]), 25);
+    expect(h).toEqual({ rows: [], top: -1, bottom: 0, exhausted: true });
   });
 
   it('a full page covers down to its lowest height', () => {
     const rows = [row(50), row(40), row(40, 1), row(30)];
-    const h = fromFirstPage(rows, 4, 60);
-    expect(h).toMatchObject({ top: 60, bottom: 30, exhausted: false });
+    const h = fromFirstPage(page(rows), 4);
+    expect(h).toMatchObject({ top: 50, bottom: 30, exhausted: false });
     expect(olderPageQuery(h, 1000)).toEqual({ until: 29, limit: 1000 });
   });
 
-  it('top never goes below the newest row', () => {
-    expect(fromFirstPage([row(70)], 25, 60).top).toBe(70);
+  it('top is the newest height the server returned, NFT rows included', () => {
+    expect(fromFirstPage(page([row(70)]), 25).top).toBe(70);
+    expect(fromFirstPage(page([row(70)], [75]), 25).top).toBe(75);
+  });
+
+  it('pages by what the node returned, counting NFT rows it leaves out of the cache', () => {
+    // 25 entries with an NFT at the newest height: full, not the last page.
+    const rows = Array.from({ length: 24 }, (_, i) => row(100 - i));
+    const h = fromFirstPage(page(rows, [101]), 25);
+    expect(h).toMatchObject({ top: 101, bottom: 77, exhausted: false });
+    expect(h.rows).toHaveLength(24);
+    // A full older page whose lowest entries are NFT rows continues below them.
+    const older = applyOlderPage(h, page([row(76), row(75)], [74, 73]), 4);
+    expect(older).toMatchObject({ bottom: 73, exhausted: false });
+    expect(olderPageQuery(older)).toEqual({ until: 72, limit: 1000 });
+    // A full page of NFT rows only still moves down.
+    const nftsOnly = applyOlderPage(older, page([], [72, 71]), 2);
+    expect(nftsOnly).toMatchObject({ bottom: 71, exhausted: false });
+    expect(nftsOnly.rows).toHaveLength(26);
+    // A short page ends the history even if it held only NFT rows.
+    expect(applyOlderPage(nftsOnly, page([], [3]), 2)).toMatchObject({ bottom: 0, exhausted: true });
+  });
+
+  it('a full page without any confirmed height is rejected', () => {
+    expect(() => fromFirstPage({ rows: [], count: 2, minHeight: Infinity, maxHeight: -1 }, 2)).toThrow();
   });
 
   it('older pages extend downward; a short page exhausts', () => {
-    let h = fromFirstPage([row(50), row(40)], 2, 60);
-    h = applyOlderPage(h, [row(30), row(20)], 2);
+    let h = fromFirstPage(page([row(50), row(40)]), 2);
+    h = applyOlderPage(h, page([row(30), row(20)]), 2);
     expect(h).toMatchObject({ bottom: 20, exhausted: false });
-    h = applyOlderPage(h, [row(10)], 2);
+    h = applyOlderPage(h, page([row(10)]), 2);
     expect(h).toMatchObject({ bottom: 0, exhausted: true });
     expect(h.rows.map((r) => r.height)).toEqual([50, 40, 30, 20, 10]);
   });
 
   it('ignores rows above the requested range in an older page', () => {
-    const h = fromFirstPage([row(50), row(40)], 2, 60);
-    const next = applyOlderPage(h, [row(40), row(30), row(25)], 3);
+    const h = fromFirstPage(page([row(50), row(40)]), 2);
+    const next = applyOlderPage(h, page([row(40), row(30), row(25)]), 3);
     expect(next.rows.map((r) => r.height)).toEqual([50, 40, 30, 25]);
   });
 
   it('a full page ending at height 0 is exhausted', () => {
-    const h = fromFirstPage([row(5), row(1)], 2, 10);
-    expect(applyOlderPage(h, [row(0), row(0, 1)], 2)).toMatchObject({ bottom: 0, exhausted: true });
+    const h = fromFirstPage(page([row(5), row(1)]), 2);
+    expect(applyOlderPage(h, page([row(0), row(0, 1)]), 2)).toMatchObject({ bottom: 0, exhausted: true });
   });
 
   it('refresh re-reads a few blocks and replaces them', () => {
     const h: AddressHistory = { rows: [row(98), row(95), row(80)], top: 100, bottom: 50, exhausted: false };
     expect(refreshSince(h)).toBe(95);
-    const same = applyRefresh(h, 95, [row(98), row(95)], 104);
+    const same = applyRefresh(h, 95, { rows: [row(98), row(95)], maxHeight: 100 });
     expect(same.changed).toBe(false);
-    expect(same.history).toMatchObject({ top: 104, bottom: 50 });
-    const reorg = applyRefresh(h, 95, [row(99), row(95)], 104);
+    expect(same.history).toMatchObject({ top: 100, bottom: 50 });
+    const reorg = applyRefresh(h, 95, { rows: [row(99), row(95)], maxHeight: 99 });
     expect(reorg.changed).toBe(true);
     expect(reorg.history.rows.map((r) => r.height)).toEqual([99, 95, 80]);
-    const added = applyRefresh(h, 95, [row(103), row(98), row(95)], 104);
+    const added = applyRefresh(h, 95, { rows: [row(103), row(98), row(95)], maxHeight: 103 });
     expect(added.changed).toBe(true);
     expect(added.history.rows.map((r) => r.height)).toEqual([103, 98, 95, 80]);
+    expect(added.history.top).toBe(103);
+  });
+
+  it('a lagging response lowers top so the next refresh reads the gap again', () => {
+    const h: AddressHistory = { rows: [row(99), row(97), row(90), row(80)], top: 99, bottom: 50, exhausted: false };
+    // The server behind the load balancer is at 93: rows 97 and 99 are missing.
+    const lagging = applyRefresh(h, refreshSince(h), { rows: [], maxHeight: -1 });
+    expect(lagging.changed).toBe(true);
+    expect(lagging.history.top).toBe(90);
+    expect(refreshSince(lagging.history)).toBe(85);
+    expect(refreshSince(lagging.history)).toBeLessThanOrEqual(97);
   });
 
   it('refresh never starts below the covered range', () => {
@@ -162,7 +206,7 @@ describe('wallet frontier', () => {
   });
 
   it('nothing is complete while an address is not loaded', () => {
-    const history = new Map<string, AddressHistory>([[A, fromFirstPage([row(5)], 25, 10)]]);
+    const history = new Map<string, AddressHistory>([[A, fromFirstPage(page([row(5)]), 25)]]);
     expect(frontier(history, [A, B])).toBe(Infinity);
     expect(completeRows(history, [A, B])).toEqual([]);
     expect(addressesToExtend(history, [A, B])).toEqual([]);
@@ -170,8 +214,8 @@ describe('wallet frontier', () => {
 
   it('everything is complete when all addresses are exhausted', () => {
     const history = new Map<string, AddressHistory>([
-      [A, fromFirstPage([row(5)], 25, 10)],
-      [B, fromFirstPage([], 25, 10)],
+      [A, fromFirstPage(page([row(5)]), 25)],
+      [B, fromFirstPage(page([]), 25)],
     ]);
     expect(frontier(history, [A, B])).toBe(0);
     expect(isComplete(history, [A, B])).toBe(true);
@@ -196,7 +240,7 @@ describe('paging against a node', () => {
     node.add(A, { height: 300 });
     node.height = 700;
     const rpc = new RpcClient(node.transport);
-    let h = await loadFirstPage(rpc, A, PARAMS, 700, 3);
+    let h = await loadFirstPage(rpc, A, PARAMS, 3);
     expect(h.rows).toHaveLength(8); // 600 + all seven rows of block 500
     expect(h.bottom).toBe(500);
     h = await loadOlderPage(rpc, A, h, PARAMS, 3);
@@ -214,7 +258,7 @@ describe('paging against a node', () => {
       const rpc = new RpcClient(node.transport);
       const first = 1 + Math.floor(rand() * 30);
       const page = 1 + Math.floor(rand() * 150);
-      let h = await loadFirstPage(rpc, A, PARAMS, node.height, first);
+      let h = await loadFirstPage(rpc, A, PARAMS, first);
       for (let guard = 0; !h.exhausted && guard < 1000; guard++) h = await loadOlderPage(rpc, A, h, PARAMS, page);
       expect(h.exhausted).toBe(true);
       expect(keys(h.rows)).toEqual(storedKeys(node, A));
@@ -226,20 +270,21 @@ describe('paging against a node', () => {
     for (let i = 0; i < 30; i++) node.add(A, { height: 100 + i });
     node.height = 200;
     const rpc = new RpcClient(node.transport);
-    let h = await loadFirstPage(rpc, A, PARAMS, 200, 10);
+    let h = await loadFirstPage(rpc, A, PARAMS, 10);
     // New activity: a block with 25 rows plus rows in other blocks.
     for (let i = 0; i < 25; i++) node.add(A, { height: 230 });
     node.add(A, { height: 231 });
     node.add(A, { height: 199 }); // inside the overlap window
     const since = refreshSince(h);
-    const rows = await fetchRange(rpc, A, since, PARAMS, 10);
-    expect(keys(rows)).toEqual(storedKeys(node, A, since));
-    const r = await refreshAddress(rpc, A, h, PARAMS, 231);
+    const range = await fetchRange(rpc, A, since, PARAMS, 10);
+    expect(keys(range.rows)).toEqual(storedKeys(node, A, since));
+    expect(range.maxHeight).toBe(231);
+    const r = await refreshAddress(rpc, A, h, PARAMS);
     expect(r.changed).toBe(true);
     h = r.history;
     expect(h.top).toBe(231);
     expect(keys(h.rows.filter((x) => x.height >= h.bottom))).toEqual(storedKeys(node, A, h.bottom));
-    const again = await refreshAddress(rpc, A, h, PARAMS, 231);
+    const again = await refreshAddress(rpc, A, h, PARAMS);
     expect(again.changed).toBe(false);
   });
 
@@ -261,7 +306,7 @@ describe('paging against a node', () => {
     node.height = 1200;
     const rpc = new RpcClient(node.transport);
     const history = new Map<string, AddressHistory>();
-    for (const a of addrs) history.set(a, await loadFirstPage(rpc, a, PARAMS, 1200, 25));
+    for (const a of addrs) history.set(a, await loadFirstPage(rpc, a, PARAMS, 25));
     for (let round = 0; round < 100 && !isComplete(history, addrs); round++) {
       const f = frontier(history, addrs);
       const all = addrs.flatMap((a) => node.all(a).filter((e) => e.height >= f));
@@ -270,5 +315,74 @@ describe('paging against a node', () => {
     }
     expect(isComplete(history, addrs)).toBe(true);
     expect(completeRows(history, addrs)).toHaveLength(addrs.reduce((s, a) => s + node.all(a).length, 0));
+  });
+});
+
+describe('NFT rows and lagging servers', () => {
+  const currencyKeys = (node: FakeNode, address: string, minHeight = 0) =>
+    node
+      .all(address)
+      .filter((e) => !e.nft && e.height >= minHeight)
+      .map((e) => `${e.height}|${e.txid}|${e.amount}`)
+      .sort();
+
+  it('an NFT row at the top of the first page does not hide older history', async () => {
+    const node = new FakeNode();
+    for (let i = 1; i <= 99; i++) node.add(A, { height: i });
+    node.add(A, { height: 100, nft: true, contract: testAddress(77) });
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS, 25);
+    expect(h).toMatchObject({ exhausted: false, bottom: 76, top: 100 });
+    expect(h.rows).toHaveLength(24);
+    for (let guard = 0; !h.exhausted && guard < 10; guard++) h = await loadOlderPage(rpc, A, h, PARAMS, 25);
+    expect(h.exhausted).toBe(true);
+    expect(keys(h.rows)).toEqual(currencyKeys(node, A));
+  });
+
+  it('pages through full pages containing NFT rows, including pages of NFT rows only', async () => {
+    const node = new FakeNode();
+    for (let i = 1; i <= 60; i++) node.add(A, { height: i, ...(i % 7 === 0 || (i >= 20 && i < 35) ? { nft: true, contract: testAddress(77) } : {}) });
+    node.height = 100;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS, 10);
+    for (let guard = 0; !h.exhausted && guard < 20; guard++) h = await loadOlderPage(rpc, A, h, PARAMS, 10);
+    expect(h.exhausted).toBe(true);
+    expect(keys(h.rows)).toEqual(currencyKeys(node, A));
+    // A refresh over a range full of NFT rows pages down too.
+    const range = await fetchRange(rpc, A, 15, PARAMS, 5);
+    expect(keys(range.rows)).toEqual(currencyKeys(node, A, 15));
+    expect(range.maxHeight).toBe(60);
+  });
+
+  it('an address with only NFT rows refreshes a small window, not its whole history', async () => {
+    const node = new FakeNode();
+    for (let i = 1; i <= 40; i++) node.add(A, { height: i * 10, nft: true, contract: testAddress(77) });
+    const rpc = new RpcClient(node.transport);
+    const h = await loadFirstPage(rpc, A, PARAMS, 25);
+    expect(h.top).toBe(400);
+    expect(refreshSince(h)).toBe(395);
+  });
+
+  it('recovers rows a lagging history server left out', async () => {
+    const node = new FakeNode();
+    for (let i = 0; i < 30; i++) node.add(A, { height: 900 + i * 3 });
+    node.height = 1000;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS, 100);
+    const all = currencyKeys(node, A);
+    expect(keys(h.rows)).toEqual(all);
+    // New rows arrive; the history server answering the refresh is 15 blocks behind.
+    node.add(A, { height: 1001 });
+    node.add(A, { height: 1004 });
+    node.historyHeight = 975;
+    const lagging = await refreshAddress(rpc, A, h, PARAMS);
+    h = lagging.history;
+    expect(h.top).toBeLessThan(983);
+    // Later refreshes reach an up-to-date server.
+    node.historyHeight = null;
+    const caughtUp = await refreshAddress(rpc, A, h, PARAMS);
+    expect(caughtUp.changed).toBe(true);
+    expect(keys(caughtUp.history.rows)).toEqual(currencyKeys(node, A));
+    expect(caughtUp.history.top).toBe(1004);
   });
 });

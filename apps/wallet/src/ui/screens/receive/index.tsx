@@ -205,7 +205,7 @@ export default function ReceiveScreen() {
                       </Button>
                     </span>
                     <Button variant="ghost" icon="external" onClick={() => void openAddress(row.address)}>
-                      Explorer
+                      View in explorer
                     </Button>
                   </div>
                 )}

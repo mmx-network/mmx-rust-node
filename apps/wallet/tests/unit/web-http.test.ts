@@ -39,19 +39,23 @@ describe('chain server URL', () => {
 
 describe('read paths', () => {
   it('allows the endpoints the wallet reads, with plain queries', () => {
-    for (const ok of ['/node/info', '/chain/info', '/address?id=mmx1abc&limit=1000', '/balance?id=mmx1abc', '/address/history?id=mmx1abc&limit=25&until=99&since=3', '/transaction?id=ABCDEF0123']) {
+    for (const ok of ['/node/info', '/chain/info', '/address?id=mmx1abc&limit=1000', '/address/history?id=mmx1abc&limit=25&until=99&since=3', '/transaction?id=ABCDEF0123']) {
       expect(checkReadPath(ok)).toBe(ok);
     }
   });
 
   it('rejects everything else', () => {
-    for (const bad of ['', '/', '/wallet/keys', '/transaction/broadcast', '/transaction/validate', '/node/info/', '//node/info', '/address/../wallet', '/address?id=a%2F', '/address?id=a b', '/address?id=a#x', '/address?id=a.b', '/address?id=a/b', '/address?id=a?b', 'http://evil/node/info', `/address?id=${'a'.repeat(600)}`]) {
+    for (const bad of ['', '/', '/wallet/keys', '/balance?id=mmx1abc', '/transaction/broadcast', '/transaction/validate', '/node/info/', '//node/info', '/address/../wallet', '/address?id=a%2F', '/address?id=a b', '/address?id=a#x', '/address?id=a.b', '/address?id=a/b', '/address?id=a?b', 'http://evil/node/info', `/address?id=${'a'.repeat(600)}`]) {
       expect(() => checkReadPath(bad), bad).toThrow(expect.objectContaining({ code: 'invalid_argument' }));
     }
   });
 });
 
 describe('RpcHttp', () => {
+  it('has no way to send a signed transfer other than the broadcast', () => {
+    expect(Object.getOwnPropertyNames(RpcHttp.prototype).filter((n) => n !== 'constructor' && n !== 'request').sort()).toEqual(['broadcast', 'get']);
+  });
+
   it('sends credential-free, uncached, non-redirecting requests to the base URL', async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const http = new RpcHttp(async (url, init) => {
@@ -59,11 +63,11 @@ describe('RpcHttp', () => {
       return new Response('{"height":5}', { status: 200 });
     }, 'https://rpc.example.org/api');
     expect((await http.get('/node/info')).value).toEqual({ height: 5 });
-    await http.validate('{"x":1}');
+    await http.broadcast('{"x":1}');
     expect(calls[0]!.url).toBe('https://rpc.example.org/api/node/info');
     expect(calls[0]!.init).toMatchObject({ method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', mode: 'cors' });
     expect(calls[0]!.init.headers).toBeUndefined();
-    expect(calls[1]!.url).toBe('https://rpc.example.org/api/transaction/validate');
+    expect(calls[1]!.url).toBe('https://rpc.example.org/api/transaction/broadcast');
     expect(calls[1]!.init).toMatchObject({ method: 'POST', body: '{"x":1}', headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
   });
 
@@ -145,7 +149,7 @@ describe('RpcHttp', () => {
     expect((await new RpcHttp(split, 'https://x').get('/node/info')).value).toEqual({ memo: '\u{4e16}\u{754c}' });
   });
 
-  it('maps a refused transfer (HTTP 400) by the node reason, other statuses to rpc_http_error', async () => {
+  it('maps a refused transfer (HTTP 4xx) by the node reason, server errors to rpc_http_error', async () => {
     const cases: Array<[string, ErrorCode]> = [
       ['insufficient funds for transaction fee: 5 > 0', 'insufficient_fee'],
       ['insufficient funds for mmx1abc', 'insufficient_funds'],
@@ -156,7 +160,16 @@ describe('RpcHttp', () => {
       expect(rejectionCode(text)).toBe(expected);
       expect(await code(new RpcHttp(reply(text, { status: 400 }), 'https://x').broadcast('{}'))).toBe(expected);
     }
-    expect(await code(new RpcHttp(reply('busy', { status: 503 }), 'https://x').broadcast('{}'))).toBe('rpc_http_error');
+    // Not accepted either: a proxy or rate limit in front of the node.
+    for (const status of [403, 404, 413, 429]) {
+      expect(await code(new RpcHttp(reply('no', { status }), 'https://x').broadcast('{}')), String(status)).toBe('tx_rejected');
+    }
+    expect(await code(new RpcHttp(reply('tx expired', { status: 422 }), 'https://x').broadcast('{}'))).toBe('tx_expired');
+    // The outcome is open: the node may have accepted it.
+    for (const status of [500, 502, 503, 504]) {
+      expect(await code(new RpcHttp(reply('busy', { status }), 'https://x').broadcast('{}')), String(status)).toBe('rpc_http_error');
+    }
+    expect(await code(new RpcHttp(async () => Promise.reject(new TypeError('Failed to fetch')), 'https://x').broadcast('{}'))).toBe('rpc_unreachable');
     expect(await code(new RpcHttp(reply('', { status: 200 }), 'https://x').broadcast('{}'))).toBe('ok');
   });
 

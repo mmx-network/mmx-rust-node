@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { WalletInfo } from '../../../backend/types';
 import { credentialUsername } from '../../../state';
 import { Banner, Button, Field, Identicon, PasswordInput, TextInput } from '../../components';
-import { PASSWORD_MANAGER_IGNORE, useInitialFocus } from '../welcome/flow';
+import { PASSPHRASE_FIELD, useInitialFocus } from '../welcome/flow';
 import type { OpenWallet } from './useOpenWallet';
 import './unlock.css';
 
@@ -139,7 +139,7 @@ export function PassphraseForm({ open }: PassphraseFormProps) {
       >
         <PasswordInput
           name="wallet-passphrase"
-          {...PASSWORD_MANAGER_IGNORE}
+          {...PASSPHRASE_FIELD}
           value={value}
           onValue={setValue}
           inputRef={ref}
@@ -187,7 +187,7 @@ export function DesktopPassphraseForm({ busy, error, generalError, onSubmit }: D
       <Field label="Passphrase" error={error}>
         <PasswordInput
           name="wallet-passphrase"
-          {...PASSWORD_MANAGER_IGNORE}
+          {...PASSPHRASE_FIELD}
           value={value}
           onValue={setValue}
           inputRef={ref}

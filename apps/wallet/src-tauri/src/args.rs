@@ -31,10 +31,13 @@ pub struct SaveState {
     pub state: AppState,
 }
 
+/// A new wallet from the words the user has just written down and
+/// confirmed.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Create {
     pub name: String,
+    pub mnemonic: Zeroizing<String>,
     #[serde(default)]
     pub passphrase: Option<Zeroizing<String>>,
     pub address_count: u32,
@@ -156,14 +159,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const WORDS: &str = "cactus wedding mansion deal random arrive gate tissue bench party \
+                         setup captain abstract mandate crouch lift anxiety embark achieve army \
+                         expect account amount claim";
+
     #[test]
     fn decodes_requests() {
-        let c: Create = parse(&json!({"name": "Main", "addressCount": 10})).unwrap();
-        assert_eq!((c.name.as_str(), c.address_count), ("Main", 10));
+        let c: Create =
+            parse(&json!({"name": "Main", "mnemonic": WORDS, "addressCount": 10})).unwrap();
+        assert_eq!(
+            (c.name.as_str(), c.mnemonic.as_str(), c.address_count),
+            ("Main", WORDS, 10)
+        );
         assert!(c.passphrase.is_none());
 
-        let c: Create =
-            parse(&json!({"name": "Main", "passphrase": "pw", "addressCount": 1})).unwrap();
+        let c: Create = parse(&json!({
+            "name": "Main", "mnemonic": WORDS, "passphrase": "pw", "addressCount": 1
+        }))
+        .unwrap();
         assert_eq!(c.passphrase.as_deref().map(String::as_str), Some("pw"));
 
         let u: Unlock = parse(&json!({"id": "wallet.dat", "passphrase": null})).unwrap();
@@ -204,19 +217,26 @@ mod tests {
     #[test]
     fn rejects_unknown_or_malformed_fields() {
         // A misspelled passphrase must not create an unprotected wallet.
-        assert!(
-            parse::<Create>(&json!({"name": "a", "passPhrase": "x", "addressCount": 1})).is_err()
-        );
+        assert!(parse::<Create>(&json!({
+            "name": "a", "mnemonic": WORDS, "passPhrase": "x", "addressCount": 1
+        }))
+        .is_err());
+        // A new wallet is only saved with the words the user confirmed.
+        assert!(parse::<Create>(&json!({"name": "a", "addressCount": 1})).is_err());
+        assert!(parse::<Create>(&json!({"name": "a", "mnemonic": 5, "addressCount": 1})).is_err());
         // Web-only fields are not accepted by the desktop backend.
         assert!(parse::<Unlock>(&json!({"id": "w", "mnemonic": "words"})).is_err());
         assert!(parse::<Import>(&json!({
             "name": "a", "mnemonic": "w", "addressCount": 1, "expectedFingerprint": "1"
         }))
         .is_err());
-        assert!(parse::<Create>(&json!({"name": "a"})).is_err());
-        assert!(parse::<Create>(&json!({"name": "a", "addressCount": -1})).is_err());
-        assert!(parse::<Create>(&json!({"name": "a", "addressCount": 1.5})).is_err());
-        assert!(parse::<Create>(&json!({"name": "a", "addressCount": "1"})).is_err());
+        assert!(parse::<Create>(&json!({"name": "a", "mnemonic": WORDS})).is_err());
+        for count in [json!(-1), json!(1.5), json!("1")] {
+            assert!(parse::<Create>(&json!({
+                "name": "a", "mnemonic": WORDS, "addressCount": count
+            }))
+            .is_err());
+        }
         assert!(parse::<Wallet>(&json!([])).is_err());
         assert!(parse::<Wallet>(&Value::Null).is_err());
         assert!(parse::<CopyText>(&json!({"text": 5})).is_err());
@@ -230,5 +250,11 @@ mod tests {
         };
         assert_eq!(e.code, "invalid_argument");
         assert!(!e.message.contains("abandon"));
+
+        let Err(e) = parse::<Create>(&json!({"name": "a", "mnemonic": WORDS, "addressCount": "x"}))
+        else {
+            panic!("decoded an invalid request");
+        };
+        assert!(!e.message.contains("cactus"));
     }
 }

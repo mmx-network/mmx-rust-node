@@ -112,7 +112,7 @@ function buildItem(key: string, rows: HistoryRow[], isVerified: VerifiedLookup):
         symbol: row.symbol,
         decimals: row.decimals,
         native: row.native,
-        verified: row.native || row.validated || isVerified(row.contract),
+        verified: row.native || isVerified(row.contract),
         amount: 0n,
       };
       map.set(row.contract, a);
@@ -223,14 +223,15 @@ export function filterItems(items: readonly ActivityItem[], filter: ActivityFilt
 }
 
 /** A locally tracked send as an activity item. */
-export function pendingItem(p: PendingTx, ownAddresses: ReadonlySet<string>): ActivityItem {
+export function pendingItem(p: PendingTx, ownAddresses: ReadonlySet<string>, isVerified: VerifiedLookup = () => false): ActivityItem {
   const toSelf = ownAddresses.has(p.to);
+  const native = p.contract === NATIVE_CONTRACT;
   const amount: ActivityAmount = {
     contract: p.contract,
     symbol: p.symbol,
     decimals: p.decimals,
-    native: p.contract === NATIVE_CONTRACT,
-    verified: true,
+    native,
+    verified: native || isVerified(p.contract),
     amount: toSelf ? p.amount : -p.amount,
   };
   const item: ActivityItem = {
@@ -258,18 +259,20 @@ export function mergeActivity(
   historyItems: readonly ActivityItem[],
   pending: readonly PendingTx[],
   ownAddresses: ReadonlySet<string>,
+  isVerified: VerifiedLookup = () => false,
 ): ActivityItem[] {
   const known = new Set(historyItems.map((i) => i.txid));
   const failed = new Set(pending.filter((p) => p.status === 'failed').map((p) => p.txid));
-  const local = pending.filter((p) => !known.has(p.txid)).map((p) => pendingItem(p, ownAddresses));
+  const local = pending.filter((p) => !known.has(p.txid)).map((p) => pendingItem(p, ownAddresses, isVerified));
   const merged = historyItems.map((i) => (failed.has(i.txid) ? { ...i, status: 'failed' as const } : i));
   return local.concat(merged).sort(compareItems);
 }
 
 /**
  * The other party of a transfer: for received funds the sender (else the first
- * foreign input), for sent funds the first foreign output (preferring the
- * primary currency).
+ * foreign input), for sent funds the foreign recipient (preferring the primary
+ * currency). A send that paid several recipients in that currency has no
+ * single counterparty.
  */
 export function counterpartyAddress(item: ActivityItem, tx: TxInfo, own: ReadonlySet<string>): string | undefined {
   if (item.kind === 'received') {
@@ -280,14 +283,40 @@ export function counterpartyAddress(item: ActivityItem, tx: TxInfo, own: Readonl
     if (item.to && !own.has(item.to)) return item.to;
     const foreign = tx.outputs.filter((o) => !own.has(o.address));
     const contract = item.primary?.contract;
-    return (foreign.find((o) => o.contract === contract) ?? foreign[0])?.address;
+    const inContract = new Set(foreign.filter((o) => o.contract === contract).map((o) => o.address));
+    if (inContract.size > 1) return undefined;
+    return inContract.size === 1 ? [...inContract][0] : foreign[0]?.address;
   }
   return undefined;
 }
 
-/** Memo of the transfer as seen by the counterparty (sent) or by the wallet (received). */
+/**
+ * The recipient when a sent item can be repeated as a plain transfer: no
+ * contract call, every input from the wallet, every input and output in the
+ * one asset sent, and all funds that left the wallet went to one other
+ * address. Anything else (an NFT purchase or swap, a payment to several
+ * recipients) is undefined, since a plain transfer would not do the same.
+ */
+export function repeatRecipient(item: ActivityItem, tx: TxInfo, own: ReadonlySet<string>): string | undefined {
+  const primary = item.primary;
+  if (item.kind !== 'sent' || !primary || primary.amount >= 0n || item.amounts.length !== 1 || tx.contractCall) return undefined;
+  if (tx.inputs.length === 0 || tx.inputs.some((i) => !own.has(i.address) || i.contract !== primary.contract)) return undefined;
+  if (tx.outputs.some((o) => o.contract !== primary.contract)) return undefined;
+  const foreign = tx.outputs.filter((o) => !own.has(o.address));
+  const to = foreign[0]?.address;
+  if (!to || foreign.some((o) => o.address !== to)) return undefined;
+  const total = foreign.reduce((sum, o) => sum + o.amount, 0n);
+  return total === -primary.amount ? to : undefined;
+}
+
+/**
+ * Memo of the transfer as seen by the counterparty (sent) or by the wallet
+ * (received). Outputs of a contract call carry the contract's notes, not a
+ * memo someone wrote, so they are not shown.
+ */
 export function memoFromTx(item: ActivityItem, tx: TxInfo, own: ReadonlySet<string>): string | undefined {
   if (item.memo) return item.memo;
+  if (tx.contractCall) return undefined;
   if (item.kind === 'sent') return tx.outputs.find((o) => !own.has(o.address) && o.memo)?.memo;
   if (item.kind === 'received' || item.kind === 'moved') return tx.outputs.find((o) => own.has(o.address) && o.memo)?.memo;
   return undefined;

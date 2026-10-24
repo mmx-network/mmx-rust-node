@@ -1,0 +1,1262 @@
+/*
+ * Prism — spectral, data-forward.
+ *
+ * A deep ink canvas with crisp hairline surfaces. Light enters in full in two
+ * places: the balance card, a luminous cyan → indigo → magenta object set in
+ * ink type, and the balance chart, whose line is drawn through the same
+ * spectrum. Elsewhere the spectrum only appears as thin slivers that mark
+ * state (active destination, dialog edge, progress). Everything else stays
+ * quiet so the numbers lead.
+ *
+ * Type: Outfit (display and all figures, tabular), Plus Jakarta Sans (UI),
+ * JetBrains Mono (addresses, IDs, axis labels).
+ */
+
+@import '@fontsource-variable/outfit/wght.css';
+@import '@fontsource-variable/plus-jakarta-sans/wght.css';
+@import '@fontsource-variable/jetbrains-mono/wght.css';
+
+/* ------------------------------------------------------------ tokens: light */
+
+:root,
+[data-scheme='light'] {
+  --font-ui: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Outfit Variable', 'Outfit', 'Plus Jakarta Sans Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas,
+    monospace;
+
+  --bg: #f8f9fd;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #f0f2f9;
+  --surface: #ffffff;
+  --surface-2: #f3f5fb;
+  --border: #e3e6f0;
+  --border-strong: #7f879f;
+  --text: #0e1222;
+  --text-muted: #525970;
+  --text-faint: #646b83;
+  --accent: #4f5bff;
+  --accent-contrast: #ffffff;
+  --accent-soft: #eceeff;
+  --positive: #047857;
+  --negative: #c81f3c;
+  --warning: #9c5700;
+  --focus: #4f5bff;
+
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 14px;
+  --shadow-1: 0 1px 2px rgba(14, 18, 34, 0.05);
+  --shadow-2: 0 24px 56px -18px rgba(20, 26, 66, 0.26), 0 8px 18px -8px rgba(14, 18, 34, 0.1);
+
+  --chart-line: var(--accent);
+  --chart-fill: rgba(79, 91, 255, 0.16);
+  --chart-grid: #e8ebf3;
+
+  --space-unit: 4px;
+  --nav-width: 248px;
+  --layout: rail;
+
+  /* Spectrum. The vivid stops paint the hero; the chart stops are tuned per scheme. */
+  --spec-cyan: #22d3ee;
+  --spec-indigo: #6c7cff;
+  --spec-magenta: #e879f9;
+  --spectrum: linear-gradient(100deg, var(--spec-cyan) 0%, var(--spec-indigo) 52%, var(--spec-magenta) 100%);
+  --spectrum-v: linear-gradient(180deg, var(--spec-cyan) 0%, var(--spec-indigo) 52%, var(--spec-magenta) 100%);
+  /*
+   * Light stops only need 3:1 (the line is a graphic). The axis colour holds
+   * across the value-label zone at the left so the labels keep 4.5:1.
+   */
+  --chart-spec-0: var(--chart-axis);
+  --chart-spec-1: #0891b2;
+  --chart-spec-2: #4f5bff;
+  --chart-spec-3: #d946ef;
+  --chart-blend: lighten;
+  --chart-ink: #000000;
+  --ink: #0a0d14;
+  /* Accent as text or icon on tinted (accent-soft) backgrounds. */
+  --accent-ink: #3a45e6;
+
+  --floating-border: #e3e6f0;
+  --btn-primary-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 1px 2px rgba(20, 26, 66, 0.2);
+  --btn-secondary-bg: #ffffff;
+  /* Secondary outlines hold 3:1 against every surface they sit on. */
+  --btn-secondary-border: #858da3;
+  --btn-secondary-shadow: 0 1px 2px rgba(14, 18, 34, 0.04);
+  --btn-secondary-hover-bg: #f3f5fb;
+  --btn-secondary-hover-border: #6b7390;
+  /* Selected segment: tinted fill, accent edge (3:1 on the track), accent label. */
+  --segmented-active-bg: #eceeff;
+  --segmented-active-fg: #3a45e6;
+  --segmented-active-ring: #4f5bff;
+  --segmented-active-shadow: 0 1px 2px rgba(20, 26, 66, 0.1);
+  --steps-upcoming: #d3d8e6;
+  --readonly-bg: #f0f2f9;
+  --readonly-border: #d3d8e6;
+  /* Chart axes take the cyan end of the spectrum (the blend leaves this colour unchanged). */
+  --chart-axis: #0b7a9c;
+  --control-bg: #ffffff;
+  --control-border: var(--border-strong);
+  --card-shadow: 0 1px 2px rgba(14, 18, 34, 0.04), 0 6px 20px -12px rgba(20, 26, 66, 0.12);
+  --state-hover: rgba(14, 18, 34, 0.045);
+  --state-press: rgba(14, 18, 34, 0.08);
+  --accent-hover: #3f4beb;
+  --accent-press: #3540d4;
+  --positive-soft: #e3f4ee;
+  --negative-soft: #fce8eb;
+  --warning-soft: #fbf0de;
+  --info-soft: #eef0ff;
+  --on-negative: #ffffff;
+  --backdrop: rgba(14, 18, 40, 0.32);
+  --ring: 0 0 0 2px var(--bg-elevated), 0 0 0 4px var(--focus);
+
+  --nav-bg: #ffffff;
+  --nav-border: #e6e9f2;
+  --nav-item-fg: var(--text-muted);
+  --nav-item-hover: var(--state-hover);
+  --nav-item-active-bg: var(--accent-soft);
+  --nav-item-active-fg: var(--text);
+  --nav-item-active-icon: var(--accent-ink);
+  --nav-item-active-shadow: none;
+  --rail-width: 80px;
+
+  --identicon-radius: 30%;
+  --brand-disc: #4f5bff;
+  --brand-glyph: #ffffff;
+  --qr-frame: #ffffff;
+
+  --hero-shadow: 0 20px 40px -26px rgba(79, 91, 255, 0.5), 0 12px 28px -22px rgba(232, 121, 249, 0.42);
+  --aurora-1: rgba(79, 91, 255, 0.1);
+  --aurora-2: rgba(34, 211, 238, 0.1);
+  --aurora-3: rgba(232, 121, 249, 0.08);
+
+  --text-display: clamp(2.5rem, 1.7rem + 2.4vw, 3.5rem);
+  --weight-display: 600;
+  --tracking-display: -0.025em;
+  --tracking-caps: 0.09em;
+  --control-radius: 12px;
+  --card-radius: 14px;
+}
+
+/* ------------------------------------------------------------- tokens: dark */
+
+[data-scheme='dark'] {
+  --bg: #0a0d14;
+  --bg-elevated: #161b2a;
+  --bg-sunken: #0b0e18;
+  --surface: #111522;
+  --surface-2: #181d2d;
+  --border: #1f2536;
+  --border-strong: #5d6786;
+  --text: #e9ecf5;
+  --text-muted: #a3aac1;
+  --text-faint: #868ea8;
+  --accent: #6c7cff;
+  --accent-contrast: #0a0d14;
+  --accent-soft: #1c2250;
+  --positive: #3ddc97;
+  --negative: #ff6b81;
+  --warning: #f5b83d;
+  --focus: #8d9aff;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-2: 0 28px 64px -18px rgba(0, 0, 0, 0.8), 0 8px 20px -8px rgba(0, 0, 0, 0.55);
+
+  --chart-line: var(--accent);
+  --chart-fill: rgba(108, 124, 255, 0.24);
+  --chart-grid: #1c2232;
+
+  --chart-spec-0: #22d3ee;
+  --chart-spec-1: #22d3ee;
+  --chart-spec-2: #6c7cff;
+  --chart-spec-3: #e879f9;
+  --chart-blend: darken;
+  --chart-ink: #ffffff;
+  --accent-ink: #8d9aff;
+
+  --floating-border: #283049;
+  --btn-primary-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  --btn-secondary-bg: #181d2d;
+  --btn-secondary-border: #626c8c;
+  --btn-secondary-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --btn-secondary-hover-bg: #222940;
+  --btn-secondary-hover-border: #7a84a4;
+  --segmented-active-bg: #1c2250;
+  --segmented-active-fg: #e9ecf5;
+  --segmented-active-ring: #6c7cff;
+  --segmented-active-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --steps-upcoming: #2a3147;
+  --readonly-bg: #181d2d;
+  --readonly-border: #283049;
+  --chart-axis: #229ab0;
+  --control-bg: #0c1019;
+  --control-border: var(--border-strong);
+  --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  --state-hover: rgba(233, 236, 245, 0.055);
+  --state-press: rgba(233, 236, 245, 0.1);
+  --accent-hover: #7f8dff;
+  --accent-press: #95a1ff;
+  --positive-soft: #123128;
+  --negative-soft: #3a1824;
+  --warning-soft: #33280f;
+  --info-soft: #171d42;
+  --on-negative: #1a0509;
+  --backdrop: rgba(4, 6, 12, 0.72);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+
+  --nav-bg: #0c1019;
+  --nav-border: #1a2030;
+  --nav-item-active-bg: var(--accent-soft);
+  --nav-item-active-fg: var(--text);
+  --nav-item-active-icon: var(--accent-ink);
+
+  --brand-disc: #6c7cff;
+  --brand-glyph: #ffffff;
+
+  --hero-shadow: 0 22px 44px -28px rgba(108, 124, 255, 0.55), 0 14px 32px -24px rgba(232, 121, 249, 0.42),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+  --aurora-1: rgba(108, 124, 255, 0.16);
+  --aurora-2: rgba(34, 211, 238, 0.09);
+  --aurora-3: rgba(232, 121, 249, 0.08);
+}
+
+/* ---------------------------------------------------------------- base type */
+
+body {
+  letter-spacing: 0;
+}
+/*
+ * Plus Jakarta Sans ships a narrow word space; at 1x the browser snaps glyph
+ * positions and a slim space can vanish ("onany"). Every element opens it
+ * relative to its own size (form controls included, which reset it in the UA
+ * sheet), and small secondary text gets a little more, since rounding eats a
+ * larger share of a small space.
+ */
+:where(body, body *) {
+  word-spacing: 0.08em;
+}
+:where(
+    .option-row__description,
+    .list-item__subtitle,
+    .field__hint,
+    .contacts__item-note,
+    .kv__label,
+    .page-header__subtitle,
+    .dialog__description,
+    .welcome-choice__detail,
+    .banner
+  ) {
+  word-spacing: 0.14em;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.heading,
+.page-header__title,
+.section__title,
+.dialog__title,
+.brand__name,
+.empty-state__title {
+  font-family: var(--font-display);
+}
+
+.page-header__title {
+  font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+@media (max-width: 719.98px) {
+  .page-header__title {
+    font-size: 1.75rem;
+  }
+}
+/* Route focus lands on the title: a soft rounded ring, not a tight debug box. */
+.page-header__title[tabindex='-1']:focus-visible {
+  outline: none;
+  border-radius: 10px;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+}
+/* Room for that ring around the glyphs, without moving the title. */
+.page-header__title[tabindex='-1'] {
+  padding-inline: 6px;
+  margin-inline: -6px;
+}
+.section__title {
+  font-size: 1.1875rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+h3.section__title {
+  font-size: var(--text-lg);
+}
+.dialog__title {
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.empty-state__title {
+  font-size: 1.1875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.text--mono,
+.address,
+.settings__mono,
+.overview-token__contract,
+.input--mono,
+.overview-chart__svg {
+  font-variant-ligatures: none;
+  word-spacing: normal;
+}
+
+/* --------------------------------------------------------------- figures */
+
+/* Every figure is Outfit with tabular digits: amounts line up in lists. */
+.amount {
+  font-family: var(--font-display);
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+  letter-spacing: -0.005em;
+}
+.amount__number {
+  font-weight: 600;
+}
+.amount__symbol {
+  font-family: var(--font-ui);
+  font-size: 0.7em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.amount--display {
+  font-feature-settings: 'pnum' 1, 'lnum' 1;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+.amount--display .amount__number {
+  font-weight: 600;
+}
+.amount--display .amount__symbol {
+  font-size: 0.3em;
+  letter-spacing: 0.14em;
+  margin-left: 0.2em;
+}
+.amount--xl {
+  letter-spacing: -0.03em;
+}
+
+.kv__value,
+.list-group__aside,
+.steps__count,
+.stepper__control,
+.menu__description,
+.switcher__meta {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ----------------------------------------------------------------- address */
+
+.address {
+  font-size: 0.9em;
+  letter-spacing: 0;
+}
+.address__chunks {
+  column-gap: 0.6ch;
+}
+.address__chunk:nth-child(even) {
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------------------ buttons */
+
+.btn {
+  font-weight: 650;
+}
+/* The label clips overflow; give Plus Jakarta's descenders room inside it. */
+.btn__label {
+  line-height: 1.3;
+}
+.btn--lg {
+  font-size: 1rem;
+  border-radius: 13px;
+}
+.btn--primary {
+  box-shadow: var(--btn-primary-shadow);
+}
+.btn--primary:hover:not(:disabled):not([aria-disabled='true']):not(:focus-visible) {
+  box-shadow:
+    var(--btn-primary-shadow),
+    0 8px 22px -10px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.btn--secondary {
+  background: var(--btn-secondary-bg);
+  border-color: var(--btn-secondary-border);
+  box-shadow: var(--btn-secondary-shadow);
+}
+.btn--secondary:hover:not(:disabled):not([aria-disabled='true']) {
+  background: var(--btn-secondary-hover-bg);
+  border-color: var(--btn-secondary-hover-border);
+}
+.btn--danger:hover:not(:disabled):not([aria-disabled='true']) {
+  filter: none;
+  background: color-mix(in srgb, var(--negative) 88%, var(--text));
+}
+/* Copied state on a filled button keeps the fill's own label colour. */
+.btn--primary.copy-btn--copied,
+.btn--primary.copy-btn--copied:hover:not(:disabled):not([aria-disabled='true']) {
+  color: var(--accent-contrast);
+}
+.btn--danger.copy-btn--copied,
+.btn--danger.copy-btn--copied:hover:not(:disabled):not([aria-disabled='true']) {
+  color: var(--on-negative);
+}
+
+.icon-btn {
+  border-radius: 10px;
+}
+.icon-btn--sm {
+  border-radius: 8px;
+}
+.icon-btn--secondary {
+  background: var(--btn-secondary-bg);
+  border-color: var(--btn-secondary-border);
+  box-shadow: var(--btn-secondary-shadow);
+}
+.icon-btn--secondary:hover:not(:disabled) {
+  background: var(--btn-secondary-hover-bg);
+}
+
+/* ------------------------------------------------------------------- inputs */
+
+.field__label {
+  font-weight: 650;
+}
+.input,
+.select__control,
+.stepper {
+  background: var(--control-bg);
+}
+/* Read-only fields read as inert: tinted fill, quiet edge, no hover lift. */
+.input--readonly,
+.input--readonly:hover:not(.input--disabled) {
+  background: var(--readonly-bg);
+  border-color: var(--readonly-border);
+}
+/*
+ * Focus: a solid 2px edge (border plus a 1px ring) in the focus colour, with a
+ * soft halo outside it. Invalid fields keep their error colour while focused.
+ */
+.input:not(.input--invalid):focus-within,
+.stepper:not(.stepper--invalid):focus-within,
+.select:not(.select--invalid) .select__control:focus-visible {
+  border-color: var(--focus);
+  box-shadow:
+    0 0 0 1px var(--focus),
+    0 0 0 4px color-mix(in srgb, var(--focus) 24%, transparent);
+}
+.input--invalid:focus-within,
+.stepper--invalid:focus-within,
+.select--invalid .select__control:focus-visible {
+  border-color: var(--negative);
+  box-shadow:
+    0 0 0 1px var(--negative),
+    0 0 0 4px color-mix(in srgb, var(--negative) 22%, transparent);
+}
+.input--mono .input__control {
+  font-size: 0.875em;
+  letter-spacing: 0;
+}
+
+/* -------------------------------------------------------------- choices */
+
+.segmented {
+  padding: 3px;
+  gap: 2px;
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border);
+  border-radius: var(--control-radius);
+}
+.segmented__item {
+  border-radius: 9px;
+  font-weight: 650;
+}
+/* Base focus (inset 2px focus ring) outranks this, so focus stays visible. */
+.segmented__item--active {
+  background: var(--segmented-active-bg);
+  color: var(--segmented-active-fg);
+  box-shadow:
+    inset 0 0 0 1px var(--segmented-active-ring),
+    var(--segmented-active-shadow);
+}
+
+.switch__track {
+  background: var(--border-strong);
+}
+.switch--on .switch__track {
+  background: var(--accent);
+}
+.switch__thumb {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* -------------------------------------------------------------------- cards */
+
+.section--card > .section__body,
+.list--inset,
+.overview-tokens__card,
+.overview-recent__loading,
+.overview-recent__empty,
+.activity-loading__card {
+  border-color: var(--card-border);
+}
+.card--sunken {
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* ------------------------------------------------------------- list items */
+
+/*
+ * Inset divided lists inset every row after the first by --s3 and only pull
+ * the body back; pull the actions back too so trailing columns stay aligned.
+ */
+.list--inset.list--divided > .list-item + .list-item > .list-item__body:not(:last-child) {
+  margin-right: 0;
+}
+.list--inset.list--divided > .list-item + .list-item > .list-item__actions {
+  margin-right: calc(var(--s3) * -1);
+}
+
+.list-item__body {
+  border-radius: 10px;
+}
+.list-item__title {
+  font-weight: 650;
+}
+.list-item__trailing-main .amount {
+  font-size: 1rem;
+}
+.list-group__header {
+  padding: 0 var(--s3) var(--s2);
+}
+.list-group__title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  color: var(--text-muted);
+}
+.list-group__aside {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.icon-tile {
+  border-radius: 12px;
+}
+.icon-tile--sm {
+  border-radius: 10px;
+}
+.icon-tile--lg {
+  border-radius: var(--radius-l);
+}
+.icon-tile--accent,
+.empty-state__icon {
+  color: var(--accent-ink);
+}
+.icon-tile--neutral {
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.identicon {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+/* -------------------------------------------------------------- badges */
+
+.badge {
+  height: 22px;
+  padding: 0 9px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.badge--accent {
+  color: var(--accent-ink);
+}
+
+/* ------------------------------------------------------------- key/value */
+
+.kv__label {
+  color: var(--text-muted);
+}
+.kv__value {
+  font-weight: 600;
+}
+.kv__row--emphasis .kv__value .amount {
+  font-size: var(--text-xl);
+}
+
+/* ------------------------------------------------------------- banners */
+
+.banner {
+  border-radius: var(--radius-m);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.banner--positive {
+  border-color: color-mix(in srgb, var(--positive) 26%, transparent);
+}
+.banner--warning {
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+}
+.banner--danger {
+  border-color: color-mix(in srgb, var(--negative) 30%, transparent);
+}
+
+/* ---------------------------------------------------------- empty state */
+
+.empty-state__icon {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-l);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.empty-state--positive .empty-state__icon {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--positive) 28%, transparent);
+}
+.empty-state--warning .empty-state__icon {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 28%, transparent);
+}
+.empty-state--negative .empty-state__icon {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--negative) 28%, transparent);
+}
+.empty-state--neutral .empty-state__icon {
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* ------------------------------------------------------------ progress */
+
+.steps__item {
+  height: 4px;
+  background: var(--steps-upcoming);
+}
+.steps__item--done,
+.steps__item--current {
+  background: var(--spectrum);
+}
+/* One continuous spectrum across the filled segments (2, 3 or 4 steps). */
+.steps__bars:has(> :nth-child(3):last-child) > .steps__item {
+  background-size: calc(300% + 2 * var(--s1)) 100%;
+}
+.steps__bars:has(> :nth-child(4):last-child) > .steps__item {
+  background-size: calc(400% + 3 * var(--s1)) 100%;
+}
+.steps__bars:has(> :nth-child(3):last-child) > .steps__item:nth-child(2) {
+  background-position: 50% 0;
+}
+.steps__bars:has(> :nth-child(3):last-child) > .steps__item:nth-child(3),
+.steps__bars:has(> :nth-child(4):last-child) > .steps__item:nth-child(4) {
+  background-position: 100% 0;
+}
+.steps__bars:has(> :nth-child(4):last-child) > .steps__item:nth-child(2) {
+  background-position: 33.333% 0;
+}
+.steps__bars:has(> :nth-child(4):last-child) > .steps__item:nth-child(3) {
+  background-position: 66.667% 0;
+}
+.steps__bars:has(> :nth-child(2):last-child) > .steps__item {
+  background-size: calc(200% + var(--s1)) 100%;
+}
+.steps__bars:has(> :nth-child(2):last-child) > .steps__item:nth-child(2) {
+  background-position: 100% 0;
+}
+.steps__bars > .steps__item--upcoming {
+  background: var(--steps-upcoming);
+}
+.steps__current {
+  font-weight: 700;
+}
+
+.import-progress__fill {
+  background: var(--spectrum);
+}
+
+/* ---------------------------------------------------------- word grid */
+
+.word-grid__item {
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.word-grid__index {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+/* Recovery words never take tracking: a split word is a trust problem. */
+.word-grid__word,
+.import-word__box .input__control {
+  letter-spacing: 0;
+}
+.import-word__number {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+
+/* ------------------------------------------------------ floating panels */
+
+.menu,
+.combobox__list {
+  border-radius: var(--radius-m);
+  padding: 6px;
+}
+.menu,
+.combobox__list,
+.dialog__panel,
+.toast,
+.overview-chart__tooltip {
+  border-color: var(--floating-border);
+}
+.menu__item,
+.combobox__option {
+  border-radius: 8px;
+}
+.menu__label {
+  font-weight: 600;
+}
+.menu__separator {
+  margin: 6px -6px;
+}
+/* Recipient suggestions show addresses: monospace. Wallet IDs stay in the UI face, tabular. */
+.combobox__description {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-ligatures: none;
+  word-spacing: normal;
+}
+/* A state icon (locked) takes the empty check slot, so the trailing column lines up. */
+.menu__trailing + .menu__check:empty {
+  display: none;
+}
+
+.tooltip {
+  border-radius: 7px;
+  padding: 5px 9px;
+  font-weight: 600;
+}
+
+/*
+ * A lit edge of the spectrum tops every dialog and sheet, and the two cards
+ * that carry an address out of the wallet (review, receive). It is a
+ * background layer, so the panel radius clips it and it follows the corners.
+ */
+.dialog__panel,
+.send-review__card,
+.receive-card {
+  --edge: var(--spectrum);
+  border-top-color: transparent;
+  background:
+    var(--edge) top / 100% 2px no-repeat border-box,
+    var(--edge-fill, var(--card-bg)) padding-box;
+}
+.dialog__panel {
+  --edge-fill: var(--bg-elevated);
+}
+/* Destructive confirmations drop the celebratory spectrum for the warning colour. */
+.dialog__panel:has(.btn--danger) {
+  --edge: linear-gradient(var(--negative), var(--negative));
+}
+
+.toast {
+  border-radius: var(--radius-m);
+}
+.toast__title {
+  font-weight: 650;
+}
+
+/* ------------------------------------------------------------------ shell */
+
+.shell__nav {
+  background: var(--nav-bg);
+  border-right: 1px solid var(--nav-border);
+}
+.nav-item {
+  position: relative;
+  border-radius: var(--radius-m);
+}
+.nav-item--active .nav-item__icon {
+  stroke-width: 2;
+}
+/* The active destination carries a sliver of the spectrum at the rail edge. */
+.nav-item--active::before {
+  content: '';
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: calc(var(--s3) * -1);
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--spectrum-v);
+}
+[data-layout='rail'] .nav-item--active::before {
+  left: calc((var(--rail-width) - 48px) / -2);
+}
+@media (min-width: 720px) and (max-width: 1023.98px) {
+  [data-layout='sidebar'] .nav-item--active::before {
+    left: calc((var(--rail-width) - 48px) / -2);
+  }
+}
+@media (min-width: 720px) {
+  [data-layout='topbar'] .nav-item--active::before {
+    top: auto;
+    bottom: -14px;
+    left: 10px;
+    right: 10px;
+    width: auto;
+    height: 3px;
+    border-radius: 3px 3px 0 0;
+    background: var(--spectrum);
+  }
+}
+
+[data-layout='rail'] .shell__nav {
+  gap: var(--s2);
+  padding: var(--s5) var(--s2) var(--s4);
+}
+[data-layout='rail'] .shell__brand {
+  padding: 0 0 var(--s2);
+}
+[data-layout='rail'] .shell__switcher {
+  margin-bottom: var(--s3);
+  padding-bottom: var(--s4);
+  border-bottom: 1px solid var(--nav-border);
+}
+[data-layout='rail'] .shell__navitems {
+  gap: var(--s1);
+}
+[data-layout='rail'] .shell__lock .icon-btn {
+  width: 48px;
+  height: 44px;
+  border-radius: var(--radius-m);
+}
+
+.switcher {
+  border-radius: var(--radius-m);
+}
+.switcher__name {
+  font-weight: 650;
+}
+.switcher__meta {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+.switcher--compact {
+  padding: 4px 6px 4px 4px;
+  border-radius: var(--radius-m);
+}
+
+.net-status {
+  font-weight: 600;
+}
+
+/* mobile */
+@media (max-width: 719.98px) {
+  .shell__mobilebar {
+    background: var(--nav-bg);
+    border-bottom-color: var(--nav-border);
+  }
+  .tabbar {
+    background: var(--nav-bg);
+    border-top-color: var(--nav-border);
+  }
+  .tabbar__item {
+    position: relative;
+    font-weight: 650;
+  }
+  .tabbar__item--active {
+    color: var(--accent-ink);
+  }
+  .tabbar__item--active::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: 28px;
+    height: 3px;
+    margin-left: -14px;
+    border-radius: 0 0 3px 3px;
+    background: var(--spectrum);
+  }
+}
+
+/* ------------------------------------------------------------ focus layout */
+
+.focus-layout {
+  background:
+    radial-gradient(ellipse 52% 46% at 50% -12%, var(--aurora-1), transparent 70%),
+    radial-gradient(ellipse 34% 36% at 18% -8%, var(--aurora-2), transparent 70%),
+    radial-gradient(ellipse 34% 36% at 82% -8%, var(--aurora-3), transparent 70%),
+    var(--bg);
+  background-repeat: no-repeat;
+}
+.welcome-hero__mark {
+  filter: drop-shadow(0 14px 30px color-mix(in srgb, var(--accent) 40%, transparent));
+}
+.welcome-choice__button {
+  border-radius: var(--card-radius);
+}
+.welcome-choice__button:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+/* The first choice (create) borrows the hero's light: a spectrum tile with an ink glyph. */
+.welcome-choice:first-child .welcome-choice__icon {
+  background: var(--spectrum);
+  color: var(--ink);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 6px 16px -8px color-mix(in srgb, var(--spec-indigo) 70%, transparent);
+}
+.welcome-choice__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* -------------------------------------------------------------- overview */
+
+/* The balance card: one luminous object, set in ink. */
+.card--hero {
+  --text: var(--ink);
+  --text-muted: rgba(10, 13, 20, 0.84);
+  --focus: var(--ink);
+  --ring: 0 0 0 2px rgba(255, 255, 255, 0.92), 0 0 0 4px var(--ink);
+  isolation: isolate;
+  color: var(--ink);
+  border: 0;
+  border-radius: var(--radius-l);
+  background:
+    radial-gradient(70% 140% at 6% -20%, rgba(255, 255, 255, 0.34), transparent 60%),
+    radial-gradient(60% 120% at 100% 120%, rgba(88, 28, 135, 0.22), transparent 70%),
+    var(--spectrum);
+  box-shadow: var(--hero-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+/* One soft refracted light plane, feathered on both edges, plus a fine grain. */
+.card--hero::before,
+.card--hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.card--hero::before {
+  background: linear-gradient(
+    112deg,
+    transparent 0 36%,
+    rgba(255, 255, 255, 0.13) 47%,
+    rgba(255, 255, 255, 0.04) 57%,
+    transparent 66%
+  );
+}
+.card--hero::after {
+  opacity: 0.22;
+  mix-blend-mode: soft-light;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.card--hero > * {
+  position: relative;
+}
+.overview-hero {
+  min-height: 196px;
+}
+.overview-hero__label {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: rgba(10, 13, 20, 0.84);
+}
+.overview-hero__balance {
+  gap: var(--s3);
+}
+/*
+ * On wider screens the figure and its symbol stay on one line; when the
+ * figure and the actions no longer fit side by side, the actions drop below
+ * the balance instead of the symbol dropping below the figure.
+ */
+@media (min-width: 720px) {
+  .overview-hero {
+    row-gap: var(--s5);
+  }
+  .overview-hero__balance {
+    flex: 1 1 auto;
+  }
+  .card--hero .amount--display {
+    flex-wrap: nowrap;
+  }
+  .overview-hero__amount--long.amount--display {
+    font-size: clamp(2.25rem, 1.5rem + 1.9vw, 3rem);
+  }
+}
+.card--hero .amount--display,
+.card--hero .amount--display .amount__number {
+  color: var(--ink);
+}
+.card--hero .amount--display .amount__frac {
+  color: rgba(10, 13, 20, 0.7);
+}
+.card--hero .amount--display .amount__symbol {
+  color: rgba(10, 13, 20, 0.84);
+}
+.overview-hero__pending,
+.overview-hero__pending .icon,
+.card--hero .amount--muted,
+.card--hero .amount--muted .amount__frac,
+.card--hero .amount--muted .amount__symbol {
+  color: rgba(10, 13, 20, 0.84);
+}
+.overview-hero__pending {
+  font-weight: 600;
+}
+.card--hero .skeleton {
+  background-color: rgba(10, 13, 20, 0.12);
+}
+.card--hero .btn--primary {
+  background: var(--ink);
+  color: #ffffff;
+  box-shadow: 0 10px 24px -12px rgba(10, 13, 20, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.card--hero .btn--primary:hover:not(:disabled):not([aria-disabled='true']) {
+  background: #1d2236;
+}
+.card--hero .btn--primary:hover:not(:disabled):not([aria-disabled='true']):not(:focus-visible) {
+  box-shadow: 0 14px 28px -12px rgba(10, 13, 20, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.card--hero .btn--primary:active:not(:disabled):not([aria-disabled='true']) {
+  background: #000000;
+}
+.card--hero .btn--secondary {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--ink);
+  border: 1.5px solid rgba(10, 13, 20, 0.8);
+  box-shadow: none;
+}
+.card--hero .btn--secondary:hover:not(:disabled):not([aria-disabled='true']) {
+  background: rgba(255, 255, 255, 0.34);
+  border-color: var(--ink);
+}
+.card--hero .btn:focus-visible {
+  box-shadow: var(--ring);
+}
+.card--hero .btn--primary.copy-btn--copied {
+  color: #ffffff;
+}
+.card--hero .btn--secondary.copy-btn--copied {
+  color: var(--ink);
+}
+
+@media (max-width: 719.98px) {
+  .overview-hero {
+    min-height: 0;
+  }
+  .overview-hero__actions .btn {
+    width: 100%;
+  }
+}
+
+/* Balance history: a prominent, quiet chart card. */
+.overview-history__card.card {
+  gap: var(--s4);
+  padding: var(--s6) var(--s6) var(--s4);
+}
+.overview-history__change {
+  align-items: baseline;
+  font-size: var(--text-xl);
+  min-height: 2rem;
+}
+.overview-history__change .amount {
+  font-size: 1.5rem;
+  letter-spacing: -0.02em;
+}
+.overview-history__change .amount__symbol {
+  font-size: 0.58em;
+}
+.overview-history__phrase {
+  font-weight: 600;
+}
+.overview-chart__plot {
+  height: 264px;
+}
+.overview-chart__gridline {
+  stroke-dasharray: 2 4;
+}
+/*
+ * Both axes are set in the cyan of the spectrum's start. The value labels sit
+ * under the blend layer at the left edge; this colour is darker (lighter) than
+ * the spectrum there in every channel, so the blend leaves it unchanged and
+ * both axes match.
+ */
+.overview-chart__ytick,
+.overview-chart__xtick {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+  fill: var(--chart-axis);
+}
+/* Value labels sit clear above their gridline; a wider halo masks the line behind them. */
+.overview-chart__ytick {
+  transform: translateY(-3px);
+  stroke-width: 5px;
+}
+.overview-chart__line {
+  stroke-width: 2.25;
+}
+.overview-chart__stop--bottom {
+  stop-opacity: 0;
+}
+/* The current value: a larger data point with a halo in the card colour. */
+.overview-chart__end {
+  r: 5px;
+  stroke-width: 3;
+}
+.overview-chart__tooltip {
+  border-radius: 10px;
+}
+.overview-chart__tooltip-value {
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+}
+.overview-chart__tooltip-time {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+.overview-chart__empty {
+  z-index: 1;
+}
+
+/*
+ * The spectral line: the line is drawn in pure white (dark) or black (light)
+ * and a spectrum layer above the plot is blended with darken / lighten. The
+ * card colour, grid and fill are darker (lighter) than every stop, so they pass
+ * through unchanged; only the line and its markers take the spectrum.
+ */
+@supports (mix-blend-mode: darken) {
+  .overview-chart {
+    background: var(--card-bg);
+  }
+  .overview-chart__line {
+    stroke: var(--chart-ink);
+  }
+  .overview-chart__end {
+    fill: var(--chart-ink);
+  }
+  .overview-chart__dot {
+    stroke: var(--chart-ink);
+  }
+  .overview-chart__plot:not(.overview-chart__plot--skeleton)::after {
+    content: '';
+    position: absolute;
+    /*
+     * Reaches 8px past the plot sides (into the card padding, card colour) so
+     * markers on the first and last points are fully tinted; stops above the
+     * time labels, which keep the axis colour.
+     */
+    inset: 0 -8px 17px;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(
+      90deg,
+      var(--chart-spec-0) 0 64px,
+      var(--chart-spec-1) 112px,
+      var(--chart-spec-2) 54%,
+      var(--chart-spec-3) 100%
+    );
+    mix-blend-mode: var(--chart-blend);
+  }
+}
+
+@media (max-width: 719.98px) {
+  .overview-chart__plot {
+    height: 188px;
+  }
+  .overview-history__card.card {
+    padding: var(--s4) var(--s3) var(--s2);
+  }
+  .overview-history__change {
+    padding-inline: var(--s1);
+  }
+}
+
+.overview-tokens__card {
+  padding: var(--s1);
+}
+
+/* ------------------------------------------------------------- screens */
+
+.activity-row__meta,
+.activity-row .list-item__trailing-sub {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0;
+  word-spacing: normal;
+}
+.activity-row__meta .badge {
+  font-family: var(--font-ui);
+}
+
+.receive-card__qr {
+  border-radius: var(--radius-l);
+  box-shadow: inset 0 0 0 1px var(--border), 0 12px 30px -18px rgba(20, 26, 66, 0.35);
+}
+.receive-card__address {
+  font-size: 1.0625rem;
+}
+
+.send-form__amount .input__control {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.send-review__hero .amount {
+  font-size: 2.5rem;
+}
+.send-review__eyebrow,
+.activity-detail__summary + * .kv__label {
+  font-weight: 600;
+}
+.send-review__eyebrow {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+}
+.send-review__address,
+.activity-save__address,
+.contact-dialog__recipient {
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.create-pick__label {
+  border-radius: var(--control-radius);
+}
+
+@media (forced-colors: active) {
+  .card--hero {
+    border: 1px solid CanvasText;
+  }
+  .dialog__panel,
+  .send-review__card,
+  .receive-card {
+    border-top-color: CanvasText;
+  }
+  .overview-chart__plot::after,
+  .nav-item--active::before,
+  .tabbar__item--active::before,
+  .card--hero::before,
+  .card--hero::after {
+    display: none;
+  }
+  .overview-chart__line {
+    stroke: CanvasText;
+  }
+}

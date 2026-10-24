@@ -6,7 +6,7 @@ import { NATIVE_CONTRACT } from '../../lib/address';
 import { toInputString } from '../../lib/amount';
 import { errorMessage } from '../../lib/errors';
 import { backend } from '../core';
-import { activity, assets, counterpartyFor, ownAddressSet, statusFor } from '../session';
+import { activity, assets, repeatRecipientFor, statusFor } from '../session';
 import { startSend, type SendDraft } from '../send';
 import { notify } from '../toasts';
 
@@ -40,7 +40,8 @@ export const activityAssetOptions = computed<ActivityAssetOption[]>(() => {
 /**
  * Prefill for repeating a sent transfer (recipient, asset, amount and memo),
  * or null when the item cannot be repeated (not a send, still pending,
- * unverified token, or recipient not known yet).
+ * unverified token, a move, contract call or payment to several recipients,
+ * or recipient not known yet).
  */
 export function sendAgainDraft(item: ActivityItem, memo?: string): Partial<SendDraft> | null {
   if (item.kind !== 'sent') return null;
@@ -49,10 +50,10 @@ export function sendAgainDraft(item: ActivityItem, memo?: string): Partial<SendD
   const primary = item.primary;
   if (!primary || primary.amount >= 0n) return null;
   if (!primary.native && !primary.verified) return null;
-  const cp = counterpartyFor(item);
-  if (!cp || ownAddressSet.value.has(cp.address)) return null;
+  const to = repeatRecipientFor(item);
+  if (!to) return null;
   const draft: Partial<SendDraft> = {
-    to: cp.address,
+    to,
     contract: primary.contract,
     amount: toInputString(-primary.amount, primary.decimals),
   };

@@ -1,4 +1,4 @@
-/** Recovery phrase display with reveal, hide and copy (copied words are cleared from the clipboard after a minute). */
+/** Recovery phrase display with reveal, hide and copy (copied words are cleared from the clipboard as soon as possible). */
 import { copyToClipboard } from '../../../state';
 import { Button, CopyButton, WordGrid } from '../../components';
 import './create.css';
@@ -7,9 +7,11 @@ export interface PhraseWordsProps {
   words: string[];
   revealed: boolean;
   onRevealedChange: (revealed: boolean) => void;
+  /** Shows a Copy button (default true); off where another control already copies the words. */
+  copyable?: boolean;
 }
 
-export function PhraseWords({ words, revealed, onRevealedChange }: PhraseWordsProps) {
+export function PhraseWords({ words, revealed, onRevealedChange, copyable = true }: PhraseWordsProps) {
   const copy = async (): Promise<void> => {
     const ok = await copyToClipboard(words.join(' '), { sensitive: true });
     if (!ok) throw new Error('copy failed');
@@ -22,7 +24,7 @@ export function PhraseWords({ words, revealed, onRevealedChange }: PhraseWordsPr
           <Button variant="ghost" size="sm" icon="eye-off" onClick={() => onRevealedChange(false)}>
             Hide
           </Button>
-          <CopyButton variant="button" buttonVariant="ghost" size="sm" label="Copy" onCopy={copy} />
+          {copyable ? <CopyButton variant="button" buttonVariant="ghost" size="sm" label="Copy" onCopy={copy} /> : null}
         </div>
       ) : null}
     </div>

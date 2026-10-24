@@ -6,6 +6,7 @@ pub const COMMANDS: &[&str] = &[
     "load_app_state",
     "save_app_state",
     "list_wallets",
+    "new_recovery_phrase",
     "create_wallet",
     "import_wallet",
     "unlock_wallet",

@@ -21,7 +21,8 @@
         "minHeight": 620,
         "center": true,
         "visible": false,
-        "create": false
+        "create": false,
+        "zoomHotkeysEnabled": true
       }
     ],
     "security": {
@@ -49,6 +50,9 @@
     "linux": {
       "appimage": {
         "bundleMediaFramework": false
+      },
+      "deb": {
+        "section": "utils"
       }
     },
     "macOS": {

@@ -26,6 +26,7 @@ type Command =
   | 'load_app_state'
   | 'save_app_state'
   | 'list_wallets'
+  | 'new_recovery_phrase'
   | 'create_wallet'
   | 'import_wallet'
   | 'unlock_wallet'
@@ -96,8 +97,14 @@ class DesktopBackend implements Backend {
     return call('list_wallets');
   }
 
-  createWallet(r: CreateWalletRequest): Promise<{ wallet: WalletInfo; mnemonic: string }> {
-    const args: Record<string, unknown> = { name: r.name, addressCount: r.addressCount };
+  async newRecoveryPhrase(): Promise<string> {
+    const words = await call<unknown>('new_recovery_phrase');
+    if (typeof words !== 'string') throw new BackendError('internal');
+    return words;
+  }
+
+  createWallet(r: CreateWalletRequest): Promise<WalletInfo> {
+    const args: Record<string, unknown> = { name: r.name, mnemonic: r.mnemonic, addressCount: r.addressCount };
     if (r.passphrase !== undefined) args.passphrase = r.passphrase;
     return call('create_wallet', args);
   }
@@ -121,6 +128,7 @@ class DesktopBackend implements Backend {
     return call('lock_wallet', { id });
   }
 
+  /** The app runs as a single window: there are no other windows to lock. */
   lockAll(): Promise<void> {
     return call('lock_all');
   }

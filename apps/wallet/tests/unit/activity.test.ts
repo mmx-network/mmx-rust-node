@@ -11,6 +11,7 @@ import {
   memoFromTx,
   mergeActivity,
   pendingItem,
+  repeatRecipient,
   type ActivityItem,
 } from '../../src/chain/activity';
 import type { PendingTx } from '../../src/chain/pending';
@@ -40,13 +41,15 @@ function r(type: TxType, amount: bigint, opts: Partial<HistoryRow> = {}): Histor
     symbol: contract === NATIVE_CONTRACT ? 'MMX' : contract === TOKEN ? 'USDM' : 'MMX',
     decimals: 6,
     native: contract === NATIVE_CONTRACT,
-    validated: contract === TOKEN,
     ...opts,
   };
 }
 
+/** TOKEN stands for a token on the verified list; FAKE is not on it. */
+const verifiedToken = (c: string) => c === TOKEN;
+
 const one = (rows: HistoryRow[]): ActivityItem => {
-  const items = groupRows(rows);
+  const items = groupRows(rows, verifiedToken);
   expect(items).toHaveLength(1);
   return items[0]!;
 };
@@ -126,9 +129,9 @@ describe('grouping', () => {
   });
 
   it('an unverified token named MMX is never treated as native', () => {
-    const item = one([r('RECEIVE', 1_000_000_000n, { contract: FAKE, validated: false })]);
+    const item = one([r('RECEIVE', 1_000_000_000n, { contract: FAKE })]);
     expect(item.primary).toMatchObject({ native: false, verified: false, symbol: 'MMX', contract: FAKE });
-    const viaLookup = groupRows([r('RECEIVE', 1n, { contract: FAKE, validated: false })], (c) => c === FAKE)[0]!;
+    const viaLookup = groupRows([r('RECEIVE', 1n, { contract: FAKE })], (c) => c === FAKE)[0]!;
     expect(viaLookup.primary!.verified).toBe(true);
   });
 
@@ -207,6 +210,18 @@ describe('pending sends', () => {
     const confirmed = groupRows([r('RECEIVE', 1n)])[0]!;
     expect(compareItems(local, confirmed)).toBeLessThan(0);
   });
+
+  it('keep an unverified token unverified, whatever its symbol', () => {
+    const fake: PendingTx = { ...p, contract: FAKE, symbol: 'MMX' };
+    for (const status of ['pending', 'expired', 'failed'] as const) {
+      const item = pendingItem({ ...fake, status }, OWN, verifiedToken);
+      expect(item.primary).toMatchObject({ native: false, verified: false, contract: FAKE });
+    }
+    expect(mergeActivity([], [fake], OWN, verifiedToken)[0]!.primary!.verified).toBe(false);
+    expect(mergeActivity([], [fake], OWN)[0]!.primary!.verified).toBe(false);
+    expect(pendingItem({ ...p, contract: TOKEN }, OWN, verifiedToken).primary!.verified).toBe(true);
+    expect(pendingItem(p, OWN).primary).toMatchObject({ native: true, verified: true });
+  });
 });
 
 describe('counterparty and memo', () => {
@@ -217,6 +232,7 @@ describe('counterparty and memo', () => {
     fee: 1n,
     inputs: [],
     outputs: [],
+    contractCall: false,
     ...over,
   });
 
@@ -250,6 +266,96 @@ describe('counterparty and memo', () => {
     expect(counterpartyAddress(one([r('REWARD', 1n)]), tx({ sender: FOREIGN }), OWN)).toBeUndefined();
     const moved = one([r('SPEND', 2n), r('RECEIVE', 2n, { address: OWN2 })]);
     expect(counterpartyAddress(moved, tx({ sender: OWN1 }), OWN)).toBeUndefined();
+  });
+
+  it('a payment to several recipients has no single counterparty', () => {
+    const item = one([r('SPEND', 15n), r('TXFEE', 1n)]);
+    const info = tx({
+      inputs: [{ address: OWN1, contract: NATIVE_CONTRACT, amount: 15n }],
+      outputs: [
+        { address: FOREIGN, contract: NATIVE_CONTRACT, amount: 10n },
+        { address: FOREIGN2, contract: NATIVE_CONTRACT, amount: 5n },
+      ],
+    });
+    expect(counterpartyAddress(item, info, OWN)).toBeUndefined();
+  });
+
+  it('contract notes are not shown as a memo', () => {
+    const item = one([r('SPEND', 500n), r('TXFEE', 1n)]);
+    const info = tx({
+      contractCall: true,
+      outputs: [{ address: FOREIGN, contract: NATIVE_CONTRACT, amount: 500n, memo: 'mmx_offer_proceeds' }],
+    });
+    expect(memoFromTx(item, info, OWN)).toBeUndefined();
+    expect(memoFromTx(item, { ...info, contractCall: false }, OWN)).toBe('mmx_offer_proceeds');
+  });
+});
+
+describe('repeating a send', () => {
+  const tx = (over: Partial<TxInfo>): TxInfo => ({
+    id: testTxid('tx1'),
+    expires: 1,
+    didFail: false,
+    fee: 1n,
+    inputs: [{ address: OWN1, contract: NATIVE_CONTRACT, amount: 500n }],
+    outputs: [{ address: FOREIGN, contract: NATIVE_CONTRACT, amount: 500n }],
+    contractCall: false,
+    ...over,
+  });
+  const sent = one([r('SPEND', 500n), r('TXFEE', 1n)]);
+
+  it('repeats a plain transfer to one recipient', () => {
+    expect(repeatRecipient(sent, tx({}), OWN)).toBe(FOREIGN);
+    const split = tx({
+      inputs: [
+        { address: OWN1, contract: NATIVE_CONTRACT, amount: 300n },
+        { address: OWN2, contract: NATIVE_CONTRACT, amount: 200n },
+      ],
+      outputs: [
+        { address: FOREIGN, contract: NATIVE_CONTRACT, amount: 450n },
+        { address: FOREIGN, contract: NATIVE_CONTRACT, amount: 50n },
+      ],
+    });
+    const fromTwo = one([r('SPEND', 300n), r('SPEND', 200n, { address: OWN2 }), r('TXFEE', 1n)]);
+    expect(repeatRecipient(fromTwo, split, OWN)).toBe(FOREIGN);
+    const token = one([r('SPEND', 9n, { contract: TOKEN }), r('TXFEE', 1n)]);
+    const tokenTx = tx({ inputs: [{ address: OWN1, contract: TOKEN, amount: 9n }], outputs: [{ address: FOREIGN, contract: TOKEN, amount: 9n }] });
+    expect(repeatRecipient(token, tokenTx, OWN)).toBe(FOREIGN);
+  });
+
+  it('never turns an NFT purchase into a plain payment to the seller', () => {
+    // nft_offer accept: the price is spent, the seller gets it, the NFT comes back.
+    const purchase = tx({
+      contractCall: true,
+      outputs: [
+        { address: FOREIGN, contract: NATIVE_CONTRACT, amount: 500n, memo: 'mmx_offer_proceeds' },
+        { address: OWN1, contract: testAddress(77), amount: 1n },
+      ],
+    });
+    expect(repeatRecipient(sent, purchase, OWN)).toBeUndefined();
+    // Without the operations the NFT coming back still shows it is no plain transfer.
+    expect(repeatRecipient(sent, { ...purchase, contractCall: false }, OWN)).toBeUndefined();
+  });
+
+  it('does not repeat a payment to several recipients as one transfer', () => {
+    const many = tx({
+      outputs: [
+        { address: FOREIGN, contract: NATIVE_CONTRACT, amount: 300n },
+        { address: FOREIGN2, contract: NATIVE_CONTRACT, amount: 200n },
+      ],
+    });
+    expect(repeatRecipient(sent, many, OWN)).toBeUndefined();
+  });
+
+  it('does not repeat swaps, trades or partial amounts', () => {
+    expect(repeatRecipient(sent, tx({ contractCall: true }), OWN)).toBeUndefined();
+    expect(repeatRecipient(sent, tx({ inputs: [{ address: FOREIGN2, contract: NATIVE_CONTRACT, amount: 500n }] }), OWN)).toBeUndefined();
+    expect(repeatRecipient(sent, tx({ outputs: [{ address: FOREIGN, contract: NATIVE_CONTRACT, amount: 499n }] }), OWN)).toBeUndefined();
+    expect(repeatRecipient(sent, tx({ outputs: [{ address: FOREIGN, contract: TOKEN, amount: 500n }] }), OWN)).toBeUndefined();
+    const swap = one([r('SPEND', 500n), r('RECEIVE', 7n, { contract: TOKEN }), r('TXFEE', 1n)]);
+    expect(repeatRecipient(swap, tx({}), OWN)).toBeUndefined();
+    const received = one([r('RECEIVE', 500n)]);
+    expect(repeatRecipient(received, tx({}), OWN)).toBeUndefined();
   });
 });
 

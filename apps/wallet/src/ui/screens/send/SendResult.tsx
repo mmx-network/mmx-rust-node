@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { normalizeAddress } from '../../../lib/address';
 import { formatAmount, parseAtomic } from '../../../lib/amount';
-import { sanitizeSymbol, shortenHash } from '../../../lib/text';
-import { copyToClipboard, describeAddress, finishSend, navigate, openTransaction, sendFlow } from '../../../state';
+import { shortenHash } from '../../../lib/text';
+import { copyToClipboard, describeAddress, finishSend, navigate, openTransaction, preparedSymbol, sendFlow } from '../../../state';
 import { Button, Card, CopyButton, EmptyState, KeyValue, KeyValueList, Page, shortenAddress } from '../../components';
 import { ContactDialog } from '../contacts/ContactDialog';
 
@@ -25,7 +25,7 @@ export function SendResult({ uncertain }: { uncertain: boolean }) {
   if (!prepared) return null;
   const to = normalizeAddress(prepared.to) ?? prepared.to;
   const who = describeAddress(to);
-  const symbol = sanitizeSymbol(prepared.symbol) || 'MMX';
+  const symbol = preparedSymbol(prepared);
   const amount = parseAtomic(prepared.amount) ?? 0n;
   const summary = `${formatAmount(amount, prepared.decimals)} ${symbol} to ${who.name ?? shortenAddress(to)}`;
 

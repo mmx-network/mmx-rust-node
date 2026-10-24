@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createMockBackend, MOCK_PASSPHRASE, MOCK_WALLETS, type MockBackend } from '../../src/backend/mock';
 import { BackendError, type WalletInfo } from '../../src/backend/types';
-import { parseAddressBalances, parseChainParams, parseHistory, parseNodeInfo, parseTransaction, parseTokenValidation } from '../../src/chain/rpc';
+import { parseAddressBalances, parseChainParams, parseHistory, parseNodeInfo, parseTransaction } from '../../src/chain/rpc';
 import { NATIVE_CONTRACT } from '../../src/lib/address';
 
 const START = 1_792_835_101_709;
@@ -55,9 +55,15 @@ describe('mock wallets (desktop)', () => {
 
   it('creates, imports, renames, resizes and removes wallets', async () => {
     const { backend } = setup();
-    const { wallet, mnemonic } = await backend.createWallet({ name: 'New', addressCount: 10 });
+    const before = (await backend.listWallets()).length;
+    const mnemonic = await backend.newRecoveryPhrase();
     expect(mnemonic.split(' ')).toHaveLength(24);
+    // New words alone store nothing.
+    expect(await backend.listWallets()).toHaveLength(before);
+    const wallet = await backend.createWallet({ name: 'New', mnemonic, addressCount: 10 });
     expect(wallet.locked).toBe(false);
+    expect((await backend.loadAppState()).activeWallet).toBe(wallet.id);
+    expect(await code(backend.createWallet({ name: 'Twice', mnemonic, addressCount: 10 }))).toBe('wallet_exists');
     expect(await code(backend.importWallet({ name: 'Again', mnemonic, addressCount: 10 }))).toBe('wallet_exists');
     expect(await code(backend.importWallet({ name: 'Bad', mnemonic: 'abandon '.repeat(23) + 'zzz', addressCount: 10 }))).toBe('invalid_mnemonic');
     expect(await code(backend.renameWallet(wallet.id, '  '))).toBe('invalid_argument');
@@ -88,12 +94,15 @@ describe('mock wallets (web)', () => {
     expect((await backend.listWallets()).every((w) => w.locked)).toBe(true);
   });
 
-  it('marks new wallets unverified until opened', async () => {
+  it('stores a new wallet open and confirmed, with the ID announced before', async () => {
     const { backend } = setup('web');
-    const { wallet, mnemonic } = await backend.createWallet({ name: 'Fresh', addressCount: 10, passphrase: 'pw' });
-    expect(wallet).toMatchObject({ locked: true, verified: false, withPassphrase: true });
-    const opened = await backend.unlockWallet(wallet.id, { mnemonic, passphrase: 'pw' });
-    expect(opened).toMatchObject({ locked: false, verified: true });
+    const mnemonic = await backend.newRecoveryPhrase();
+    const id = await backend.walletFingerprint({ mnemonic, passphrase: 'pw' });
+    expect(id).not.toBe(await backend.walletFingerprint({ mnemonic }));
+    expect(await backend.walletFingerprint({ mnemonic, passphrase: '' })).toBe(await backend.walletFingerprint({ mnemonic }));
+    const wallet = await backend.createWallet({ name: 'Fresh', mnemonic, passphrase: 'pw', addressCount: 10 });
+    expect(wallet).toMatchObject({ id, fingerprint: id, locked: false, verified: true, withPassphrase: true });
+    expect(await backend.getAddresses(wallet.id)).toHaveLength(10);
   });
 
   it('detects the passphrase from an expected fingerprint on import', async () => {
@@ -169,21 +178,25 @@ describe('mock chain server', () => {
     for (let i = 1; i < all.length; i++) expect(all[i - 1]!.height).toBeGreaterThanOrEqual(all[i]!.height);
   });
 
-  it('includes an unverified token named MMX and a whitelisted token', async () => {
+  it('includes a token named MMX that is not native and another token', async () => {
     const { backend } = setup();
     const p = await params(backend);
-    const flags = new Map<string, boolean>();
     const symbols = new Map<string, string>();
     for (const w of await backend.listWallets()) {
       if (w.locked) continue;
       for (const a of await backend.getAddresses(w.id)) {
         for (const r of parseAddressBalances(await backend.rpcGet(`/address?id=${a}&limit=1000`), p)) symbols.set(r.contract, r.symbol);
-        for (const [c, v] of parseTokenValidation(await backend.rpcGet(`/balance?id=${a}`))) flags.set(c, v);
       }
     }
     const tokens = [...symbols].filter(([c]) => c !== NATIVE_CONTRACT);
-    expect(tokens.some(([c, s]) => s === 'MMX' && flags.get(c) === false)).toBe(true);
-    expect(tokens.some(([c, s]) => s === 'USDM' && flags.get(c) === true)).toBe(true);
+    expect(tokens.some(([, s]) => s === 'MMX')).toBe(true);
+    expect(tokens.some(([, s]) => s === 'USDM')).toBe(true);
+  });
+
+  it('serves only the reads the wallet makes', async () => {
+    const { backend } = setup();
+    const [a] = await backend.getAddresses('wallet.dat');
+    await expect(backend.rpcGet(`/balance?id=${a}`)).rejects.toMatchObject({ code: 'invalid_argument' });
   });
 });
 
@@ -239,6 +252,44 @@ describe('mock sending', () => {
         expect(await code(backend.prepareSend({ ...req, amount: (BigInt(max) + 1n).toString() }))).not.toBe('ok');
       }
     }
+  });
+
+  it('holds back funds of sends that are not included yet', async () => {
+    const { backend, advance } = setup();
+    const trading = (await backend.listWallets())[2]!;
+    const to = (await backend.getAddresses('wallet.dat'))[5]!;
+    const req = { walletId: trading.id, to, contract: NATIVE_CONTRACT, feeLevel: 1 as const };
+    const max = BigInt(await backend.maxSendable(req));
+    const half = max / 2n;
+    const first = await backend.prepareSend({ ...req, amount: half.toString() });
+    await backend.broadcast(trading.id, first.txid);
+    // The first send's amount and fee are not offered again.
+    const after = BigInt(await backend.maxSendable(req));
+    expect(after).toBeLessThan(max - half);
+    expect(await code(backend.prepareSend({ ...req, amount: (after + 1n).toString() }))).toBe('insufficient_funds');
+    const second = await backend.prepareSend({ ...req, amount: after.toString() });
+    await backend.broadcast(trading.id, second.txid);
+    // Both are included (the mock chain throws on an overspent address) and nothing is held any more.
+    advance(25_000);
+    const p = await params(backend);
+    for (const s of [first, second]) expect(parseTransaction(await backend.rpcGet(`/transaction?id=${s.txid}`), p)!.height).toBeDefined();
+    expect(BigInt(await backend.maxSendable(req))).toBeLessThan(10n ** 6n);
+  });
+
+  it('holds back an uncertain send but not a refused one', async () => {
+    const { backend } = setup();
+    const trading = (await backend.listWallets())[2]!;
+    const to = (await backend.getAddresses('wallet.dat'))[5]!;
+    const req = { walletId: trading.id, to, contract: NATIVE_CONTRACT, feeLevel: 1 as const };
+    const max = BigInt(await backend.maxSendable(req));
+    const refused = await backend.prepareSend({ ...req, amount: '1000000' });
+    backend.failNextBroadcast = new BackendError('tx_rejected');
+    expect(await code(backend.broadcast(trading.id, refused.txid))).toBe('tx_rejected');
+    expect(BigInt(await backend.maxSendable(req))).toBe(max);
+    const unknown = await backend.prepareSend({ ...req, amount: '1000000' });
+    backend.failNextBroadcast = new BackendError('rpc_timeout');
+    expect(await code(backend.broadcast(trading.id, unknown.txid))).toBe('rpc_timeout');
+    expect(BigInt(await backend.maxSendable(req))).toBeLessThanOrEqual(max - 1_000_000n - BigInt(unknown.fee));
   });
 
   it('expires prepared transactions after ten minutes', async () => {

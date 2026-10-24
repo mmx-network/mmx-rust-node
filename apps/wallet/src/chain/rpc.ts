@@ -9,8 +9,8 @@ import { BackendError, isBackendError } from '../backend/types';
 import { decodeAddress, NATIVE_CONTRACT } from '../lib/address';
 import { MAX_ATOMIC, MAX_DECIMALS } from '../lib/amount';
 import { isTxid } from '../lib/explorer';
-import { sanitizeMemo, sanitizeSymbol } from '../lib/text';
-import type { BalanceRow, ChainParams, HistoryRow, NodeInfo, TxInfo, TxIo, TxType } from './types';
+import { sanitizeMemo, sanitizeSymbol, shortenHash } from '../lib/text';
+import type { BalanceRow, ChainParams, HistoryPage, HistoryRow, NodeInfo, TxInfo, TxIo, TxType } from './types';
 import { TX_TYPES } from './types';
 
 export type Transport = (path: string) => Promise<unknown>;
@@ -100,12 +100,15 @@ function timeMs(o: Obj): number | undefined {
   return undefined;
 }
 
-/** Native symbol is fixed; tokens use the sanitized server symbol. */
+/**
+ * Native symbol is fixed; tokens use the sanitized server symbol. A symbol
+ * that is empty after sanitizing is valid on chain (the node only limits its
+ * length and a few whitespace characters), so it is shown as the shortened
+ * contract instead — the same for every response, never an error.
+ */
 function symbolFor(o: Obj, contract: string): string {
   if (contract === NATIVE_CONTRACT) return 'MMX';
-  const s = sanitizeSymbol(text(o, 'symbol'));
-  if (!s) throw invalid('symbol');
-  return s;
+  return sanitizeSymbol(text(o, 'symbol')) || shortenHash(contract, 8, 4);
 }
 
 export function parseChainParams(v: unknown): ChainParams {
@@ -164,43 +167,54 @@ export function parseAddressBalances(v: unknown, params: ChainParams): BalanceRo
   return rows;
 }
 
-/** `/balance?id=` → contract → whitelisted. */
-export function parseTokenValidation(v: unknown): Map<string, boolean> {
-  const out = new Map<string, boolean>();
-  if (v === null) return out;
-  const o = asObject(v, 'balance');
-  for (const item of asArray(o.balances, 'balances')) {
-    const row = asObject(item, 'balance');
-    out.set(address(row, 'contract'), row.is_validated === true);
-  }
-  return out;
-}
-
 function txType(o: Obj): TxType {
   const t = text(o, 'type');
   if (!(TX_TYPES as readonly string[]).includes(t)) throw invalid('type');
   return t as TxType;
 }
 
+/** Inclusive height range a history request asked for. */
+export interface HistoryRange {
+  since?: number;
+  until?: number;
+}
+
 /**
- * `/address/history` rows. Pending entries (no height) are skipped — they are
- * tracked locally — as are NFT rows, which carry no currency metadata.
+ * An `/address/history` response. Pending entries (no height) are skipped —
+ * they are tracked locally — and NFT rows, which carry no currency metadata,
+ * are left out of `rows` but still counted, so paging follows what the node
+ * returned. Every confirmed entry must belong to `expectedAddress` and lie in
+ * the requested range.
  */
-export function parseHistory(v: unknown, params: ChainParams, expectedAddress?: string): HistoryRow[] {
+export function parseHistoryPage(
+  v: unknown,
+  params: ChainParams,
+  expectedAddress?: string,
+  range: HistoryRange = {},
+): HistoryPage {
+  const list = asArray(v, 'history');
+  const since = range.since ?? 0;
+  const until = range.until ?? U32_MAX;
   const rows: HistoryRow[] = [];
-  for (const item of asArray(v, 'history')) {
+  let minHeight = Infinity;
+  let maxHeight = -1;
+  for (const item of list) {
     const o = asObject(item, 'history entry');
     if (o.is_pending === true || o.height === null || o.height === U32_MAX) continue;
-    if (o.is_nft === true) continue;
-    const contract = address(o, 'contract');
+    const height = u32(o, 'height');
+    if (height < since || height > until) throw invalid('height');
     const addr = address(o, 'address');
     if (expectedAddress && addr !== expectedAddress) throw invalid('address');
+    if (height < minHeight) minHeight = height;
+    if (height > maxHeight) maxHeight = height;
+    if (o.is_nft === true) continue;
+    const contract = address(o, 'contract');
     const ms = timeMs(o);
     if (ms === undefined) throw invalid('time_stamp');
     const memo = optionalMemo(o);
     rows.push({
       txid: txid(o, 'txid'),
-      height: u32(o, 'height'),
+      height,
       timeMs: ms,
       type: txType(o),
       address: addr,
@@ -209,11 +223,15 @@ export function parseHistory(v: unknown, params: ChainParams, expectedAddress?: 
       decimals: decimals(o, contract, params),
       symbol: symbolFor(o, contract),
       native: contract === NATIVE_CONTRACT,
-      validated: o.is_validated === true,
       ...(memo ? { memo } : {}),
     });
   }
-  return rows;
+  return { rows, count: list.length, minHeight, maxHeight };
+}
+
+/** The currency rows of an `/address/history` response (see parseHistoryPage). */
+export function parseHistory(v: unknown, params: ChainParams, expectedAddress?: string): HistoryRow[] {
+  return parseHistoryPage(v, params, expectedAddress).rows;
 }
 
 function parseIo(v: unknown, params: ChainParams): TxIo {
@@ -241,6 +259,7 @@ export function parseTransaction(v: unknown, params: ChainParams): TxInfo | null
     fee: atomic(fee.amount, 'fee'),
     inputs: asArray(o.inputs ?? [], 'inputs').map((i) => parseIo(i, params)),
     outputs: asArray(o.outputs ?? [], 'outputs').map((i) => parseIo(i, params)),
+    contractCall: asArray(o.operations ?? [], 'operations').length > 0 || (o.deployed !== null && o.deployed !== undefined),
   };
   if (o.height !== null && o.height !== undefined) info.height = u32(o, 'height');
   const ms = timeMs(o);
@@ -368,19 +387,21 @@ export class RpcClient {
     return parseAddressBalances(await this.get(`/address?id=${addr}&limit=1000`), params);
   }
 
-  async tokenValidation(addr: string): Promise<Map<string, boolean>> {
-    return parseTokenValidation(await this.get(`/balance?id=${addr}`));
-  }
-
+  /**
+   * One history page. A full page (at least `limit` entries) must include a
+   * confirmed height, since the next older page starts below it.
+   */
   async history(
     addr: string,
     query: { limit: number; since?: number; until?: number },
     params: ChainParams,
-  ): Promise<HistoryRow[]> {
+  ): Promise<HistoryPage> {
     let path = `/address/history?id=${addr}&limit=${query.limit}`;
     if (query.since !== undefined) path += `&since=${query.since}`;
     if (query.until !== undefined) path += `&until=${query.until}`;
-    return parseHistory(await this.get(path), params, addr);
+    const page = parseHistoryPage(await this.get(path), params, addr, query);
+    if (page.count >= query.limit && page.minHeight === Infinity) throw invalid('history');
+    return page;
   }
 
   /** True when the address has any history. */

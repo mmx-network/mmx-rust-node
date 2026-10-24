@@ -55,7 +55,10 @@ pub fn read(dir: &Path) -> Result<Config> {
     match load(dir)? {
         Loaded::Missing => Ok(Config::new()),
         Loaded::Valid(map) => Ok(map),
-        Loaded::Invalid => Err(invalid("invalid wallet configuration")),
+        Loaded::Invalid => Err(invalid(format!(
+            "invalid wallet configuration: {}",
+            dir.join(FILE).display()
+        ))),
     }
 }
 

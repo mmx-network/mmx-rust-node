@@ -61,9 +61,24 @@ export function useMounted(): RefObject<boolean> {
   return mounted;
 }
 
-/** Attributes that keep password managers away from a field (passphrases, never saved with the words). */
+/** Attributes that keep password manager extensions away from a text field (e.g. the wallet name). */
 export const PASSWORD_MANAGER_IGNORE = {
   autocomplete: 'off',
+  'data-1p-ignore': 'true',
+  'data-lpignore': 'true',
+  'data-bwignore': 'true',
+  'data-form-type': 'other',
+} as const;
+
+/**
+ * Attributes for passphrase fields (always a PasswordInput, so the value stays
+ * masked). Browsers' own password managers ignore autocomplete="off" on
+ * password fields; "one-time-code" marks the field as not a password, so a
+ * passphrase is never offered for saving and never replaces the saved
+ * recovery words. The data-* hints do the same for extensions.
+ */
+export const PASSPHRASE_FIELD = {
+  autocomplete: 'one-time-code',
   'data-1p-ignore': 'true',
   'data-lpignore': 'true',
   'data-bwignore': 'true',

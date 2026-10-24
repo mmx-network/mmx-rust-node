@@ -1,10 +1,10 @@
 /**
  * First step of creating or importing a wallet: its name and an optional
- * passphrase.
+ * passphrase, typed twice.
  */
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Banner, Button, Card, Field, Icon, OptionRow, PasswordInput, Switch, TextInput } from '../../components';
-import { PASSWORD_MANAGER_IGNORE, useInitialFocus } from '../welcome/flow';
+import { PASSPHRASE_FIELD, PASSWORD_MANAGER_IGNORE, useInitialFocus } from '../welcome/flow';
 import { detailsErrors, type DetailsErrors, type DetailsValue } from './details';
 import './create.css';
 
@@ -36,14 +36,14 @@ export function WalletDetails({
   const passphraseRef = useRef<HTMLInputElement>(null);
   const repeatRef = useRef<HTMLInputElement>(null);
   const toggled = useRef(false);
-  const confirm = mode === 'create';
+  const create = mode === 'create';
   useInitialFocus(nameRef);
 
   useEffect(() => {
     if (toggled.current && value.usePassphrase) passphraseRef.current?.focus();
   }, [value.usePassphrase]);
 
-  const errors = detailsErrors(value, confirm);
+  const errors = detailsErrors(value);
   const shown: DetailsErrors = attempted ? errors : {};
 
   const set = (patch: Partial<DetailsValue>): void => onChange({ ...value, ...patch });
@@ -75,8 +75,8 @@ export function WalletDetails({
 
       <Card padding="none" class="create-details__passphrase">
         <OptionRow
-          title={confirm ? 'Add a passphrase' : 'This wallet has a passphrase'}
-          description={confirm ? 'Asked each time you open this wallet' : 'Only if you set one for these words'}
+          title={create ? 'Add a passphrase' : 'This wallet has a passphrase'}
+          description={create ? 'Asked each time you open this wallet' : 'Only if you set one for these words'}
         >
           <Switch
             checked={value.usePassphrase}
@@ -85,7 +85,7 @@ export function WalletDetails({
               // Turning it off forgets what was typed.
               set(on ? { usePassphrase: true } : { usePassphrase: false, passphrase: '', repeat: '' });
             }}
-            aria-label={confirm ? 'Add a passphrase' : 'This wallet has a passphrase'}
+            aria-label={create ? 'Add a passphrase' : 'This wallet has a passphrase'}
             disabled={busy}
           />
         </OptionRow>
@@ -94,26 +94,24 @@ export function WalletDetails({
             <Field label="Passphrase" error={shown.passphrase}>
               <PasswordInput
                 name="wallet-passphrase"
-                {...PASSWORD_MANAGER_IGNORE}
+                {...PASSPHRASE_FIELD}
                 value={value.passphrase}
                 onValue={(passphrase) => set({ passphrase })}
                 inputRef={passphraseRef}
                 disabled={busy}
               />
             </Field>
-            {confirm ? (
-              <Field label="Repeat passphrase" error={shown.repeat}>
-                <PasswordInput
-                  name="wallet-passphrase-repeat"
-                  {...PASSWORD_MANAGER_IGNORE}
-                  value={value.repeat}
-                  onValue={(repeat) => set({ repeat })}
-                  inputRef={repeatRef}
-                  disabled={busy}
-                />
-              </Field>
-            ) : null}
-            {confirm ? (
+            <Field label="Repeat passphrase" error={shown.repeat}>
+              <PasswordInput
+                name="wallet-passphrase-repeat"
+                {...PASSPHRASE_FIELD}
+                value={value.repeat}
+                onValue={(repeat) => set({ repeat })}
+                inputRef={repeatRef}
+                disabled={busy}
+              />
+            </Field>
+            {create ? (
               <p class="create-details__warning">
                 <Icon name="warning" size="sm" class="create-details__warning-icon" />
                 <span>A forgotten passphrase can’t be recovered.</span>

@@ -23,6 +23,16 @@ To use another server:
 VITE_RPC_URL=https://rpc.example.org npm run build:web
 ```
 
+PowerShell:
+
+```powershell
+$env:VITE_RPC_URL='https://rpc.example.org'; npm run build:web
+```
+
+Web builds run in Vite mode `web`, so the variable can also be kept in
+`apps/wallet/.env.web` or `.env.web.local` (`VITE_RPC_URL=https://…`).
+`.env.production` is not read.
+
 It must be HTTPS and must send `Access-Control-Allow-Origin` for the wallet's
 origin (or `*`) on `GET` and `POST` responses. The build writes the
 Content-Security-Policy for that server into `index.html` and
@@ -42,6 +52,11 @@ response (ready-made in this directory):
 The files here contain the policy for `https://rpc.mmx.network`. With a
 different `VITE_RPC_URL`, copy the `Content-Security-Policy` line from the
 generated `dist/web/_headers` into your server configuration.
+
+`nginx.conf` works with the nginx packages of current distributions (for
+example 1.22 on Debian 12, 1.24 on Ubuntu 24.04). nginx 1.25.1 and later warn
+that the `http2` parameter of `listen` is deprecated; the warning is harmless,
+or replace the parameter with a `http2 on;` line.
 
 Requirements for any other server:
 

@@ -74,6 +74,8 @@
   .import-form__actions {
     flex-direction: column-reverse;
     align-items: center;
+    /* Keeps Clear away from the import button's tap target. */
+    gap: var(--s6);
   }
   .import-form .import-form__actions .import-form__submit {
     flex: none;

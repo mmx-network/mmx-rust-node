@@ -1,9 +1,8 @@
 /**
  * Onboarding helpers for the welcome, create, import and unlock screens:
- * password manager access (web), discarding an unfinished new wallet and
- * leaving the flows.
+ * password manager access (web), finishing a new wallet and leaving the flows.
  */
-import type { WalletId } from '../../backend/types';
+import type { WalletInfo } from '../../backend/types';
 import {
   canUseCredentialApi,
   preventSilentAccess,
@@ -11,10 +10,10 @@ import {
   storeCredential,
   type StoredCredential,
 } from '../../backend/web/credentials';
-import { phase, platform, refreshWallets, wallets } from '../core';
+import { phase, platform, wallets } from '../core';
 import { navigate } from '../router';
 import { notify } from '../toasts';
-import { completeCreate, removeWallet } from '../wallets';
+import { createWallet } from '../wallets';
 
 export type { StoredCredential };
 
@@ -45,22 +44,14 @@ export async function requestWalletCredential(): Promise<StoredCredential | null
 }
 
 /**
- * Removes a wallet whose creation was abandoned before its recovery words were
- * confirmed (desktop keeps a backup of the key file). Never throws.
+ * Stores and opens a new wallet once its recovery words were confirmed
+ * (desktop: three words picked; web: the saved phrase filled in again), with
+ * a "Wallet created" toast.
  */
-export async function discardNewWallet(id: WalletId): Promise<void> {
-  if (!wallets.value.some((w) => w.id === id)) return;
-  try {
-    await removeWallet(id);
-  } catch {
-    await refreshWallets().catch(() => undefined);
-  }
-}
-
-/** Opens a newly created wallet after its recovery words were confirmed (desktop). */
-export async function finishCreate(id: WalletId): Promise<void> {
-  await completeCreate(id);
+export async function finishCreate(request: { name: string; mnemonic: string; passphrase?: string }): Promise<WalletInfo> {
+  const info = await createWallet(request);
   notify('Wallet created', 'success');
+  return info;
 }
 
 /** Leaves a welcome/create/import flow: back into the app, to the unlock screen or to the start. */

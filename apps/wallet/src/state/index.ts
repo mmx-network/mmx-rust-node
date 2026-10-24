@@ -66,8 +66,10 @@ export {
   ownAddressSet,
   params,
   pendingOutgoingTotals,
+  pendingReservedTotals,
   recentActivity,
   refreshNow,
+  repeatRecipientFor,
   seriesContract,
   seriesLoading,
   seriesRange,
@@ -84,13 +86,17 @@ export {
 } from './session';
 export {
   activateWallet,
-  completeCreate,
+  checkHiddenFunds,
   createWallet,
   discovery,
   fundedAddressesFrom,
   importWallet,
   lock,
+  lockedElsewhere,
+  newRecoveryPhrase,
+  newWalletFingerprint,
   openSavedWallet,
+  reconcileAddresses,
   removeWallet,
   renameWallet,
   revealMnemonic,
@@ -99,7 +105,10 @@ export {
   suggestWalletName,
   unlockWallet,
   verifyPassphrase,
+  type HiddenFundsCheck,
+  type LockRequest,
 } from './wallets';
+export { beginSetup, clearSetupNotice, setupActive, setupNotice } from './setup';
 export {
   amountErrorMessage,
   backToEdit,
@@ -112,12 +121,14 @@ export {
   formatPrepared,
   matchesRequest,
   reviewSend,
+  preparedSymbol,
   reviewTotals,
   sendableAssets,
   sendDraft,
   sendFlow,
   sendNeedsPassphrase,
   setSendFeeLevel,
+  spendableBalance,
   startSend,
   unlockForSend,
   updateDraft,
@@ -142,9 +153,10 @@ export {
   updateContact,
   type ContactResult,
   type ImportContactsResult,
+  type RestoreResult,
 } from './contacts';
 export { DEFAULT_RPC_URL, normalizeRpcUrl, setAutoLockMinutes, setDefaultFeeLevel, setRpcUrl, setTheme } from './settings';
-export { copyAddress, copyToClipboard, openAddress, openTransaction } from './actions';
+export { copyAddress, copyToClipboard, openAddress, openTransaction, sensitiveCopyMessage } from './actions';
 export { autoLockDelayMinutes, markActivity } from './idle';
 export { init, startRouteGuard, startRouter } from './init';
 export { credentialUsername, parseCredentialUsername } from '../backend/web/credentials';
@@ -165,7 +177,6 @@ export { SERIES_RANGES, type BalanceSeries, type SeriesPoint, type SeriesRange }
 export type { ChainParams, TxInfo } from '../chain/types';
 export type { PendingTx } from '../chain/pending';
 export {
-  discardNewWallet,
   finishCreate,
   hasWallets,
   leaveOnboarding,

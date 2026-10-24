@@ -41,13 +41,19 @@ fn agent(pooled: bool) -> ureq::Agent {
     };
     config.build().new_agent()
 }
-fn transport(e: ureq::Error) -> Error {
+/// A request that failed without an answer. Only a POST submits a
+/// transaction, so only its message warns that it may have been accepted.
+fn transport(e: ureq::Error, posted: bool) -> Error {
     let code = match e {
         ureq::Error::Timeout(_) => "rpc_timeout",
         ureq::Error::BodyExceedsLimit(_) => "rpc_response_invalid",
         _ => "rpc_transport_error",
     };
-    Error::new(code, "RPC request failed; a submitted transaction may still have been accepted; check its ID before retrying")
+    if posted {
+        Error::new(code, "RPC request failed; a submitted transaction may still have been accepted; check its ID before retrying")
+    } else {
+        Error::new(code, "RPC request failed")
+    }
 }
 impl Rpc {
     pub fn new(url: &str) -> Result<Self> {
@@ -104,7 +110,7 @@ impl Rpc {
                 }
             }
         }
-        .map_err(transport)?;
+        .map_err(|e| transport(e, body.is_some()))?;
         if response.version() == ureq::http::Version::HTTP_10 {
             self.no_keep_alive.store(true, Ordering::Relaxed);
         }
@@ -114,7 +120,7 @@ impl Rpc {
             .with_config()
             .limit(limit)
             .read_to_vec()
-            .map_err(transport)?;
+            .map_err(|e| transport(e, body.is_some()))?;
         if !(200..300).contains(&status) {
             // Server-controlled text: printable characters only.
             let detail: String = String::from_utf8_lossy(&bytes)
@@ -122,6 +128,11 @@ impl Rpc {
                 .take(500)
                 .map(|c| if c.is_control() { ' ' } else { c })
                 .collect();
+            // Every POST submits a transaction; a 4xx answer means the node
+            // did not accept it. Other statuses leave the outcome open.
+            if body.is_some() && (400..500).contains(&status) {
+                return Err(refusal(status, &detail));
+            }
             return Err(Error::new(
                 "rpc_http_error",
                 format!("RPC returned HTTP {status}: {detail}"),
@@ -144,7 +155,9 @@ impl Rpc {
         self.request(path, Some(bytes))?;
         Ok(())
     }
-    pub fn validate(&self, bytes: &[u8], max_fee: u32) -> Result<u128> {
+    /// The node's dry run of a signed transaction. Fails when it would not
+    /// execute (`wallet_error`), or when the reported fee is above `max_fee`.
+    pub fn validate(&self, bytes: &[u8], max_fee: u128) -> Result<u128> {
         let v: Value = serde_json::from_slice(&self.request("/transaction/validate", Some(bytes))?)
             .map_err(|_| rpc_invalid("invalid JSON response from RPC"))?;
         if boolean(&v, "did_fail")? {
@@ -154,8 +167,8 @@ impl Rpc {
             ));
         }
         let fee = atomic(&v["total_fee"])?;
-        if fee > max_fee as u128 {
-            return Err(rpc_invalid("RPC returned a fee above the signed maximum"));
+        if fee > max_fee {
+            return Err(rpc_invalid("RPC returned a fee above the expected maximum"));
         }
         Ok(fee)
     }
@@ -185,6 +198,43 @@ impl Rpc {
         u32_field(&node, "height")
     }
 }
+/// Error codes of a node that refused a submitted transaction (it was not
+/// accepted, so nothing is pending).
+const REFUSALS: [&str; 4] = [
+    "tx_rejected",
+    "insufficient_funds",
+    "insufficient_fee",
+    "transaction_expired",
+];
+
+/// A node's 4xx answer to a submitted transaction, classified by its text
+/// (the node reports these as plain messages, e.g. "insufficient funds for
+/// transaction fee: 1300 > 0" or "transaction expired at height 100").
+fn refusal(status: u16, detail: &str) -> Error {
+    let text = detail.to_ascii_lowercase();
+    let code = if text.contains("insufficient funds for transaction fee")
+        || text.contains("insufficient funds for tx fee")
+    {
+        "insufficient_fee"
+    } else if text.contains("insufficient funds") {
+        "insufficient_funds"
+    } else if text.contains("expired") {
+        "transaction_expired"
+    } else {
+        "tx_rejected"
+    };
+    Error::new(
+        code,
+        format!("the node refused the transaction (HTTP {status}): {detail}"),
+    )
+}
+
+/// Whether a submit failed because the node refused the transaction (as
+/// opposed to a transport failure, after which it may have been accepted).
+pub fn is_refusal(e: &Error) -> bool {
+    REFUSALS.contains(&e.code)
+}
+
 pub fn text<'a>(v: &'a Value, field: &str) -> Result<&'a str> {
     v[field]
         .as_str()
@@ -255,6 +305,87 @@ mod tests {
         let error = rpc.get("/node/info").unwrap_err();
         handle.join().unwrap();
         assert_eq!(error.code, "rpc_timeout");
+    }
+
+    /// Reads one whole HTTP request (headers and `Content-Length` body).
+    fn read_request(stream: &mut std::net::TcpStream) {
+        let mut data = Vec::new();
+        let mut buf = [0; 4096];
+        let mut want = None;
+        while want.is_none_or(|n| data.len() < n) {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => data.extend_from_slice(&buf[..n]),
+            }
+            if want.is_none() {
+                if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&data[..end]).to_ascii_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    want = Some(end + 4 + length);
+                }
+            }
+        }
+    }
+
+    /// Answers every request on `server` with `status` and `body`.
+    fn answer_all(server: TcpListener, status: u16, body: &'static str) {
+        use std::io::Write;
+        thread::spawn(move || {
+            for mut stream in server.incoming().flatten() {
+                read_request(&mut stream);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn refused_submissions_are_classified_and_other_failures_are_not() {
+        for (status, body, post, get) in [
+            (
+                400,
+                "insufficient funds for transaction fee: 1300 > 0",
+                "insufficient_fee",
+                "rpc_http_error",
+            ),
+            (
+                400,
+                "insufficient funds for mmx1abc",
+                "insufficient_funds",
+                "rpc_http_error",
+            ),
+            (
+                400,
+                "transaction expired at height 1100",
+                "transaction_expired",
+                "rpc_http_error",
+            ),
+            (400, "duplicate tx", "tx_rejected", "rpc_http_error"),
+            (429, "", "tx_rejected", "rpc_http_error"),
+            (500, "internal", "rpc_http_error", "rpc_http_error"),
+            (503, "lost sync", "rpc_http_error", "rpc_http_error"),
+            (302, "", "rpc_http_error", "rpc_http_error"),
+        ] {
+            let server = TcpListener::bind("127.0.0.1:0").unwrap();
+            let rpc = Rpc::new(&format!("http://{}", server.local_addr().unwrap())).unwrap();
+            answer_all(server, status, body);
+            let e = rpc.post("/transaction/broadcast", b"{}").unwrap_err();
+            assert_eq!(e.code, post, "{status} {body}");
+            assert_eq!(is_refusal(&e), post != "rpc_http_error", "{status} {body}");
+            assert_eq!(
+                rpc.validate(b"{}", 0).unwrap_err().code,
+                post,
+                "{status} {body}"
+            );
+            assert_eq!(rpc.get("/node/info").unwrap_err().code, get, "{status}");
+        }
     }
 
     #[test]

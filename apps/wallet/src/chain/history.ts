@@ -1,21 +1,26 @@
 /**
  * History cache (docs/wallet-app.md §6.4).
  *
- * Per address the cache holds one contiguous, fully fetched height range
- * [bottom, top]. `since` and `until` are inclusive and the node always
- * completes the last block of a page, so a full page covers [minHeight, …]
- * completely and the next older page uses `until = minHeight − 1`. A page with
- * fewer rows than the limit means nothing older exists (bottom = 0).
+ * Per address the cache holds every row from `bottom` up to the newest block.
+ * `since` and `until` are inclusive and the node always completes the last
+ * block of a page, so a full page covers [minHeight, …] completely and the
+ * next older page uses `until = minHeight − 1`. A page with fewer entries than
+ * the limit means nothing older exists (bottom = 0). Page sizes and heights
+ * are taken from everything the node returned, NFT rows included, because the
+ * node's limit counts them although the cache does not keep them.
  *
  * Across addresses, rows at or above the frontier — the highest bottom among
  * addresses that still have older rows — are complete for the whole wallet.
  *
- * Refresh re-reads from a few blocks below the top (`since`), replacing those
- * rows, so a short reorg or a lagging server behind a load balancer cannot
- * leave stale or missing rows.
+ * Refresh re-reads from a few blocks below `top`, the newest height the
+ * history server has actually returned, and replaces those rows, so a short
+ * reorg cannot leave stale rows. `top` never comes from `/node/info`: when a
+ * lagging server behind a load balancer leaves out recent rows, `top` drops
+ * with them and the next refresh reads that range again.
  */
+import { BackendError } from '../backend/types';
 import type { RpcClient } from './rpc';
-import type { ChainParams, HistoryRow } from './types';
+import type { ChainParams, HistoryPage, HistoryRow } from './types';
 
 export const FIRST_PAGE_LIMIT = 25;
 export const PAGE_LIMIT = 1000;
@@ -25,7 +30,11 @@ export const REFRESH_OVERLAP = 6;
 export interface AddressHistory {
   /** Newest first. */
   rows: HistoryRow[];
-  /** Highest height known complete. */
+  /**
+   * Newest height the history server returned for this address (NFT rows
+   * included), as of the last first page or refresh; −1 when none. Refresh
+   * starts a few blocks below it.
+   */
   top: number;
   /** Lowest height known complete (inclusive). */
   bottom: number;
@@ -35,16 +44,19 @@ export interface AddressHistory {
 
 export type WalletHistory = ReadonlyMap<string, AddressHistory>;
 
-function maxHeight(rows: readonly HistoryRow[]): number {
+/** Newest height among `rows`; −1 when there are none. */
+export function maxHeight(rows: readonly HistoryRow[]): number {
   let m = -1;
   for (const r of rows) if (r.height > m) m = r.height;
   return m;
 }
 
-function minHeight(rows: readonly HistoryRow[]): number {
-  let m = Infinity;
-  for (const r of rows) if (r.height < m) m = r.height;
-  return m;
+/** What a page tells about older rows: none left, or complete down to its lowest height. */
+function pageBottom(page: HistoryPage, limit: number): { bottom: number; exhausted: boolean } {
+  if (page.count < limit) return { bottom: 0, exhausted: true };
+  // RpcClient.history rejects a full page without a confirmed height.
+  if (!Number.isFinite(page.minHeight)) throw new BackendError('rpc_response_invalid', 'invalid field: history');
+  return { bottom: page.minHeight, exhausted: page.minHeight === 0 };
 }
 
 /** Newest first; ties keep a deterministic order. */
@@ -59,16 +71,9 @@ export function compareRows(a: HistoryRow, b: HistoryRow): number {
   );
 }
 
-/**
- * Result of the first page for an address (no since/until). `head` is the
- * chain height observed before the request.
- */
-export function fromFirstPage(rows: readonly HistoryRow[], limit: number, head: number): AddressHistory {
-  const sorted = rows.slice().sort(compareRows);
-  const top = Math.max(head, maxHeight(sorted));
-  if (sorted.length < limit) return { rows: sorted, top, bottom: 0, exhausted: true };
-  const bottom = minHeight(sorted);
-  return { rows: sorted, top, bottom, exhausted: bottom === 0 };
+/** Result of the first page for an address (no since/until). */
+export function fromFirstPage(page: HistoryPage, limit: number): AddressHistory {
+  return { rows: page.rows.slice().sort(compareRows), top: page.maxHeight, ...pageBottom(page, limit) };
 }
 
 /** Request for the next older page, or null if the address is exhausted. */
@@ -78,13 +83,10 @@ export function olderPageQuery(h: AddressHistory, limit = PAGE_LIMIT): { until: 
 }
 
 /** Applies an older page fetched with `until = bottom − 1`. */
-export function applyOlderPage(h: AddressHistory, rows: readonly HistoryRow[], limit: number): AddressHistory {
+export function applyOlderPage(h: AddressHistory, page: HistoryPage, limit: number): AddressHistory {
   const until = h.bottom - 1;
-  const page = rows.filter((r) => r.height <= until);
-  const merged = h.rows.concat(page.slice().sort(compareRows));
-  if (page.length < limit) return { rows: merged, top: h.top, bottom: 0, exhausted: true };
-  const bottom = minHeight(page);
-  return { rows: merged, top: h.top, bottom, exhausted: bottom === 0 };
+  const older = page.rows.filter((r) => r.height <= until).sort(compareRows);
+  return { rows: h.rows.concat(older), top: h.top, ...pageBottom(page, limit) };
 }
 
 /** Height to refresh from: a few blocks below the top, never below the covered range. */
@@ -92,24 +94,30 @@ export function refreshSince(h: AddressHistory, overlap = REFRESH_OVERLAP): numb
   return Math.max(h.bottom, h.top - overlap + 1, 0);
 }
 
+/** Everything a refresh read: the rows at or above `since` and the newest height returned. */
+export interface RangeResult {
+  rows: HistoryRow[];
+  /** Newest height in the responses (NFT rows included); −1 when none. */
+  maxHeight: number;
+}
+
 /**
  * Replaces everything at or above `since` with `fresh` — the complete set of
- * rows in [since, head] — and reports whether anything changed.
+ * rows the server holds from `since` on — and reports whether anything changed.
  */
 export function applyRefresh(
   h: AddressHistory,
   since: number,
-  fresh: readonly HistoryRow[],
-  head: number,
+  fresh: RangeResult,
 ): { history: AddressHistory; changed: boolean } {
   const kept = h.rows.filter((r) => r.height < since);
   const replaced = h.rows.filter((r) => r.height >= since);
-  const incoming = fresh.filter((r) => r.height >= since).sort(compareRows);
+  const incoming = fresh.rows.filter((r) => r.height >= since).sort(compareRows);
   const changed = !sameRows(replaced, incoming);
   return {
     history: {
       rows: incoming.concat(kept),
-      top: Math.max(h.top, head, maxHeight(incoming)),
+      top: Math.max(maxHeight(kept), fresh.maxHeight),
       bottom: Math.min(h.bottom, since),
       exhausted: h.exhausted,
     },
@@ -197,11 +205,9 @@ export async function loadFirstPage(
   rpc: RpcClient,
   address: string,
   params: ChainParams,
-  head: number,
   limit = FIRST_PAGE_LIMIT,
 ): Promise<AddressHistory> {
-  const rows = await rpc.history(address, { limit }, params);
-  return fromFirstPage(rows, limit, head);
+  return fromFirstPage(await rpc.history(address, { limit }, params), limit);
 }
 
 export async function loadOlderPage(
@@ -213,13 +219,13 @@ export async function loadOlderPage(
 ): Promise<AddressHistory> {
   const q = olderPageQuery(h, limit);
   if (!q) return h;
-  const rows = await rpc.history(address, q, params);
-  return applyOlderPage(h, rows, limit);
+  return applyOlderPage(h, await rpc.history(address, q, params), limit);
 }
 
 /**
- * Fetches all rows in [since, head]: pages downward from the head with
- * `until = minHeight − 1` while pages are full.
+ * Fetches all rows from `since` to the newest block: pages downward with
+ * `until = minHeight − 1` while pages are full. The client rejects rows
+ * outside the requested range, so every page moves strictly downward.
  */
 export async function fetchRange(
   rpc: RpcClient,
@@ -228,20 +234,19 @@ export async function fetchRange(
   params: ChainParams,
   limit = PAGE_LIMIT,
   maxPages = 20,
-): Promise<HistoryRow[]> {
-  const out: HistoryRow[] = [];
+): Promise<RangeResult> {
+  const rows: HistoryRow[] = [];
+  let newest = -1;
   let until: number | undefined;
-  for (let page = 0; page < maxPages; page++) {
+  for (let n = 0; n < maxPages; n++) {
     const query: { limit: number; since: number; until?: number } = { limit, since };
     if (until !== undefined) query.until = until;
-    const rows = (await rpc.history(address, query, params)).filter(
-      (r) => r.height >= since && (until === undefined || r.height <= until),
-    );
-    out.push(...rows);
-    if (rows.length < limit) return out;
-    const low = minHeight(rows);
-    if (low <= since) return out;
-    until = low - 1;
+    const page = await rpc.history(address, query, params);
+    rows.push(...page.rows);
+    newest = Math.max(newest, page.maxHeight);
+    const { bottom, exhausted } = pageBottom(page, limit);
+    if (exhausted || bottom <= since) return { rows, maxHeight: newest };
+    until = bottom - 1;
   }
   throw new RangeError('history range too large');
 }
@@ -251,9 +256,7 @@ export async function refreshAddress(
   address: string,
   h: AddressHistory,
   params: ChainParams,
-  head: number,
 ): Promise<{ history: AddressHistory; changed: boolean }> {
   const since = refreshSince(h);
-  const rows = await fetchRange(rpc, address, since, params);
-  return applyRefresh(h, since, rows, head);
+  return applyRefresh(h, since, await fetchRange(rpc, address, since, params));
 }

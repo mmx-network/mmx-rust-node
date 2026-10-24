@@ -121,7 +121,8 @@ describe('passphrase wallets (desktop)', () => {
     expect(S.phase.value).toBe('ready');
     expect(S.route.value.name).toBe('overview');
     expect(S.canLock.value).toBe(true);
-    expect(S.verifiedAssets.value.map((a) => a.symbol)).toEqual(['MMX', 'USDM']);
+    // Mainnet verifies native MMX only; the mock's is_validated flag is ignored.
+    expect(S.verifiedAssets.value.map((a) => a.symbol)).toEqual(['MMX']);
     await S.lock();
     await settle(10);
     expect(S.phase.value).toBe('unlock');
@@ -277,7 +278,8 @@ describe('contacts and labels', () => {
     expect(S.searchContacts('').length).toBe(4);
     const removed = await S.deleteContact(id);
     expect(S.contactForAddress(address)).toBeUndefined();
-    expect(await S.restoreContact(removed!)).toBe(true);
+    expect(await S.restoreContact(removed!)).toBe('restored');
+    expect(await S.restoreContact(removed!)).toBe('duplicate');
     expect((await backend.loadAppState()).contacts).toHaveLength(4);
   });
 
@@ -288,7 +290,7 @@ describe('contacts and labels', () => {
     expect(exported.name).toBe('mmx-contacts.json');
     await S.deleteContact(S.contacts.value[0]!.id);
     backend.nextImport = exported.contents;
-    expect(await S.importContacts()).toEqual({ status: 'imported', added: 1, skipped: 2 });
+    expect(await S.importContacts()).toEqual({ status: 'imported', added: 1, skipped: 2, full: 0 });
     expect(S.contacts.value).toHaveLength(3);
     backend.nextImport = 'garbage';
     expect(await S.importContacts()).toEqual({ status: 'invalid' });
@@ -359,13 +361,15 @@ describe('wallet management', () => {
     expect(await codeOf(S.importWallet({ name: 'Dup', mnemonic: words }))).toBe('wallet_exists');
     expect(await codeOf(S.importWallet({ name: '', mnemonic: words }))).toBe('invalid_argument');
     expect(S.suggestWalletName()).toBe('Wallet');
-    const created = await S.createWallet({ name: 'Wallet', passphrase: 'pw' });
-    expect(created.mnemonic.split(' ')).toHaveLength(24);
-    expect(S.suggestWalletName()).toBe('Wallet 2');
+    const mnemonic = await S.newRecoveryPhrase();
+    expect(mnemonic.split(' ')).toHaveLength(24);
+    // Nothing is stored before the words are confirmed.
+    expect(S.suggestWalletName()).toBe('Wallet');
     expect(S.activeWallet.value?.id).toBe(info.id);
-    await S.completeCreate(created.wallet.id);
+    const created = await S.createWallet({ name: 'Wallet', mnemonic, passphrase: 'pw' });
     await settle();
-    expect(S.activeWallet.value?.id).toBe(created.wallet.id);
+    expect(S.suggestWalletName()).toBe('Wallet 2');
+    expect(S.activeWallet.value?.id).toBe(created.id);
     expect(S.phase.value).toBe('ready');
   });
 
@@ -423,12 +427,14 @@ describe('web wallet', () => {
     expect(again.id).toBe(main.id);
   });
 
-  it('returns to the confirm step for a wallet that was never opened', async () => {
+  it('returns to the confirm step for a wallet an earlier version stored unconfirmed', async () => {
     vi.resetModules();
     const S: State = await import('../../src/state');
     const M: Mock = await import('../../src/backend/mock');
     const backend = M.createMockBackend({ platform: 'web' });
-    const { wallet } = await backend.createWallet({ name: 'Fresh', addressCount: 10 });
+    const list = await backend.listWallets();
+    const wallet = list[2]!;
+    vi.spyOn(backend, 'listWallets').mockImplementation(async () => list.map((w) => (w.id === wallet.id ? { ...w, verified: false } : w)));
     await S.init({ backend });
     await settle();
     expect(S.activeWallet.value?.id).toBe(wallet.id);

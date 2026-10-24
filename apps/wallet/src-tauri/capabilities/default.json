@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The wallet window may call the wallet's own commands and nothing else.",
+  "description": "The wallet window may call the wallet's own commands and set its own zoom (zoom keys), nothing else.",
   "windows": [
     "main"
   ],
@@ -9,6 +9,7 @@
     "allow-load-app-state",
     "allow-save-app-state",
     "allow-list-wallets",
+    "allow-new-recovery-phrase",
     "allow-create-wallet",
     "allow-import-wallet",
     "allow-unlock-wallet",
@@ -28,6 +29,7 @@
     "allow-copy-text",
     "allow-open-external",
     "allow-export-file",
-    "allow-import-file"
+    "allow-import-file",
+    "core:webview:allow-set-webview-zoom"
   ]
 }

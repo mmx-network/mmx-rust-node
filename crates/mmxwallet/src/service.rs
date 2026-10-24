@@ -16,19 +16,23 @@ use crate::{
     storage, validate,
 };
 use mmx_wallet::{
-    fingerprint, seed_to_words, words_to_seed, Address, KeyFile, Output, TransferOptions, Wallet,
+    fingerprint, seed_to_words, words_to_seed, Address, ChainParams, KeyFile, Output, Transaction,
+    TransferOptions, Wallet,
 };
+use reserve::Reservation;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use zeroize::Zeroizing;
 
 pub use crate::error::{Error, Result};
+
+mod reserve;
 
 /// Prepared transfers can be broadcast for this long after review.
 const PREPARED_TTL: Duration = Duration::from_secs(10 * 60);
@@ -185,8 +189,15 @@ enum Protection {
 
 struct Prepared {
     wallet: String,
+    tx: Transaction,
+    /// The signed transfer as broadcast.
     bytes: Vec<u8>,
+    params: ChainParams,
+    /// Chain height of the balances it was built from.
+    height: u32,
     created: Instant,
+    /// Wall-clock time, which (unlike `created`) also counts time asleep.
+    created_at: SystemTime,
 }
 
 pub struct Service {
@@ -197,6 +208,8 @@ pub struct Service {
     unlocked: Mutex<HashMap<String, Zeroizing<String>>>,
     /// Reviewed, signed transfers by uppercase transaction ID.
     prepared: Mutex<HashMap<String, Prepared>>,
+    /// Funds of broadcast transfers not in a block yet, by wallet id.
+    reserved: Mutex<HashMap<String, Vec<Reservation>>>,
     rpc: Mutex<Arc<Rpc>>,
     prepared_ttl: Duration,
 }
@@ -298,14 +311,27 @@ fn normalize_mnemonic(input: &str) -> Result<Zeroizing<String>> {
 }
 
 /// RPC text shown to the user: printable, trimmed and short.
-fn display_symbol(symbol: &str) -> String {
-    symbol
+fn display_symbol(symbol: &str, contract: &Address) -> String {
+    let clean = symbol
         .chars()
         .filter(|c| !validate::is_unsafe_char(*c))
         .take(SYMBOL_MAX_CHARS)
         .collect::<String>()
         .trim()
-        .to_owned()
+        .to_owned();
+    if !clean.is_empty() {
+        return clean;
+    }
+    // A symbol that is empty after cleaning is valid on chain; show the
+    // shortened contract instead, as the UI's asset list does.
+    let contract = contract.to_string();
+    match (
+        contract.get(..8),
+        contract.get(contract.len().saturating_sub(4)..),
+    ) {
+        (Some(head), Some(tail)) if contract.len() > 13 => format!("{head}\u{2026}{tail}"),
+        _ => contract,
+    }
 }
 
 /// A chain server URL accepted in settings (HTTP(S), host, optional port
@@ -446,6 +472,7 @@ impl Service {
                 files: Mutex::new(()),
                 unlocked: Mutex::new(HashMap::new()),
                 prepared: Mutex::new(HashMap::new()),
+                reserved: Mutex::new(HashMap::new()),
                 rpc: Mutex::new(Arc::new(rpc)),
                 prepared_ttl: PREPARED_TTL,
             })
@@ -473,33 +500,23 @@ impl Service {
         })
     }
 
-    /// Creates a wallet from a new random seed and makes it active. An
-    /// empty passphrase means none. Returns the wallet and its 24 words.
+    /// 24 recovery words of a new random seed (OS RNG). Nothing is stored:
+    /// the wallet is saved by [`Service::create`] once its backup is confirmed.
+    pub fn new_mnemonic() -> Zeroizing<String> {
+        Zeroizing::new(seed_to_words(&KeyFile::generate(None).seed_value))
+    }
+
+    /// Saves a new wallet from the words of [`Service::new_mnemonic`] after
+    /// the user confirmed their backup, and makes it active. An empty
+    /// passphrase means none.
     pub fn create(
         &self,
         name: &str,
+        mnemonic: Zeroizing<String>,
         passphrase: Option<Zeroizing<String>>,
         count: u32,
-    ) -> Result<(WalletInfo, Zeroizing<String>)> {
-        run(|| {
-            let name = validate::name(name)?;
-            let count = validate::num_addresses(count)?;
-            let passphrase = passphrase.filter(|p| !p.is_empty());
-            let pass = passphrase.as_deref().map(String::as_str);
-            let (key, fingerprint, protection) = loop {
-                let key = KeyFile::generate(pass);
-                let (fingerprint, protection) = detect(&key)?;
-                // A passphrase whose fingerprint collides with the
-                // no-passphrase one would be skipped by detection.
-                if pass.is_none() || protection == Protection::Passphrase {
-                    break (key, fingerprint, protection);
-                }
-            };
-            let mnemonic = Zeroizing::new(seed_to_words(&key.seed_value));
-            let _files = guard(&self.files);
-            let info = self.add(name, count, &key, fingerprint, protection, passphrase)?;
-            Ok((info, mnemonic))
-        })
+    ) -> Result<WalletInfo> {
+        run(|| self.add_words(name, mnemonic, passphrase, count, true))
     }
 
     /// Adds a wallet from its 24 recovery words and makes it active.
@@ -510,39 +527,59 @@ impl Service {
         passphrase: Option<Zeroizing<String>>,
         count: u32,
     ) -> Result<WalletInfo> {
-        run(|| {
-            let name = validate::name(name)?;
-            let count = validate::num_addresses(count)?;
-            let words = normalize_mnemonic(&mnemonic)?;
-            drop(mnemonic);
-            let seed = Zeroizing::new(words_to_seed(&words)?);
-            drop(words);
-            let passphrase = passphrase.filter(|p| !p.is_empty());
-            let key = KeyFile::new(*seed, passphrase.as_deref().map(String::as_str));
-            let (fingerprint, protection) = detect(&key)?;
-            let _files = guard(&self.files);
-            // The same seed opened the same way is the same wallet, even
-            // under another file name.
-            for (_, path) in storage::wallet_files(&self.dir)? {
-                let Ok(existing) = storage::read_key(&path) else {
-                    continue;
-                };
-                if existing.seed_value != key.seed_value {
-                    continue;
-                }
-                let same = match (protection, existing.finger_print.as_deref()) {
-                    (Protection::Passphrase, stored) => stored == Some(fingerprint.as_str()),
-                    _ => matches!(
-                        detect(&existing),
-                        Ok((_, Protection::None | Protection::Empty))
-                    ),
-                };
-                if same {
-                    return Err(Error::new("wallet_exists", "wallet already exists"));
-                }
+        run(|| self.add_words(name, mnemonic, passphrase, count, false))
+    }
+
+    /// Saves a wallet from recovery words, unless the same wallet exists.
+    fn add_words(
+        &self,
+        name: &str,
+        mnemonic: Zeroizing<String>,
+        passphrase: Option<Zeroizing<String>>,
+        count: u32,
+        new: bool,
+    ) -> Result<WalletInfo> {
+        let name = validate::name(name)?;
+        let count = validate::num_addresses(count)?;
+        let words = normalize_mnemonic(&mnemonic)?;
+        drop(mnemonic);
+        let seed = Zeroizing::new(words_to_seed(&words)?);
+        drop(words);
+        let passphrase = passphrase.filter(|p| !p.is_empty());
+        let key = KeyFile::new(*seed, passphrase.as_deref().map(String::as_str));
+        let (fingerprint, protection) = detect(&key)?;
+        // A passphrase whose fingerprint equals the no-passphrase (or
+        // empty-passphrase) one would be taken for none when the wallet is
+        // opened (about 1 in 2^31). Existing wallets are kept as they are;
+        // a new one gets another passphrase.
+        if new && passphrase.is_some() && protection != Protection::Passphrase {
+            return Err(Error::new(
+                "invalid_argument",
+                "this passphrase cannot be used; choose another one",
+            ));
+        }
+        let _files = guard(&self.files);
+        // The same seed opened the same way is the same wallet, even
+        // under another file name.
+        for (_, path) in storage::wallet_files(&self.dir)? {
+            let Ok(existing) = storage::read_key(&path) else {
+                continue;
+            };
+            if existing.seed_value != key.seed_value {
+                continue;
             }
-            self.add(name, count, &key, fingerprint, protection, passphrase)
-        })
+            let same = match (protection, existing.finger_print.as_deref()) {
+                (Protection::Passphrase, stored) => stored == Some(fingerprint.as_str()),
+                _ => matches!(
+                    detect(&existing),
+                    Ok((_, Protection::None | Protection::Empty))
+                ),
+            };
+            if same {
+                return Err(Error::new("wallet_exists", "wallet already exists"));
+            }
+        }
+        self.add(name, count, &key, fingerprint, protection, passphrase)
     }
 
     /// Saves a new key file and its settings. The caller holds `files`.
@@ -668,6 +705,7 @@ impl Service {
             drop(files);
             guard(&self.unlocked).remove(&id);
             guard(&self.prepared).retain(|_, p| p.wallet != id);
+            guard(&self.reserved).remove(&id);
             Ok(())
         })
     }
@@ -740,6 +778,9 @@ impl Service {
 
     /// Validates and saves the app state. Labels of wallets that are no
     /// longer listed are ignored; a changed server URL is checked first.
+    /// `active_wallet` is not written: [`Service::set_active`] saves every
+    /// switch, and a value loaded earlier would undo a change made since
+    /// (for example by `mmxwallet use`).
     pub fn set_app_state(&self, state: AppState) -> Result<()> {
         run(|| {
             let invalid = |message: &str| Error::new("invalid_argument", message);
@@ -800,9 +841,6 @@ impl Service {
             let none = BTreeMap::new();
             for id in &listed {
                 config::set_labels(&mut config, id, labels.get(id.as_str()).unwrap_or(&none));
-            }
-            if let Some(id) = state.active_wallet.as_ref().filter(|a| listed.contains(a)) {
-                config::set_active(&mut config, Some(id));
             }
             let contacts: Vec<Value> = contacts
                 .iter()
@@ -894,7 +932,8 @@ impl Service {
             let (wallet, _) = self.open_wallet(id, count)?;
             let rpc = self.client();
             let params = rpc.params()?;
-            let state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
+            let mut state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
+            self.reserve(&rpc, id, &mut state);
             match wallet.max_transfer_amount(
                 &state.balances,
                 &params,
@@ -909,9 +948,10 @@ impl Service {
         })
     }
 
-    /// Builds, signs and validates a transfer with fresh balances. Nothing is
-    /// sent: the signed transfer is kept for [`Service::broadcast`] for 10
-    /// minutes, bound to the wallet.
+    /// Builds, signs and checks a transfer with fresh balances, less the
+    /// funds of the wallet's broadcast transfers that are not in a block yet.
+    /// Nothing is sent: the signed transfer stays on this device for
+    /// [`Service::broadcast`] for 10 minutes, bound to the wallet.
     pub fn prepare_send(&self, request: &SendRequest) -> Result<PreparedSend> {
         run(|| {
             let to = validate::recipient(&request.to)?;
@@ -923,14 +963,16 @@ impl Service {
             let (wallet, with_passphrase) = self.open_wallet(&request.wallet_id, count)?;
             let rpc = self.client();
             let params = rpc.params()?;
-            let state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
+            let mut state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
+            self.reserve(&rpc, &request.wallet_id, &mut state);
             let native = currency == Address::default();
             let (decimals, symbol) = if native {
                 (params.decimals, "MMX".to_owned())
             } else {
                 let total = state.totals.get(&currency).ok_or_else(insufficient_funds)?;
-                (total.decimals, display_symbol(&total.symbol))
+                (total.decimals, display_symbol(&total.symbol, &currency))
             };
+            // Signed and verified (hashes, cost, signatures) by `transfer`.
             let tx = wallet.transfer(
                 &state.balances,
                 &params,
@@ -955,15 +997,12 @@ impl Service {
                     insufficient_fee()
                 });
             }
+            // A simple transfer is charged exactly its static fee.
+            let fee = tx.fee_amount();
             let bytes = serde_json::to_vec(&tx)
                 .map_err(|_| Error::new("internal", "transaction serialization failed"))?;
-            let fee = rpc
-                .validate(&bytes, tx.max_fee_amount)
-                .map_err(|e| match e.code {
-                    "wallet_error" => Error::new("tx_rejected", e.message),
-                    _ => e,
-                })?;
             let txid = tx.id_hex().to_ascii_uppercase();
+            let expires = tx.expires;
             // Kept only if the wallet was not locked meanwhile; `lock` removes
             // the passphrase before the prepared transfers, so holding
             // `unlocked` here closes the gap.
@@ -975,8 +1014,12 @@ impl Service {
                 txid.clone(),
                 Prepared {
                     wallet: request.wallet_id.clone(),
+                    tx,
                     bytes,
+                    params,
+                    height: state.height,
                     created: Instant::now(),
+                    created_at: SystemTime::now(),
                 },
             );
             drop(unlocked);
@@ -988,27 +1031,49 @@ impl Service {
                 decimals,
                 amount: amount.to_string(),
                 fee: fee.to_string(),
-                expires: tx.expires,
+                expires,
                 height: state.height,
                 memo,
             })
         })
     }
 
-    /// Sends a prepared transfer of this wallet. It is removed whatever the
-    /// outcome, so it is never sent twice.
+    /// Sends a prepared transfer of this wallet, once: it is removed whatever
+    /// the outcome. Its funds stay reserved unless the node refused it.
     pub fn broadcast(&self, id: &str, txid: &str) -> Result<()> {
         run(|| {
             let id = validate::wallet_id(id)?;
             let txid = validate::txid(txid)?;
             let prepared = guard(&self.prepared)
                 .remove(&txid)
-                .filter(|p| p.wallet == id && p.created.elapsed() < self.prepared_ttl)
+                .filter(|p| p.wallet == id && self.fresh(p))
                 .ok_or_else(|| {
                     Error::new("prepared_not_found", "the transfer is no longer available")
                 })?;
-            self.client()
-                .post("/transaction/broadcast", &prepared.bytes)
+            let rpc = self.client();
+            // A cheap read first, so an expired transfer is never sent (the
+            // node runs it at the next height). If the read fails, the
+            // broadcast below reports the connection.
+            let height = rpc.height(&prepared.params).ok();
+            if height.is_some_and(|h| prepared.tx.expires <= h) {
+                return Err(Error::new(
+                    "tx_expired",
+                    "the transfer expired before it was sent",
+                ));
+            }
+            let reservation = Reservation::new(&prepared.tx, height.unwrap_or(prepared.height));
+            let reserved_txid = reservation.txid.clone();
+            // Reserved before sending, so a transfer prepared meanwhile
+            // already leaves these funds alone.
+            reserve::add(
+                guard(&self.reserved).entry(id.to_owned()).or_default(),
+                reservation,
+            );
+            let result = rpc.post("/transaction/broadcast", &prepared.bytes);
+            if result.as_ref().is_err_and(rpc::is_refusal) {
+                self.release(id, &reserved_txid);
+            }
+            result
         })
     }
 
@@ -1021,9 +1086,19 @@ impl Service {
         })
     }
 
+    /// Whether a prepared transfer is within its time to live, by the
+    /// monotonic clock and by the wall clock (which counts time asleep).
+    fn fresh(&self, p: &Prepared) -> bool {
+        p.created.elapsed() < self.prepared_ttl
+            && SystemTime::now()
+                .duration_since(p.created_at)
+                .ok()
+                .is_none_or(|age| age < self.prepared_ttl)
+    }
+
     fn keep_prepared(&self, txid: String, prepared: Prepared) {
         let mut all = guard(&self.prepared);
-        all.retain(|_, p| p.created.elapsed() < self.prepared_ttl);
+        all.retain(|_, p| self.fresh(p));
         while all.len() >= MAX_PREPARED {
             let Some(oldest) = all
                 .iter()
@@ -1039,6 +1114,42 @@ impl Service {
 
     fn client(&self) -> Arc<Rpc> {
         guard(&self.rpc).clone()
+    }
+
+    /// Subtracts the funds of the wallet's broadcast transfers that are not
+    /// in a block yet from `state` (balances read at `state.height`). Those
+    /// checked at an earlier height are looked up first; no lock is held
+    /// meanwhile. A failed lookup keeps the funds reserved.
+    fn reserve(&self, rpc: &Rpc, id: &str, state: &mut remote::State) {
+        let height = state.height;
+        let due = match guard(&self.reserved).get_mut(id) {
+            Some(list) => reserve::due(list, height),
+            None => return,
+        };
+        let statuses = if due.is_empty() {
+            Vec::new()
+        } else {
+            remote::tx_statuses(rpc, &due)
+        };
+        let mut all = guard(&self.reserved);
+        let Some(list) = all.get_mut(id) else {
+            return;
+        };
+        reserve::update(list, &due, &statuses, height);
+        reserve::apply(&mut state.balances, list);
+        if list.is_empty() {
+            all.remove(id);
+        }
+    }
+
+    fn release(&self, id: &str, txid: &str) {
+        let mut all = guard(&self.reserved);
+        if let Some(list) = all.get_mut(id) {
+            list.retain(|r| r.txid != txid);
+            if list.is_empty() {
+                all.remove(id);
+            }
+        }
     }
 
     /// The id's key file; the id must name a listed wallet.

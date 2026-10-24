@@ -288,11 +288,15 @@ class WalletCLI(unittest.TestCase):
         self.assertEqual(result['status'], 'validated')
         self.assertEqual(result['memo'], 'memo 世界')
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        self.assertFalse(any(endpoint.endswith('/broadcast') for endpoint, _ in self.server.posts))
+        # Nothing signed leaves the machine before a broadcast is confirmed.
+        self.assertEqual(self.server.posts, [])
         signed = path.read_bytes()
+        # The fee shown is the static fee the node charges for a transfer.
+        tx = json.loads(signed)
+        self.assertEqual(result['fee_atomic'], str(tx['static_cost'] * tx['fee_ratio'] // 1024))
         result2 = self.run_cli('broadcast', '--transaction', str(path), '--rpc', self.url)
         self.assertEqual(result['transaction_id'], result2['transaction_id'])
-        self.assertEqual([body for endpoint, body in self.server.posts if endpoint.endswith('/broadcast')], [signed])
+        self.assertEqual(self.server.posts, [('/transaction/validate', signed), ('/transaction/broadcast', signed)])
 
     def test_payment_amounts_are_exact_and_never_rounded(self):
         for number, atomic in [('0.000001', '1'), ('1e-6', '1'), ('1.000001', '1000001'),
@@ -323,7 +327,35 @@ class WalletCLI(unittest.TestCase):
                               '--target', self.wallet['address'], '--amount', '1', '--yes')
         self.assertTrue(result['broadcast'])
         self.assertEqual(result['status'], 'broadcast')
-        self.assertEqual(sum(endpoint.endswith('/broadcast') for endpoint, _ in self.server.posts), 1)
+        self.assertEqual([path for path, _ in self.server.posts], ['/transaction/validate', '/transaction/broadcast'])
+        tx = json.loads(self.server.posts[1][1])
+        self.assertEqual(result['fee_atomic'], str(tx['static_cost']))
+        self.assertEqual(self.server.posts[0][1], self.server.posts[1][1])
+
+    def test_node_refusals_are_structured(self):
+        for body, code in [('insufficient funds for transaction fee: 1300 > 0', 'insufficient_fee'),
+                           ('insufficient funds for mmx1abc', 'insufficient_funds'),
+                           ('transaction expired at height 1000', 'transaction_expired'),
+                           ('duplicate tx', 'tx_rejected')]:
+            with self.subTest(body=body):
+                self.server.posts = []
+                self.server.responses = {'/transaction/broadcast': (body.encode(), 400)}
+                self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
+                             '--target', self.wallet['address'], '--amount', '1', '--yes', error=code)
+                self.server.responses = {'/transaction/validate': (body.encode(), 400)}
+                self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
+                             '--target', self.wallet['address'], '--amount', '1', '--yes', error=code)
+                self.assertEqual([path for path, _ in self.server.posts],
+                                 ['/transaction/validate', '/transaction/broadcast', '/transaction/validate'])
+        self.server.responses = {'/transaction/broadcast': (b'lost sync', 503)}
+        self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
+                     '--target', self.wallet['address'], '--amount', '1', '--yes', error='rpc_http_error')
+
+    def test_fee_above_the_shown_fee_is_not_broadcast(self):
+        self.server.fee = 1301
+        self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
+                     '--target', self.wallet['address'], '--amount', '1', '--yes', error='rpc_response_invalid')
+        self.assertEqual([path for path, _ in self.server.posts], ['/transaction/validate'])
 
     def test_no_network_side_effect_after_failed_save(self):
         missing = self.root / 'nonexistent' / 'signed.json'
@@ -342,9 +374,13 @@ class WalletCLI(unittest.TestCase):
         self.server.fee = 2**63
         self.run_cli('broadcast', '--transaction', str(path), '--rpc', self.url, error='rpc_response_invalid')
         self.server.fee = 100
-        self.server.height = 1101
-        self.run_cli('broadcast', '--transaction', str(path), '--rpc', self.url, error='transaction_expired')
+        # Expires at 1100: the node runs it at the next height, too late at 1100.
+        for height in [1100, 1101]:
+            self.server.height = height
+            self.run_cli('broadcast', '--transaction', str(path), '--rpc', self.url, error='transaction_expired')
         self.assertFalse(any(endpoint.endswith('/broadcast') for endpoint, _ in self.server.posts))
+        self.server.height = 1099
+        self.run_cli('broadcast', '--transaction', str(path), '--rpc', self.url)
 
     def test_tampered_signature_and_old_transaction_are_rejected(self):
         _, path = self.prepare()
@@ -365,6 +401,11 @@ class WalletCLI(unittest.TestCase):
         self.server.amount = '1'
         self.run_cli('send', '--file', str(self.file), '--rpc', self.url,
                      '--target', self.wallet['address'], '--amount', '1', error='insufficient_funds')
+        self.assertEqual(self.server.posts, [])
+        # The amount fits, the fee does not (1 + 1300 > 1300).
+        self.server.amount = '1300'
+        self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
+                     '--target', self.wallet['address'], '--amount', '0.000001', error='insufficient_funds')
         self.assertEqual(self.server.posts, [])
 
     def test_nft_holdings_do_not_block_fungible_balance_or_send(self):
@@ -393,11 +434,16 @@ class WalletCLI(unittest.TestCase):
                 self.server.responses['/address'] = ({'balances': [row]}, 200)
                 self.run_cli('balance', '--file', str(self.file), '--rpc', self.url, error='rpc_response_invalid')
 
-    def test_fee_payer_affordability_is_checked_by_rpc(self):
+    def test_failing_transfer_is_not_broadcast(self):
         self.server.amount = '1000000'
         self.server.responses['/transaction/validate'] = ({'did_fail': True, 'error': 'insufficient fee payer balance'}, 200)
+        # Without confirmation nothing is sent, not even for a dry run.
+        result = self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
+                              '--target', self.wallet['address'], '--amount', '0.5')
+        self.assertFalse(result['broadcast'])
+        self.assertEqual(self.server.posts, [])
         self.run_cli('send', '--file', str(self.file), '--rpc', self.url, '-N', '1',
-                     '--target', self.wallet['address'], '--amount', '1', error='wallet_error')
+                     '--target', self.wallet['address'], '--amount', '0.5', '--yes', error='wallet_error')
         self.assertEqual([path for path, _ in self.server.posts], ['/transaction/validate'])
         tx = json.loads(self.server.posts[0][1])
         self.assertEqual(tx['static_cost'], 1300)
@@ -475,6 +521,50 @@ class WalletCLI(unittest.TestCase):
         self.assertIn('[!] wallet_broken.dat', self.run_cli('list', json_mode=False))
         self.assertEqual(self.run_cli('address')['address'], created['address'])
         self.run_cli('use', '0')
+
+    def test_unreadable_key_file_is_never_skipped_over(self):
+        first = self.run_cli('create')
+        second = self.run_cli('create')
+        config_path = self.root / 'wallets' / 'mmxwallet.json'
+        config = json.loads(config_path.read_text())
+        del config['active_wallet']
+        config_path.write_text(json.dumps(config))
+        self.run_cli('address', error='wallet_error')
+        Path(first['wallet_file']).write_bytes(b'\xffnot a key file')
+        # One readable wallet left, but the broken one is a wallet too.
+        failed = self.run_cli('address', error='wallet_error')
+        self.assertIn('multiple wallets found', failed['error'])
+        self.assertNotIn(second['address'], failed['error'])
+        # The broken wallet named as active, or selected: its own error.
+        config['active_wallet'] = Path(first['wallet_file']).name
+        config_path.write_text(json.dumps(config))
+        failed = self.run_cli('address', error='wallet_error')
+        self.assertIn(Path(first['wallet_file']).name, failed['error'])
+        self.run_cli('balance', '--rpc', self.url, error='wallet_error')
+        failed = self.run_cli('address', '--wallet', first['fingerprint'], error='wallet_error')
+        self.assertIn(Path(first['wallet_file']).name, failed['error'])
+        self.assertEqual(self.run_cli('address', '--wallet', second['fingerprint'])['address'], second['address'])
+        self.run_cli('use', first['fingerprint'], error='wallet_error')
+
+    def test_file_in_wallet_directory_keeps_its_settings(self):
+        created = self.run_cli('create')
+        self.run_cli('set-addresses', '3')
+        self.assertEqual(len(self.run_cli('addresses', '--file', created['wallet_file'])['addresses']), 3)
+        self.assertEqual(len(self.run_cli('addresses', '--file', str(self.file))['addresses']), 10)
+
+    def test_damaged_configuration_writes_nothing(self):
+        created = self.run_cli('create')
+        config_path = self.root / 'wallets' / 'mmxwallet.json'
+        config_path.write_text('{broken')
+        before = sorted(p.name for p in config_path.parent.iterdir())
+        failed = self.run_cli('create', error='invalid_argument')
+        self.assertIn('mmxwallet.json', failed['error'])
+        self.run_cli('import', secret={'mnemonic': self.wallet['mnemonic']}, error='invalid_argument')
+        self.assertEqual(sorted(p.name for p in config_path.parent.iterdir()), before)
+        # A selected wallet does not need the configuration.
+        words = self.run_cli('mnemonic', '--wallet', created['fingerprint'])
+        self.assertEqual(words['fingerprint'], created['fingerprint'])
+        self.run_cli('address', error='invalid_argument')
 
     def test_default_rpc_from_configuration(self):
         self.run_cli('create')

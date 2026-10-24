@@ -43,6 +43,37 @@ export const NAV_ITEMS: readonly NavDef[] = [
 const TAB_IDS: readonly RouteId[] = ['overview', 'send', 'receive', 'activity'];
 const MORE_IDS: readonly RouteId[] = ['contacts', 'settings'];
 
+const APP_TITLE = 'MMX Wallet';
+
+/** Browser tab and window title of a page, e.g. "Send · MMX Wallet". */
+export function documentTitle(route: RouteId): string {
+  const label = NAV_ITEMS.find((n) => n.id === route)?.label;
+  return label ? `${label} · ${APP_TITLE}` : APP_TITLE;
+}
+
+/**
+ * After a page change, moves focus to the new page's heading (or the main
+ * area) when the focused control went away with the old page, so keyboard
+ * and screen reader users land on the new page. Focus that is still on a
+ * control (the navigation, or a field the new page focused itself) stays.
+ * Returns the element that received focus.
+ */
+export function focusNewPage(
+  main: HTMLElement | null,
+  doc: Pick<Document, 'activeElement' | 'body'> = document,
+): HTMLElement | null {
+  const active = doc.activeElement;
+  if (!main || (active && active !== doc.body && active.isConnected)) return null;
+  const heading = main.querySelector<HTMLElement>('h1');
+  if (heading) {
+    if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+    heading.focus({ preventScroll: true });
+    if (doc.activeElement === heading) return heading;
+  }
+  main.focus({ preventScroll: true });
+  return main;
+}
+
 interface NavMode {
   /** Nav labels are hidden (rail layout, collapsed sidebar, narrow top bar). */
   iconOnly: boolean;
@@ -89,13 +120,22 @@ export function Shell({
   const { iconOnly, tooltip } = useNavMode();
   const firstRender = useRef(true);
 
+  // Runs after the new page's own effects, so a page that focuses a field keeps that focus.
   useEffect(() => {
+    document.title = documentTitle(route);
     if (firstRender.current) {
       firstRender.current = false;
       return;
     }
     window.scrollTo({ top: 0 });
+    focusNewPage(mainRef.current);
   }, [route]);
+  useEffect(
+    () => () => {
+      document.title = APP_TITLE;
+    },
+    [],
+  );
 
   const switcherProps = { wallets, activeWalletId, onSelectWallet, onAddWallet };
   const moreActive = MORE_IDS.includes(route);

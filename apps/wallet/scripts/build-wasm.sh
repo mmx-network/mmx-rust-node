@@ -4,6 +4,9 @@
 #   scripts/build-wasm.sh          -> src/backend/web/pkg        (shipped build)
 #   scripts/build-wasm.sh --test   -> tests/.wasm-test/pkg       (adds parity-test hooks)
 #
+# From any shell (cmd.exe and PowerShell too): npm run build:wasm [-- --test]
+# (scripts/build-wasm.ts runs this script in bash, on Windows Git for Windows').
+#
 # Needs the wasm32-unknown-unknown Rust target and wasm-bindgen-cli matching
 # the wasm-bindgen crate version below.
 set -euo pipefail

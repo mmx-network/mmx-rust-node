@@ -49,8 +49,21 @@ export interface HistoryRow extends Currency {
   address: string;
   amount: bigint;
   memo?: string;
-  /** Token is on the node's whitelist (always false for MMX itself). */
-  validated: boolean;
+}
+
+/**
+ * One `/address/history` response. `count`, `minHeight` and `maxHeight` cover
+ * every entry the node returned, including NFT rows that `rows` leaves out:
+ * the node's `limit` counts them, so paging must too.
+ */
+export interface HistoryPage {
+  rows: HistoryRow[];
+  /** Number of entries in the response. */
+  count: number;
+  /** Lowest confirmed height in the response (Infinity when none). */
+  minHeight: number;
+  /** Highest confirmed height in the response (−1 when none). */
+  maxHeight: number;
 }
 
 export interface TxIo {
@@ -75,4 +88,6 @@ export interface TxInfo {
   sender?: string;
   inputs: TxIo[];
   outputs: TxIo[];
+  /** The transaction calls or deploys a contract (not a plain transfer). */
+  contractCall: boolean;
 }

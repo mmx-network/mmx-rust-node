@@ -49,7 +49,7 @@ export class MockRpcControl {
   }
 
   /** Registers a token so it can be funded. */
-  token(contract: string, symbol: string, options: { decimals?: number; validated?: boolean } = {}): Promise<void> {
+  token(contract: string, symbol: string, options: { decimals?: number } = {}): Promise<void> {
     return this.call('POST', '/__mock/token', { contract, symbol, ...options });
   }
 
@@ -73,8 +73,8 @@ export class MockRpcControl {
     return this.call('GET', '/__mock/broadcasts');
   }
 
-  /** Chain requests made by the app (method, path with query, status). */
-  requests(): Promise<Array<{ method: string; path: string; status: number }>> {
+  /** Chain requests made by the app (method, path with query, status, request body size). */
+  requests(): Promise<Array<{ method: string; path: string; status: number; bytes: number }>> {
     return this.call('GET', '/__mock/requests');
   }
 

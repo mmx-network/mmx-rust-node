@@ -1,10 +1,12 @@
 /**
  * Auto-lock after inactivity (§6.6). Web: always (default 15 min) and on
  * `pagehide`; desktop: only passphrase wallets and only when
- * autoLockMinutes > 0.
+ * autoLockMinutes > 0. New recovery words held by the create flow count as
+ * an open wallet: auto-lock cancels the setup.
  */
 import { DEFAULT_AUTO_LOCK_MINUTES } from '../lib/appstate';
 import { platform, settings, wallets } from './core';
+import { setupActive } from './setup';
 import { lock } from './wallets';
 
 const ACTIVITY_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus'] as const;
@@ -20,12 +22,13 @@ export function markActivity(now = Date.now()): void {
 /** Minutes until auto-lock for the current state, or null when auto-lock does not apply. */
 export function autoLockDelayMinutes(): number | null {
   const minutes = settings.value.autoLockMinutes;
+  const setup = setupActive.value;
   if (platform.value === 'web') {
-    if (!wallets.value.some((w) => !w.locked)) return null;
+    if (!setup && !wallets.value.some((w) => !w.locked)) return null;
     return minutes > 0 ? minutes : DEFAULT_AUTO_LOCK_MINUTES;
   }
   if (minutes <= 0) return null;
-  return wallets.value.some((w) => w.withPassphrase && !w.locked) ? minutes : null;
+  return setup || wallets.value.some((w) => w.withPassphrase && !w.locked) ? minutes : null;
 }
 
 export function idleExpired(now = Date.now()): boolean {
@@ -33,11 +36,12 @@ export function idleExpired(now = Date.now()): boolean {
   return minutes !== null && now - lastActivity >= minutes * 60_000;
 }
 
-async function lockNow(): Promise<void> {
+/** Idle and pagehide locks stay in this window; only an explicit Lock reaches other tabs. */
+async function lockNow(reason: 'inactivity' | 'pagehide'): Promise<void> {
   if (locking) return;
   locking = true;
   try {
-    await lock();
+    await lock({ inactivity: reason === 'inactivity' });
   } catch {
     // Locking is retried on the next check.
   } finally {
@@ -59,19 +63,19 @@ export function startIdleLock(): () => void {
     }
     // Activity after the deadline (e.g. returning to a sleeping laptop) must not postpone the lock.
     if (idleExpired(now)) {
-      void lockNow();
+      void lockNow('inactivity');
       return;
     }
     lastActivity = now;
   };
   const check = () => {
-    if (idleExpired()) void lockNow();
+    if (idleExpired()) void lockNow('inactivity');
   };
   const onVisibility = () => {
     if (document.visibilityState === 'visible') check();
   };
   const onPageHide = () => {
-    if (platform.value === 'web') void lockNow();
+    if (platform.value === 'web') void lockNow('pagehide');
   };
   for (const type of ACTIVITY_EVENTS) window.addEventListener(type, onActivity, { capture: true, passive: true });
   document.addEventListener('visibilitychange', onVisibility);

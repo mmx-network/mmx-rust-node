@@ -50,7 +50,7 @@ export function SaveCredential({ username, words, submitLabel, onSaved, children
 
   return (
     <form class="onboarding-form create-save" method="post" action="#" onSubmit={(e) => void submit(e)}>
-      <Field label="Wallet" labelAction={<CopyButton size="sm" label="Copy wallet" onCopy={copy(username, false)} />}>
+      <Field label="Wallet" labelAction={<CopyButton size="sm" label="Copy wallet name" onCopy={copy(username, false)} />}>
         <TextInput name="username" autocomplete="username" value={username} readOnly class="create-save__username" />
       </Field>
       <Field label="Recovery phrase" labelAction={<CopyButton size="sm" label="Copy recovery phrase" onCopy={copy(words, true)} />}>

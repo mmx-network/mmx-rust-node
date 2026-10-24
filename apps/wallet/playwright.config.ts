@@ -46,9 +46,9 @@ export default defineConfig({
       stderr: 'pipe',
     },
     {
-      command: `npx vite build --outDir ${OUT_DIR} --emptyOutDir --logLevel warn && npx vite preview --outDir ${OUT_DIR} --host 127.0.0.1 --port ${APP_PORT} --strictPort`,
+      command: `npx vite build --mode web --outDir ${OUT_DIR} --emptyOutDir --logLevel warn && npx vite preview --mode web --outDir ${OUT_DIR} --host 127.0.0.1 --port ${APP_PORT} --strictPort`,
       url: APP_URL,
-      env: { VITE_PLATFORM: 'web', VITE_RPC_URL: RPC_URL },
+      env: { VITE_RPC_URL: RPC_URL },
       reuseExistingServer: false,
       timeout: 180_000,
       stdout: 'ignore',

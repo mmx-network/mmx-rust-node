@@ -1,10 +1,11 @@
 /** Browser services of the web wallet: clipboard, explorer links, file export and import. */
 import { BackendError } from '../types';
+import { CONTACTS_FILE_MAX_BYTES } from '../../lib/appstate';
 import { isExplorerUrl } from '../../lib/explorer';
 
 /** Sensitive text (recovery words) is removed from the clipboard after this delay. */
 export const CLIPBOARD_CLEAR_MS = 60_000;
-export const MAX_IMPORT_BYTES = 1024 * 1024;
+export const MAX_IMPORT_BYTES = CONTACTS_FILE_MAX_BYTES;
 
 async function writeClipboard(text: string): Promise<void> {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
@@ -47,40 +48,68 @@ function copyWithSelection(text: string): boolean {
 }
 
 /**
- * Clipboard writes. A sensitive copy is cleared after a minute if the last
- * thing this page copied is still that text; a copy made by the user in the
- * page in the meantime cancels the clearing. When the page is not focused at
- * that moment (browsers refuse clipboard writes then) the clearing happens as
- * soon as the page is focused again.
+ * Events after which a refused clearing is tried again. Browsers accept
+ * clipboard writes only while the page has focus (Chromium) or during a user
+ * gesture (Firefox, Safari: pointerdown with a mouse, pointerup on touch,
+ * keydown). pagehide is a last attempt before the page goes away.
+ */
+const RETRY_EVENTS = ['pointerdown', 'pointerup', 'keydown', 'focus', 'pagehide'] as const;
+
+/**
+ * Clipboard writes. A sensitive copy (recovery words) is cleared after a
+ * minute, or earlier when the wallets are locked. A later copy, by this page
+ * or by the user in the page, replaces it and cancels the clearing.
+ *
+ * Clearing is best effort: when the browser refuses the write (page not
+ * focused, no user gesture) it is tried again on the next click, tap or key
+ * press in the page, when the page is focused again and when it is hidden.
+ * Nothing can clear the clipboard once the page is closed.
  */
 export class Clipboard {
-  private last: string | null = null;
+  private seq = 0;
+  /** Id of the sensitive copy still to be cleared; 0 = none. */
+  private pending = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private retry: (() => void) | null = null;
   private listening = false;
 
   async copy(text: string, sensitive: boolean): Promise<void> {
-    // Sensitive text still waiting to be cleared.
-    const pending = this.timer !== null || this.retry !== null ? this.last : null;
+    const pending = this.pending;
     this.cancelClear();
     try {
       await writeClipboard(text);
     } catch (e) {
-      if (pending !== null) void this.clear(pending);
+      // The earlier sensitive text is still on the clipboard: clear it now.
+      if (pending !== 0) {
+        this.pending = pending;
+        this.attempt(pending);
+      }
       throw e;
     }
-    this.last = text;
     this.listen();
-    if (sensitive) this.timer = setTimeout(() => void this.clear(text), CLIPBOARD_CLEAR_MS);
+    if (!sensitive) return;
+    const id = ++this.seq;
+    this.pending = id;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.attempt(id);
+    }, CLIPBOARD_CLEAR_MS);
+  }
+
+  /** Clears sensitive text at once (wallets locked) instead of waiting for the timer. */
+  clearPending(): void {
+    const id = this.pending;
+    if (id === 0) return;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.attempt(id);
   }
 
   private listen(): void {
     if (this.listening || typeof document === 'undefined') return;
     this.listening = true;
-    const forget = () => {
-      this.last = null;
-      this.cancelClear();
-    };
+    // The user copied something in the page: the clipboard no longer holds our text.
+    const forget = () => this.cancelClear();
     document.addEventListener('copy', forget, true);
     document.addEventListener('cut', forget, true);
   }
@@ -88,35 +117,56 @@ export class Clipboard {
   private cancelClear(): void {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
-    if (this.retry && typeof window !== 'undefined') window.removeEventListener('focus', this.retry);
-    this.retry = null;
+    this.pending = 0;
+    this.disarm();
   }
 
-  private async clear(text: string): Promise<void> {
-    this.timer = null;
-    if (this.last !== text) return;
-    let cleared = false;
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+  private disarm(): void {
+    const retry = this.retry;
+    this.retry = null;
+    if (retry && typeof window !== 'undefined') {
+      for (const type of RETRY_EVENTS) window.removeEventListener(type, retry, true);
+    }
+  }
+
+  /**
+   * One clearing attempt. The clipboard is called synchronously, so an attempt
+   * from an event handler runs inside the user gesture (Safari drops the
+   * gesture across an await).
+   */
+  private attempt(id: number): void {
+    if (this.pending !== id) return;
+    let write: Promise<void> | null = null;
+    const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+    if (clipboard?.writeText) {
       try {
-        await navigator.clipboard.writeText('');
-        cleared = true;
+        write = clipboard.writeText('');
       } catch {
-        cleared = false;
+        write = null;
       }
     }
-    if (!cleared && this.last === text) cleared = copyWithSelection(' ');
-    if (cleared) {
-      if (this.last === text) this.last = null;
+    if (write === null) {
+      if (copyWithSelection(' ')) this.cleared(id);
+      else this.arm(id);
       return;
     }
-    if (typeof window === 'undefined' || this.retry || this.last !== text) return;
-    const retry = () => {
-      window.removeEventListener('focus', retry);
-      if (this.retry === retry) this.retry = null;
-      void this.clear(text);
-    };
+    write.then(
+      () => this.cleared(id),
+      () => this.arm(id),
+    );
+  }
+
+  private cleared(id: number): void {
+    if (this.pending !== id) return;
+    this.pending = 0;
+    this.disarm();
+  }
+
+  private arm(id: number): void {
+    if (this.pending !== id || this.retry !== null || typeof window === 'undefined') return;
+    const retry = () => this.attempt(id);
     this.retry = retry;
-    window.addEventListener('focus', retry);
+    for (const type of RETRY_EVENTS) window.addEventListener(type, retry, true);
   }
 }
 
@@ -156,7 +206,7 @@ export function downloadFile(suggestedName: string, contents: string): boolean {
 }
 
 /**
- * Lets the user pick a JSON file (at most 1 MiB) and returns its text, or null
+ * Lets the user pick a JSON file (at most 2 MiB) and returns its text, or null
  * when the dialog was cancelled. Must be called from a user action: the file
  * dialog opens synchronously.
  */

@@ -4,9 +4,9 @@ import { MAX_ADDRESSES, WALLET_NAME_MAX } from '../../../lib/appstate';
 import { errorMessage } from '../../../lib/errors';
 import { validateName } from '../../../lib/text';
 import {
-  balancesLoaded,
+  activeWalletId,
+  checkHiddenFunds,
   copyToClipboard,
-  fundedAddressesFrom,
   notify,
   platform,
   removeWallet,
@@ -14,6 +14,7 @@ import {
   revealMnemonic,
   setAddressCount,
   verifyPassphrase,
+  type HiddenFundsCheck,
 } from '../../../state';
 import {
   Banner,
@@ -30,7 +31,7 @@ import {
   TextInput,
   WordGrid,
 } from '../../components';
-import { PASSWORD_MANAGER_IGNORE, useMounted } from '../welcome/flow';
+import { PASSPHRASE_FIELD, useMounted } from '../welcome/flow';
 import { fundedMessage } from './text';
 
 function nameError(name: string): string | undefined {
@@ -107,7 +108,8 @@ function RenameForm({ wallet, onClose }: { wallet: WalletInfo; onClose: () => vo
   );
 }
 
-type CountCheck = { kind: 'funded'; indices: number[] } | { kind: 'unknown' };
+/** A confirmation before hiding addresses, for the count that was checked. */
+type CountCheck = Exclude<HiddenFundsCheck, { kind: 'none' }> & { count: number };
 
 function AddressCount({ wallet }: { wallet: WalletInfo }) {
   const [count, setCount] = useState(wallet.addressCount);
@@ -118,11 +120,15 @@ function AddressCount({ wallet }: { wallet: WalletInfo }) {
   useEffect(() => setCount(wallet.addressCount), [wallet.id, wallet.addressCount]);
   const changed = count !== wallet.addressCount;
 
-  const apply = async (): Promise<void> => {
+  const apply = async (target: number): Promise<void> => {
+    const id = wallet.id;
     setBusy(true);
     try {
-      await setAddressCount(count);
-      notify(count === 1 ? 'This wallet now uses 1 address.' : `This wallet now uses ${count} addresses.`, 'success');
+      await setAddressCount(target);
+      // Another wallet may be open by now: don't report this change there.
+      if (activeWalletId.value === id) {
+        notify(target === 1 ? 'This wallet now uses 1 address.' : `This wallet now uses ${target} addresses.`, 'success');
+      }
     } catch (e) {
       notify(errorMessage(e), 'error');
       if (mounted.current) setCount(wallet.addressCount);
@@ -134,20 +140,21 @@ function AddressCount({ wallet }: { wallet: WalletInfo }) {
     }
   };
 
-  const save = (): void => {
+  const save = async (): Promise<void> => {
     if (busy) return;
-    if (count < wallet.addressCount) {
-      if (!balancesLoaded.value) {
-        setCheck({ kind: 'unknown' });
-        return;
-      }
-      const funded = fundedAddressesFrom(count);
-      if (funded.length > 0) {
-        setCheck({ kind: 'funded', indices: funded });
-        return;
-      }
+    const target = count;
+    // Checked against the stored count: it may have changed in another tab or with the command line.
+    setBusy(true);
+    let result: HiddenFundsCheck;
+    try {
+      result = await checkHiddenFunds(target);
+    } catch {
+      result = { kind: 'unknown' };
     }
-    void apply();
+    if (!mounted.current) return;
+    setBusy(false);
+    if (result.kind === 'none') void apply(target);
+    else setCheck({ ...result, count: target });
   };
 
   return (
@@ -159,7 +166,7 @@ function AddressCount({ wallet }: { wallet: WalletInfo }) {
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setCount(wallet.addressCount)}>
               Cancel
             </Button>
-            <Button size="sm" variant="primary" loading={busy} onClick={save}>
+            <Button size="sm" variant="primary" loading={busy} onClick={() => void save()}>
               Save
             </Button>
           </div>
@@ -171,11 +178,13 @@ function AddressCount({ wallet }: { wallet: WalletInfo }) {
         message={
           check?.kind === 'funded'
             ? `${fundedMessage(check.indices)} Hidden addresses are left out of your balance until you show them again.`
-            : 'Your balance is still loading, so some of these addresses may hold funds.'
+            : 'The balance of these addresses isn’t loaded yet, so some may hold funds.'
         }
         confirmLabel="Hide addresses"
         busy={busy}
-        onConfirm={() => void apply()}
+        onConfirm={() => {
+          if (check) void apply(check.count);
+        }}
         onCancel={() => setCheck(null)}
       />
     </>
@@ -267,7 +276,7 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
             <Field label="Passphrase" error={passphraseError}>
               <PasswordInput
                 name="wallet-passphrase"
-                {...PASSWORD_MANAGER_IGNORE}
+                {...PASSPHRASE_FIELD}
                 value={passphrase}
                 onValue={setPassphrase}
                 inputRef={passphraseRef}
@@ -301,6 +310,18 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
       </Dialog>
     </>
   );
+}
+
+/** What the user needs before removing a wallet: the words, and the passphrase if it has one. */
+function removeMessage(web: boolean, withPassphrase: boolean): string {
+  if (web) {
+    return withPassphrase
+      ? 'Make sure your recovery phrase is saved and you know your passphrase. You need both to open this wallet again.'
+      : 'Make sure your recovery phrase is saved. You need it to open this wallet again.';
+  }
+  return withPassphrase
+    ? 'Make sure you have the recovery phrase and your passphrase. You need both to restore this wallet.'
+    : 'Make sure you have the recovery phrase. You need it to restore this wallet.';
 }
 
 function RemoveWallet({ wallet }: { wallet: WalletInfo }) {
@@ -341,11 +362,7 @@ function RemoveWallet({ wallet }: { wallet: WalletInfo }) {
         open={open}
         tone="danger"
         title={web ? `Forget ${wallet.name}?` : `Remove ${wallet.name}?`}
-        message={
-          web
-            ? 'Make sure your recovery phrase is saved. You need it to open this wallet again.'
-            : 'Make sure you have the recovery phrase. You need it to restore this wallet.'
-        }
+        message={removeMessage(web, wallet.withPassphrase)}
         confirmLabel={web ? 'Forget wallet' : 'Remove wallet'}
         busy={busy}
         confirmDisabled={!matches}
@@ -400,7 +417,9 @@ export function WalletSettings({ wallet }: { wallet: WalletInfo }) {
         <OptionRow
           tone="danger"
           title={web ? 'Forget on this device' : 'Remove from this computer'}
-          description={web ? 'You can open it again with the recovery phrase' : 'You can restore it with the recovery phrase'}
+          description={`${web ? 'You can open it again with the recovery phrase' : 'You can restore it with the recovery phrase'}${
+            wallet.withPassphrase ? ' and passphrase' : ''
+          }`}
         >
           <RemoveWallet wallet={wallet} />
         </OptionRow>

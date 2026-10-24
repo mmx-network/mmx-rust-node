@@ -232,7 +232,8 @@ describe('overview and activity store helpers', () => {
     await vi.advanceTimersByTimeAsync(1000);
     const options = A.activityAssetOptions.value;
     expect(options[0]).toMatchObject({ contract: NATIVE_CONTRACT, native: true });
-    expect(options.map((o) => o.symbol)).toEqual(['MMX', 'USDM', 'MMX']);
+    // Mainnet verifies native MMX only, so both tokens are unverified (sorted by symbol).
+    expect(options.map((o) => o.symbol)).toEqual(['MMX', 'MMX', 'USDM']);
     expect(options[2]).toMatchObject({ native: false, verified: false });
   });
 

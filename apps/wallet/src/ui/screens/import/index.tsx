@@ -29,6 +29,13 @@ export default function ImportScreen() {
     wordsRef.current = next;
     setWordsState(next);
   };
+  /** Words before the last Clear, for Undo; dropped on the next edit and when leaving. */
+  const cleared = useRef<string[] | null>(null);
+  const [canUndo, setCanUndo] = useState(false);
+  const forgetCleared = (): void => {
+    cleared.current = null;
+    setCanUndo(false);
+  };
   const [showErrors, setShowErrors] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [nameError, setNameError] = useState<string | undefined>(undefined);
@@ -109,6 +116,7 @@ export default function ImportScreen() {
         latestWords={() => wordsRef.current}
         onWords={(next) => {
           setWords(next);
+          if (cleared.current) forgetCleared();
           if (error) setError(undefined);
         }}
         showErrors={showErrors}
@@ -117,10 +125,18 @@ export default function ImportScreen() {
           setError(undefined);
           setStep('details');
         }}
+        canUndo={canUndo}
         onClear={() => {
+          cleared.current = wordsRef.current;
+          setCanUndo(true);
           setWords(emptyWords());
           setShowErrors(false);
           setError(undefined);
+        }}
+        onUndo={() => {
+          const previous = cleared.current;
+          forgetCleared();
+          if (previous) setWords(previous);
         }}
         onSubmit={() => void runImport()}
       />
@@ -154,12 +170,15 @@ interface WordsStepProps {
   onWords: (words: string[]) => void;
   showErrors: boolean;
   error?: string;
+  /** The words were just cleared: offer Undo instead of Clear. */
+  canUndo: boolean;
   onBack: () => void;
   onClear: () => void;
+  onUndo: () => void;
   onSubmit: () => void;
 }
 
-function WordsStep({ steps, words, latestWords, onWords, showErrors, error, onBack, onClear, onSubmit }: WordsStepProps) {
+function WordsStep({ steps, words, latestWords, onWords, showErrors, error, canUndo, onBack, onClear, onUndo, onSubmit }: WordsStepProps) {
   const inputs = useRef<(HTMLInputElement | null)[]>([]);
   const formRef = useRef<HTMLFormElement>(null);
   const any = words.some(Boolean);
@@ -196,17 +215,23 @@ function WordsStep({ steps, words, latestWords, onWords, showErrors, error, onBa
         />
         {error ? <Banner tone="danger">{error}</Banner> : null}
         <div class="import-form__actions">
-          <Button
-            variant="ghost"
-            icon="close"
-            onClick={() => {
-              onClear();
-              requestAnimationFrame(() => inputs.current[0]?.focus());
-            }}
-            disabled={!any}
-          >
-            Clear
-          </Button>
+          {canUndo ? (
+            <Button variant="ghost" icon="refresh" onClick={onUndo}>
+              Undo clear
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              icon="close"
+              onClick={() => {
+                onClear();
+                requestAnimationFrame(() => inputs.current[0]?.focus());
+              }}
+              disabled={!any}
+            >
+              Clear
+            </Button>
+          )}
           <Button type="submit" variant="primary" size="lg" class="import-form__submit">
             Import wallet
           </Button>
