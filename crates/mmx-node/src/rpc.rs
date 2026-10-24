@@ -9,7 +9,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use vnx::{
     binary::{Reader, Writer},
@@ -58,9 +58,9 @@ pub const METHODS: &[&str] = &[
 
 // Shared by HTTP and native RPC. Capture only immutable database handles while
 // holding the ledger lock; query work and encoding run on the request's worker.
-struct ReadPermit(Arc<AtomicUsize>);
+pub(crate) struct ReadPermit(Arc<AtomicUsize>);
 impl ReadPermit {
-    fn acquire(workers: &Arc<AtomicUsize>) -> Result<Self> {
+    pub(crate) fn acquire(workers: &Arc<AtomicUsize>) -> Result<Self> {
         let mut current = workers.load(Ordering::Acquire);
         loop {
             if current >= 2 {
@@ -130,7 +130,27 @@ impl ReadTask {
     }
 }
 
-fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Value> {
+fn lock_node_until(node: &Mutex<Node>, end: Instant) -> Result<std::sync::MutexGuard<'_, Node>> {
+    loop {
+        if Instant::now() >= end {
+            return Err(error("RPC request deadline"));
+        }
+        match node.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(error("node lock poisoned")),
+            Err(std::sync::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+fn dispatch(node: &Arc<Mutex<Node>>, method: &str, args: Value) -> Result<Value> {
+    dispatch_until(node, method, args, Instant::now() + Duration::from_secs(5))
+}
+fn dispatch_until(
+    node: &Arc<Mutex<Node>>,
+    method: &str,
+    mut args: Value,
+    end: Instant,
+) -> Result<Value> {
     if !args.is_object() {
         return Err(error("RPC parameters must be an object"));
     }
@@ -148,30 +168,52 @@ fn dispatch(node: &Arc<Mutex<Node>>, method: &str, mut args: Value) -> Result<Va
     let mut writer = Writer::new(Vec::new(), registry.clone());
     writer.write(&args)?;
     let request = Record::decode(&writer.into_inner())?;
+    if method == "add_transaction" {
+        let task = {
+            let n = lock_node_until(node, end)?;
+            n.capture_admission(
+                request.field("tx")?.record()?,
+                request.field("pre_validate")?.boolean()?,
+                true,
+            )?
+        };
+        if let Some(mut task) = task {
+            let result = task.validate()?;
+            lock_node_until(node, end)?.publish_transaction(task, result)?;
+        }
+        return Ok(Value::Null);
+    }
     let mut task = if method == "validate" || crate::transactions::is_balance_method(&request.name)
     {
-        let n = node.lock().map_err(|_| error("node lock poisoned"))?;
+        let n = lock_node_until(node, end)?;
         Some(ReadTask::capture(&n)?)
     } else {
         None
     };
     let response = if let Some(task) = &mut task {
-        task.call(&request)?.encode()?
+        task.call(&request)?
     } else {
-        let mut n = node.lock().map_err(|_| error("node lock poisoned"))?;
-        if method == "add_transaction" {
-            n.add_transaction(
-                request.field("tx")?.record()?,
-                request.field("pre_validate")?.boolean()?,
-            )?;
-            return Ok(Value::Null);
-        }
-        n.call(&request)?.encode()?
+        let n = lock_node_until(node, end)?;
+        n.call(&request)?
     };
-    let response = Reader::new(Cursor::new(response), registry)
+    if response.memory_size() > MAX_RESPONSE_BYTES {
+        return Err(error("RPC response exceeds byte budget"));
+    }
+    let response = response.encode()?;
+    if response.len() > MAX_RESPONSE_BYTES {
+        return Err(error("RPC response exceeds byte budget"));
+    }
+    let mut response = Reader::new(Cursor::new(response), registry)
+        .with_limits(vnx::binary::Limits {
+            max_allocated_bytes: MAX_RESPONSE_BYTES,
+            ..Default::default()
+        })
         .with_utf8_lossy(true)
         .read()?;
-    Ok(response["_ret_0"].clone())
+    Ok(response
+        .as_object_mut()
+        .and_then(|v| v.remove("_ret_0"))
+        .unwrap_or(Value::Null))
 }
 pub struct VnxServer {
     server: Server,
@@ -357,8 +399,11 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
     })
 }
 
-fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
+fn request(node: &Arc<Mutex<Node>>, r: Value, end: Instant) -> Option<Value> {
     let id = r.get("id").cloned().unwrap_or(Value::Null);
+    if !bounded_id(&id) {
+        return Some(limit_error(Value::Null, "RPC id exceeds 128 bytes"));
+    }
     let failure = |code, message: String| json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}});
     if r["jsonrpc"] != "2.0"
         || !r["method"].is_string()
@@ -373,7 +418,7 @@ fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
         .unwrap_or(r["method"].as_str().unwrap());
     let result = if method == "get_status" {
         (|| -> Result<Value> {
-            let n = node.lock().map_err(|_| error("node lock poisoned"))?;
+            let n = lock_node_until(node, end)?;
             let tip = n
                 .chain
                 .selected()
@@ -390,10 +435,11 @@ fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
             )
         })()
     } else {
-        dispatch(
+        dispatch_until(
             node,
             method,
             r.get("params").cloned().unwrap_or_else(|| json!({})),
+            end,
         )
     };
     r.get("id")?;
@@ -409,13 +455,86 @@ fn request(node: &Arc<Mutex<Node>>, r: Value) -> Option<Value> {
         ),
     })
 }
+const MAX_BATCH_CALLS: usize = 32;
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+fn bounded_id(id: &Value) -> bool {
+    // Arbitrary-precision numeric IDs and escaped strings also need a wire
+    // bound, so the reserved final-error space cannot be bypassed.
+    serde_json::to_writer(ResponseBudget(128), id).is_ok()
+}
+fn limit_error(id: Value, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message}})
+}
+struct ResponseBudget(usize);
+impl std::io::Write for ResponseBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.0 {
+            return Err(std::io::Error::other("RPC response exceeds byte budget"));
+        }
+        self.0 -= bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 pub fn json_request(node: &Arc<Mutex<Node>>, body: &[u8]) -> Option<Value> {
+    json_request_until(node, body, Instant::now() + Duration::from_secs(5))
+}
+pub(crate) fn json_request_until(
+    node: &Arc<Mutex<Node>>,
+    body: &[u8],
+    end: Instant,
+) -> Option<Value> {
+    json_request_budget(node, body, end, MAX_RESPONSE_BYTES)
+}
+fn json_request_budget(
+    node: &Arc<Mutex<Node>>,
+    body: &[u8],
+    end: Instant,
+    bytes: usize,
+) -> Option<Value> {
     match serde_json::from_slice::<Value>(body) {
         Ok(Value::Array(items)) if !items.is_empty() => {
-            let replies: Vec<_> = items.into_iter().filter_map(|r| request(node, r)).collect();
+            if items.len() > MAX_BATCH_CALLS {
+                return Some(limit_error(Value::Null, "RPC batch exceeds 32 calls"));
+            }
+            // Reserve room for punctuation and a final bounded error. Check
+            // notifications too: they consume execution work without a reply.
+            let mut budget = ResponseBudget(bytes.saturating_sub(512));
+            let mut replies = Vec::new();
+            for r in items {
+                let id = r
+                    .get("id")
+                    .filter(|v| bounded_id(v))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if Instant::now() >= end {
+                    replies.push(limit_error(id, "RPC request deadline"));
+                    break;
+                }
+                if let Some(reply) = request(node, r, end) {
+                    if serde_json::to_writer(&mut budget, &reply).is_err() {
+                        replies.push(limit_error(id, "RPC response exceeds byte budget"));
+                        break;
+                    }
+                    replies.push(reply);
+                }
+            }
             (!replies.is_empty()).then_some(Value::Array(replies))
         }
-        Ok(r) => request(node, r),
+        Ok(r) => {
+            if Instant::now() >= end {
+                return Some(limit_error(Value::Null, "RPC request deadline"));
+            }
+            request(node, r, end).map(|reply| {
+                if serde_json::to_writer(ResponseBudget(bytes), &reply).is_err() {
+                    limit_error(Value::Null, "RPC response exceeds byte budget")
+                } else {
+                    reply
+                }
+            })
+        }
         Err(_) => {
             Some(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}))
         }
@@ -424,7 +543,7 @@ pub fn json_request(node: &Arc<Mutex<Node>>, body: &[u8]) -> Option<Value> {
 pub use crate::http::HttpServer;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mmx_consensus::Value as N;
     use mmx_execution::chain::{forks::ForkChain, genesis::Assets};
@@ -454,7 +573,10 @@ mod tests {
         assert_eq!(active.load(Ordering::Acquire), 0);
     }
 
-    fn fixture() -> (Arc<Mutex<Node>>, Record, Record) {
+    pub(crate) fn fixture() -> (Arc<Mutex<Node>>, Record, Record) {
+        fixture_at(None)
+    }
+    fn fixture_at(path: Option<&std::path::Path>) -> (Arc<Mutex<Node>>, Record, Record) {
         let rows: Vec<Value> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
             .lines()
             .map(|s| serde_json::from_str(s).unwrap())
@@ -474,7 +596,10 @@ mod tests {
             testnet_rewards: None,
             project_relay: None,
         };
-        let mut chain = ForkChain::memory(params);
+        let mut chain = match path {
+            Some(path) => ForkChain::open_native(path, params).unwrap(),
+            None => ForkChain::memory(params),
+        };
         chain.initialize(&assets).unwrap();
         let step = &rows.iter().find(|r| r["kind"] == "chain").unwrap()["steps"][0];
         (
@@ -488,6 +613,88 @@ mod tests {
             Record::decode(&raw(&step["block"])).unwrap(),
             Record::decode(&raw(&step["vdf"])).unwrap(),
         )
+    }
+    #[test]
+    fn batches_share_call_byte_and_execution_deadline_budgets() {
+        let (node, _, _) = fixture();
+        let call = json!({"jsonrpc":"2.0","id":1,"method":"get_block_at","params":{"height":0}});
+        let body = serde_json::to_vec(&vec![call.clone(); 8]).unwrap();
+        let reply = json_request_budget(
+            &node,
+            &body,
+            Instant::now() + Duration::from_secs(5),
+            20_000,
+        )
+        .unwrap();
+        assert_eq!(reply.as_array().unwrap().len(), 2);
+        assert!(reply[0]["result"].is_object());
+        assert!(reply[1]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("byte budget"));
+        assert!(serde_json::to_vec(&reply).unwrap().len() <= 20_000);
+        let _locked = node.lock().unwrap();
+        // Both checks happen before any dispatch, even for notifications.
+        let notifications =
+            serde_json::to_vec(&vec![json!({"jsonrpc":"2.0","method":"get_height"}); 33]).unwrap();
+        assert!(
+            json_request(&node, &notifications).unwrap()["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("32 calls")
+        );
+        assert!(
+            json_request_until(&node, &body, Instant::now()).unwrap()[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("deadline")
+        );
+        let numeric_id = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"get_height\"}}",
+            "9".repeat(1024)
+        );
+        let oversized = json_request(&node, numeric_id.as_bytes()).unwrap();
+        assert!(oversized["id"].is_null());
+        assert!(oversized["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("128 bytes"));
+        assert!(!bounded_id(&json!("\n".repeat(100))));
+    }
+    #[test]
+    fn submission_executes_without_live_lock_and_rejects_changed_or_rewound_snapshots() {
+        for disk in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (node, block, vdf) = fixture_at(disk.then_some(dir.path()));
+            let tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+                .record()
+                .unwrap();
+            let mut n = node.lock().unwrap();
+            n.synced = true;
+            let mut task = n.capture_admission(tx, true, true).unwrap().unwrap();
+            let (sent, received) = std::sync::mpsc::channel();
+            let worker = thread::spawn(move || {
+                let result = task.validate().unwrap();
+                sent.send((task, result)).unwrap();
+            });
+            // The worker must finish even while this thread owns the mutex.
+            let (task, result) = received.recv_timeout(Duration::from_secs(3)).unwrap();
+            worker.join().unwrap();
+            let root = n.chain.selected().hash_at(0).unwrap().unwrap();
+            n.chain.admit(&block, &[vdf]).unwrap();
+            n.chain.update(root, None).unwrap();
+            if disk {
+                // Exercise Native's generation check even after an ABA rewind.
+                n.chain.rollback_to(0).unwrap();
+            }
+            assert!(n
+                .publish_transaction(task, result)
+                .unwrap_err()
+                .to_string()
+                .contains("snapshot changed"));
+            assert_eq!(n.pending_transactions(), 0);
+            assert_eq!(n.rpc_workers.load(Ordering::Acquire), 0);
+        }
     }
     #[test]
     fn snapshot_tasks_release_ledger_lock_retain_parent_and_bound_shared_workers() {

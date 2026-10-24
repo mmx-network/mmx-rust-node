@@ -393,6 +393,15 @@ pub fn harvester_options(
         ]
         .into(),
         max_connections: 64,
+        receive_limits: vnx::binary::Limits {
+            max_container: 4096,
+            max_string_bytes: 4096,
+            max_value_bytes: 256 * 1024,
+            max_allocated_bytes: 1024 * 1024,
+            max_schemas: 4096,
+            max_schema_bytes: 512 * 1024,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

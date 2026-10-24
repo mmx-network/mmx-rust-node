@@ -1371,7 +1371,7 @@ fn a_dropped_prefetched_reply_keeps_downloaded_content_for_the_next_sync_attempt
 }
 
 #[test]
-fn unconsumed_prefetch_survives_restart_without_selecting_or_downloading_its_future_blocks() {
+fn unvalidated_prefetch_is_ram_only_and_restart_refetches_it_once() {
     let (network, _, blocks) = fixture();
     let directory = tempfile::tempdir().unwrap();
     let node = Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()));
@@ -1407,6 +1407,13 @@ fn unconsumed_prefetch_survives_restart_without_selecting_or_downloading_its_fut
         .is_some());
     drop(node);
     let node = Arc::new(Mutex::new(Node::open(directory.path(), &network).unwrap()));
+    assert!(node
+        .lock()
+        .unwrap()
+        .chain
+        .block(&hash(&blocks[2], "hash").unwrap())
+        .unwrap()
+        .is_none());
     node.lock().unwrap().tick().unwrap();
     assert_eq!(
         node.lock()
@@ -1421,6 +1428,6 @@ fn unconsumed_prefetch_survives_restart_without_selecting_or_downloading_its_fut
     );
     let progress = synchronize_peers(&mut peers(&blocks, &events), &node, &stop, |_| {}).unwrap();
     assert_eq!(progress.selected, 2);
-    assert_eq!((progress.body_requests, progress.body_retries), (0, 0));
-    assert!(counts(&events).values().all(|&n| n == 1));
+    assert_eq!((progress.body_requests, progress.body_retries), (2, 0));
+    assert!(counts(&events).values().all(|&n| n == 2));
 }

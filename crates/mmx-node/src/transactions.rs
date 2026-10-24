@@ -11,8 +11,9 @@ use mmx_consensus::{Record, Value};
 use mmx_execution::transaction::{self, TransactionContext, TransactionResult};
 use mmx_vm::{storage::StorageDb, Storage};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::{mpsc, Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 type BalanceRows = BTreeMap<([u8; 32], [u8; 32]), u128>;
@@ -31,6 +32,12 @@ pub(crate) struct Pool {
     bytes: usize,
     tip: Option<[u8; 32]>,
     pub relay: Relay,
+    background: Option<Workers>,
+    queued: BTreeMap<[u8; 32], PreparedTx>,
+    queued_order: VecDeque<[u8; 32]>,
+    queued_bytes: usize,
+    inflight: BTreeSet<[u8; 32]>,
+    epoch: u64,
 }
 impl Pool {
     fn remove(&mut self, id: &[u8; 32]) -> Result<()> {
@@ -47,7 +54,91 @@ impl Pool {
         self.entries.clear();
         self.bytes = 0;
         self.tip = None;
+        self.queued.clear();
+        self.queued_order.clear();
+        self.queued_bytes = 0;
+        self.epoch = self.epoch.wrapping_add(1);
         Ok(())
+    }
+}
+#[derive(Clone)]
+struct PreparedTx {
+    record: Arc<Record>,
+    id: [u8; 32],
+    size: usize,
+    pre_validate: bool,
+    reliable: bool,
+}
+pub(crate) struct ValidationTask {
+    tx: PreparedTx,
+    storage: StorageDb,
+    context: TransactionContext,
+    epoch: u64,
+    _permit: crate::rpc::ReadPermit,
+}
+impl ValidationTask {
+    fn capture(node: &Node, tx: PreparedTx) -> Result<Self> {
+        Self::with_permit(
+            node,
+            tx,
+            crate::rpc::ReadPermit::acquire(&node.rpc_workers)?,
+        )
+    }
+    fn with_permit(node: &Node, tx: PreparedTx, permit: crate::rpc::ReadPermit) -> Result<Self> {
+        let selected = node.chain.selected();
+        let db = selected.storage().database();
+        Ok(Self {
+            tx,
+            storage: StorageDb::new(db.fork(db.version())?),
+            context: TransactionContext {
+                height: db.version(),
+                params: selected.params().clone(),
+                locked_contracts: None,
+            },
+            epoch: node.tx_pool.epoch,
+            _permit: permit,
+        })
+    }
+    pub(crate) fn validate(&mut self) -> Result<TransactionResult> {
+        validate_snapshot(&mut self.storage, &self.context, &self.tx.record)
+    }
+    fn current(&self, node: &Node) -> Result<bool> {
+        let db = node.chain.selected().storage().database();
+        Ok(node.tx_pool.epoch == self.epoch
+            && db.version() == self.context.height
+            && db.can_replace_suffix(self.context.height, self.storage.database())?)
+    }
+}
+type Completion = (ValidationTask, Result<TransactionResult>, Duration);
+struct Workers {
+    jobs: mpsc::SyncSender<ValidationTask>,
+    results: mpsc::Receiver<Completion>,
+    next: Instant,
+}
+impl Workers {
+    fn new() -> Result<Self> {
+        let (jobs, receive) = mpsc::sync_channel::<ValidationTask>(2);
+        let receive = Arc::new(Mutex::new(receive));
+        let (send, results) = mpsc::channel();
+        for i in 0..2 {
+            let (receive, send) = (receive.clone(), send.clone());
+            std::thread::Builder::new()
+                .name(format!("mmx-tx-{i}"))
+                .spawn(move || loop {
+                    let job = receive.lock().unwrap().recv();
+                    let Ok(mut task) = job else { break };
+                    let start = Instant::now();
+                    let result = task.validate();
+                    if send.send((task, result, start.elapsed())).is_err() {
+                        break;
+                    }
+                })?;
+        }
+        Ok(Self {
+            jobs,
+            results,
+            next: Instant::now(),
+        })
     }
 }
 impl Node {
@@ -90,19 +181,50 @@ impl Node {
         self.admit_transaction(tx, pre_validate, true)
     }
     pub(crate) fn add_peer_transaction(&mut self, tx: &Record) -> Result<bool> {
-        self.admit_transaction(tx, false, false)
+        if self.tx_pool.background.is_none() {
+            return self.admit_transaction(tx, false, false);
+        }
+        let Some(tx) = self.prepare_admission(tx, false, false)? else {
+            return Ok(false);
+        };
+        self.enqueue_transaction(tx)
     }
-    fn admit_transaction(
-        &mut self,
+    pub fn enable_background_transactions(&mut self) -> Result<()> {
+        if self.tx_pool.background.is_none() {
+            self.tx_pool.background = Some(Workers::new()?);
+        }
+        Ok(())
+    }
+    fn enqueue_transaction(&mut self, tx: PreparedTx) -> Result<bool> {
+        let id = tx.id;
+        if self.tx_pool.queued.contains_key(&id) || self.tx_pool.inflight.contains(&id) {
+            return Ok(false);
+        }
+        if self.tx_pool.queued.len() >= 256
+            || self.tx_pool.queued_bytes.saturating_add(tx.size) > 8 * 1024 * 1024
+        {
+            return Err(error("transaction validation queue full"));
+        }
+        self.tx_pool.queued_bytes += tx.size;
+        self.tx_pool.queued_order.push_back(id);
+        self.tx_pool.queued.insert(id, tx);
+        Ok(true)
+    }
+    fn prepare_admission(
+        &self,
         tx: &Record,
         pre_validate: bool,
         reliable: bool,
-    ) -> Result<bool> {
+    ) -> Result<Option<PreparedTx>> {
         if !self.synced {
             return Err(error("not synced"));
         }
         if tx.name != "mmx.Transaction" {
             return Err(error("expected transaction"));
+        }
+        // Reject before cloning, encoding, signature checks or VM execution.
+        if tx.memory_size() > MAX_RELAY_TX_BYTES {
+            return Err(error("transaction exceeds pool size limit"));
         }
         let supplied_id = hash(tx, "id")?;
         if !pre_validate
@@ -112,7 +234,7 @@ impl Node {
                 .get(&supplied_id)
                 .is_some_and(|e| e.record.as_ref() == tx)
         {
-            return Ok(false);
+            return Ok(None);
         }
         let params = self.chain.selected().params();
         let mut tx = tx.clone();
@@ -139,8 +261,9 @@ impl Node {
             .get(&id)
             .is_some_and(|e| e.record.as_ref() == &tx);
         if duplicate && !pre_validate {
-            return Ok(false);
+            return Ok(None);
         }
+        self.check_pool_capacity(id, size)?;
         let current = self
             .chain
             .selected()
@@ -150,19 +273,77 @@ impl Node {
         if number(&tx, "expires")? < current.saturating_add(1) {
             return Err(error("transaction expired"));
         }
-        let result = self.validate_transaction(&tx)?;
+        Ok(Some(PreparedTx {
+            record: Arc::new(tx),
+            id,
+            size,
+            pre_validate,
+            reliable,
+        }))
+    }
+    fn check_pool_capacity(&self, id: [u8; 32], size: usize) -> Result<usize> {
+        let old = self.tx_pool.entries.get(&id).map_or(0, |e| e.size);
+        let bytes = self.tx_pool.bytes - old + size;
+        if bytes > MAX_POOL_BYTES || (self.tx_pool.entries.len() >= MAX_POOL_ITEMS && old == 0) {
+            return Err(error("transaction pool full"));
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn capture_admission(
+        &self,
+        tx: &Record,
+        pre_validate: bool,
+        reliable: bool,
+    ) -> Result<Option<ValidationTask>> {
+        self.prepare_admission(tx, pre_validate, reliable)?
+            .map(|tx| ValidationTask::capture(self, tx))
+            .transpose()
+    }
+    fn admit_transaction(
+        &mut self,
+        tx: &Record,
+        pre_validate: bool,
+        reliable: bool,
+    ) -> Result<bool> {
+        let Some(mut task) = self.capture_admission(tx, pre_validate, reliable)? else {
+            return Ok(false);
+        };
+        let result = task.validate()?;
+        self.publish_transaction(task, result)
+    }
+    pub(crate) fn publish_transaction(
+        &mut self,
+        task: ValidationTask,
+        result: TransactionResult,
+    ) -> Result<bool> {
+        if !self.synced || !task.current(self)? {
+            return Err(error("transaction validation snapshot changed; retry"));
+        }
+        let PreparedTx {
+            record: tx,
+            id,
+            size,
+            pre_validate,
+            reliable,
+        } = task.tx;
         if pre_validate && result.did_fail {
             return Err(error("transaction execution would fail"));
         }
-        if duplicate {
+        if self
+            .tx_pool
+            .entries
+            .get(&id)
+            .is_some_and(|e| e.record == tx)
+        {
             return Ok(false);
         }
-        let sender = tx
+        let bytes = self.check_pool_capacity(id, size)?;
+        let sender: [u8; 32] = tx
             .field("sender")?
             .optional()?
             .ok_or_else(|| error("missing sender"))?
-            .bytes()?;
-        let sender: [u8; 32] = sender.try_into()?;
+            .bytes()?
+            .try_into()?;
         let mut fees = u64::from(result.total_fee);
         for (other_id, entry) in &self.tx_pool.entries {
             if *other_id != id
@@ -187,12 +368,6 @@ impl Node {
         {
             return Err(error("insufficient funds for pending transaction fees"));
         }
-        let old = self.tx_pool.entries.get(&id).map_or(0, |e| e.size);
-        let bytes = self.tx_pool.bytes - old + size;
-        if bytes > MAX_POOL_BYTES || (self.tx_pool.entries.len() >= MAX_POOL_ITEMS && old == 0) {
-            return Err(error("transaction pool full"));
-        }
-        let tx = Arc::new(tx);
         self.tx_pool
             .relay
             .publish_with_origin(id, tx.clone(), size, reliable)?;
@@ -206,6 +381,65 @@ impl Node {
         );
         self.tx_pool.bytes = bytes;
         Ok(true)
+    }
+    pub(crate) fn poll_transactions(&mut self) -> Result<()> {
+        let Some(mut workers) = self.tx_pool.background.take() else {
+            return Ok(());
+        };
+        let result = self.poll_transactions_with(&mut workers);
+        self.tx_pool.background = Some(workers);
+        result
+    }
+    fn poll_transactions_with(&mut self, workers: &mut Workers) -> Result<()> {
+        // At most two completions and two new jobs per tick. No VM runs here.
+        while let Ok((task, result, elapsed)) = workers.results.try_recv() {
+            self.tx_pool.inflight.remove(&task.tx.id);
+            workers.next = workers.next.max(Instant::now() + elapsed);
+            if task.epoch != self.tx_pool.epoch {
+                continue;
+            }
+            if self.synced && !task.current(self)? {
+                let _ = self.enqueue_transaction(task.tx);
+            } else if let Ok(result) = result {
+                let _ = self.publish_transaction(task, result);
+            }
+        }
+        if self.synced && Instant::now() >= workers.next {
+            for _ in self.tx_pool.inflight.len()..2 {
+                let Some(&id) = self.tx_pool.queued_order.front() else {
+                    break;
+                };
+                let queued = &self.tx_pool.queued[&id];
+                if self.check_pool_capacity(id, queued.size).is_err()
+                    || number(&queued.record, "expires")?
+                        < self.chain.selected().storage().database().version()
+                    || self
+                        .tx_pool
+                        .entries
+                        .get(&id)
+                        .is_some_and(|entry| entry.record == queued.record)
+                {
+                    self.tx_pool.queued_order.pop_front();
+                    self.tx_pool.queued_bytes -= self.tx_pool.queued.remove(&id).unwrap().size;
+                    continue;
+                }
+                let permit = match crate::rpc::ReadPermit::acquire(&self.rpc_workers) {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let task =
+                    ValidationTask::with_permit(self, self.tx_pool.queued[&id].clone(), permit)?;
+                self.tx_pool.queued_order.pop_front();
+                let tx = self.tx_pool.queued.remove(&id).unwrap();
+                self.tx_pool.queued_bytes -= tx.size;
+                workers
+                    .jobs
+                    .try_send(task)
+                    .map_err(|_| error("transaction worker unavailable"))?;
+                self.tx_pool.inflight.insert(id);
+            }
+        }
+        Ok(())
     }
     pub(crate) fn prune_transactions(&mut self) -> Result<()> {
         if self.tx_pool.entries.is_empty() {
@@ -432,6 +666,77 @@ pub(crate) fn validate_snapshot(
 mod tests {
     use super::*;
     use crate::node::record;
+
+    #[test]
+    fn peer_admission_is_bounded_deduplicated_fifo_and_executes_on_workers() {
+        let (node, block, _) = crate::rpc::tests::fixture();
+        let tx = block.field("tx_list").unwrap().seq().unwrap()[0]
+            .record()
+            .unwrap();
+        let mut n = node.lock().unwrap();
+        n.synced = true;
+        n.tx_pool.bytes = MAX_POOL_BYTES;
+        assert!(n
+            .capture_admission(tx, true, true)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("pool full"));
+        assert_eq!(n.rpc_workers.load(std::sync::atomic::Ordering::Acquire), 0);
+        n.tx_pool.bytes = 0;
+        n.enable_background_transactions().unwrap();
+        assert!(n.add_peer_transaction(tx).unwrap());
+        assert!(!n.add_peer_transaction(tx).unwrap());
+        assert_eq!(n.pending_transactions(), 0);
+        // Capacity can fill after queue admission; reject again before capture.
+        n.tx_pool.bytes = MAX_POOL_BYTES;
+        n.poll_transactions().unwrap();
+        assert!(n.tx_pool.inflight.is_empty());
+        assert!(n.tx_pool.queued.is_empty());
+        assert_eq!(n.rpc_workers.load(std::sync::atomic::Ordering::Acquire), 0);
+        n.tx_pool.bytes = 0;
+        n.add_peer_transaction(tx).unwrap();
+        n.poll_transactions().unwrap();
+        assert_eq!(n.tx_pool.inflight.len(), 1);
+        // Retain the live lock while a worker performs the entire validation.
+        let completion = n
+            .tx_pool
+            .background
+            .as_ref()
+            .unwrap()
+            .results
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        n.tx_pool.inflight.remove(&completion.0.tx.id);
+        n.publish_transaction(completion.0, completion.1.unwrap())
+            .unwrap();
+        assert_eq!(n.pending_transactions(), 1);
+        n.tx_pool.clear().unwrap();
+        let template = n.prepare_admission(tx, false, false).unwrap().unwrap();
+        for index in 0..256u32 {
+            let mut queued = template.clone();
+            queued.id[..4].copy_from_slice(&index.to_be_bytes());
+            n.enqueue_transaction(queued).unwrap();
+        }
+        let mut extra = template;
+        extra.id = [255; 32];
+        assert!(n
+            .enqueue_transaction(extra)
+            .unwrap_err()
+            .to_string()
+            .contains("queue full"));
+        assert_eq!(
+            &n.tx_pool.queued_order.front().unwrap()[..4],
+            &0u32.to_be_bytes()
+        );
+        assert_eq!(
+            &n.tx_pool.queued_order.back().unwrap()[..4],
+            &255u32.to_be_bytes()
+        );
+        n.tx_pool.clear().unwrap();
+        assert!(n.tx_pool.queued_order.is_empty());
+        assert_eq!(n.tx_pool.queued_bytes, 0);
+    }
 
     fn balance_query(owners: Vec<[u8; 32]>, currencies: Vec<[u8; 32]>, limit: i64) -> Record {
         record(

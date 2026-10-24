@@ -356,6 +356,7 @@ impl Node {
     }
     pub(crate) fn update(&mut self) -> Result<Update> {
         let started = Instant::now();
+        self.poll_transactions()?;
         for (message, _) in self.inbox.take()? {
             if let Err(e) = self.admit_message(&message) {
                 eprintln!("Rejected {}: {e}", message.name);

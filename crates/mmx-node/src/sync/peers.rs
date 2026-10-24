@@ -311,9 +311,9 @@ impl<S: PeerSource> PeerPool<S> {
         // window, leaving a reader gap in which its WAL can be recycled.
         drop(context);
         let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
-        // Retain completed bodies even if the consumer is cancelled before it
-        // receives this window. The active view still ends at sync_pos, so this
-        // write-ahead archive cannot select prefetched future blocks.
+        // Keep completed bodies in bounded RAM even if the consumer cancels.
+        // The active view still ends at sync_pos; only fully executed branches
+        // enter the durable archive. Unvalidated prefetch expires on restart.
         let params = local.chain.selected().params();
         let ready: Vec<_> = self.completed.range((start, [0; 32])..(start + count, [0; 32]))
             .filter_map(|(_, block)| block.as_ref())

@@ -521,7 +521,9 @@ sources at `141054c398d2bab6802174379ce3b191d4f3a499`, and VNX integration at
 `35be1ac0b4966e9e4686c87961e683a408b9ec2c`. This pass includes the new desktop,
 browser and WASM wallets. Concurrent wallet theme/e2e edits were present in the
 working tree; they are not included in this review checkpoint. The findings
-below are open; this checkpoint documents the review without applying fixes.
+below describe the original review checkpoint. All six are resolved by the
+[fix checkpoint](#review-fix-checkpoint-2026-10-25) below; the original evidence
+is preserved for comparison.
 
 ### P1: Historical sync permanently stores candidates before contextual checks
 
@@ -660,3 +662,39 @@ farmer/harvester/timelord, config/systemd, and desktop/web trust boundaries.
 Vendored VNX was checked at its decoding, session and transport integration
 boundaries. No new consensus acceptance mismatch was confirmed; passing native
 fixtures and this source review do not establish exhaustive protocol parity.
+
+### Review fix checkpoint, 2026-10-25
+
+All six findings above are fixed. Implementation choices, native source paths,
+resource limits and remaining performance measurements are recorded in
+[performance parity](performance-parity.md#review-fixes-2026-10-25).
+
+| Finding | Resolution |
+| --- | --- |
+| Historical candidate disk growth | Bounded expiring RAM quarantine; full detached ledger validation before a single batched archive promotion; archive publication still precedes ledger publication. Contextual/ledger rejections never acquire durable body or invalid-marker records. |
+| JSON-RPC batch amplification | Shared call count, serialized response bytes and deadline; bounded IDs/conversion and deadline-aware mutex acquisition; no second complete HTTP response copy. |
+| Farm report memory/starvation | Field/message/schema/allocation limits before remote queueing, retained byte budget across all identities, bounded service drains. |
+| VM execution under live mutex | Cheap admission/capacity checks, bounded persistent peer workers and off-lock HTTP/VNX submission; exact snapshot/generation/epoch and fees/capacity checks before publication. |
+| Named GPU index mismatch | Resolve the native name-relative or platform-relative GPU index before initializing a device. |
+| Full memtable recount per commit | Incremental insertion/replacement/tombstone/rewind accounting with recovery/checkpoint regressions. |
+
+The VNX submodule is updated to `2403c60`, adding configurable server receive
+budgets with a real network regression. Defaults remain unchanged for other
+servers. Root network report listeners opt into tighter budgets.
+
+Deliberate change: unvalidated prefetch remains shared in RAM across cancelled
+sync attempts, but is fetched again after process restart. Validated archived
+content remains reusable across restarts and every retained rollback height.
+The embedded synchronous transaction API remains available; transport-enabled
+nodes use the bounded background path. HTTP deadlines stop lock waits and
+further batch calls; they cannot preempt an already-running cost-bounded VM call.
+
+The tmpfs accounting probe improved from 151.750 ms to 1.624 ms for 100 one-key
+commits after 50,000 seed rows. This does not claim C++ or mainnet throughput
+parity. No live services, ledger/plot scans or data migrations were used.
+
+Fix validation: workspace all-target tests **473 passed, 6 ignored**; VNX
+all-target tests **102 passed, 4 ignored**. Workspace and VNX all-target Clippy
+pass with warnings denied; formatting and diff whitespace checks pass. Builds
+used two jobs, incremental/debug output disabled and low CPU/I/O priority. The
+ignored optional hardware/native conformance cases remain unexecuted.

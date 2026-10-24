@@ -3553,6 +3553,13 @@ fn rpc_submission_and_peer_gossip_keep_native_reliable_upload_semantics() {
             n.lock().unwrap().add_transaction(&tx, false).unwrap();
         } else {
             n.lock().unwrap().receive(&tx).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while n.lock().unwrap().pending_transactions() == 0
+                && std::time::Instant::now() < deadline
+            {
+                n.lock().unwrap().tick().unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
         assert_eq!(n.lock().unwrap().pending_transactions(), 1);
         if local {

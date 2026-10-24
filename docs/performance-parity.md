@@ -1,10 +1,9 @@
 # C++ performance parity
 
-The [2026-10-25 review](cpp-port-audit.md#codebase-review-2026-10-25) records open
-issues found after the checkpoints below: permanent retention of unverified
-sync candidates, aggregate JSON-RPC/report memory limits, synchronous transaction
-admission, named GPU selection, and per-commit memtable recounting. Earlier
-fixture results must not be read as coverage of these gaps.
+The [2026-10-25 review](cpp-port-audit.md#codebase-review-2026-10-25) found six
+admission/storage gaps. The [fix checkpoint](#review-fixes-2026-10-25) records
+their resolutions, new bounds and deliberate differences. Earlier fixture
+results do not establish performance parity for those paths.
 
 Performance is part of the migration requirements for every component. Read the
 C++ counterpart before implementation and preserve the execution strategy as
@@ -691,3 +690,70 @@ server rather than measured against C++.
   without a reply. A broadcast can therefore reach the node twice; it is the
   same signed transaction (same id), which the node accepts idempotently while
   it is pending, so no second transfer can result.
+
+## Review fixes, 2026-10-25
+
+Native source inspected: `Node.cpp::{add_block,add_transaction,write_block}`,
+`Node_update.cpp::{verify_block_proofs,validate_new}`, `Node_api.cpp::get_block_ex`,
+`Farmer.cpp`, and `DataBase.cpp::Table::insert_entry`, at
+`141054c398d2bab6802174379ce3b191d4f3a499`.
+
+- Historical windows now enter a 4,096-item / 128 MiB RAM quarantine, with a
+  120-second missing-parent timeout and 8,192-content negative cache. Arrival
+  order, three-observer/all-content downloads, prefetch and body sharing remain.
+  A detached branch executes once; only a fully valid branch is archived in a
+  batch, before its ledger delta publishes. Rejected candidates write no body
+  or invalid-marker records. Existing archived invalid records are not migrated.
+  Temporary header overlays preserve ancestry beyond the 2,048-header read
+  cache and disappear at publication. Rollback/purge bounds on durable history
+  remain independent of quarantine limits.
+- Deliberate sync difference: unvalidated prefetch survives cancellation in RAM,
+  but not a process restart. It is fetched once again after restart. Fully
+  validated archived content still avoids new downloads after restart/rewind.
+  Losing speculative downloads is preferable to permanently writing unverified
+  network data. Timed-out quarantine entries can also be fetched again; there
+  are no duplicate concurrent body leases.
+- JSON-RPC allows at most 32 batch calls (including notifications), a shared
+  32 MiB serialized reply budget, bounded response conversion and 128-byte
+  serialized IDs. The HTTP absolute deadline also bounds mutex acquisition and
+  stops further batch execution; it cannot preempt one already-running,
+  consensus-cost-bounded VM call. HTTP writes headers/body separately instead
+  of copying the full response string. These are service limits, not consensus.
+- Submissions check size, expiry and pool capacity before VM work. HTTP/VNX
+  validate outside the live mutex and recheck the snapshot owner, version,
+  generation, reset epoch, capacity and pending fees before publication. The
+  transport-enabled node queues peer work FIFO (256 items / 8 MiB), deduplicates
+  IDs and uses two persistent workers sharing the RPC execution slots. Each
+  completion imposes an equally long scheduling pause to bound sustained peer
+  validation duty. Stale work is retried against a fresh snapshot; reset work
+  is discarded. Direct embedded `Node::add_transaction` retains synchronous
+  semantics. Native uses randomized dependency-aware batches; Rust uses bounded
+  independent snapshot jobs, since admission does not publish ledger writes.
+- Farm reports have per-field limits, a 256 KiB encoded limit and a conservative
+  32 MiB retained allocation charge, including replacements and expiry. ID
+  rotation shares that global budget; metadata identities remain informational.
+  The remote VNX reader enforces message/string/container/schema/allocation
+  budgets before runtime queueing. Report, proof and challenge drains are
+  bounded per service iteration. These bounds deliberately exceed native's
+  item-only protection; proof/signing permissions remain unchanged.
+- Named GPU indexes now count matching names across platforms, as in native;
+  unnamed indexes count GPUs within the configured/first platform. Selection
+  precedes device initialization. CPU devices remain excluded.
+- Native DB memtable accounting updates on insertion, replacement, tombstones
+  and rewind removal. Ordinary commits no longer walk unrelated keys. The same
+  debug-profile tmpfs probe (100 one-key commits) now takes **0.322 ms** with
+  10 seed rows and **1.624 ms** with 50,000 seed rows, versus **0.575 / 151.750 ms**
+  before. This is a bounded CPU/accounting comparison, not C++ or mainnet
+  throughput parity. No live ledger/plots, broad state cache or format migration
+  was used.
+
+Regression coverage includes signed contextual/ledger-invalid historical blocks,
+archive-free staging/expiry/budget failure, atomic promotion, restart and every
+retained rollback height, two lying sync peers, timeout-only lease replacement,
+submission execution while the owner holds the live mutex, Native ABA rewind,
+full-pool rejection before worker acquisition, bounded FIFO admission, aggregate
+RPC byte/call/deadline rejection, remote report limits and actual VNX ingress.
+Mixed/duplicate device names use pure selection fixtures; no mixed-GPU hardware
+performance result is claimed. Full mainnet replay, saturated RPC/harvester
+latency and native/Rust transaction throughput remain comparative workloads to
+measure; correctness tests do not establish those performance claims.

@@ -375,7 +375,9 @@ pub fn farmer_main() -> Result<()> {
     let mut updated = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         for _ in 0..16 {
-            let Some(sample) = challenges.try_recv()? else { break; };
+            let Some(sample) = challenges.try_recv()? else {
+                break;
+            };
             let age = Duration::from_micros(
                 vnx::time::now_micros()
                     .saturating_sub(sample.recv_time)
@@ -386,7 +388,9 @@ pub fn farmer_main() -> Result<()> {
             }
         }
         for _ in 0..8 {
-            let Some(sample) = reports.try_recv()? else { break; };
+            let Some(sample) = reports.try_recv()? else {
+                break;
+            };
             match serde_json::from_value::<mmx::FarmInfo>(sample.value) {
                 Ok(info) => {
                     if let Err(e) = farmer
@@ -401,7 +405,9 @@ pub fn farmer_main() -> Result<()> {
             }
         }
         for _ in 0..16 {
-            let Some(sample) = proofs.try_recv()? else { break; };
+            let Some(sample) = proofs.try_recv()? else {
+                break;
+            };
             let signed = (|| -> Result<Value> {
                 let r = service::from_json(&sample.value)?;
                 let signed = farmer

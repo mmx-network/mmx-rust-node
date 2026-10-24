@@ -18,7 +18,7 @@ use mmx_consensus::{
 use mmx_db::{Store as Database, Write};
 use mmx_types::{mmx, VnxType};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -49,13 +49,29 @@ struct Entry {
     invalid: bool,
 }
 
-/// An owned, consistent view of archived bodies. Indexed storage shares its
-/// committed MVCC prefix, so readers do not hold the node's ledger mutex.
+// Service admission bounds, independent of consensus and retained rollback
+// history. Unverified network data is never written to the permanent archive.
+const MAX_STAGED_BLOCKS: usize = 4096;
+const MAX_STAGED_BYTES: usize = 128 * 1024 * 1024;
+const STAGED_TIMEOUT: Duration = Duration::from_secs(120);
+struct Staged {
+    block: Arc<Record>,
+    header: Arc<mmx::BlockHeader>,
+    arrival: u32,
+    size: usize,
+    received: Instant,
+}
+/// An owned, consistent view of archived and quarantined bodies. Indexed
+/// storage and quarantined records are shared without the node's ledger mutex.
 pub struct BlockSnapshot {
     archive: Database,
+    staged: BTreeMap<Hash, Arc<Record>>,
 }
 impl BlockSnapshot {
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
+        if let Some(block) = self.staged.get(hash) {
+            return Ok(Some(block.as_ref().clone()));
+        }
         archive_block(&self.archive, hash)
     }
 }
@@ -73,6 +89,11 @@ pub struct ForkChain {
     tip_limit: Option<u32>,
     headers: super::cache::Headers,
     prepared: Option<PreparedExtension>,
+    staged: BTreeMap<Hash, Staged>,
+    staged_bytes: usize,
+    arrival: u32,
+    rejected: BTreeSet<Hash>,
+    rejection_order: VecDeque<Hash>,
 }
 impl ForkChain {
     pub fn memory(params: mmx::ChainParams) -> Self {
@@ -88,6 +109,11 @@ impl ForkChain {
             tip_limit: None,
             headers: Default::default(),
             prepared: None,
+            staged: BTreeMap::new(),
+            staged_bytes: 0,
+            arrival: 0,
+            rejected: BTreeSet::new(),
+            rejection_order: VecDeque::new(),
         }
     }
     pub fn open(path: impl AsRef<Path>, params: mmx::ChainParams) -> ChainResult<Self> {
@@ -103,6 +129,7 @@ impl ForkChain {
         Self::with_storage(selected, archive)
     }
     fn with_storage(selected: ChainState, archive: Database) -> ChainResult<Self> {
+        let arrival = archive.version();
         let chain = Self {
             chain: selected,
             archive,
@@ -115,6 +142,11 @@ impl ForkChain {
             tip_limit: None,
             headers: Default::default(),
             prepared: None,
+            staged: BTreeMap::new(),
+            staged_bytes: 0,
+            arrival,
+            rejected: BTreeSet::new(),
+            rejection_order: VecDeque::new(),
         };
         if chain.archive.version() != 0
             && chain.archive.get("fork_meta", b"params", None)?
@@ -316,7 +348,7 @@ impl ForkChain {
         self.connected
             .iter()
             .filter_map(|hash| {
-                let header = cached_header(&self.archive, &self.headers, hash);
+                let header = self.get_header(hash).map_err(ChainError::from);
                 match header {
                     Ok(Some(h))
                         if h.height > root_height
@@ -375,19 +407,38 @@ impl ForkChain {
         Ok(())
     }
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
+        if let Some(entry) = self.staged.get(hash) {
+            return Ok(Some(entry.block.as_ref().clone()));
+        }
         archive_block(&self.archive, hash)
     }
     pub fn header(&self, hash: &Hash) -> ChainResult<Option<Record>> {
+        if let Some(entry) = self.staged.get(hash) {
+            return Ok(Some(Record {
+                name: "mmx.BlockHeader".into(),
+                fields: entry
+                    .block
+                    .fields
+                    .iter()
+                    .filter(|(name, _)| name.as_str() != "tx_list")
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            }));
+        }
         bodies::header_record(&self.archive, bodies::ARCHIVE, hash)
     }
-    /// Probe the immutable body index without loading a header or transaction.
-    /// Both split and legacy complete-body values use the same reference index.
+    /// Probe quarantine and the immutable body index without loading payloads.
     pub fn contains_block(&self, hash: &Hash) -> ChainResult<bool> {
-        Ok(self.archive.contains("fork_blocks", hash, None)?)
+        Ok(self.staged.contains_key(hash) || self.archive.contains("fork_blocks", hash, None)?)
     }
     pub fn block_snapshot(&self) -> ChainResult<BlockSnapshot> {
         Ok(BlockSnapshot {
             archive: self.archive.fork(self.archive.version())?,
+            staged: self
+                .staged
+                .iter()
+                .map(|(id, entry)| (*id, entry.block.clone()))
+                .collect(),
         })
     }
 
@@ -441,7 +492,7 @@ impl ForkChain {
     ) -> ChainResult<bool> {
         block::prevalidate(block, self.chain.params())?;
         let id = bytes::<32>(block.field("hash")?)?;
-        if self.contains_block(&id)? {
+        if self.archive.contains("fork_blocks", &id, None)? {
             return Ok(true);
         }
         let parent_id = bytes::<32>(block.field("prev")?)?;
@@ -460,14 +511,17 @@ impl ForkChain {
             Err(_) => return Ok(false),
         };
         let mut preview = self.chain.snapshot_at(common.height)?;
+        preview
+            .headers
+            .pin(self.staged.values().map(|entry| entry.header.clone()));
         let canonical_parent = parents.is_empty();
-        for parent in parents {
+        for parent in &parents {
             let record = self
-                .block(&parent)?
+                .block(parent)?
                 .ok_or_else(|| invalid("missing live parent"))?;
             let historical = uint(&record, "height")? <= u64::from(root_height)
-                || self.sync_verified.contains(&parent);
-            let work = self.verified.get(&parent).cloned().unwrap_or_default();
+                || self.sync_verified.contains(parent);
+            let work = self.verified.get(parent).cloned().unwrap_or_default();
             preview.append_mode(
                 &record,
                 &work,
@@ -485,7 +539,9 @@ impl ForkChain {
             .iter()
             .map(|point| Record::from_generated(point.proof()))
             .collect::<mmx_consensus::Result<Vec<_>>>()?;
+        self.promote_staged(&parents)?;
         self.retain(block, &work)?;
+        preview.headers.unpin();
         self.evidence.insert(id, evidence.clone());
         self.verified.insert(id, linked.clone());
         if canonical_parent {
@@ -533,16 +589,17 @@ impl ForkChain {
         self.prepared = Some(execution);
         Ok(true)
     }
-    /// Atomically retain a historical download window with no attached PoTs.
-    /// First-record and height/arrival ordering match sequential admission.
+    /// Atomically quarantine a historical window. Only a fully validated
+    /// branch is promoted to the archive, immediately before ledger publication.
     pub fn admit_blocks(&mut self, blocks: &[Record]) -> ChainResult<()> {
         if self.chain.tip()?.is_none() {
             return Err(invalid("chain is not initialized"));
         }
-        let mut writes = Vec::new();
-        let mut headers = Vec::new();
+        self.expire_staged();
+        let mut staged = Vec::new();
+        let mut size = self.staged_bytes;
         let mut seen = BTreeSet::new();
-        let mut arrival = self.archive.version();
+        let mut arrival = self.arrival;
         for block in blocks {
             let height = uint(block, "height")? as u32;
             if height == 0 {
@@ -553,25 +610,87 @@ impl ForkChain {
             }
             block::prevalidate(block, self.chain.params())?;
             let hash = bytes::<32>(block.field("hash")?)?;
-            if !seen.insert(hash) || self.archive.get("fork_blocks", &hash, None)?.is_some() {
+            let content = bytes::<32>(block.field("content_hash")?)?;
+            if !seen.insert(hash)
+                || self.rejected.contains(&content)
+                || self.contains_block(&hash)?
+            {
                 continue;
             }
-            let key = [height.to_be_bytes(), arrival.to_be_bytes()].concat();
+            // Include the separately decoded typed header and map/Arc overhead.
+            let bytes = block.memory_size().saturating_mul(2).saturating_add(1024);
+            size = size.saturating_add(bytes);
+            if size > MAX_STAGED_BYTES || self.staged.len() + staged.len() >= MAX_STAGED_BLOCKS {
+                return Err(invalid("historical candidate quarantine full"));
+            }
+            staged.push((
+                hash,
+                Staged {
+                    block: Arc::new(block.clone()),
+                    header: Arc::new(header(block)?),
+                    arrival,
+                    size: bytes,
+                    received: Instant::now(),
+                },
+            ));
             arrival = arrival
                 .checked_add(1)
                 .ok_or_else(|| invalid("fork archive version limit"))?;
-            headers.push(header(block)?);
-            writes.extend([
-                Write::put("fork_order", key, hash),
-                Write::put("fork_work", hash, pack(&[])?),
-            ]);
-            writes.extend(bodies::writes(block, bodies::ARCHIVE)?);
+        }
+        self.staged.extend(staged);
+        self.staged_bytes = size;
+        self.arrival = arrival;
+        Ok(())
+    }
+    fn expire_staged(&mut self) {
+        self.staged.retain(|_, entry| {
+            let keep = entry.received.elapsed() < STAGED_TIMEOUT;
+            if !keep {
+                self.staged_bytes -= entry.size;
+            }
+            keep
+        });
+    }
+    fn reject_staged(&mut self, hashes: &BTreeSet<Hash>) -> ChainResult<()> {
+        for hash in hashes {
+            if let Some(entry) = self.staged.remove(hash) {
+                self.staged_bytes -= entry.size;
+                let content = bytes::<32>(entry.block.field("content_hash")?)?;
+                if self.rejected.insert(content) {
+                    self.rejection_order.push_back(content);
+                }
+            }
+        }
+        while self.rejection_order.len() > 8192 {
+            self.rejected
+                .remove(&self.rejection_order.pop_front().unwrap());
+        }
+        Ok(())
+    }
+    fn promote_staged(&mut self, hashes: &[Hash]) -> ChainResult<()> {
+        let mut writes = Vec::new();
+        for hash in hashes {
+            if let Some(entry) = self.staged.get(hash) {
+                writes.push(Write::put(
+                    "fork_order",
+                    [
+                        entry.header.height.to_be_bytes(),
+                        entry.arrival.to_be_bytes(),
+                    ]
+                    .concat(),
+                    *hash,
+                ));
+                writes.push(Write::put("fork_work", *hash, pack(&[])?));
+                writes.extend(bodies::writes(&entry.block, bodies::ARCHIVE)?);
+            }
         }
         if !writes.is_empty() {
-            self.archive.commit_batch(arrival, writes)?;
-            self.refresh_bodies()?;
-            for header in headers {
-                self.headers.insert(header);
+            self.commit_archive(writes)?;
+        }
+        for hash in hashes {
+            if let Some(entry) = self.staged.remove(hash) {
+                self.staged_bytes -= entry.size;
+                self.headers.insert(entry.header.as_ref().clone());
             }
         }
         Ok(())
@@ -601,12 +720,24 @@ impl ForkChain {
             if height == 0 {
                 writes.push(Write::put("fork_meta", b"genesis", hash));
             }
-            let key = [height.to_be_bytes(), self.archive.version().to_be_bytes()].concat();
+            let arrival = if let Some(entry) = self.staged.get(&hash) {
+                entry.arrival
+            } else {
+                let arrival = self.arrival;
+                self.arrival = arrival
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("fork archive version limit"))?;
+                arrival
+            };
+            let key = [height.to_be_bytes(), arrival.to_be_bytes()].concat();
             writes.push(Write::put("fork_order", key, hash));
             writes.extend(bodies::writes(block, bodies::ARCHIVE)?);
             retained_header = Some(header(block)?);
         }
         self.commit_archive(writes)?;
+        if let Some(entry) = self.staged.remove(&hash) {
+            self.staged_bytes -= entry.size;
+        }
         if let Some(header) = retained_header {
             self.headers.insert(header);
         }
@@ -625,7 +756,9 @@ impl ForkChain {
             .version()
             .checked_add(1)
             .ok_or_else(|| invalid("fork archive version limit"))?;
+        let next = next.max(self.arrival);
         self.archive.commit_batch(next, writes)?;
+        self.arrival = next;
         self.refresh_bodies()?;
         Ok(())
     }
@@ -644,7 +777,8 @@ impl ForkChain {
             .tip_limit
             .and_then(|h| h.checked_add(1))
             .map(|h| [h.to_be_bytes(), 0u32.to_be_bytes()].concat());
-        self.archive
+        let mut entries = self
+            .archive
             .scan_range(
                 "fork_order",
                 &[
@@ -669,14 +803,40 @@ impl ForkChain {
                 if row.key.len() != 8 || row.key[..4] != header.height.to_be_bytes() {
                     return Err(invalid("fork order height mismatch"));
                 }
-                Ok(Entry {
-                    block,
-                    header,
-                    proofs: self.work(&hash)?,
-                    invalid: self.archive.get("fork_invalid", &hash, None)?.is_some(),
-                })
+                Ok((
+                    row.key,
+                    Entry {
+                        block,
+                        header,
+                        proofs: self.work(&hash)?,
+                        invalid: self.archive.get("fork_invalid", &hash, None)?.is_some(),
+                    },
+                ))
             })
-            .collect()
+            .collect::<ChainResult<Vec<_>>>()?;
+        for entry in self.staged.values() {
+            if entry.header.height > root_height
+                && self
+                    .tip_limit
+                    .is_none_or(|limit| entry.header.height <= limit)
+            {
+                entries.push((
+                    [
+                        entry.header.height.to_be_bytes(),
+                        entry.arrival.to_be_bytes(),
+                    ]
+                    .concat(),
+                    Entry {
+                        block: entry.block.as_ref().clone(),
+                        header: entry.header.clone(),
+                        proofs: vec![],
+                        invalid: false,
+                    },
+                ));
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries.into_iter().map(|(_, entry)| entry).collect())
     }
     /// Select and apply a branch above an explicitly supplied selected root.
     /// Root advancement and the lowest backwards-sync height are supplied by
@@ -710,6 +870,17 @@ impl ForkChain {
         now_ms: i64,
         mode: ValidationMode,
     ) -> ChainResult<Update> {
+        let out = self.update_mode_inner(root, sync_pending, now_ms, mode)?;
+        self.reject_staged(&out.invalid)?;
+        Ok(out)
+    }
+    fn update_mode_inner(
+        &mut self,
+        root: Hash,
+        sync_pending: Option<u32>,
+        now_ms: i64,
+        mode: ValidationMode,
+    ) -> ChainResult<Update> {
         let load_started = Instant::now();
         let root_header = self
             .chain
@@ -727,10 +898,15 @@ impl ForkChain {
             .iter()
             .map(|entry| (entry.header.hash.0, &entry.block))
             .collect();
-        let headers: BTreeMap<_, _> = entries
+        let mut headers: BTreeMap<_, _> = entries
             .iter()
             .map(|e| (e.header.hash.0, e.header.clone()))
             .collect();
+        headers.extend(
+            self.staged
+                .iter()
+                .map(|(hash, entry)| (*hash, entry.header.clone())),
+        );
         let history = History {
             headers: &headers,
             archive: &self.archive,
@@ -937,12 +1113,15 @@ impl ForkChain {
             };
             out.lineage_time += lineage_started.elapsed();
             let archive = &self.archive;
+            let staged = &self.staged;
             let sync_verified = &self.sync_verified;
             let evidence = &self.evidence;
             let mut validated = Vec::new();
             let branch = line.iter().map(|hash| {
                 let block = if let Some(block) = bodies.get(hash) {
                     (*block).clone()
+                } else if let Some(entry) = staged.get(hash) {
+                    entry.block.as_ref().clone()
                 } else {
                     archive_block(archive, hash)?.ok_or_else(|| invalid("missing replay block"))?
                 };
@@ -986,8 +1165,27 @@ impl ForkChain {
                 let execution = self.prepared.take().unwrap();
                 self.chain.adopt_extension(execution).map(|()| Vec::new())
             } else {
-                self.chain
-                    .reorganize_stream(common.height + 1, branch, false)
+                match self.chain.prepare_reorganization(
+                    common.height + 1,
+                    branch,
+                    false,
+                    &self
+                        .staged
+                        .values()
+                        .map(|entry| entry.header.clone())
+                        .collect::<Vec<_>>(),
+                ) {
+                    Ok((mut prepared, receipts)) => {
+                        // Archive first: after a crash the selected ledger can
+                        // never reference a missing body. Execute exactly once.
+                        self.promote_staged(&line)?;
+                        prepared.bodies = self.chain.bodies.clone();
+                        self.chain
+                            .publish_reorganization(common.height + 1, prepared)
+                            .map(|()| receipts)
+                    }
+                    Err(error) => Err(error),
+                }
             };
             out.replay_time += replay_started.elapsed();
             match replay {
@@ -1015,7 +1213,9 @@ impl ForkChain {
     fn persist_invalid(&mut self, hashes: &BTreeSet<Hash>) -> ChainResult<()> {
         let mut writes = Vec::new();
         for hash in hashes {
-            if self.archive.get("fork_invalid", hash, None)?.is_none() {
+            if !self.staged.contains_key(hash)
+                && self.archive.get("fork_invalid", hash, None)?.is_none()
+            {
                 writes.push(Write::put("fork_invalid", *hash, [1]));
             }
         }
@@ -1029,7 +1229,7 @@ impl ForkChain {
         let mut line = Vec::new();
         let mut expected = None;
         loop {
-            let Some(h) = cached_header(&self.archive, &self.headers, &current)? else {
+            let Some(h) = self.get_header(&current)? else {
                 return Ok(None);
             };
             if expected.is_some_and(|height| height != h.height) {
@@ -1080,10 +1280,12 @@ impl HeaderSource for History<'_> {
 }
 impl HeaderSource for ForkChain {
     fn get_header(&self, hash: &Hash) -> ProofResult<Option<mmx::BlockHeader>> {
-        cached_header(&self.archive, &self.headers, hash)
-            .map_err(|e| ProofError::Invalid(e.to_string()))
+        Ok(self.get_shared_header(hash)?.map(|h| h.as_ref().clone()))
     }
     fn get_shared_header(&self, hash: &Hash) -> ProofResult<Option<Arc<mmx::BlockHeader>>> {
+        if let Some(entry) = self.staged.get(hash) {
+            return Ok(Some(entry.header.clone()));
+        }
         cached_header_shared(&self.archive, &self.headers, hash)
             .map_err(|e| ProofError::Invalid(e.to_string()))
     }
@@ -1092,13 +1294,6 @@ fn archive_block(archive: &Database, hash: &Hash) -> ChainResult<Option<Record>>
     bodies::block(archive, bodies::ARCHIVE, hash)
 }
 
-fn cached_header(
-    archive: &Database,
-    cache: &super::cache::Headers,
-    hash: &Hash,
-) -> ChainResult<Option<mmx::BlockHeader>> {
-    Ok(cached_header_shared(archive, cache, hash)?.map(|h| h.as_ref().clone()))
-}
 fn cached_header_shared(
     archive: &Database,
     cache: &super::cache::Headers,
@@ -1162,4 +1357,67 @@ fn unpack(mut input: &[u8]) -> ChainResult<Vec<Record>> {
         return Err(invalid("trailing archived work"));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    use super::*;
+    use vnx::serde_json::{self, Value};
+
+    #[test]
+    fn quarantine_bounds_expiry_rejection_and_promotion_do_not_write_candidates_twice() {
+        let rows: Vec<Value> = include_str!("../../tests/fixtures/chain.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let raw = |value: &Value| vnx::util::from_hex_string(value.as_str().unwrap()).unwrap();
+        let genesis = rows.iter().find(|row| row["name"] == "synthetic").unwrap();
+        let params = mmx::ChainParams::decode(&raw(&genesis["params"])).unwrap();
+        let assets = genesis::Assets {
+            binaries: genesis["binaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| Record::decode(&raw(value)).unwrap())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            testnet_rewards: None,
+            project_relay: None,
+        };
+        let first = &rows.iter().find(|row| row["kind"] == "chain").unwrap()["steps"][0]["block"];
+        let block = Record::decode(&raw(first)).unwrap();
+        let id = bytes::<32>(block.field("hash").unwrap()).unwrap();
+        let mut chain = ForkChain::memory(params);
+        chain.initialize(&assets).unwrap();
+        let archive_version = chain.archive.version();
+        chain.staged_bytes = MAX_STAGED_BYTES;
+        assert!(chain
+            .admit_blocks(std::slice::from_ref(&block))
+            .unwrap_err()
+            .to_string()
+            .contains("quarantine full"));
+        assert!(chain.staged.is_empty());
+        assert_eq!(chain.archive.version(), archive_version);
+        chain.staged_bytes = 0;
+        chain.admit_blocks(std::slice::from_ref(&block)).unwrap();
+        let size = chain.staged_bytes;
+        chain.admit_blocks(std::slice::from_ref(&block)).unwrap();
+        assert_eq!(chain.staged_bytes, size);
+        assert_eq!(chain.archive.version(), archive_version);
+        assert!(!chain.archive.contains("fork_blocks", &id, None).unwrap());
+        chain.staged.get_mut(&id).unwrap().received = Instant::now() - STAGED_TIMEOUT;
+        chain.admit_blocks(&[]).unwrap();
+        assert_eq!(chain.staged_bytes, 0);
+        assert!(!chain.contains_block(&id).unwrap());
+        chain.admit_blocks(std::slice::from_ref(&block)).unwrap();
+        let root = chain.selected().hash_at(0).unwrap().unwrap();
+        chain.update_sync_at(root, None, 0).unwrap();
+        assert!(chain.staged.is_empty());
+        assert_eq!(chain.staged_bytes, 0);
+        assert!(chain.archive.contains("fork_blocks", &id, None).unwrap());
+        let version = chain.archive.version();
+        chain.admit_blocks(&[block]).unwrap();
+        assert_eq!(chain.archive.version(), version);
+    }
 }

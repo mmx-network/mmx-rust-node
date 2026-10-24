@@ -447,7 +447,8 @@ pub struct Client {
 impl Client {
     pub fn connect(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
         let (inbox, peer_state, relay) = {
-            let local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            local.enable_background_transactions()?;
             (local.inbox(), local.peer_state(), local.transaction_relay())
         };
         let connection = Connection::connect(address)?;
@@ -761,7 +762,8 @@ pub struct Server {
 impl Server {
     pub fn bind(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
         let (inbox, peer_state, relay) = {
-            let local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
+            local.enable_background_transactions()?;
             (local.inbox(), local.peer_state(), local.transaction_relay())
         };
         let listener = TcpListener::bind(address)?;

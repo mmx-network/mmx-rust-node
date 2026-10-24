@@ -1426,3 +1426,80 @@ fn verified_live_execution_is_reused_and_foreign_or_rewound_bases_cannot_publish
         &steps[1],
     );
 }
+
+#[test]
+fn historical_quarantine_never_archives_contextual_or_ledger_rejections() {
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+    use mmx_consensus::Value as N;
+    use mmx_execution::chain::forks::ForkChain;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let p = params(&g);
+    let mut chain = ForkChain::open_native(dir.path(), p.clone()).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    let root = block_hash(&g);
+    let mut bad_context = record(&steps[0]["block"]);
+    bad_context
+        .fields
+        .insert("time_diff".into(), N::Uint(1 << 40));
+    let id = mmx_consensus::header::calc_hash(&bad_context, &p).unwrap();
+    bad_context
+        .fields
+        .insert("hash".into(), N::Bytes(id.to_vec()));
+    let mut secret = [0; 32];
+    secret[31] = 1;
+    let sig: Signature = SigningKey::from_slice(&secret)
+        .unwrap()
+        .sign_prehash(&id)
+        .unwrap();
+    bad_context.fields.insert(
+        "farmer_sig".into(),
+        N::Optional(Some(Box::new(N::Bytes(sig.to_bytes().to_vec())))),
+    );
+    let content = mmx_consensus::header::calc_content_hash(&bad_context).unwrap();
+    bad_context
+        .fields
+        .insert("content_hash".into(), N::Bytes(content.to_vec()));
+    let bad_ledger = record(
+        &rows()
+            .into_iter()
+            .find(|r| r["kind"] == "fork_rejection")
+            .unwrap()["block"],
+    );
+    let bad_ledger_id = bad_ledger
+        .field("hash")
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    // Both commitments/signatures pass the cheap network checks.
+    for block in [&bad_context, &bad_ledger] {
+        mmx_execution::block::prevalidate(block, &p).unwrap();
+    }
+    chain
+        .admit_blocks(&[
+            bad_context.clone(),
+            bad_ledger.clone(),
+            record(&steps[0]["block"]),
+        ])
+        .unwrap();
+    assert!(chain.contains_block(&id).unwrap());
+    let update = chain.update_sync_at(root, None, 0).unwrap();
+    assert!(update.invalid.contains(&id));
+    assert!(update.invalid.contains(&bad_ledger_id));
+    assert!(!chain.contains_block(&id).unwrap());
+    assert!(!chain.contains_block(&bad_ledger_id).unwrap());
+    verify_step(chain.selected(), &steps[0]);
+    // Repeated rejected content consumes neither archive space nor quarantine.
+    chain.admit_blocks(&[bad_context, bad_ledger]).unwrap();
+    assert!(!chain.contains_block(&id).unwrap());
+    drop(chain);
+    let mut chain = ForkChain::open_native(dir.path(), p).unwrap();
+    assert!(!chain.contains_block(&id).unwrap());
+    assert!(!chain.contains_block(&bad_ledger_id).unwrap());
+    verify_step(chain.selected(), &steps[0]);
+    chain.rollback_to(0).unwrap();
+    chain.update_sync_at(root, None, 1).unwrap();
+    verify_step(chain.selected(), &steps[0]);
+}

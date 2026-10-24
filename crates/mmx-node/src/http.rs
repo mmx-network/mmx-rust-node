@@ -178,7 +178,7 @@ fn serve(stream: TcpStream, node: &Arc<Mutex<Node>>, timeout: Duration) -> Resul
         .ok_or_else(|| error("HTTP timeout overflow"))?;
     let mut input = BufReader::new(Deadline { stream, end });
     let (status, body) = match request(&mut input) {
-        Ok(bytes) => match rpc::json_request(node, &bytes) {
+        Ok(bytes) => match rpc::json_request_until(node, &bytes, end) {
             Some(v) => (200, v.to_string()),
             None => (204, String::new()),
         },
@@ -199,8 +199,9 @@ fn serve(stream: TcpStream, node: &Arc<Mutex<Node>>, timeout: Duration) -> Resul
         417 => "Expectation Failed",
         _ => "Error",
     };
-    let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+    let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len());
     input.get_mut().write_all(response.as_bytes())?;
+    input.get_mut().write_all(body.as_bytes())?;
     Ok(())
 }
 type Streams = Arc<Mutex<BTreeMap<u64, TcpStream>>>;

@@ -377,6 +377,25 @@ impl ChainState {
         >,
         collect_receipts: bool,
     ) -> ChainResult<Vec<block::Receipt>> {
+        let (branch, receipts) =
+            self.prepare_reorganization(height, blocks, collect_receipts, &[])?;
+        self.publish_reorganization(height, branch)?;
+        Ok(receipts)
+    }
+    fn prepare_reorganization(
+        &self,
+        height: u32,
+        blocks: impl IntoIterator<
+            Item = ChainResult<(
+                Record,
+                Vec<VerifiedPoint>,
+                ValidationMode,
+                Option<mmx_consensus::transitions::VerifiedHeader>,
+            )>,
+        >,
+        collect_receipts: bool,
+        pending_headers: &[Arc<mmx::BlockHeader>],
+    ) -> ChainResult<(Self, Vec<block::Receipt>)> {
         if height == 0 {
             return Err(invalid("cannot replace genesis"));
         }
@@ -386,6 +405,7 @@ impl ChainState {
             headers: self.headers.before(height),
             bodies: self.bodies.clone(),
         };
+        branch.headers.pin(pending_headers.iter().cloned());
         let mut receipts = Vec::new();
         for entry in blocks {
             let (block, points, mode, evidence) = entry?;
@@ -394,6 +414,9 @@ impl ChainState {
                 receipts.push(receipt);
             }
         }
+        Ok((branch, receipts))
+    }
+    fn publish_reorganization(&mut self, height: u32, branch: Self) -> ChainResult<()> {
         let publication = Instant::now();
         self.storage
             .database_mut()
@@ -405,8 +428,9 @@ impl ChainState {
                 publication.elapsed().as_secs_f64()
             );
         }
+        branch.headers.unpin();
         self.headers = branch.headers;
-        Ok(receipts)
+        Ok(())
     }
     pub fn vdf_payout(
         &self,

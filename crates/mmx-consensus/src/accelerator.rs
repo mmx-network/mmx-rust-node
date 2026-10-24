@@ -83,7 +83,9 @@ impl Accelerator {
             let selected = select_device(&devices, device as usize, platform, name)?;
             let engine = Self::new(selected.index, None, true)?;
             if engine.device.name != selected.name || engine.device.platform != selected.platform {
-                return Err(mmx_opencl::Error("OpenCL device list changed during selection".into()));
+                return Err(mmx_opencl::Error(
+                    "OpenCL device list changed during selection".into(),
+                ));
             }
             Ok(engine)
         })();
@@ -136,18 +138,50 @@ mod tests {
     use super::*;
     #[test]
     fn named_gpu_indexes_are_relative_to_name_and_unnamed_indexes_to_platform() {
-        let devices: Vec<_> = [("A", "first"), ("B", "second"), ("B", "first"), ("C", "second")]
-            .into_iter().enumerate().map(|(index,(name,platform))| DeviceInfo { index, name:name.into(),platform:platform.into() }).collect();
-        assert_eq!(select_device(&devices,0,None,Some("B")).unwrap().index,1);
-        assert_eq!(select_device(&devices,1,None,Some("B")).unwrap().index,2);
+        let devices: Vec<_> = [
+            ("A", "first"),
+            ("B", "second"),
+            ("B", "first"),
+            ("C", "second"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, platform))| DeviceInfo {
+            index,
+            name: name.into(),
+            platform: platform.into(),
+        })
+        .collect();
+        assert_eq!(
+            select_device(&devices, 0, None, Some("B")).unwrap().index,
+            1
+        );
+        assert_eq!(
+            select_device(&devices, 1, None, Some("B")).unwrap().index,
+            2
+        );
         // As in native, a name takes priority over the platform setting.
-        assert_eq!(select_device(&devices,0,Some("first"),Some("B")).unwrap().index,1);
-        assert_eq!(select_device(&devices,1,None,None).unwrap().index,2);
-        assert_eq!(select_device(&devices,1,Some("second"),None).unwrap().index,3);
-        for (index,platform,name) in [(2,None,Some("B")),(0,Some("missing"),None),(0,None,Some("missing"))] {
-            assert!(select_device(&devices,index,platform,name).is_err());
+        assert_eq!(
+            select_device(&devices, 0, Some("first"), Some("B"))
+                .unwrap()
+                .index,
+            1
+        );
+        assert_eq!(select_device(&devices, 1, None, None).unwrap().index, 2);
+        assert_eq!(
+            select_device(&devices, 1, Some("second"), None)
+                .unwrap()
+                .index,
+            3
+        );
+        for (index, platform, name) in [
+            (2, None, Some("B")),
+            (0, Some("missing"), None),
+            (0, None, Some("missing")),
+        ] {
+            assert!(select_device(&devices, index, platform, name).is_err());
         }
-        assert!(select_device(&[],0,None,None).is_err());
+        assert!(select_device(&[], 0, None, None).is_err());
     }
     #[test]
     fn driver_error_disables_engine_and_proofs_are_rechecked_on_cpu() {

@@ -316,8 +316,10 @@ impl State {
         let mem = Arc::make_mut(&mut self.mem);
         if action.cut < self.version {
             mem.retain(|(table, key, Reverse(v)), value| {
-                if *v < action.cut { return true; }
-                self.mem_bytes -= mem_entry_bytes(table,key,*value);
+                if *v < action.cut {
+                    return true;
+                }
+                self.mem_bytes -= mem_entry_bytes(table, key, *value);
                 false
             });
             for view in &mut self.runs {
@@ -332,7 +334,7 @@ impl State {
                 return Err(Error::Corrupt("native recovered reference"));
             }
             let key = (entry.table, Key(entry.key), Reverse(entry.version));
-            let base = mem_entry_bytes(&key.0,&key.1,None);
+            let base = mem_entry_bytes(&key.0, &key.1, None);
             self.mem_bytes += base + entry.value.map_or(0, |_| 24);
             if let Some(previous) = mem.insert(key, entry.value) {
                 self.mem_bytes -= base + previous.map_or(0, |_| 24);
@@ -1410,26 +1412,61 @@ fn write_gc_batch(
 mod accounting_tests {
     use super::*;
     fn check(db: &Native) {
-        assert_eq!(db.state.mem_bytes, db.state.mem.iter().map(|((t,k,_),v)| mem_entry_bytes(t,k,*v)).sum::<usize>());
+        assert_eq!(
+            db.state.mem_bytes,
+            db.state
+                .mem
+                .iter()
+                .map(|((t, k, _), v)| mem_entry_bytes(t, k, *v))
+                .sum::<usize>()
+        );
     }
     #[test]
     fn metadata_accounting_survives_tombstones_forks_rewind_checkpoint_and_recovery() {
-        let directory=tempfile::tempdir().unwrap();
-        let mut db=Native::open(directory.path()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Native::open(directory.path()).unwrap();
         for version in 1..20u32 {
-            db.commit_batch(version,[Write::put("t",b"key",version.to_le_bytes()),Write::delete("deleted",b"key")]).unwrap();
+            db.commit_batch(
+                version,
+                [
+                    Write::put("t", b"key", version.to_le_bytes()),
+                    Write::delete("deleted", b"key"),
+                ],
+            )
+            .unwrap();
             check(&db);
         }
-        let pinned=db.fork(19).unwrap();
-        let mut branch=db.fork(7).unwrap();
-        branch.commit_batch(8,[Write::delete("t",b"key"),Write::put("added",b"new",b"value")]).unwrap();
-        db.replace_suffix(7,&branch).unwrap(); check(&db);
-        db.revert(4).unwrap();check(&db);
-        db.commit_batch(5,[Write::put("t",b"key",b"replacement")]).unwrap();check(&db);
-        assert_eq!(pinned.get("t",b"key",None).unwrap(),Some(18u32.to_le_bytes().to_vec()));
-        drop(pinned);drop(branch);drop(db);
-        let mut db=Native::open(directory.path()).unwrap();check(&db);
-        db.checkpoint().unwrap();check(&db);assert_eq!(db.state.mem_bytes,0);
-        db.commit_batch(6,[Write::delete("t",b"key")]).unwrap();check(&db);
+        let pinned = db.fork(19).unwrap();
+        let mut branch = db.fork(7).unwrap();
+        branch
+            .commit_batch(
+                8,
+                [
+                    Write::delete("t", b"key"),
+                    Write::put("added", b"new", b"value"),
+                ],
+            )
+            .unwrap();
+        db.replace_suffix(7, &branch).unwrap();
+        check(&db);
+        db.revert(4).unwrap();
+        check(&db);
+        db.commit_batch(5, [Write::put("t", b"key", b"replacement")])
+            .unwrap();
+        check(&db);
+        assert_eq!(
+            pinned.get("t", b"key", None).unwrap(),
+            Some(19u32.to_le_bytes().to_vec())
+        );
+        drop(pinned);
+        drop(branch);
+        drop(db);
+        let mut db = Native::open(directory.path()).unwrap();
+        check(&db);
+        db.checkpoint().unwrap();
+        check(&db);
+        assert_eq!(db.state.mem_bytes, 0);
+        db.commit_batch(6, [Write::delete("t", b"key")]).unwrap();
+        check(&db);
     }
 }

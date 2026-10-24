@@ -15,21 +15,30 @@ const MAX_REPORT_MEMORY: usize = 32 * 1024 * 1024;
 struct ReportSize(usize);
 impl Write for ReportSize {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 = self.0.checked_add(bytes.len()).filter(|n| *n <= MAX_REPORT_BYTES)
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .filter(|n| *n <= MAX_REPORT_BYTES)
             .ok_or_else(|| io::Error::other("farm report exceeds 256 KiB"))?;
         Ok(bytes.len())
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 fn report_memory(info: &mmx::FarmInfo) -> Result<usize> {
     if info.harvester.as_ref().is_some_and(|n| n.len() >= 1024)
-        || info.plot_dirs.len() > 1024 || info.plot_dirs.iter().any(|p| p.len() > 4096)
-        || info.plot_count.len() > 64 || info.harvester_bytes.len() > 1024
-        || info.pool_info.len() > 1024 || info.pool_stats.len() > 1024 {
+        || info.plot_dirs.len() > 1024
+        || info.plot_dirs.iter().any(|p| p.len() > 4096)
+        || info.plot_count.len() > 64
+        || info.harvester_bytes.len() > 1024
+        || info.pool_info.len() > 1024
+        || info.pool_stats.len() > 1024
+    {
         return Err(error("farm report field limit exceeded"));
     }
-    let mut size=ReportSize(0);
-    vnx::serde_json::to_writer(&mut size,info)?;
+    let mut size = ReportSize(0);
+    vnx::serde_json::to_writer(&mut size, info)?;
     // Charge string/vector/map overhead conservatively as well as encoded
     // bytes. Tiny entries can occupy much more heap than their JSON spelling.
     Ok(size.0 * 16 + std::mem::size_of::<mmx::FarmInfo>() + 128)
@@ -143,16 +152,20 @@ impl Farmer {
             _ => return Err(error("harvester report has no identity")),
         };
         self.reports.retain(|_, (time, _, bytes)| {
-            if time.elapsed() <= self.harvester_timeout { return true; }
+            if time.elapsed() <= self.harvester_timeout {
+                return true;
+            }
             self.report_bytes -= *bytes;
             false
         });
         if self.reports.len() >= 4096 && !self.reports.contains_key(&id) {
             return Err(error("too many harvesters"));
         }
-        let previous = self.reports.get(&id).map_or(0, |(_,_,bytes)| *bytes);
+        let previous = self.reports.get(&id).map_or(0, |(_, _, bytes)| *bytes);
         let bytes = self.report_bytes - previous + size;
-        if bytes > MAX_REPORT_MEMORY { return Err(error("farm report memory budget exceeded")); }
+        if bytes > MAX_REPORT_MEMORY {
+            return Err(error("farm report memory budget exceeded"));
+        }
         self.reports.insert(id, (Instant::now(), info, size));
         self.report_bytes = bytes;
         Ok(())
@@ -224,25 +237,41 @@ fn optional_address(address: Option<Address>) -> Value {
 mod report_tests {
     use super::*;
     fn report(id: u8) -> mmx::FarmInfo {
-        mmx::FarmInfo { harvester_id:Some([id;32].into()),harvester:Some("test".into()),plot_dirs:vec!["x".repeat(4096);32],..Default::default() }
+        mmx::FarmInfo {
+            harvester_id: Some([id; 32].into()),
+            harvester: Some("test".into()),
+            plot_dirs: vec!["x".repeat(4096); 32],
+            ..Default::default()
+        }
     }
     #[test]
     fn reports_bound_fields_retained_bytes_replacements_and_expiry() {
-        let mut farmer=Farmer::new([],None);
-        let mut bad=report(0);bad.plot_dirs=vec!["x".repeat(128*1024)];
-        assert!(farmer.report(bad).is_err());assert!(farmer.reports.is_empty());
+        let mut farmer = Farmer::new([], None);
+        let mut bad = report(0);
+        bad.plot_dirs = vec!["x".repeat(128 * 1024)];
+        assert!(farmer.report(bad).is_err());
+        assert!(farmer.reports.is_empty());
         for id in 0..=255u8 {
-            if farmer.report(report(id)).is_err() { break; }
+            if farmer.report(report(id)).is_err() {
+                break;
+            }
         }
         assert!(farmer.reports.len() < 256 && !farmer.reports.is_empty());
         assert!(farmer.report_bytes <= MAX_REPORT_MEMORY);
-        let size=farmer.report_bytes;
-        farmer.report(report(0)).unwrap();assert_eq!(farmer.report_bytes,size);
-        let count=farmer.reports.len();
-        let mut oversized=report(0);oversized.plot_dirs=vec!["x".repeat(4096);128];
-        assert!(farmer.report(oversized).is_err());assert_eq!(farmer.reports.len(),count);assert_eq!(farmer.report_bytes,size);
-        for (time,_,_) in farmer.reports.values_mut() { *time=Instant::now()-Duration::from_secs(120); }
-        farmer.report(report(255)).unwrap();assert_eq!(farmer.reports.len(),1);
-        assert_eq!(farmer.report_bytes,report_memory(&report(255)).unwrap());
+        let size = farmer.report_bytes;
+        farmer.report(report(0)).unwrap();
+        assert_eq!(farmer.report_bytes, size);
+        let count = farmer.reports.len();
+        let mut oversized = report(0);
+        oversized.plot_dirs = vec!["x".repeat(4096); 128];
+        assert!(farmer.report(oversized).is_err());
+        assert_eq!(farmer.reports.len(), count);
+        assert_eq!(farmer.report_bytes, size);
+        for (time, _, _) in farmer.reports.values_mut() {
+            *time = Instant::now() - Duration::from_secs(120);
+        }
+        farmer.report(report(255)).unwrap();
+        assert_eq!(farmer.reports.len(), 1);
+        assert_eq!(farmer.report_bytes, report_memory(&report(255)).unwrap());
     }
 }

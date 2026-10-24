@@ -222,6 +222,7 @@ fn main() -> Result<()> {
         name.as_deref(),
     );
     state.enable_background_vdf_with(accelerator)?;
+    state.enable_background_transactions()?;
     let tip = state.chain().selected().tip()?.ok_or("missing tip")?;
     println!(
         "Opened {} at height {} / VDF {}, root {}",

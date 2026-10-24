@@ -12,6 +12,9 @@ pub(super) struct Headers(RefCell<Entries>);
 struct Entries {
     values: BTreeMap<Hash, Arc<mmx::BlockHeader>>,
     order: VecDeque<Hash>,
+    // Temporary header-only overlay for detached execution of quarantined
+    // bodies. It is bounded by quarantine admission and released at publication.
+    pinned: BTreeMap<Hash, Arc<mmx::BlockHeader>>,
 }
 impl Headers {
     /// Only the retained prefix remains authoritative in a speculative branch.
@@ -28,7 +31,21 @@ impl Headers {
         Self(RefCell::new(copy))
     }
     pub fn get_shared(&self, hash: &Hash) -> Option<Arc<mmx::BlockHeader>> {
-        self.0.borrow().values.get(hash).cloned()
+        let entries = self.0.borrow();
+        entries
+            .values
+            .get(hash)
+            .or_else(|| entries.pinned.get(hash))
+            .cloned()
+    }
+    pub fn pin(&self, headers: impl IntoIterator<Item = Arc<mmx::BlockHeader>>) {
+        self.0
+            .borrow_mut()
+            .pinned
+            .extend(headers.into_iter().map(|h| (h.hash.0, h)));
+    }
+    pub fn unpin(&self) {
+        self.0.borrow_mut().pinned.clear();
     }
     pub fn insert(&self, header: mmx::BlockHeader) -> Arc<mmx::BlockHeader> {
         let mut entries = self.0.borrow_mut();
@@ -48,5 +65,35 @@ impl Headers {
     }
     pub fn clear(&self) {
         *self.0.borrow_mut() = Entries::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn detached_pending_ancestry_survives_cache_eviction_and_is_released_at_publication() {
+        let cache = Headers::default();
+        let hash = [255; 32];
+        cache.pin([Arc::new(mmx::BlockHeader {
+            hash: hash.into(),
+            height: 1,
+            ..Default::default()
+        })]);
+        for n in 0..2050u32 {
+            let mut hash = [0; 32];
+            hash[..4].copy_from_slice(&n.to_be_bytes());
+            cache.insert(mmx::BlockHeader {
+                hash: hash.into(),
+                height: n + 2,
+                ..Default::default()
+            });
+        }
+        assert_eq!(cache.get_shared(&hash).unwrap().height, 1);
+        assert_eq!(cache.0.borrow().values.len(), 2048);
+        // A new independent snapshot cannot inherit another speculative overlay.
+        assert!(cache.before(u32::MAX).get_shared(&hash).is_none());
+        cache.unpin();
+        assert!(cache.get_shared(&hash).is_none());
     }
 }
