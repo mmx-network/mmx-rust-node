@@ -5,10 +5,9 @@ import { Badge } from '@wallet/ui/components/Badge';
 import { BrandMark } from '@wallet/ui/components/Brand';
 import { IconButton } from '@wallet/ui/components/IconButton';
 import { Menu } from '@wallet/ui/components/Menu';
-import { Tooltip } from '@wallet/ui/components/Tooltip';
 import { PageHeader } from '@wallet/ui/components/Layout';
 import { api, endpoint } from './lib/api';
-import { href, parseRoute, searchTarget, sectionOf, type Route, type Section } from './lib/router';
+import { href, parseRoute, searchTarget, sectionOf, type Route } from './lib/router';
 import { useResource } from './lib/resource';
 import type { Block, NodeInfo } from './lib/types';
 import { Blocks, RecentList } from './ui/lists';
@@ -19,9 +18,9 @@ import { FarmerPage } from './ui/farmer';
 import { Button, Card, EmptyState, Icon } from './ui/common';
 
 const NAV = [
-  { id: 'blocks', label: 'Blocks', icon: 'overview' },
-  { id: 'transactions', label: 'Transactions', icon: 'activity' },
-  { id: 'farmers', label: 'Farmers', icon: 'reward' },
+  { id: 'blocks', label: 'Blocks' },
+  { id: 'transactions', label: 'Transactions' },
+  { id: 'farmers', label: 'Farmers' },
 ] as const;
 
 export function storedAppearance(): Appearance {
@@ -213,55 +212,35 @@ export function App() {
           : 'Connected'
       : 'Connecting';
   const tone = node.error ? 'negative' : !node.data || node.data.is_synced === false ? 'warning' : 'positive';
-  const navItem = (id: Section, label: string, icon: (typeof NAV)[number]['icon'], mobile = false) => (
-    <a
-      href={href({ kind: id })}
-      class={
-        mobile
-          ? `tabbar__item${section === id ? ' tabbar__item--active' : ''}`
-          : `nav-item${section === id ? ' nav-item--active' : ''}`
-      }
-      aria-current={section === id ? 'page' : undefined}
-    >
-      <Icon name={icon} class={mobile ? 'tabbar__icon' : 'nav-item__icon'} />
-      <span class={mobile ? 'tabbar__label' : 'nav-item__label'}>{label}</span>
-    </a>
-  );
   return (
-    <div class="shell explorer-shell">
+    <div class="explorer-shell">
       <button type="button" class="skip-link" onClick={() => main.current?.focus()}>
         Skip to content
       </button>
-      <aside class="shell__nav" aria-label="Explorer navigation">
-        <a class="shell__brand" href={href({ kind: 'blocks' })} aria-label="MMX Explorer home">
-          <BrandMark size={32} />
-        </a>
-        <nav class="shell__navlist" aria-label="Main">
-          <ul class="shell__navitems">
-            {NAV.map((item) => (
-              <li key={item.id}>
-                <Tooltip content={item.label} placement="right" describe={false}>
-                  {navItem(item.id, item.label, item.icon)}
-                </Tooltip>
-              </li>
-            ))}
-          </ul>
-        </nav>
-        <div class="shell__status">
-          <Tooltip content={`Chain server: ${status}`} placement="right">
-            <span class={`network-dot network-dot--${tone}`} role="img" aria-label={status} tabIndex={0} />
-          </Tooltip>
-        </div>
-      </aside>
       <main class="shell__main" ref={main} id="main" tabIndex={-1}>
         <div class="shell__content">
           <header class="explorer-top">
             <a class="explorer-brand" href={href({ kind: 'blocks' })}>
-              <BrandMark size={25} class="explorer-mobile-mark" />
+              <BrandMark size={28} />
               <span>
                 MMX <span class="muted">Explorer</span>
               </span>
             </a>
+            <nav class="explorer-nav" aria-label="Main">
+              <ul>
+                {NAV.map((item) => (
+                  <li key={item.id}>
+                    <a
+                      href={href({ kind: item.id })}
+                      class="explorer-nav__link"
+                      aria-current={section === item.id ? 'page' : undefined}
+                    >
+                      {item.label}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
             <div class="explorer-top__actions">
               <Badge tone={tone} dot>
                 {status}
@@ -282,13 +261,6 @@ export function App() {
           </footer>
         </div>
       </main>
-      <nav class="tabbar" aria-label="Mobile navigation">
-        <ul class="tabbar__items">
-          {NAV.map((item) => (
-            <li key={item.id}>{navItem(item.id, item.label, item.icon, true)}</li>
-          ))}
-        </ul>
-      </nav>
     </div>
   );
 }

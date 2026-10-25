@@ -705,6 +705,8 @@ and `Node_api.cpp::{get_tx_ids,get_history,get_farmed_blocks,get_farmer_ranking}
 before changing the client. It shares the wallet's actual Obsidian CSS, fonts
 and UI components. It does not change any node, consensus, database, farming or
 wallet state code and still uses the existing public WebAPI.
+Primary navigation uses text links at the top on every screen size; this
+layout change adds no API requests or changes to refresh scheduling.
 
 Native request bounds and visible-page polling remain: 20 headers / 10 s,
 100 transactions / 10 s, 200 ranked farmers / 30 s, farmer summary and 100

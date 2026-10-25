@@ -78,7 +78,12 @@ test('legacy address links show balances, contract data and paged activity', asy
 });
 
 test('farmer rankings and farmer block history are paged', async ({ page }) => {
-  await page.goto('/#/explore/farmers');
+  await page.goto('/');
+  await page
+    .getByRole('navigation', { name: 'Main', exact: true })
+    .getByRole('link', { name: 'Farmers', exact: true })
+    .click();
+  await expect(page.getByRole('heading', { name: 'Farmers', exact: true })).toBeVisible();
   await expect(page.locator('tbody tr')).toHaveCount(20);
   await page.getByRole('link', { name: 'Next', exact: true }).click();
   await expect(page.locator('tbody tr').first().locator('td').first()).toHaveText('21');
@@ -106,12 +111,25 @@ test('mobile dark mode keeps tables inside the viewport and preserves appearance
   await page.getByRole('button', { name: 'Appearance', exact: true }).click();
   await page.getByRole('menuitemradio', { name: 'Dark mode' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-scheme', 'dark');
-  await expect(page.getByRole('navigation', { name: 'Mobile navigation' })).toBeVisible();
+  const navigation = page.getByRole('navigation', { name: 'Main', exact: true });
+  await expect(navigation).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Blocks', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('button', { name: 'Search', exact: true })).toBeVisible();
   await expect(page.locator('tbody tr')).toHaveCount(20);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  for (const width of [390, 320, 820, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    const navBounds = await navigation.boundingBox();
+    const searchBounds = await page.getByRole('search').boundingBox();
+    expect(navBounds!.y + navBounds!.height).toBeLessThanOrEqual(searchBounds!.y);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-scheme', 'dark');
-  await page.getByRole('navigation', { name: 'Mobile navigation' }).getByRole('link', { name: 'Transactions' }).click();
+  await navigation.getByRole('link', { name: 'Transactions', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Transactions', exact: true })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Transactions', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
 });

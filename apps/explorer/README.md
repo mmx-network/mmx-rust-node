@@ -5,6 +5,9 @@ imports the wallet's actual theme, local fonts, icons and UI components; there
 is no separate copy of the design system. It does not import wallet state,
 signing code, Tauri or WASM.
 
+Blocks, Transactions and Farmers are available as text links across the top on
+desktop and mobile.
+
 ## Develop and build
 
 Node.js 22.18+ (24 recommended). From this checkout:
