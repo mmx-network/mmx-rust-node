@@ -210,7 +210,7 @@ try:
     print("      first screen: " + " | ".join(rendered.split("\n")[:6])[:160])
     check("no wallets", ok("list wallets", "list_wallets") == [])
     state = ok("load app state", "load_app_state")
-    check("default settings", state["settings"] == {"theme": "system", "autoLockMinutes": 15, "feeLevel": 1})
+    check("default settings", state["settings"] == {"theme": "system", "autoLockMinutes": 24 * 60, "feeLevel": 1})
     check("nothing written before a change", not os.path.exists(HOME))
 
     # Wallets: new words first, the wallet is saved once they are confirmed.
