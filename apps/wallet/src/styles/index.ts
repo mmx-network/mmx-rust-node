@@ -4,6 +4,7 @@
 // Development builds also accept ?style=<id> (and ?layout=<layout>) in the URL.
 import './base.css';
 import { DEFAULT_THEME, themes, type ThemeMeta } from './themes';
+import { auroraImage } from './themes/obsidian/aurora';
 
 export type Appearance = 'system' | 'light' | 'dark';
 export type { ShellLayout, ThemeMeta } from './themes';
@@ -41,6 +42,19 @@ function paint(): void {
     document.head.appendChild(meta);
   }
   meta.content = activeTheme.themeColor[scheme];
+  drawAurora();
+}
+
+let auroraSize = '';
+
+/** Lite effects: the Obsidian aurora as a pre-drawn image (see aurora.ts). */
+function drawAurora(): void {
+  const root = document.documentElement;
+  if (root.dataset.effects !== 'lite' || activeTheme.id !== 'obsidian') return;
+  auroraSize = `${window.innerWidth}x${window.innerHeight}x${root.dataset.scheme ?? ''}`;
+  const url = auroraImage(window.innerWidth, window.innerHeight, getComputedStyle(root));
+  if (url) root.style.setProperty('--ob-aurora-image', `url("${url}")`);
+  else root.style.removeProperty('--ob-aurora-image');
 }
 
 /**
@@ -59,9 +73,14 @@ if (typeof document !== 'undefined') {
   const root = document.documentElement;
   root.dataset.style = activeTheme.id;
   root.dataset.layout = activeTheme.layout;
+  // WebKitGTK (Linux desktop app) often renders on the CPU: use cheaper effects.
+  if (__PLATFORM__ === 'desktop' && /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)) {
+    root.dataset.effects = 'lite';
+  }
   if (import.meta.env.DEV) {
     const layout = new URLSearchParams(location.search).get('layout');
     if (layout === 'sidebar' || layout === 'rail' || layout === 'topbar') root.dataset.layout = layout;
+    if (new URLSearchParams(location.search).has('lite')) root.dataset.effects = 'lite';
   }
   if (typeof window.matchMedia === 'function') {
     media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -70,6 +89,15 @@ if (typeof document !== 'undefined') {
     });
   }
   paint();
+  if (root.dataset.effects === 'lite') {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    window.addEventListener('resize', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (auroraSize !== `${window.innerWidth}x${window.innerHeight}x${root.dataset.scheme ?? ''}`) drawAurora();
+      }, 150);
+    });
+  }
   ready = entry.load().then(
     () => undefined,
     () => undefined,
