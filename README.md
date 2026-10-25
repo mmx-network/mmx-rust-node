@@ -118,6 +118,12 @@ words in the browser's password manager. Both are built from
 `scripts/build-linux-container.sh`, `scripts/build-macos.sh` or
 `scripts/build-windows.ps1` for the desktop packages.
 
+The block explorer in [`apps/explorer`](apps/explorer/README.md) shares the new
+wallet's design and preserves existing explorer links. Run `npm ci && npm run
+build` in that directory to build its static site, or `npm run dev` to preview
+it on port 5175. It includes paged blocks, transactions, farmers and address
+activity, and talks directly to the public WebAPI without a local ledger.
+
 For farming, restart the node with the private farmer endpoint configured:
 
 ```sh

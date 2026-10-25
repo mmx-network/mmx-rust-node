@@ -1,0 +1,56 @@
+name: Explorer
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apps/explorer/**'
+      - 'apps/wallet/src/styles/**'
+      - 'apps/wallet/src/ui/components/**'
+      - 'apps/wallet/src/ui/icons.ts'
+      - 'apps/wallet/src/lib/address.ts'
+      - '.github/workflows/explorer.yml'
+  pull_request:
+    paths:
+      - 'apps/explorer/**'
+      - 'apps/wallet/src/styles/**'
+      - 'apps/wallet/src/ui/components/**'
+      - 'apps/wallet/src/ui/icons.ts'
+      - 'apps/wallet/src/lib/address.ts'
+      - '.github/workflows/explorer.yml'
+permissions:
+  contents: read
+env:
+  GOMAXPROCS: '2'
+  UV_THREADPOOL_SIZE: '2'
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/explorer
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/explorer/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: explorer-test-results
+          path: apps/explorer/test-results
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mmx-explorer-web
+          path: |
+            apps/explorer/dist/assets
+            apps/explorer/dist/index.html
+            apps/explorer/dist/favicon.svg
+            apps/explorer/dist/_headers

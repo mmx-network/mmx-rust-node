@@ -697,6 +697,61 @@ server rather than measured against C++.
   same signed transaction (same id), which the node accepts idempotently while
   it is pending, so no second transfer can result.
 
+## Explorer
+
+The new `apps/explorer` reads native `www/explorer/public/{index,explorer,mount}.js`,
+`WebAPI.cpp::{render_headers,render_transactions,render_balances,render_history}`,
+and `Node_api.cpp::{get_tx_ids,get_history,get_farmed_blocks,get_farmer_ranking}`
+before changing the client. It shares the wallet's actual Obsidian CSS, fonts
+and UI components. It does not change any node, consensus, database, farming or
+wallet state code and still uses the existing public WebAPI.
+
+Native request bounds and visible-page polling remain: 20 headers / 10 s,
+100 transactions / 10 s, 200 ranked farmers / 30 s, farmer summary and 100
+farmed headers / 30 s, balances / 10 s, approximately 200 history rows / 60 s,
+and network info / 300 s. Contract and individual block reads run on navigation;
+an individual transaction refreshes every 10 s. Independent address and farmer
+requests run concurrently and publish separately; no per-row detail fanout is
+introduced. Balance/NFT requests retain the public server's default limits.
+
+Deliberate differences and paging constraints:
+
+- Visible tables render 20 rows at a time. Historical block pages request only
+  their own 20-header range using a height anchor in the URL. The server's
+  `min(limit, offset)` excludes genesis, so a boundary page adds one explicit
+  `/header?height=0` read. No next-page prefetch or chain-wide scan is added.
+- Other list pages slice the native bounded response windows, including the
+  full final block returned by address history. The public API does not expose
+  a global transaction offset, farmer-ranking offset or farmed-block upper
+  cursor. Arbitrarily deep paging for those lists needs server API work; the
+  client does not emulate it by repeatedly expanding limits or scanning blocks.
+  Direct detail links and block transaction lists remain available.
+- Automatic list updates pause after page one so records do not shift during
+  paging. Hidden tabs pause/cancel requests and resume once due; native timers
+  continue in the background. Refresh schedules from completion, preventing
+  overlap when a server takes longer than its interval. This can make the
+  effective interval longer than C++ under sustained latency.
+- Identical in-flight GETs share one request with independent cancellation.
+  Leaving a page aborts its subscriptions; late results cannot replace the
+  newly selected page. Each request has a 20 s deadline and 16 MiB streamed
+  response bound. Only the current result window is retained; there is no
+  accumulated history, durable response cache or new ledger-state cache.
+- Invalid search input is rejected locally, including MMX checksums and uint32
+  height limits. A failed hash lookup only falls through to transaction lookup
+  for an absent header, never for a syncing/unreachable server. Raw integer
+  amounts are formatted without floating-point rounding when supplied by the
+  API; balance fields still have the public API's floating-point precision.
+
+Synthetic regressions exercise a complete 66-height chain down to genesis with
+four header-list requests and one genesis read; transaction paging makes one
+bounded list request across multiple UI pages. They also cover a moving tip,
+legacy links, malformed search, shared/cancelled requests, response/time limits,
+failed-refresh recovery, uint128 amounts, detail-table paging and mobile dark
+mode. These are bounded correctness/request-count comparisons against the native
+API contract, not native/Rust throughput parity. No live ledger/plot storage is
+read by the tests. Native UI/browser CPU, rendering, network latency and
+large-contract comparisons remain unmeasured.
+
 ## Review fixes, 2026-10-25
 
 Native source inspected: `Node.cpp::{add_block,add_transaction,write_block}`,
