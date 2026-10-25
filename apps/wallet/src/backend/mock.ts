@@ -675,7 +675,7 @@ export class MockBackend implements Backend {
     const main = MOCK_WALLETS[0];
     const mainAddress = deriveAddresses(main.mnemonic, main.passphrase, 1)[0]!;
     this.chain = new MockChain(this.now, options.empty ? null : mainAddress);
-    this.appState = { labels: {}, contacts: [], settings: { theme: 'system', autoLockMinutes: 15, feeLevel: 1 } };
+    this.appState = { labels: {}, contacts: [], settings: { theme: 'system', autoLockMinutes: 1440, feeLevel: 1 } };
     if (!options.empty) this.seed();
   }
 
@@ -698,7 +698,7 @@ export class MockBackend implements Backend {
         { id: 'c-pool', name: 'Mining pool', address: FOREIGN[1]! },
         { id: 'c-exchange', name: 'Exchange deposit', address: FOREIGN[2]!, note: 'Use memo 88412' },
       ],
-      settings: { theme: 'system', autoLockMinutes: 15, feeLevel: 1 },
+      settings: { theme: 'system', autoLockMinutes: 1440, feeLevel: 1 },
     };
   }
 

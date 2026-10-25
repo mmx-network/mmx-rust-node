@@ -7,7 +7,7 @@
 //!   "wallets": { "wallet_123.dat": { "name": "Savings", "num_addresses": 10,
 //!                                    "labels": { "0": "Main" } } },
 //!   "contacts": [ { "id": "c-1", "name": "Alice", "address": "mmx1…", "note": "" } ],
-//!   "app": { "theme": "system", "auto_lock_minutes": 15, "fee_level": 1 } }
+//!   "app": { "theme": "system", "auto_lock_minutes": 1440, "fee_level": 1 } }
 //! ```
 use crate::{
     error::{invalid, Result},

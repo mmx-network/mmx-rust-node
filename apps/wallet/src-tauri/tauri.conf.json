@@ -38,7 +38,7 @@
     "homepage": "https://mmx.network",
     "license": "Apache-2.0",
     "category": "Finance",
-    "shortDescription": "Send, receive and keep track of your MMX.",
+    "shortDescription": "Send and receive MMX.",
     "longDescription": "Create wallets, send and receive MMX and tokens, and follow your balance and activity. Your recovery words and keys stay on this computer.",
     "icon": [
       "icons/32x32.png",

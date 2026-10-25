@@ -139,7 +139,7 @@ test('inactivity during wallet creation drops the new words and says why', async
   await page.clock.install();
   await openApp(page);
   const created = await startCreate(page, 'Idle');
-  await page.clock.fastForward('16:00');
+  await page.clock.fastForward('24:01:00');
   await expect(page).toHaveURL(/#\/welcome$/u);
   await expect(page.getByText('Wallet setup was cancelled after inactivity.')).toBeVisible();
   await expectNothingStored(page, created);
@@ -156,7 +156,7 @@ test('inactivity while recovery words are typed into import drops them', async (
   // Let the screen's effects run (the page clock is installed) before the idle wait.
   await page.clock.runFor(1000);
   // No wallet is open, yet the typed words count as one for auto-lock.
-  await page.clock.fastForward('16:00');
+  await page.clock.fastForward('24:01:00');
   await expect(page).toHaveURL(/#\/welcome$/u);
   await expect(page.getByText('Wallet setup was cancelled after inactivity.')).toBeVisible();
   await expect(page.getByLabel('Word 1', { exact: true })).toHaveCount(0);

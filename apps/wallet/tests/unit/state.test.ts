@@ -137,7 +137,7 @@ describe('passphrase wallets (desktop)', () => {
     expect(S.autoLockDelayMinutes()).toBeNull();
     const savings = S.wallets.value.find((w) => w.name === 'Savings')!;
     await S.unlockWallet(savings.id, { passphrase: M.MOCK_PASSPHRASE });
-    expect(S.autoLockDelayMinutes()).toBe(15);
+    expect(S.autoLockDelayMinutes()).toBe(24 * 60);
     await S.setAutoLockMinutes(0);
     expect(S.autoLockDelayMinutes()).toBeNull();
     expect(await codeOf(S.setAutoLockMinutes(7))).toBe('invalid_argument');
@@ -393,7 +393,12 @@ describe('web wallet', () => {
     await settle();
     expect(S.phase.value).toBe('ready');
     expect(S.canLock.value).toBe(true);
-    expect(S.autoLockDelayMinutes()).toBe(15);
+    expect(S.autoLockDelayMinutes()).toBe(24 * 60);
+    // "Never" turns the idle lock off on the web too (closing the tab still locks).
+    await S.setAutoLockMinutes(0);
+    expect(S.autoLockDelayMinutes()).toBeNull();
+    await S.setAutoLockMinutes(6 * 60);
+    expect(S.autoLockDelayMinutes()).toBe(6 * 60);
     await S.lock();
     await settle(10);
     expect(S.phase.value).toBe('unlock');

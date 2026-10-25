@@ -15,10 +15,11 @@ export const WALLET_NAME_MAX = 64;
 export const CONTACT_NAME_MAX = 64;
 export const CONTACT_NOTE_MAX = 200;
 export const MAX_CONTACTS = 1000;
-export const DEFAULT_AUTO_LOCK_MINUTES = 15;
+export const DEFAULT_AUTO_LOCK_MINUTES = 24 * 60;
+const AUTO_LOCK_OPTIONS = [5, 15, 30, 60, 6 * 60, 24 * 60, 0] as const;
 export const AUTO_LOCK_CHOICES: Record<Platform, readonly number[]> = {
-  desktop: [5, 15, 30, 60, 0],
-  web: [5, 15, 30, 60],
+  desktop: AUTO_LOCK_OPTIONS,
+  web: AUTO_LOCK_OPTIONS,
 };
 const MAX_AUTO_LOCK_MINUTES = 24 * 60;
 const CONTACT_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -45,7 +46,7 @@ export function sanitizeSettings(raw: unknown, platform: Platform): Settings {
   if (isTheme(raw.theme)) s.theme = raw.theme;
   const minutes = raw.autoLockMinutes;
   if (typeof minutes === 'number' && Number.isInteger(minutes) && minutes >= 0 && minutes <= MAX_AUTO_LOCK_MINUTES) {
-    s.autoLockMinutes = platform === 'web' && minutes === 0 ? DEFAULT_AUTO_LOCK_MINUTES : minutes;
+    s.autoLockMinutes = minutes;
   }
   if (isFeeLevel(raw.feeLevel)) s.feeLevel = raw.feeLevel;
   if (platform === 'desktop' && typeof raw.rpcUrl === 'string') {

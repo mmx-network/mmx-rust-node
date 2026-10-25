@@ -531,9 +531,14 @@ html {
   }
   /* Inset hairlines: dividers that stop short of the glass edge. */
   [data-layout='rail'] .shell__switcher {
-    margin-bottom: var(--s2);
-    padding-bottom: var(--s3);
-    background: linear-gradient(var(--nav-border), var(--nav-border)) center bottom / calc(100% - 2 * var(--s2)) 1px no-repeat;
+    width: 100%;
+    margin-bottom: 0;
+    padding-top: var(--s2);
+    background: linear-gradient(var(--nav-border), var(--nav-border)) center top / calc(100% - 2 * var(--s2)) 1px no-repeat;
+  }
+  [data-layout='rail'] .shell__switcher + .shell__lock {
+    padding-top: var(--s1);
+    background: none;
   }
   [data-layout='rail'] .shell__switcher .switcher-root {
     display: flex;

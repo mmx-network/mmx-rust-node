@@ -118,6 +118,8 @@ export function Shell({
   const auto = useId();
   const mainId = `main${auto}`;
   const { iconOnly, tooltip } = useNavMode();
+  // An icon-only side rail is too narrow for the full switcher: show the avatar next to Lock.
+  const railSwitcher = iconOnly && tooltip === 'right';
   const firstRender = useRef(true);
 
   // Runs after the new page's own effects, so a page that focuses a field keeps that focus.
@@ -157,13 +159,11 @@ export function Shell({
         <div class="shell__brand">
           <BrandLockup size="sm" class="shell__lockup" />
         </div>
-        <div class="shell__switcher">
-          <WalletSwitcher
-            {...switcherProps}
-            compact={iconOnly && tooltip === 'right'}
-            placement={iconOnly && tooltip === 'right' ? 'right-start' : tooltip === 'bottom' ? 'bottom-end' : 'bottom-start'}
-          />
-        </div>
+        {railSwitcher ? null : (
+          <div class="shell__switcher">
+            <WalletSwitcher {...switcherProps} placement={tooltip === 'bottom' ? 'bottom-end' : 'bottom-start'} />
+          </div>
+        )}
         <nav class="shell__navlist" aria-label="Main">
           <ul class="shell__navitems">
             {NAV_ITEMS.map((item) => {
@@ -194,8 +194,13 @@ export function Shell({
           </ul>
         </nav>
         <div class="shell__status">
-          <NetworkStatus {...network} display={iconOnly && tooltip === 'right' ? 'dot' : 'full'} />
+          <NetworkStatus {...network} display={railSwitcher ? 'dot' : 'full'} />
         </div>
+        {railSwitcher ? (
+          <div class="shell__switcher shell__switcher--bottom">
+            <WalletSwitcher {...switcherProps} compact placement="right-end" />
+          </div>
+        ) : null}
         {canLock ? (
           <div class="shell__lock">
             {iconOnly ? (

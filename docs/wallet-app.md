@@ -389,7 +389,7 @@ Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
 - Settings: wallet (name, fingerprint, address count 1–100 with warning when hiding
   addresses that hold funds, show recovery phrase — a passphrase wallet asks for its
   passphrase first, on both platforms; remove wallet); security (auto-lock
-  5/15/30/60 min, desktop also Never; Lock now = Lock everywhere on web); network
+  5/15/30 min, 1/6/24 h (default) or Never; Lock now = Lock everywhere on web); network
   (desktop: server URL — Connect checks the server (`/node/info` synced, network
   matches) before anything is saved; a failure keeps the typed URL with the error
   and the old server; reset to default); appearance (System/Light/Dark); about
@@ -426,7 +426,7 @@ error; scientific notation rejected; more fractional digits than `decimals` → 
   the username is the expected fingerprint; if the username has none, the passphrase
   step is shown as optional.
 - After unlock the password input value is cleared; the seed is held only inside the
-  WASM `Vault` of that tab. Lock / auto-lock (default 15 min idle, also on `pagehide`)
+  WASM `Vault` of that tab. Lock / auto-lock (default 24 h idle, unless Never; always on `pagehide`)
   frees every Vault of the tab and clears unlocked UI state.
 - Cross-tab lock (decision 4): explicit Lock (shell button, Settings "Lock now") calls
   `lockAll({everywhere: true})`, which also writes `mmx-wallet/lock` (a unique value

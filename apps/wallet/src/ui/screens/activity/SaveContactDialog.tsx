@@ -63,7 +63,7 @@ export function SaveContactDialog({ address, onClose, onSaved }: SaveContactDial
       open
       onClose={onClose}
       title="Save to contacts"
-      size="sm"
+      size="lg"
       dismissible={!busy}
       footer={
         <>
@@ -94,7 +94,7 @@ export function SaveContactDialog({ address, onClose, onSaved }: SaveContactDial
             <Text as="span" size="sm" tone="muted">
               Address
             </Text>
-            <Text as="div" size="sm" class="activity-save__address">
+            <Text as="div" class="activity-save__address">
               <AddressText address={address} mode="full" />
             </Text>
           </Stack>

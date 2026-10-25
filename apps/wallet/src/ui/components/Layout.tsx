@@ -5,7 +5,7 @@ import { cx } from './internal/cx';
 export type Gap = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 10 | 12;
 
 export interface PageProps {
-  /** narrow: forms and flows (560 px); default: 960 px; wide: full content width. */
+  /** narrow: forms and flows (680 px, a full address fits on one line); default: 960 px; wide: full content width. */
   width?: 'narrow' | 'default' | 'wide';
   class?: string;
   children?: ComponentChildren;

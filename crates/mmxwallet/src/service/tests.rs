@@ -688,7 +688,7 @@ fn app_state_round_trip_preserves_unknown_keys() {
     // Defaults with no configuration at all.
     let defaults = svc.app_state().unwrap();
     assert_eq!(defaults, AppState::default());
-    assert_eq!(defaults.settings.auto_lock_minutes, 15);
+    assert_eq!(defaults.settings.auto_lock_minutes, 24 * 60);
     assert_eq!(defaults.settings.fee_level, 1);
 
     let (info, _) = create(&svc, "A", None, 10);

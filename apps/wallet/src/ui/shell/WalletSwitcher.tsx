@@ -11,7 +11,7 @@ export interface WalletSwitcherProps {
   activeWalletId?: string;
   onSelectWallet: (id: string) => void;
   onAddWallet: () => void;
-  /** Avatar and chevron only. */
+  /** Avatar only. */
   compact?: boolean;
   placement?: Placement;
   class?: string;
@@ -102,7 +102,7 @@ export function WalletSwitcher({
               ) : null}
             </span>
           )}
-          <Icon name="chevron-down" size="sm" class="switcher__chevron" />
+          {compact ? null : <Icon name="chevron-down" size="sm" class="switcher__chevron" />}
         </button>
       )}
     />

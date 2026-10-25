@@ -96,6 +96,7 @@ function ContactForm({ contact, address: fixed, onClose, onSaved, onDelete }: Co
       onClose={onClose}
       dismissible={!busy}
       title={contact ? 'Edit contact' : 'Add contact'}
+      size="lg"
       class="contact-dialog"
       footer={
         <>

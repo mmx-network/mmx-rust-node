@@ -48,7 +48,7 @@ export default function WelcomeScreen() {
           class="welcome-hero"
           leading={<BrandMark size={72} class="welcome-hero__mark" />}
           title="Welcome to MMX Wallet"
-          subtitle="Send, receive and keep track of your MMX."
+          subtitle="Send and receive MMX."
         />
       )}
       {notice ? <Banner tone="info">{notice}</Banner> : null}

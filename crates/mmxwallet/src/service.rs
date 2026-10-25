@@ -45,7 +45,7 @@ const MAX_CONTACTS: usize = 1000;
 /// Wallets with labels in one app state (labels of unlisted wallets are dropped).
 const MAX_LABELLED_WALLETS: usize = 1000;
 const MAX_AUTO_LOCK_MINUTES: u32 = 24 * 60;
-const DEFAULT_AUTO_LOCK_MINUTES: u32 = 15;
+const DEFAULT_AUTO_LOCK_MINUTES: u32 = 24 * 60;
 const DEFAULT_FEE_LEVEL: u32 = 1;
 const MAX_MNEMONIC_INPUT: usize = 4096;
 const SYMBOL_MAX_CHARS: usize = 24;
