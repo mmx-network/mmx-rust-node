@@ -132,8 +132,9 @@ function OwnAddresses({ item }: { item: ActivityItem }) {
     <KeyValue label={item.kind === 'moved' ? (list.length === 1 ? 'Address' : 'Addresses') : 'To'}>
       <span class="activity-detail__own">
         {list.map((a) => (
-          <span key={a} class="activity-detail__own-item" title={a}>
-            {ownAddressName(a)}
+          <span key={a} class="activity-detail__party">
+            <span class="activity-detail__party-name">{ownAddressName(a)}</span>
+            <AddressText address={a} mode="short" onCopy={() => copyValue(a)} />
           </span>
         ))}
       </span>

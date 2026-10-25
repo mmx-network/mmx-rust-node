@@ -15,31 +15,16 @@ interface Shapes {
   base: string;
   halo: string;
   band: string;
-  disc: string;
   angle: number;
   bandX: number;
   bandW: number;
   haloX: number;
   haloY: number;
   haloR: number;
-  discX: number;
-  discY: number;
-  discR: number;
 }
 
 const hsl = (h: number, s: number, l: number): string =>
   `hsl(${Math.round(((h % 360) + 360) % 360)} ${Math.round(s)}% ${Math.round(l)}%)`;
-
-const DISC_SPOTS: ReadonlyArray<readonly [number, number]> = [
-  [21, 21],
-  [43, 21],
-  [21, 43],
-  [43, 43],
-  [32, 19],
-  [19, 32],
-  [45, 32],
-  [32, 45],
-];
 
 const cache = new Map<string, Shapes>();
 
@@ -50,21 +35,26 @@ export function identiconShapes(value: string): Shapes {
   const r = xorshift(fnv1a(value));
   const hue = r() * 360;
   const turn = r() < 0.5 ? -1 : 1;
-  const [discX, discY] = DISC_SPOTS[Math.floor(r() * DISC_SPOTS.length)]!;
+  // Draws that once placed a small disc are kept, so the other shapes (and
+  // every existing avatar) stay the same.
+  const skip = (n: number): void => {
+    for (let i = 0; i < n; i++) r();
+  };
+  skip(1);
+  const base = hsl(hue, 44 + r() * 14, 46 + r() * 8);
+  const halo = hsl(hue + turn * (12 + r() * 16), 48 + r() * 12, 27 + r() * 7);
+  const band = hsl(hue - turn * (16 + r() * 18), 58 + r() * 16, 70 + r() * 6);
+  skip(3);
   const shapes: Shapes = {
-    base: hsl(hue, 44 + r() * 14, 46 + r() * 8),
-    halo: hsl(hue + turn * (12 + r() * 16), 48 + r() * 12, 27 + r() * 7),
-    band: hsl(hue - turn * (16 + r() * 18), 58 + r() * 16, 70 + r() * 6),
-    disc: hsl(hue + 165 + r() * 30, 56 + r() * 14, 62 + r() * 8),
+    base,
+    halo,
+    band,
     angle: (r() < 0.5 ? -1 : 1) * (30 + r() * 30),
     bandX: 32 + (r() - 0.5) * 20,
     bandW: 13 + r() * 6,
     haloX: r() < 0.5 ? 8 + r() * 10 : 56 - r() * 10,
     haloY: r() < 0.5 ? 8 + r() * 10 : 56 - r() * 10,
     haloR: 24 + r() * 12,
-    discX,
-    discY,
-    discR: 8 + r() * 4,
   };
   if (cache.size > 500) cache.clear();
   cache.set(value, shapes);
@@ -95,7 +85,6 @@ export function Identicon({ value, size = 32, label, class: className }: Identic
         fill={s.band}
         transform={`rotate(${s.angle.toFixed(1)} 32 32)`}
       />
-      <circle cx={s.discX} cy={s.discY} r={s.discR.toFixed(1)} fill={s.disc} />
     </svg>
   );
 }

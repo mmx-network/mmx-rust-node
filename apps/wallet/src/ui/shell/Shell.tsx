@@ -118,7 +118,7 @@ export function Shell({
   const auto = useId();
   const mainId = `main${auto}`;
   const { iconOnly, tooltip } = useNavMode();
-  // An icon-only side rail is too narrow for the full switcher: show the avatar next to Lock.
+  // An icon-only side rail is too narrow for the full switcher: show the avatar below Lock.
   const railSwitcher = iconOnly && tooltip === 'right';
   const firstRender = useRef(true);
 
@@ -196,11 +196,6 @@ export function Shell({
         <div class="shell__status">
           <NetworkStatus {...network} display={railSwitcher ? 'dot' : 'full'} />
         </div>
-        {railSwitcher ? (
-          <div class="shell__switcher shell__switcher--bottom">
-            <WalletSwitcher {...switcherProps} compact placement="right-end" />
-          </div>
-        ) : null}
         {canLock ? (
           <div class="shell__lock">
             {iconOnly ? (
@@ -213,6 +208,11 @@ export function Shell({
                 <span class="nav-item__label">Lock</span>
               </button>
             )}
+          </div>
+        ) : null}
+        {railSwitcher ? (
+          <div class="shell__switcher shell__switcher--bottom">
+            <WalletSwitcher {...switcherProps} compact placement="right-end" />
           </div>
         ) : null}
       </header>

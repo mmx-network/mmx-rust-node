@@ -536,7 +536,7 @@ html {
     padding-top: var(--s2);
     background: linear-gradient(var(--nav-border), var(--nav-border)) center top / calc(100% - 2 * var(--s2)) 1px no-repeat;
   }
-  [data-layout='rail'] .shell__switcher + .shell__lock {
+  [data-layout='rail'] .shell__lock + .shell__switcher {
     padding-top: var(--s1);
     background: none;
   }

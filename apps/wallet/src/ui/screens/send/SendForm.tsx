@@ -357,7 +357,6 @@ export function SendForm() {
               label="Memo"
               optional
               error={memoError}
-              hint="Anyone can see the memo."
               counter={memo.showCounter ? `${memo.bytes}/${MEMO_MAX_BYTES}` : undefined}
             >
               <TextInput
