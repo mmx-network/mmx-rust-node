@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'preact/hooks';
+import { useId, useState } from 'preact/hooks';
 import { AddressText, Button, Dialog, Field, Stack, Text, TextInput } from '../../components';
 import type { Contact } from '../../../backend/types';
 import { addContact, contactErrors, type ContactResult } from '../../../state';
@@ -19,18 +19,15 @@ function firstProblem(errors: ContactErrors, address: string): string | null {
   return m.name ?? m.address ?? null;
 }
 
-/** Small dialog that saves an address from a transaction as a contact. */
+/**
+ * Small dialog that saves an address from a transaction as a contact. Render it
+ * with `key={address}` so each address starts with empty fields.
+ */
 export function SaveContactDialog({ address, onClose, onSaved }: SaveContactDialogProps) {
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const formId = `save-contact${useId()}`;
-
-  useEffect(() => {
-    setName('');
-    setError(null);
-    setBusy(false);
-  }, [address]);
 
   if (address === null) return null;
 

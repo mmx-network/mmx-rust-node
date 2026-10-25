@@ -318,7 +318,7 @@ export function ActivityDetailSheet({ itemKey, onClose }: ActivityDetailSheetPro
       <Sheet open={itemKey !== null} onClose={onClose} title={item ? activityTitle(item) : 'Transaction'} footer={footer}>
         {body}
       </Sheet>
-      <SaveContactDialog address={saveAddress} onClose={() => setSaveAddress(null)} onSaved={(c) => setSaved(c.address)} />
+      <SaveContactDialog key={saveAddress ?? ''} address={saveAddress} onClose={() => setSaveAddress(null)} onSaved={(c) => setSaved(c.address)} />
     </>
   );
 }
