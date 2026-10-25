@@ -1581,15 +1581,13 @@ h3.section__title {
 .address__chunks {
   display: inline-flex;
   flex-wrap: wrap;
-  column-gap: 0.5ch;
   row-gap: 2px;
   letter-spacing: 0.02em;
 }
 /*
  * A full address stays on one line where it can: the text shrinks with its
- * container (one line of chunked mono text is 40.7em in Chromium and 41.5em in
- * Firefox; 43em leaves room for other engines) down to 12px, and
- * only wraps below that.
+ * container down to 12px, and only wraps below that. One line is 37.6em in
+ * Chromium and 37.2em in Firefox; 39em leaves room for other engines.
  */
 .address--full {
   display: flex;
@@ -1597,10 +1595,10 @@ h3.section__title {
   container-type: inline-size;
 }
 .address--full .address__chunks {
-  font-size: clamp(12px, 100cqi / 43, 1em);
+  font-size: clamp(12px, 100cqi / 39, 1em);
 }
 .address--full:has(.address__copy) .address__chunks {
-  font-size: clamp(12px, (100cqi - 44px) / 43, 1em);
+  font-size: clamp(12px, (100cqi - 44px) / 39, 1em);
 }
 .address__chunk:nth-child(even) {
   color: var(--text-muted);
