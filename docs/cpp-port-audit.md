@@ -710,7 +710,11 @@ idle expiry and configured body deadlines. Supported settings and explicit gaps
 are listed in the [configuration reference](development.md#router-configuration);
 the [performance checkpoint](performance-parity.md#router-configuration-checkpoint-2026-10-26)
 records source revisions, bounds and deliberate scheduling differences. Full
-Router configuration or performance parity is not claimed.
+workload equivalence is not claimed. Exact Router configuration or architecture
+replication is not required: preserve intent, functionality, performance,
+reliability and robustness. The config inventory distinguishes unsupported
+controls from functional gaps; the performance checkpoint's outcome priorities
+identify the remaining delivery, backpressure, connectivity and recovery work.
 
 The socket/lifetime follow-up also honors inherited keepalive, send/receive
 buffers and listener backlog, plus incoming-only `disconnect_interval` age

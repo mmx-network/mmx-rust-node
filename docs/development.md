@@ -15,7 +15,11 @@ approximations.
 
 Performance is also a migration requirement across the node, database, wallet,
 farmer, harvester and utilities. Read the matching C++ execution strategy before
-porting, preserve its important optimizations, and verify comparable workloads.
+porting, preserve the properties behind its important optimizations, and verify
+comparable workloads. The target is equivalent intent, functionality,
+performance, reliability and robustness. Rust may use different architecture,
+scheduling mechanisms and configuration when those outcomes are preserved;
+one-to-one replication of C++ framework internals is not required.
 [Performance parity](performance-parity.md) records the reference paths,
 regression checks and outstanding comparison gaps. The [C++ port audit](cpp-port-audit.md)
 covers consensus, defenses, I/O, scheduling and remaining migration work.
@@ -82,16 +86,29 @@ absent on incoming sockets; native's inherited listener default is false. This
 preserves the existing Rust latency choice while allowing an explicit native
 override. Outgoing no-delay remains enabled as in native `TcpEndpoint`.
 
-The following settings still lack equivalent implementations: `open_port`
-(UPnP), periodic `discover_interval`, `stats_interval_ms`,
-`update_interval_ms`, `max_queue_ms`, `max_write_queue`, `priority_queue_size`,
-`show_warnings`, `node_version`, `mode`, Router topic/server names, and
-`storage_path` for persistent known-peer storage. The Rust sender uses bounded
-synchronous writes rather than the native asynchronous write queue. Discovery
-currently runs on authentication. The bounded coordinator does not perform
-native full-pool retry probes; underfilled pools retry each connect cycle as
-C++ does. Incoming sockets exchange gossip/RPC but do not enter the historical
-sync observer pool; fixed peers must qualify as synced full nodes too.
+The table records config compatibility, not a requirement to reproduce every
+native knob. Remaining work is assessed by operational outcomes:
+
+| Outcome | Current limitation or evidence still needed |
+| --- | --- |
+| Maintain a healthy, diverse peer pool through churn | Discovery runs on authentication, without periodic refresh or full-pool probing. An equivalent Rust policy need not reproduce native timer phasing. |
+| Recover connectivity after restart | Learned peers are memory-only, leaving startup dependent on seeds/fixed peers. Validate recovery when bootstrap sources fail; bounded peer persistence or another equivalent mechanism may provide resilience. |
+| Deliver ready work promptly despite slow peers | Body groups still wait for their bounded providers before processing results. Group bounds alone do not preserve native's immediate delivery of individual completions. |
+| Remain responsive and bounded under send pressure | Independent senders exist, but synchronous writes/response work can delay connection expiry. Equivalent backpressure, priority delivery, cleanup and memory bounds matter more than reproducing native queue classes or knob names. |
+| Use available connections effectively | Incoming peers exchange gossip/RPC but are not historical sync observers; fixed peers must qualify as synced full nodes. The effect on connectivity and sync availability needs consideration, including NAT deployments. |
+| Establish automatic inbound reachability where requested | `open_port` / UPnP is unimplemented. Outgoing connections and manual port forwarding remain available; automatic mapping is a separate missing capability. |
+
+Native `discover_interval` and peer `storage_path` are not implemented.
+`max_queue_ms`, `max_write_queue` and `priority_queue_size` do not map directly
+to the current Rust sender. Native `stats_interval_ms`, `update_interval_ms`
+and `show_warnings` controls are unsupported; useful diagnostics and maintenance
+behavior remain requirements, without requiring identical logging/timer knobs.
+Arbitrary `node_version`, `mode`, Router topic names and `node_server` overrides
+are unsupported too. Framework wiring and arbitrary advertised-version changes
+need not be copied; protocol compatibility and any required alternate node role
+must still be implemented correctly. Deliberate defaults and quorum/deadline
+policies above and below require evidence for their availability and latency
+tradeoffs rather than automatic replacement with C++ values.
 
 Cache sizes apply to each existing first-seen cache, without a new payload cache.
 The independent 100,000-entry receipt bound remains even when hash retention is

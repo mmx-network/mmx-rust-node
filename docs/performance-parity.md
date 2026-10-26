@@ -6,9 +6,15 @@ their resolutions, new bounds and deliberate differences. Earlier fixture
 results do not establish performance parity for those paths.
 
 Performance is part of the migration requirements for every component. Read the
-C++ counterpart before implementation and preserve the execution strategy as
-well as consensus results. Comparable measurements are required before claiming
-performance parity. A source comparison alone does not establish it.
+C++ counterpart before implementation and preserve its intent, functionality,
+performance, reliability and robustness, as well as consensus results. Preserve
+the useful properties of its execution strategy; Rust may achieve them with
+different internals, scheduling mechanisms or a smaller configuration surface.
+One-to-one code or config replication is not a completion criterion. Missing
+capabilities, lost operational controls and weaker guarantees are gaps; omitted
+framework knobs or architectural differences alone are not. Comparable
+measurements, including failure/overload/recovery cases, are required before
+claiming equivalent outcomes. A source comparison alone does not establish them.
 
 The initial comparison below uses `../mmx-node` at
 `5626ac2b7cd26aa9626ea3b2cf864b4cfe6fbcd2` (2026-10-19). Native fixtures retain
@@ -898,6 +904,11 @@ without adding a global relay lock to each received-message cache update.
 
 Deliberate differences and missing optimizations:
 
+These observations record behavior and evidence still needed. They are not a
+requirement to copy C++ implementation details. In particular, using threads
+instead of an event loop is not itself a defect; ready-work latency, bounded
+resource use, peer isolation and recovery under load must be comparable.
+
 - Rust requires the configured number of fresh successful distinct hash
   observations; native can count failed/empty observers toward completion.
   Rust fetches every observed content candidate once without majority filtering.
@@ -982,7 +993,8 @@ Dropping the connection releases its shared admission lease. Native checks on
 its update timer after integer-second rounding; Rust enforces an absolute
 receive deadline and can expire up to a timer tick/rounding interval sooner.
 Synchronous response work or blocked writes can still delay receive-loop checks;
-native's event loop and asynchronous sender remain an optimization gap.
+prompt cleanup under those conditions remains a reliability/performance concern,
+regardless of the architecture chosen to address it.
 
 New regressions inspect actual listener/accepted/outgoing socket options and
 OS buffer sizes, native buffer-disable/seconds semantics, and a busy
@@ -996,3 +1008,38 @@ measurements. No live ledger/plot data or unrelated service was used.
 Follow-up validation: **155 node tests and 10 daemon integration tests passed**.
 Node/tools all-target Clippy, formatting and diff whitespace checks pass. Builds
 retain the two-job, nonincremental, no-debug, low CPU/I/O priority policy.
+
+### Outcome priorities
+
+The migration target is preserved intent, functionality, performance,
+reliability and robustness. Config coverage above is an interoperability
+inventory, not a checklist of mandatory Rust features. The material remaining
+Router concerns are:
+
+1. Ready body results must progress independently of stalled providers. Compare
+   completion latency, retries and duplicate downloads with one or more slow
+   peers while retaining bounded ownership and memory.
+2. Send pressure must preserve consensus/control priority, bounded memory and
+   prompt cancellation, expiry and cleanup. Test slow readers and saturated
+   sends while unrelated peers and RPC continue to progress. An event loop or
+   native queue implementation is not prescribed.
+3. Peer management must recover from churn and restart, replenish useful peers
+   and avoid dependence on a stale initial pool or unavailable bootstrap sources.
+   Rust currently lacks periodic discovery, persisted learned peers and full-pool
+   refresh probes. Those mechanisms or an equivalent approach must establish
+   resilience; exact native timers, rotation policies and storage are optional.
+4. Connection-role and sync policies must retain availability in the supported
+   deployment scenarios, including NAT. Incoming historical sync exclusion,
+   strict successful-observer minimums, fixed-peer qualification and absolute
+   deadlines need explicit availability/robustness evidence. They are not
+   automatically better or worse solely because they differ from C++.
+5. Automatic port mapping remains unavailable where deployments require it.
+   Manual reachability and outbound bidirectional communication do not implement
+   that capability; whether to add UPnP is a feature-scope decision.
+
+Equivalent diagnostics, maintenance and operational controls remain required.
+Exact native logging intervals, queue parameter names, internal topic/server
+wiring and arbitrary version overrides need not be reproduced. Alternate node
+roles are functional scope when supported, rather than a reason to expose a
+`mode` setting without implementing the role. Existing fallback/default choices
+remain documented tradeoffs, subject to workload and failure-case validation.

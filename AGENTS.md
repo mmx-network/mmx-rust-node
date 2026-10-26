@@ -1,11 +1,23 @@
 # Porting requirements
 
-When porting or changing a subsystem, read its implementation in
-`../mmx-node` first. Preserve its important performance choices as well as its
-behavior: concurrency, scheduling, batching, deduplication, memory bounds,
-positional reads, cheap rejection before expensive work, and immediate delivery
-of completed work. Record deliberate differences and missing optimizations in
-`docs/performance-parity.md` instead of assuming a working fixture proves parity.
+Use C++ as the reference for intent, functionality, performance, reliability and
+robustness, not as a requirement for one-to-one code, architecture or config.
+When porting or changing a subsystem, read its implementation in `../mmx-node`
+first. Preserve the properties behind its important performance choices:
+concurrency, scheduling, batching, deduplication, memory bounds, positional
+reads, cheap rejection before expensive work, and immediate delivery of
+completed work. Rust may use different mechanisms when they preserve these
+outcomes. An omitted C++ framework setting is not by itself a functional gap;
+lost capabilities, operational control or guarantees are. Keep meaningful
+config names and units compatible where practical, and document unsupported
+settings and deliberate differences in `docs/performance-parity.md`.
+
+Judge alternatives by observable behavior and representative workloads,
+including slow resources, failures, overload, cancellation and recovery. A
+working fixture or a simpler implementation alone does not establish equivalent
+performance, reliability or robustness. Record evidence and remaining
+uncertainty instead of treating an architectural difference as either a defect
+or proof of improvement.
 
 Avoid migration regressions across the node, database, wallet, farmer,
 harvester and utilities. Consensus must match C++; the physical database format
