@@ -5,10 +5,12 @@ The page compares native SVG icons on light and dark backgrounds, including
 16, 24, 36, and 58 px samples. Each SVG is self-contained, with no fonts,
 embedded raster images, or external resources.
 
-The baseline is `../public/mmx-logo.svg`, copied from the hero's colors,
-140-degree base gradient, upper-left radial light, violet border, inset rim
-highlight, glyph proportions, and -9-degree rotation. It is currently used by
-the website's header, footer, and wallet illustration for review.
+The selected design is **08 — Wide border** (`simple-coin.svg`). Its canonical
+application source is `../../wallet/branding/mmx-logo.svg`; the website,
+wallet/explorer interface, favicons, and platform icons derive from that SVG.
+The website hero uses that same asset without adding another rotation or border.
+
+The original hero treatment is retained in `hero-match.svg` for comparison.
 
 The latest round uses a 30% larger mark, filling about 81% of the coin's height
 before rotation, compared with about 62% in the baseline:
@@ -27,5 +29,5 @@ The six earlier studies are retained in an expandable comparison:
 - `indigo-dusk.svg`: a cooler indigo gradient.
 
 These studies are dev preview sources and are not entry points in the
-production website build. Wallet/explorer branding, favicons, and installed
-app icons retain their existing assets pending a selected direction.
+production website build. See `../../wallet/branding/README.md` to regenerate
+application assets from the selected canonical SVG.

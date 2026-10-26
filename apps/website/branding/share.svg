@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <title>MMX Network</title>
+  <defs><radialGradient id="share-light"><stop stop-color="#4c1d95" stop-opacity=".5"/><stop offset="1" stop-color="#07060b" stop-opacity="0"/></radialGradient></defs>
+  <rect width="1200" height="630" fill="#07060b"/>
+  <ellipse cx="500" cy="300" rx="680" ry="480" fill="url(#share-light)"/>
+  <g transform="translate(124 187)"><defs>
+    <filter id="soft-halo" filterUnits="userSpaceOnUse" x="-32" y="-32" width="320" height="320" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="4.5" result="wide"/>
+      <feFlood flood-color="#a78bfa" flood-opacity="0.5"/>
+      <feComposite in2="wide" operator="in" result="outer-glow"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.1" result="near"/>
+      <feFlood flood-color="#e0caff" flood-opacity="0.22"/>
+      <feComposite in2="near" operator="in" result="inner-glow"/>
+      <feMerge><feMergeNode in="outer-glow"/><feMergeNode in="inner-glow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="face-clip"><circle cx="128" cy="128" r="122"/></clipPath>
+    <linearGradient id="base" gradientUnits="userSpaceOnUse" x1="12.086" y1="-10.141" x2="243.914" y2="266.141">
+      <stop stop-color="#4c1d95"/>
+      <stop offset="1" stop-color="#1d102f"/>
+    </linearGradient>
+    <radialGradient id="light" gradientUnits="userSpaceOnUse" cx="76.8" cy="25.6" r="291.885">
+      <stop stop-color="#a670fa" stop-opacity="0.439216"/>
+      <stop offset="0.7" stop-color="#a670fa" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="rim" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <circle cx="128" cy="128" r="126.5" fill="#fff"/>
+      <circle cx="128" cy="129.5" r="126.5" fill="#000"/>
+    </mask>
+  </defs>
+  <g transform="rotate(-9 128 128)">
+    <circle cx="128" cy="128" r="128" fill="url(#base)"/>
+    <circle cx="128" cy="128" r="128" fill="url(#light)"/>
+    <circle cx="128" cy="128" r="128" fill="#d7beff" fill-opacity="0.333333" mask="url(#rim)"/>
+    <circle cx="128" cy="128" r="125" fill="none" stroke="#c084fc" stroke-opacity="0.6" stroke-width="6"/>
+    <g clip-path="url(#face-clip)">
+    <g transform="translate(128 128) scale(1.1) translate(-128 -128)">
+      <path filter="url(#soft-halo)" fill="#fff" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
+    </g>
+    </g>
+  </g></g>
+  <g fill="#efecf8" font-family="Space Grotesk, Inter, DejaVu Sans, sans-serif">
+    <text x="434" y="287" font-size="66" font-weight="600" letter-spacing="-2">MMX Network</text>
+    <text x="434" y="345" font-size="28" fill="#b4aecb">Decentralized by design.</text>
+    <text x="434" y="405" font-size="19" fill="#b197fc">mmx.network</text>
+  </g>
+</svg>

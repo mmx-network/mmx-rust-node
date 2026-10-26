@@ -101,7 +101,7 @@ Wrap every control in `Field`; it wires the label, hint and error to the control
 | `List` / `ListItem` / `ListGroup` | List: `label?`, `inset?`, `divided?`. Item: `leading?`, `title`, `subtitle?`, `trailing?`, `trailingSub?`, `onClick?`, `actions?`, `chevron?`, `selected?`, `disabled?`. Group: `title`, `aside?`, `inset?` | `onClick` makes the row a button; `actions` render outside it (no nested buttons). `ListGroup` for date groups. `list`, `list--inset`, `list-item`, `list-item__*`, `list-group`. |
 | `QRCode` | `value`, `label` (aria), `size? = 200`, `ecc? = 'M'` | Always dark on white with a 4-module quiet zone. `qr`. |
 | `WordGrid` | `words`, `hidden?`, `onReveal?`, `revealLabel?`, `start?` | Numbered recovery phrase. While `hidden` the words are not in the DOM. Text selection is disabled; offer a CopyButton with `sensitive` copy instead. `word-grid`. |
-| `BrandMark` / `BrandLockup` | mark: `size?`, `variant? 'color'\|'glyph'`, `label?`; lockup: `size?`, `name? = 'MMX Wallet'` | Official MMX mark. Disc colour via `--brand-disc`. |
+| `BrandMark` / `BrandLockup` | mark: `size?`, `variant? 'color'\|'glyph'`, `label?`; lockup: `size?`, `name? = 'MMX Wallet'` | Color mark uses the canonical `branding/mmx-logo.svg`; glyph-only variant follows `currentColor`. |
 
 ## Feedback
 

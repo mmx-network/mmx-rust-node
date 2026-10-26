@@ -1,4 +1,5 @@
 import { cx } from './internal/cx';
+import mmxLogo from '../../../branding/mmx-logo.svg';
 
 // Official MMX mark, traced from the circular logo (256 × 256 grid).
 export const MMX_GLYPH =
@@ -13,7 +14,7 @@ export const MMX_GLYPH =
 export interface BrandMarkProps {
   /** Pixel size (default 32). */
   size?: number;
-  /** color: purple disc with white glyph; glyph: glyph only in currentColor. */
+  /** color: the selected gradient SVG; glyph: glyph only in currentColor. */
   variant?: 'color' | 'glyph';
   /** Accessible name; decorative when omitted. */
   label?: string;
@@ -21,18 +22,30 @@ export interface BrandMarkProps {
 }
 
 export function BrandMark({ size = 32, variant = 'color', label, class: className }: BrandMarkProps) {
+  if (variant === 'color') {
+    return (
+      <img
+        class={cx('brand-mark', 'brand-mark--color', className)}
+        src={mmxLogo}
+        width={size}
+        height={size}
+        alt={label ?? ''}
+        aria-hidden={label ? undefined : 'true'}
+        draggable={false}
+      />
+    );
+  }
   return (
     <svg
       class={cx('brand-mark', `brand-mark--${variant}`, className)}
       width={size}
       height={size}
-      viewBox={variant === 'glyph' ? '28 28 200 200' : '0 0 256 256'}
+      viewBox="28 28 200 200"
       focusable="false"
       role={label ? 'img' : undefined}
       aria-label={label}
       aria-hidden={label ? undefined : 'true'}
     >
-      {variant === 'color' ? <circle class="brand-mark__disc" cx="128" cy="128" r="128" /> : null}
       <path class="brand-mark__glyph" d={MMX_GLYPH} />
     </svg>
   );

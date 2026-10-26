@@ -43,8 +43,11 @@ throughput. The node download link continues to point to the published C++
 node releases; Rust source and the new web apps are linked separately. The
 existing SafeTrade and NonKYC market links are retained from `mmx-website`.
 
-`public/` includes crawler metadata, the manifest, the wallet's branding/icons,
-and the original website's social preview image. `public/_headers` is the
+`public/` includes crawler metadata, the manifest, the selected MMX icons,
+and a social preview rendered from `branding/share.svg`. The icon source is
+`../wallet/branding/mmx-logo.svg`; its render script also refreshes this site's
+SVG/PNG assets. The hero uses the same SVG as the header and footer.
+`public/_headers` is the
 production policy source; its CSP is also embedded in the built HTML. There
 are no API connections, inline scripts, or inline styles. Only fingerprinted
 `/assets/` files receive immutable caching in the image.

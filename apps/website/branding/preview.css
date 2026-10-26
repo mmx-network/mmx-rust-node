@@ -5,6 +5,7 @@
 .preview-intro { max-width: 680px; margin-top: 16px; font-size: 14px; }
 .icon-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; margin-top: 34px; }
 .icon-card { overflow: hidden; }
+.icon-card--selected { border-color: var(--accent); }
 .icon-stage { display: grid; place-items: center; min-height: 245px; background: radial-gradient(ellipse at 50% 50%, var(--glow), transparent 72%); border-bottom: 1px solid var(--border); }
 .icon-stage img { display: block; }
 .icon-details { padding: 24px; }
