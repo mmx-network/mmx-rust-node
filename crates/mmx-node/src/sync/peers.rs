@@ -23,9 +23,10 @@ pub const MIN_PEERS: usize = 3;
 pub const MAX_PEERS: usize = 8;
 // Preserve the previous eight-peer worst-case bound while allowing smaller
 // authenticated pools to fill a complete body-request pipeline as well.
-const MAX_GROUP_CONTENTS: usize = 32;
+const MAX_BODY_INFLIGHT: usize = 32;
 type Missing = BTreeSet<(u32, Hash)>;
 type QualifiedPeer = (Hash, u32, Client, Vec<String>);
+mod body;
 mod connect;
 mod metadata;
 mod prefetch;
@@ -41,6 +42,22 @@ trait WindowSource {
 pub trait PeerSource: Send + 'static {
     fn hashes(&mut self, start: u32, count: u32) -> Result<Vec<Option<BlockHash>>>;
     fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>>;
+    /// Deliver each correlated body as it completes, retaining successful
+    /// replies even when another request in this batch subsequently fails.
+    fn fetch_each(
+        &mut self,
+        hashes: &[Hash],
+        emit: &mut dyn FnMut(usize, Option<Record>) -> Result<()>,
+    ) -> Result<()> {
+        let values = self.fetch(hashes)?;
+        if values.len() != hashes.len() {
+            return Err(error("incomplete body response batch"));
+        }
+        for (index, value) in values.into_iter().enumerate() {
+            emit(index, value)?;
+        }
+        Ok(())
+    }
     fn synced_height(&mut self) -> Result<Option<u32>>;
     fn backpressure_retries(&self) -> u64 {
         0
@@ -55,6 +72,13 @@ impl PeerSource for Client {
     }
     fn fetch(&mut self, hashes: &[Hash]) -> Result<Vec<Option<Record>>> {
         self.blocks_by_hash(hashes)
+    }
+    fn fetch_each(
+        &mut self,
+        hashes: &[Hash],
+        emit: &mut dyn FnMut(usize, Option<Record>) -> Result<()>,
+    ) -> Result<()> {
+        self.blocks_by_hash_each(hashes, emit)
     }
     fn synced_height(&mut self) -> Result<Option<u32>> {
         Client::synced_height(self)
@@ -71,6 +95,7 @@ struct Peer<S> {
     source: Option<S>,
     replacement: Option<S>,
     inflight: Option<metadata::Job<S>>,
+    body: Option<body::Job<S>>,
     active: bool,
     qualified: bool,
     needs_status: bool,
@@ -92,6 +117,8 @@ pub struct PeerPool<S> {
     body_retries: u64,
     retired_backpressure: u64,
     metadata: metadata::Queue,
+    bodies: body::Queue,
+    retained_heights: std::ops::RangeInclusive<u32>,
     query: u64,
 }
 #[derive(Default)]
@@ -156,6 +183,7 @@ impl<S: PeerSource> PeerPool<S> {
                 source: Some(source),
                 replacement: None,
                 inflight: None,
+                body: None,
                 active: true,
                 qualified: false,
                 needs_status: true,
@@ -176,6 +204,8 @@ impl<S: PeerSource> PeerPool<S> {
             body_retries: 0,
             retired_backpressure: 0,
             metadata: metadata::Queue::new(config.pool_capacity()),
+            bodies: body::Queue::new(),
+            retained_heights: 0..=0,
             query: 0,
         }
     }
@@ -196,10 +226,14 @@ impl<S: PeerSource> PeerPool<S> {
         self.retired_backpressure += self
             .peers
             .iter()
-            .filter(|p| !p.active && p.replacement.is_none())
+            .filter(|p| {
+                !p.active && p.replacement.is_none() && p.inflight.is_none() && p.body.is_none()
+            })
             .map(|p| p.backpressure)
             .sum::<u64>();
-        self.peers.retain(|p| p.active || p.replacement.is_some());
+        self.peers.retain(|p| {
+            p.active || p.replacement.is_some() || p.inflight.is_some() || p.body.is_some()
+        });
     }
     fn backpressure_retries(&self) -> u64 {
         self.retired_backpressure + self.peers.iter().map(|p| p.backpressure).sum::<u64>()
@@ -213,6 +247,7 @@ impl<S: PeerSource> PeerPool<S> {
             source: Some(source),
             replacement: None,
             inflight: None,
+            body: None,
             active: true,
             qualified: false,
             needs_status: true,
@@ -230,7 +265,7 @@ impl<S: PeerSource> PeerPool<S> {
         let Some(peer) = self.peers.iter_mut().find(|peer| peer.id == id) else {
             return self.add(id, source);
         };
-        if peer.inflight.is_some() {
+        if peer.inflight.is_some() || peer.body.is_some() {
             peer.replacement = Some(source);
             peer.active = false;
             peer.qualified = false;
@@ -250,27 +285,12 @@ impl<S: PeerSource> PeerPool<S> {
     }
     pub fn poll(&mut self) -> Result<()> {
         self.drain_control()?;
-        if !self.peers.iter().any(|p| p.active && p.source.is_some()) {
-            self.poll_metadata()?;
-        }
-        thread::scope(|scope| {
-            let jobs: Vec<_> = self
-                .peers
-                .iter_mut()
-                .filter(|p| p.active && p.source.is_some())
-                .map(|p| {
-                    scope.spawn(move || {
-                        if p.source.as_mut().unwrap().poll().is_err() {
-                            p.active = false;
-                        }
-                    })
-                })
-                .collect();
-            for job in jobs {
-                job.join().map_err(|_| error("peer worker panicked"))?;
-            }
-            Ok(())
-        })
+        self.start_polls()?;
+        self.poll_metadata()
+    }
+    fn next_query(&mut self) -> u64 {
+        self.query = self.query.wrapping_add(1);
+        self.query
     }
     pub fn window(
         &mut self,
@@ -355,6 +375,10 @@ impl<S: PeerSource> PeerPool<S> {
         if stop.load(Ordering::Relaxed) {
             return Err(error("sync cancelled"));
         }
+        self.retained_heights =
+            start.saturating_sub(2 * BATCH_BLOCKS)..=start.saturating_add(2 * BATCH_BLOCKS);
+        self.completed
+            .retain(|(height, _), _| self.retained_heights.contains(height));
         // An exhausted provider set is not a proof that the content cannot be
         // supplied later by a newly discovered peer. Its leases have expired.
         self.completed.retain(|_, block| block.is_some());
@@ -419,190 +443,40 @@ impl<S: PeerSource> PeerPool<S> {
                 }
             }
         }
-        let params = &context.params;
+        let params = Arc::new(context.params.clone());
+        self.inherit_body_leases(&mut jobs);
         let mut output = Window {
             start,
-            target: 0,
-            heights: Vec::new(),
             hash_time,
-            body_time: Duration::ZERO,
-            body_requests: 0,
-            body_retries: 0,
-            archive_time: Duration::ZERO,
-            backpressure_retries: 0,
+            ..Default::default()
         };
         let body_started = Instant::now();
         let mut unsupported = BTreeMap::new();
         let mut bytes = 0usize;
-        // Bound each group by unique content count, including competing
-        // candidates. The global bound does not shrink with the peer count;
-        // common content can fill one provider's complete bounded pipeline.
-        let mut first = 0;
-        while first < count && bytes < BATCH_BYTES {
-            let mut end = start + first + 1;
-            let mut contents = jobs.range((start + first, [0; 32])..(end, [0; 32])).count();
-            while end < start + count {
-                let additional = jobs.range((end, [0; 32])..=(end, [255; 32])).count();
-                if contents + additional > MAX_GROUP_CONTENTS {
+        let mut height = start;
+        loop {
+            for (key, failure) in self.drain_bodies()? {
+                if jobs.contains_key(&key) {
+                    unsupported.insert(key, failure);
+                }
+            }
+            if stop.load(Ordering::Relaxed) {
+                return Err(error("sync cancelled"));
+            }
+            self.expire_bodies();
+            // Consume ready heights in order, but let every provider continue
+            // filling the shared request budget while another owner stalls.
+            while height < start + count {
+                let range = (height, [0; 32])..=(height, [255; 32]);
+                if jobs
+                    .range(range.clone())
+                    .any(|(key, _)| !self.completed.contains_key(key))
+                {
                     break;
                 }
-                contents += additional;
-                end += 1;
-            }
-            let mut pending: Vec<_> = jobs
-                .range((start + first, [0; 32])..(end, [0; 32]))
-                .filter(|(key, job)| {
-                    job.heights.first() == Some(&key.0) && !self.completed.contains_key(key)
-                })
-                .map(|(key, _)| *key)
-                .collect();
-            while !pending.is_empty() {
-                if stop.load(Ordering::Relaxed) {
-                    return Err(error("sync cancelled"));
-                }
-                let now = Instant::now();
-                let mut assigned = vec![Vec::new(); self.peers.len()];
-                let mut exhausted = Vec::new();
-                for key in &pending {
-                    let job = jobs.get_mut(key).expect("known height job");
-                    if job.retry_at.is_some_and(|deadline| now < deadline) {
-                        continue;
-                    }
-                    job.providers.shuffle(&mut rand::thread_rng());
-                    if let Some(&(peer, block_id)) = job
-                        .providers
-                        .iter()
-                        .filter(|&&(p, _)| self.peers[p].active && !job.tried.contains(&p))
-                        .min_by_key(|&&(p, _)| self.peers[p].latency)
-                    {
-                        // Keep the fastest claimant's bounded request pipeline
-                        // full instead of assigning the same common chain to
-                        // slow claimants merely because its slots are occupied.
-                        if assigned[peer].len() < MAX_BODY_REQUESTS {
-                            job.tried.insert(peer);
-                            self.body_requests += 1;
-                            self.body_retries += u64::from(job.tried.len() > 1);
-                            job.retry_at = Some(now + self.timeout);
-                            assigned[peer].push((*key, block_id));
-                        }
-                    } else if !job
-                        .providers
-                        .iter()
-                        .any(|&(p, _)| self.peers[p].active && !job.tried.contains(&p))
-                    {
-                        exhausted.push(*key);
-                    }
-                }
-                for key in exhausted {
-                    if let Some(failure) = unsupported.remove(&key) {
-                        return Err(failure);
-                    }
-                    complete(&mut self.completed, &jobs[&key], None);
-                }
-                let profiling = std::env::var_os("MMX_PROFILE_REPLAY").is_some();
-                let results = thread::scope(|scope| {
-                    let tasks: Vec<_> = self
-                        .peers
-                        .iter_mut()
-                        .zip(assigned)
-                        .enumerate()
-                        .filter(|(_, (_, keys))| !keys.is_empty())
-                        .map(|(peer_index, (peer, keys))| {
-                            let ids = keys.iter().map(|(_, id)| *id).collect::<Vec<_>>();
-                            scope.spawn(move || {
-                                let requested = Instant::now();
-                                let source = peer
-                                    .source
-                                    .as_mut()
-                                    .expect("hash claimant owns its connection");
-                                let busy_before = source.backpressure_retries();
-                                let result = source.fetch(&ids);
-                                let elapsed = requested.elapsed();
-                                peer.backpressure = source.backpressure_retries();
-                                if profiling {
-                                    let returned = result.as_ref().map_or(0, |values| {
-                                        values.iter().filter(|value| value.is_some()).count()
-                                    });
-                                    eprintln!("Sync body: peer={} count={} returned={} metadata_ms={:.3} elapsed_ms={:.3} busy_retries={}",
-                                        vnx::util::to_hex_string(&peer.id[..8], true, false),
-                                        keys.len(), returned, peer.latency.as_secs_f64() * 1e3,
-                                        elapsed.as_secs_f64() * 1e3,
-                                        peer.backpressure.saturating_sub(busy_before));
-                                }
-                                if let Err(e) = &result {
-                                    eprintln!(
-                                        "Sync peer {}: block request failed: {e}",
-                                        vnx::util::to_hex_string(&peer.id[..8], true, false)
-                                    );
-                                    peer.active = false;
-                                }
-                                (peer_index, keys, requested, result)
-                            })
-                        })
-                        .collect();
-                    tasks
-                        .into_iter()
-                        .map(|j| j.join().map_err(|_| error("peer worker panicked")))
-                        .collect::<Result<Vec<_>>>()
-                })?;
-                let made_requests = !results.is_empty();
-                for (_, keys, requested, result) in results {
-                    for (key, _) in &keys {
-                        jobs.get_mut(key).expect("known height job").retry_at =
-                            Some(requested + self.timeout);
-                    }
-                    if let Ok(values) = result {
-                        for ((key, requested_id), value) in keys.into_iter().zip(values) {
-                            let job = &jobs[&key];
-                            if let Some(block) = value {
-                                // Never trust the echoed hash fields. prevalidate
-                                // recomputes the full commitment and authenticates
-                                // the farmer; contextual/CPU/ledger checks follow.
-                                let matches = block.name == "mmx.Block"
-                                    && number(&block, "height")
-                                        .is_ok_and(|height| job.heights.contains(&height))
-                                    && hash(&block, "hash").ok() == Some(requested_id)
-                                    && hash(&block, "content_hash").ok() == Some(job.hash.content);
-                                if matches {
-                                    match mmx_execution::block::prevalidate(&block, params) {
-                                        Ok(()) => complete(&mut self.completed, job, Some(block)),
-                                        Err(failure) if failure.is_unsupported() => {
-                                            unsupported.insert(
-                                                key,
-                                                Box::new(failure)
-                                                    as Box<dyn std::error::Error + Send + Sync>,
-                                            );
-                                        }
-                                        Err(_) => (),
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                pending.retain(|key| !self.completed.contains_key(key));
-                if !pending.is_empty() && !made_requests {
-                    // Even an immediate bad/empty reply cannot trigger a second
-                    // body request until the first provider's lease expires.
-                    let deadline = pending
-                        .iter()
-                        .filter_map(|key| jobs[key].retry_at)
-                        .min()
-                        .unwrap_or_else(Instant::now);
-                    if deadline > Instant::now() {
-                        thread::sleep(
-                            deadline
-                                .saturating_duration_since(Instant::now())
-                                .min(Duration::from_millis(50)),
-                        );
-                    }
-                }
-            }
-            for height in start + first..end {
                 let mut values = Vec::new();
-                for (key, _) in jobs.range((height, [0; 32])..=(height, [255; 32])) {
-                    let value = self.completed.get(key).expect("completed height job");
-                    if let Some(block) = value {
+                for (key, _) in jobs.range(range) {
+                    if let Some(block) = self.completed.get(key).and_then(Option::as_ref) {
                         let Value::Int(stamp) = block.field("time_stamp")? else {
                             continue;
                         };
@@ -619,8 +493,85 @@ impl<S: PeerSource> PeerPool<S> {
                     }
                 }
                 output.heights.push(values);
+                height += 1;
+                if bytes >= BATCH_BYTES {
+                    break;
+                }
             }
-            first = end - start;
+            if height == start + count || bytes >= BATCH_BYTES {
+                break;
+            }
+            let now = Instant::now();
+            let mut slots = MAX_BODY_INFLIGHT.saturating_sub(self.pending_bodies());
+            let mut assigned: Vec<Vec<body::Request>> =
+                (0..self.peers.len()).map(|_| Vec::new()).collect();
+            let mut exhausted = Vec::new();
+            for (key, job) in &mut jobs {
+                if self.completed.contains_key(key)
+                    || job.heights.first() != Some(&key.0)
+                    || job.retry_at.is_some_and(|deadline| now < deadline)
+                {
+                    continue;
+                }
+                job.providers.shuffle(&mut rand::thread_rng());
+                if let Some(&(peer, block_id)) = job
+                    .providers
+                    .iter()
+                    .filter(|&&(p, _)| self.peers[p].active && !job.tried.contains(&p))
+                    .min_by_key(|&&(p, _)| self.peers[p].latency)
+                {
+                    // A busy fast claimant keeps priority for unattempted
+                    // content; slower claimants are used only after a lease.
+                    if slots > 0
+                        && self.peers[peer].source.is_some()
+                        && assigned[peer].len() < MAX_BODY_REQUESTS
+                    {
+                        job.tried.insert(peer);
+                        self.body_requests += 1;
+                        self.body_retries += u64::from(job.tried.len() > 1);
+                        slots -= 1;
+                        assigned[peer].push(body::Request {
+                            key: *key,
+                            block: block_id,
+                            heights: job.heights.clone(),
+                        });
+                    }
+                } else {
+                    exhausted.push(*key);
+                }
+            }
+            for (peer, requests) in assigned.into_iter().enumerate() {
+                if !requests.is_empty() {
+                    let keys: Vec<_> = requests.iter().map(|request| request.key).collect();
+                    let requested = self.start_bodies(peer, requests, params.clone())?;
+                    for key in keys {
+                        jobs.get_mut(&key).unwrap().retry_at = Some(requested + self.timeout);
+                    }
+                }
+            }
+            let exhausted_any = !exhausted.is_empty();
+            for key in exhausted {
+                if let Some(failure) = unsupported.remove(&key) {
+                    return Err(failure);
+                }
+                complete(&mut self.completed, &jobs[&key], None);
+            }
+            if exhausted_any {
+                continue;
+            }
+            let wait = jobs
+                .values()
+                .filter_map(|job| job.retry_at)
+                .filter(|deadline| *deadline > Instant::now())
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .min()
+                .unwrap_or(Duration::from_millis(50))
+                .min(Duration::from_millis(50));
+            if let Some((key, failure)) = self.wait_body(wait)? {
+                if jobs.contains_key(&key) {
+                    unsupported.insert(key, failure);
+                }
+            }
         }
         // Retain the recent tip/lookahead only; durable blocks are reused from
         // the archive. This also bounds negative-response bookkeeping.

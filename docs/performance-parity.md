@@ -910,7 +910,7 @@ Existing bounded background connection/metadata ownership, identity
 deduplication, randomized candidate selection and immediate completion admission
 are retained. New attempts wait for the configured connect cycle; completed
 attempts do not. The metadata reply queue scales with configured pool capacity.
-Body groups retain their independent 32-content bound rather than multiplying
+Body requests retain an independent aggregate bound of 32 rather than multiplying
 it by the configured peer count. The full fetch deadline now follows config;
 body leases and body RPC deadlines use its native one-eighth value (22.5 seconds
 with the C++ file), so a silent provider cannot occupy a group for the full
@@ -931,8 +931,8 @@ resource use, peer isolation and recovery under load must be comparable.
   Rust fetches every observed content candidate once without majority filtering.
   Incoming connections are not historical sync observers, and fixed peers must
   qualify as synced full nodes before pool admission.
-- Body workers still join each bounded group before processing its results;
-  native processes individual asynchronous returns immediately. Absolute RPC
+- The independent completion checkpoint below removes body/poll join barriers
+  and retains partial successes as individual replies arrive. Absolute RPC
   deadlines differ from native inactivity timers; failed/empty bodies retain
   their lease instead of releasing it early. The separate three-second connect,
   ten-second write/partial-frame guards and 64 MiB decode limits remain.
@@ -1033,9 +1033,9 @@ reliability and robustness. Config coverage above is an interoperability
 inventory, not a checklist of mandatory Rust features. The material remaining
 Router concerns are:
 
-1. Ready body results must progress independently of stalled providers. Compare
-   completion latency, retries and duplicate downloads with one or more slow
-   peers while retaining bounded ownership and memory.
+1. Independent body/poll completion is implemented and covered by the checkpoint
+   below. Continue representative saturated-network comparisons of completion
+   latency, retries and duplicate downloads while retaining the same bounds.
 2. Send pressure must preserve consensus/control priority, bounded memory and
    prompt cancellation, expiry and cleanup. Test slow readers and saturated
    sends while unrelated peers and RPC continue to progress. An event loop or
@@ -1060,3 +1060,83 @@ wiring and arbitrary version overrides need not be reproduced. Alternate node
 roles are functional scope when supported, rather than a reason to expose a
 `mode` setting without implementing the role. Existing fallback/default choices
 remain documented tradeoffs, subject to workload and failure-case validation.
+
+### Independent peer completion checkpoint (2026-10-26)
+
+Reference: C++ `141054c398d2bab6802174379ce3b191d4f3a499`,
+`Router.cpp::{process,on_return,update,main}`,
+`vnx-addons/src/{TcpServer,MsgServer}.cpp` receive/send/shutdown paths.
+Native processes individual returns, tracks content leases independently and
+does not join all providers before progressing another peer's work.
+
+The Rust body scheduler now moves one connection owner into a background job
+and receives correlated individual body completions through a bounded queue.
+Valid results are checked against the requested chain/content hashes and height
+claims, then statically prevalidated before entering the existing bounded
+completion map. A stalled or failed tail cannot discard earlier successes.
+The shared limit is 32 unanswered body requests across all peers, including
+late attempts from older windows; a peer owns at most one body, metadata or poll
+operation. Normal common-content pipelines retain 32-request batching. Healthy
+providers can refill request capacity while another provider remains blocked.
+
+Leases still prevent premature duplicate requests. Once a lease expires, other
+eligible providers can serve the missing content without joining the late
+owner. The late owner remains in its bounded peer slot, is disqualified for
+fresh observations, and is joined at completion or pool shutdown. Authenticated
+replacement waits for that owner, rejects its later payloads and requires fresh
+status qualification. Prior-window pending leases carry into new windows;
+late bodies stay within the existing recent-height retention range. Closing
+the reply channels before joining releases workers blocked on delivery.
+Cancellation first consumes already-delivered completions, retains the ready
+bodies in existing RAM staging, clears pending heights and keeps worker ownership.
+
+Idle peer polls now use the same owned completion mechanism as metadata instead
+of joining a scope containing every peer. A partial frame on one peer cannot
+hold up connection maintenance or healthy peers' hash/body jobs. Sender teardown
+also sets its stop flag under the notification mutex and wakes its condition
+variable. This handles both an already-idle sender and the race before it
+enters the wait, including when `send_interval_ms` is one minute. Socket shutdown
+continues to interrupt blocked writes before the sender is joined.
+
+The all-observed-content policy and consensus validation are unchanged. A window
+still waits until its candidates are resolved or their leases expire; this is
+not early publication that drops a slow competing branch. Contextual checks,
+CPU proof verification, ledger execution and durable publication still follow
+the existing selected-chain path. The byte target now stops at a completed
+height instead of overshooting to a whole provider group. There is no new broad
+state/payload cache or live-storage scan. Absolute body deadlines and full leases
+after failed/empty replies remain deliberate differences from native.
+
+A controlled RAM workload compiled the previous checked-in scheduler from
+`3e2290a` alongside the new scheduler using the same synthetic providers and
+block fixtures.
+It requested 65 common statically valid blocks and one competing block at height
+one from three synthetic providers. Metadata delays were 0/40/60 ms; normal
+body batches took an artificial 40 ms. The slow-provider case delayed the
+competing provider's body by 350 ms. Each version used fresh RAM nodes, fetched
+66 bodies once, and recorded zero retries. Three samples per case alternated
+previous/current order, with identical debug-profile/resource settings:
+
+| Workload / median | Previous scheduler | Independent completions |
+| --- | ---: | ---: |
+| Healthy providers, all common bodies downloaded | 214.858 ms | 212.358 ms |
+| Healthy providers, full window | 240.571 ms | 235.872 ms |
+| Slow competing provider, all common bodies downloaded | 520.607 ms | 210.427 ms |
+| Slow competing provider, full window | 543.015 ms | 442.597 ms |
+
+These measurements isolate scheduling with artificial delays; they do not prove
+C++, WAN or mainnet throughput parity. The temporary baseline copy/harness was
+removed after comparison. Permanent gated regressions require all 65 healthy
+bodies to download before the competing provider is released and check the
+aggregate request bound. Other regressions cover a partial batch whose tail
+fails, lease-only reassignment, late-owner replacement, cancellation/cleanup,
+a blocked poll with three healthy observers, and sender teardown with a long
+idle interval. A real socket test delivers a reordered successful reply before
+another request times out. Existing native backpressure/reordering, competing
+branches, forged commitments and archived-content reuse tests remain applicable.
+
+Validation: **161 node tests and 10 actual-daemon integration tests passed**.
+Node/tools all-target Clippy passes with warnings denied; formatting and diff
+whitespace checks pass. Node/utility builds and comparisons used two build jobs,
+incremental/debug output disabled and low CPU/I/O priority. No live ledger/plot
+storage or unrelated process was used.

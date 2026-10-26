@@ -3,6 +3,7 @@ use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use mmx_execution::chain::{forks::ForkChain, genesis::Assets, network::Network};
 use mmx_types::{mmx, VnxType};
 use vnx::serde_json::{self, Value as Json};
+mod body_cases;
 
 #[derive(Clone, Debug)]
 enum Event {
@@ -625,10 +626,11 @@ fn competing_contents_share_one_global_group_bound_across_all_providers() {
             }
         })
         .collect();
-    assert_eq!(batches, [10, 10, 10, 2, 2, 2]);
-    assert!(batches
-        .chunks(3)
-        .all(|round| round.iter().sum::<usize>() <= 32));
+    assert_eq!(batches.iter().sum::<usize>(), 36);
+    assert!(batches.iter().all(|&size| size <= MAX_BODY_REQUESTS));
+    // Completions replenish capacity individually; there are no longer
+    // artificial three-provider rounds. Gated tests below cover the shared
+    // outstanding-request bound while providers remain blocked.
     assert_eq!(
         node.lock()
             .unwrap()

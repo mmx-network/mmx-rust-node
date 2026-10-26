@@ -12,7 +12,7 @@ use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
@@ -625,7 +625,16 @@ impl Relay {
     pub(crate) fn sequence(&self) -> u64 {
         self.latest.load(Ordering::Acquire)
     }
-    pub(crate) fn wait(&self, observed: u64) -> Result<()> {
+    pub(crate) fn stop_waiter(&self, stop: &AtomicBool) {
+        let _guard = self
+            .wake
+            .0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        stop.store(true, Ordering::Release);
+        self.wake.1.notify_all();
+    }
+    pub(crate) fn wait(&self, observed: u64, stop: &AtomicBool) -> Result<()> {
         let interval = self
             .state
             .lock()
@@ -636,7 +645,7 @@ impl Relay {
             .0
             .lock()
             .map_err(|_| error("relay notification poisoned"))?;
-        if self.sequence() == observed {
+        if self.sequence() == observed && !stop.load(Ordering::Acquire) {
             drop(
                 self.wake
                     .1

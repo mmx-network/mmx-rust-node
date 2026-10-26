@@ -722,3 +722,13 @@ limits. Listener/accepted options and outgoing native endpoint defaults are
 tested separately; busy incoming expiry releases admission capacity while an
 outgoing sibling stays connected. Synchronous writes/response work can still
 delay receive-loop expiry checks, unlike native's asynchronous event loop.
+
+The independent peer completion follow-up removes body-provider and idle-poll
+join barriers. Individual successful bodies survive a failed batch tail, and
+healthy pipelines refill a shared 32-request budget while a peer stalls. Late
+owners remain bounded and joined, with replacement and cancellation regressions.
+Sender teardown now wakes the idle wait directly. The controlled RAM comparison
+reduced the slow-provider full-window median from 543.015 to 442.597 ms while
+the healthy case was comparable; this is not a native/network throughput claim.
+See the [completion checkpoint](performance-parity.md#independent-peer-completion-checkpoint-2026-10-26)
+for workload, bounds and remaining window-publication/deadline differences.

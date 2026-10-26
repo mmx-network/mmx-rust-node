@@ -346,6 +346,64 @@ fn configured_body_lease_releases_a_silent_provider_before_the_full_fetch_timeou
     assert!(elapsed < Duration::from_secs(4), "body waited {elapsed:?}");
 }
 
+#[test]
+fn body_transport_delivers_a_reordered_success_before_another_request_times_out() {
+    use mmx_node::sync::peers::PeerSource;
+    let (network, _, steps, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config.set("Router.fetch_timeout_ms", json!(8000)).unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let blocks: Vec<_> = steps[..2].iter().map(|step| wire(&step["block"])).collect();
+    let ids: Vec<_> = blocks
+        .iter()
+        .map(|block| hash(block, "hash").unwrap())
+        .collect();
+    let expected = blocks[1].clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (delivered, observed) = std::sync::mpsc::channel();
+    let (finished, release) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut connection = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        answer_authentication(&mut connection);
+        let _first = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
+        let second = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
+        connection
+            .send(&record(
+                "mmx.Return",
+                [
+                    ("id".into(), second.field("id").unwrap().clone()),
+                    (
+                        "result".into(),
+                        V::Record(record(
+                            "mmx.Node.get_block.return",
+                            [("_ret_0".into(), V::Record(expected))],
+                        )),
+                    ),
+                ],
+            ))
+            .unwrap();
+        // The successful body must be delivered while this peer is still
+        // deliberately withholding the first request's reply.
+        observed.recv_timeout(Duration::from_secs(3)).unwrap();
+        release.recv_timeout(Duration::from_secs(3)).unwrap();
+    });
+    let mut client = peer::Client::connect(&address.to_string(), local).unwrap();
+    let mut ready = Vec::new();
+    let failure = client
+        .fetch_each(&ids, &mut |index, block| {
+            ready.push((index, block));
+            delivered.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap_err();
+    finished.send(()).unwrap();
+    server.join().unwrap();
+    assert!(failure.to_string().contains("peer request timed out"));
+    assert_eq!(ready, [(1, Some(blocks[1].clone()))]);
+}
+
 struct TestPeer {
     connection: peer::Connection,
     bootstrap: std::collections::VecDeque<Record>,

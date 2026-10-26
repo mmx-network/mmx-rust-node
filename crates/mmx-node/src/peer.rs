@@ -125,6 +125,7 @@ struct Output {
 struct RelayWorker {
     stop: Arc<AtomicBool>,
     thread: JoinHandle<()>,
+    wake: Relay,
 }
 impl Output {
     fn send_batch(&mut self, values: &[Record]) -> Result<()> {
@@ -227,6 +228,7 @@ impl Connection {
         let socket = self.stream.try_clone()?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let wake = relay.clone();
         let thread = thread::Builder::new()
             .name("mmx-peer-send".into())
             .spawn(move || {
@@ -239,7 +241,7 @@ impl Connection {
                                 .map_err(|_| error("peer output poisoned"))?
                                 .send_batch(std::slice::from_ref(record))
                         })?;
-                        relay.wait(observed)?;
+                        relay.wait(observed, &stopping)?;
                     }
                     Ok(())
                 };
@@ -250,7 +252,7 @@ impl Connection {
                     let _ = socket.shutdown(std::net::Shutdown::Both);
                 }
             })?;
-        self.relay_worker = Some(RelayWorker { stop, thread });
+        self.relay_worker = Some(RelayWorker { stop, thread, wake });
         self.relay_receipts = Some(receiver.clone());
         Ok(receiver)
     }
@@ -388,7 +390,7 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         if let Some(worker) = self.relay_worker.take() {
-            worker.stop.store(true, Ordering::Relaxed);
+            worker.wake.stop_waiter(&worker.stop);
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
             let _ = worker.thread.join();
         }
@@ -558,8 +560,23 @@ impl Client {
         methods: Vec<Record>,
         timeout: Duration,
     ) -> Result<Vec<Value>> {
-        let mut pending = std::collections::BTreeMap::new();
         let mut results = vec![None; methods.len()];
+        self.call_many_stream(methods, timeout, &mut |index, value| {
+            results[index] = Some(value);
+            Ok(())
+        })?;
+        results
+            .into_iter()
+            .map(|value| value.ok_or_else(|| error("missing peer result")))
+            .collect()
+    }
+    fn call_many_stream(
+        &mut self,
+        methods: Vec<Record>,
+        timeout: Duration,
+        emit: &mut dyn FnMut(usize, Value) -> Result<()>,
+    ) -> Result<()> {
+        let mut pending = std::collections::BTreeMap::new();
         let mut queued: std::collections::VecDeque<_> = (0..methods.len()).collect();
         let end = Instant::now() + timeout;
         let mut send_after = Instant::now();
@@ -634,20 +651,19 @@ impl Client {
                 if result.name != expected {
                     return Err(error(format!("unexpected peer result: {}", result.name)));
                 }
-                results[index] = Some(result.field("_ret_0")?.clone());
+                emit(index, result.field("_ret_0")?.clone())?;
             } else {
                 self.handle(message)?;
             }
         }
-        results
-            .into_iter()
-            .map(|v| {
-                v.ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::TimedOut, "peer request timed out")
-                        .into()
-                })
-            })
-            .collect()
+        if !pending.is_empty() || !queued.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "peer request timed out",
+            )
+            .into());
+        }
+        Ok(())
     }
     pub fn backpressure_retries(&self) -> u64 {
         self.backpressure_retries
@@ -713,10 +729,25 @@ impl Client {
         if hashes.len() > MAX_BODY_REQUESTS {
             return Err(error("peer body request window exceeds limit"));
         }
+        let mut values = vec![None; hashes.len()];
+        self.blocks_by_hash_each(hashes, &mut |index, value| {
+            values[index] = value;
+            Ok(())
+        })?;
+        Ok(values)
+    }
+    pub(crate) fn blocks_by_hash_each(
+        &mut self,
+        hashes: &[Hash],
+        emit: &mut dyn FnMut(usize, Option<Record>) -> Result<()>,
+    ) -> Result<()> {
+        if hashes.len() > MAX_BODY_REQUESTS {
+            return Err(error("peer body request window exceeds limit"));
+        }
         // The coordinator borrows this connection for a bounded body group.
         // Return ownership at the native body lease, rather than holding up
         // all providers for the full metadata/fetch inactivity timeout.
-        self.call_many_with_timeout(
+        self.call_many_stream(
             hashes
                 .iter()
                 .map(|hash| {
@@ -727,14 +758,15 @@ impl Client {
                 })
                 .collect(),
             self.peer_state.router.body_timeout,
-        )?
-        .into_iter()
-        .map(|value| match value {
-            Value::Null => Ok(None),
-            Value::Record(b) => Ok(Some(b)),
-            _ => Err(error("invalid peer block result")),
-        })
-        .collect()
+            &mut |index, value| {
+                let value = match value {
+                    Value::Null => None,
+                    Value::Record(block) => Some(block),
+                    _ => return Err(error("invalid peer block result")),
+                };
+                emit(index, value)
+            },
+        )
     }
     pub fn known_peers(&mut self) -> Result<Vec<String>> {
         let maximum = self.peer_state.router.max_peer_set.min(32);
@@ -951,6 +983,49 @@ impl Drop for Server {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn dropping_a_peer_wakes_its_sender_even_with_a_one_minute_idle_interval() {
+        for idle_first in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut connection =
+                Connection::connect(&listener.local_addr().unwrap().to_string()).unwrap();
+            let _remote = listener.accept().unwrap().0;
+            let relay = Relay::default();
+            relay
+                .configure_policy(&crate::router::RouterConfig {
+                    send_interval: Duration::from_secs(60),
+                    ..Default::default()
+                })
+                .unwrap();
+            connection
+                .start_relay(
+                    relay.clone(),
+                    mmx_types::mmx::node_type_e::FULL_NODE.value,
+                    true,
+                )
+                .unwrap();
+            let stop = connection.relay_worker.as_ref().unwrap().stop.clone();
+            if idle_first {
+                thread::sleep(Duration::from_millis(20));
+            }
+            let (finished, ready) = std::sync::mpsc::channel();
+            let worker = thread::spawn(move || {
+                drop(connection);
+                let _ = finished.send(());
+            });
+            let result = ready.recv_timeout(Duration::from_secs(2));
+            // Always release the test worker, including on regression.
+            if result.is_err() {
+                relay.stop_waiter(&stop);
+            }
+            worker.join().unwrap();
+            assert!(
+                result.is_ok(),
+                "peer shutdown waited for the sender's idle timer"
+            );
+        }
+    }
 
     #[test]
     fn native_listener_socket_settings_do_not_override_outgoing_endpoint_defaults() {

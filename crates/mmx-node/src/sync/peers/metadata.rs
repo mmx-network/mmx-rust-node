@@ -10,10 +10,12 @@ use std::{
 
 #[derive(Clone, Copy)]
 enum Kind {
+    Poll,
     Status,
     Hashes(u32, u32),
 }
 enum Value {
+    Poll,
     Status(Option<u32>),
     Hashes(Vec<Option<BlockHash>>),
 }
@@ -48,10 +50,6 @@ struct Observation {
     hashes: Vec<Option<BlockHash>>,
 }
 impl<S: PeerSource> PeerPool<S> {
-    fn next_query(&mut self) -> u64 {
-        self.query = self.query.wrapping_add(1);
-        self.query
-    }
     fn start_metadata(&mut self, index: usize, query: u64, kind: Kind) -> Result<()> {
         let peer = &mut self.peers[index];
         if peer.inflight.is_some() {
@@ -67,6 +65,7 @@ impl<S: PeerSource> PeerPool<S> {
             let began = Instant::now();
             let (result, busy) = catch_unwind(AssertUnwindSafe(|| {
                 let result = match kind {
+                    Kind::Poll => source.poll().map(|_| Value::Poll),
                     Kind::Status => source.synced_height().map(Value::Status),
                     Kind::Hashes(start, count) => source.hashes(start, count).map(Value::Hashes),
                 };
@@ -123,6 +122,7 @@ impl<S: PeerSource> PeerPool<S> {
             return Ok(None);
         }
         match reply.result {
+            Ok(Value::Poll) => (),
             Ok(Value::Status(Some(height))) => {
                 peer.height = height;
                 peer.qualified = true;
@@ -190,7 +190,18 @@ impl<S: PeerSource> PeerPool<S> {
         self.drain_metadata()?;
         Ok(())
     }
+    pub(super) fn start_polls(&mut self) -> Result<()> {
+        for index in 0..self.peers.len() {
+            if self.peers[index].active && self.peers[index].source.is_some() {
+                let query = self.next_query();
+                self.start_metadata(index, query, Kind::Poll)?;
+            }
+        }
+        Ok(())
+    }
     pub(super) fn drain_control(&mut self) -> Result<()> {
+        self.drain_bodies()?;
+        self.expire_bodies();
         self.drain_metadata()?;
         Ok(())
     }
@@ -205,6 +216,8 @@ impl<S: PeerSource> PeerPool<S> {
         Ok(())
     }
     pub fn refresh(&mut self) -> Result<u32> {
+        self.drain_bodies()?;
+        self.expire_bodies();
         self.drain_metadata()?;
         if self.refreshed.elapsed() >= self.query_interval {
             for peer in &mut self.peers {
@@ -222,7 +235,14 @@ impl<S: PeerSource> PeerPool<S> {
             .count()
             < self.minimum
         {
-            if self.len() < self.minimum || !self.peers.iter().any(|p| p.inflight.is_some()) {
+            self.drain_bodies()?;
+            self.expire_bodies();
+            if self.len() < self.minimum
+                || !self
+                    .peers
+                    .iter()
+                    .any(|p| p.inflight.is_some() || p.body.is_some())
+            {
                 return Err(error(format!(
                     "sync requires at least {} distinct synced peers",
                     self.minimum
@@ -256,6 +276,8 @@ impl<S: PeerSource> PeerPool<S> {
             if stop.load(Ordering::Relaxed) {
                 return Err(error("sync cancelled"));
             }
+            self.drain_bodies()?;
+            self.expire_bodies();
             self.start_statuses()?;
             let mut ready: Vec<_> = self
                 .peers
@@ -286,7 +308,11 @@ impl<S: PeerSource> PeerPool<S> {
                 .iter()
                 .any(|p| p.active && p.qualified && p.source.is_some() && !asked.contains(&p.id));
             if self.len() < self.minimum
-                || (!available && !self.peers.iter().any(|p| p.inflight.is_some()))
+                || (!available
+                    && !self
+                        .peers
+                        .iter()
+                        .any(|p| p.inflight.is_some() || p.body.is_some()))
             {
                 return Err(error(format!(
                     "fewer than {} peers answered the hash window",
@@ -311,11 +337,15 @@ impl<S> Drop for PeerPool<S> {
     fn drop(&mut self) {
         // Closing the receive end also releases a worker blocked on delivery.
         self.metadata.receiver.take();
+        self.bodies.close();
         for peer in &mut self.peers {
             if let Some(job) = peer.inflight.take() {
                 if let Ok(source) = job.worker.join() {
                     peer.source = Some(source);
                 }
+            }
+            if let Some(job) = peer.body.take() {
+                let _ = job.worker.join();
             }
         }
     }
@@ -407,6 +437,10 @@ mod replacement_tests {
             3,
             "polling below the sync minimum must restore the replacement"
         );
+        while pool.peers[0].inflight.is_some() {
+            assert!(Instant::now() < deadline);
+            pool.poll_metadata().unwrap();
+        }
         assert_eq!(pool.peers[0].source.as_ref().unwrap().height, 42);
         assert!(
             !pool.peers[0].qualified,
@@ -426,7 +460,10 @@ mod replacement_tests {
             .unwrap()
             .is_none());
         assert_eq!(pool.peers[0].inflight.as_ref().unwrap().query, fresh);
-        pool.receive_metadata(Duration::from_secs(3)).unwrap();
+        while !pool.peers[0].qualified {
+            assert!(Instant::now() < deadline);
+            pool.receive_metadata(Duration::from_millis(50)).unwrap();
+        }
         assert_eq!(pool.peers[0].height, 42);
         assert!(pool.peers[0].qualified);
         assert_eq!(pool.peers.len(), 3);

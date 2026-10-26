@@ -93,7 +93,7 @@ native knob. Remaining work is assessed by operational outcomes:
 | --- | --- |
 | Maintain a healthy, diverse peer pool through churn | Discovery runs on authentication, without periodic refresh or full-pool probing. An equivalent Rust policy need not reproduce native timer phasing. |
 | Recover connectivity after restart | Learned peers are memory-only, leaving startup dependent on seeds/fixed peers. Validate recovery when bootstrap sources fail; bounded peer persistence or another equivalent mechanism may provide resilience. |
-| Deliver ready work promptly despite slow peers | Body groups still wait for their bounded providers before processing results. Group bounds alone do not preserve native's immediate delivery of individual completions. |
+| Deliver ready work promptly despite slow peers | Body replies now reach the scheduler individually, retaining partial successes and replenishing a shared 32-request budget independently of slow owners. Window publication still accounts for every observed candidate or its lease. Controlled previous/current measurements are recorded below; saturated network comparisons remain. |
 | Remain responsive and bounded under send pressure | Independent senders exist, but synchronous writes/response work can delay connection expiry. Equivalent backpressure, priority delivery, cleanup and memory bounds matter more than reproducing native queue classes or knob names. |
 | Use available connections effectively | Incoming peers exchange gossip/RPC but are not historical sync observers; fixed peers must qualify as synced full nodes. The effect on connectivity and sync availability needs consideration, including NAT deployments. |
 | Establish automatic inbound reachability where requested | `open_port` / UPnP is unimplemented. Outgoing connections and manual port forwarding remain available; automatic mapping is a separate missing capability. |
@@ -115,9 +115,13 @@ The independent 100,000-entry receipt bound remains even when hash retention is
 zero. Sender notifications deliver completed publications immediately, with
 `send_interval_ms` controlling idle waits rather than reproducing native timer
 phasing. Transport retains its separate three-second connect, ten-second write
-and absolute partial-frame deadlines, and 64 MiB decode bounds. Body groups still
-join their bounded providers before processing that group's results; their
-deadline is the body lease. Native handles individual returns independently.
+and absolute partial-frame deadlines, and 64 MiB decode bounds. Individual body
+replies are correlated, checked and retained without waiting for their batch's
+tail. Late body owners remain bounded in their peer slot and are joined during
+cleanup; replacement sockets cannot inherit their qualification or stale data.
+Metadata and idle polls also retain one owner per connection, allowing other
+peers to progress while one poll is blocked. Sender shutdown wakes its idle wait
+directly rather than waiting for the configured send interval.
 RPC deadlines are absolute rather than native fetch-job inactivity timers, and
 failed/empty bodies retain the full lease. Incoming lifetime expiry uses an
 absolute receive deadline, including authentication and partial frames; native
@@ -177,17 +181,19 @@ after an offline rewind. Tests cover holding each requested height across timer
 updates/restarts, then replaying when sync resumes.
 
 Each connection correlates reordered native returns while serving peer requests,
-with at most 32 body requests outstanding. A shared group contains at most 32
-contents across all providers, independent of pool size, so smaller pools can
-fill a complete pipeline while retaining the previous eight-peer maximum.
+with at most 32 body requests outstanding across all providers, including late
+attempts from an earlier window. This bound is independent of pool size, so
+smaller pools can fill a complete pipeline. Each completed body frees request
+capacity while other owners remain busy; there is no provider-group join barrier.
 Common content is fetched from its
 fastest successful hash claimant; a slower provider is tried only after the request
 lease expires. Hash requests fan out to available pool members. Each height window
 completes after the configured minimum of independent successful replies, including
 other replies already ready at that point, without majority voting. Later
 replies restore their connection owner and update status, but cannot count toward
-another window. A connection owns at most one metadata operation; every outstanding
-owner is joined before the pool closes. Whole frames share a ten-second deadline
+another window. A connection owns at most one metadata, poll or body operation;
+every outstanding owner is joined before the pool closes. Closing bounded reply
+queues releases workers blocked on delivery. Whole frames share a ten-second deadline
 across header and payload reads, also bounded by the configured RPC/body
 deadline. Trickling bytes cannot extend either deadline; failed frames close the
 connection.
