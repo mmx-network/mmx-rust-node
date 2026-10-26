@@ -13,10 +13,10 @@ the website's header, footer, and wallet illustration for review.
 The latest round uses a 30% larger mark, filling about 81% of the coin's height
 before rotation, compared with about 62% in the baseline:
 
-- `larger-halo.svg`: a broad violet halo and brighter glow close to the glyph.
-- `simple-coin.svg`: the stronger halo with one smooth, three-pixel beveled rim.
-- `inset-coin.svg`: an engraved glyph, inner shadow and highlight, and the same
-  simple rim.
+- `larger-halo.svg`: a restrained violet halo with the original thin border.
+- `simple-coin.svg`: the same soft halo with a plain, six-pixel violet border.
+- `inset-coin.svg`: pale lilac engraving with deeper inner shadows, a bright
+  lower-edge highlight, and the same plain wide rim.
 
 The six earlier studies are retained in an expandable comparison:
 

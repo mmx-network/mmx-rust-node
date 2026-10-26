@@ -1,27 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <title>MMX — Inset coin</title>
-  <desc>An engraved violet mark with inner shadows, a lower-edge highlight, and a simple rim.</desc>
+  <title>MMX — Brighter inset</title>
+  <desc>A pale lilac engraved mark with deeper inner shadows, a bright lower edge, and a wider plain border.</desc>
   <defs>
-    <linearGradient id="simple-rim" gradientUnits="userSpaceOnUse" x1="28" y1="0" x2="228" y2="256">
-      <stop stop-color="#d5beff"/>
-      <stop offset="0.48" stop-color="#6a429b"/>
-      <stop offset="1" stop-color="#a47ccc"/>
-    </linearGradient>
     <linearGradient id="engraving" gradientUnits="userSpaceOnUse" x1="45" y1="25" x2="210" y2="235">
-      <stop stop-color="#c4aae9"/>
-      <stop offset="0.52" stop-color="#9471bd"/>
-      <stop offset="1" stop-color="#71508e"/>
+      <stop stop-color="#f4e9ff"/>
+      <stop offset="0.52" stop-color="#dfcaf4"/>
+      <stop offset="1" stop-color="#c4a6e8"/>
     </linearGradient>
     <filter id="inset" filterUnits="userSpaceOnUse" x="0" y="0" width="256" height="256" color-interpolation-filters="sRGB">
-      <feOffset in="SourceAlpha" dx="1.5" dy="2.5" result="shadow-offset"/>
+      <feOffset in="SourceAlpha" dx="2" dy="3" result="shadow-offset"/>
       <feComposite in="SourceAlpha" in2="shadow-offset" operator="out" result="top-edge"/>
-      <feGaussianBlur in="top-edge" stdDeviation="1.1" result="top-soft"/>
-      <feFlood flood-color="#090312" flood-opacity="0.95"/>
+      <feGaussianBlur in="top-edge" stdDeviation="0.8" result="top-soft"/>
+      <feFlood flood-color="#05020c"/>
       <feComposite in2="top-soft" operator="in" result="inner-shadow"/>
       <feOffset in="SourceAlpha" dx="-1" dy="-1.5" result="light-offset"/>
       <feComposite in="SourceAlpha" in2="light-offset" operator="out" result="bottom-edge"/>
       <feGaussianBlur in="bottom-edge" stdDeviation="0.5" result="bottom-soft"/>
-      <feFlood flood-color="#f0dcff" flood-opacity="0.95"/>
+      <feFlood flood-color="#fff0ff"/>
       <feComposite in2="bottom-soft" operator="in" result="inner-light"/>
       <feMerge><feMergeNode in="SourceGraphic"/><feMergeNode in="inner-shadow"/><feMergeNode in="inner-light"/></feMerge>
       <feComposite in2="SourceAlpha" operator="in"/>
@@ -43,7 +38,7 @@
     <circle cx="128" cy="128" r="128" fill="url(#base)"/>
     <circle cx="128" cy="128" r="128" fill="url(#light)"/>
     <circle cx="128" cy="128" r="128" fill="#d7beff" fill-opacity="0.333333" mask="url(#rim)"/>
-    <circle cx="128" cy="128" r="126.5" fill="none" stroke="url(#simple-rim)" stroke-width="3"/>
+    <circle cx="128" cy="128" r="125" fill="none" stroke="#c084fc" stroke-opacity="0.6" stroke-width="6"/>
     <g transform="translate(128 128) scale(1.1) translate(-128 -128)">
       <path filter="url(#inset)" fill="url(#engraving)" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
     </g>

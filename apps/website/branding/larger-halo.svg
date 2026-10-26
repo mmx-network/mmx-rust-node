@@ -1,14 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <title>MMX — Larger halo</title>
-  <desc>A 30% larger mark with a broader violet halo and a bright inner glow.</desc>
+  <title>MMX — Soft halo</title>
+  <desc>A 30% larger mark with a restrained violet glow and the original thin border.</desc>
   <defs>
-    <filter id="strong-halo" filterUnits="userSpaceOnUse" x="-32" y="-32" width="320" height="320" color-interpolation-filters="sRGB">
-      <feMorphology in="SourceAlpha" operator="dilate" radius="1.1" result="spread"/>
-      <feGaussianBlur in="spread" stdDeviation="9" result="wide"/>
-      <feFlood flood-color="#a78bfa"/>
+    <filter id="soft-halo" filterUnits="userSpaceOnUse" x="-32" y="-32" width="320" height="320" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="4.5" result="wide"/>
+      <feFlood flood-color="#a78bfa" flood-opacity="0.5"/>
       <feComposite in2="wide" operator="in" result="outer-glow"/>
-      <feGaussianBlur in="spread" stdDeviation="2.8" result="near"/>
-      <feFlood flood-color="#e0caff" flood-opacity="0.9"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.1" result="near"/>
+      <feFlood flood-color="#e0caff" flood-opacity="0.22"/>
       <feComposite in2="near" operator="in" result="inner-glow"/>
       <feMerge><feMergeNode in="outer-glow"/><feMergeNode in="inner-glow"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
@@ -33,7 +32,7 @@
     <circle cx="128" cy="128" r="127.25" fill="none" stroke="#c084fc" stroke-opacity="0.376471" stroke-width="1.5"/>
     <g clip-path="url(#face-clip)">
     <g transform="translate(128 128) scale(1.1) translate(-128 -128)">
-      <path filter="url(#strong-halo)" fill="#fff" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
+      <path filter="url(#soft-halo)" fill="#fff" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
     </g>
     </g>
   </g>
