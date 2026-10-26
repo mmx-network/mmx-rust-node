@@ -181,7 +181,9 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
         assert len(logos) == 4
         document_ids = set()
         for logo in logos:
-            ElementTree.fromstring(logo)
+            svg = ElementTree.fromstring(logo)
+            effects = svg.findall('.//{http://www.w3.org/2000/svg}filter') + svg.findall('.//{http://www.w3.org/2000/svg}mask')
+            assert bool(effects) == (int(svg.get('width')) > 64)
             ids = set(re.findall(rb'\bid="([^"]+)"', logo))
             assert not document_ids & ids
             document_ids.update(ids)

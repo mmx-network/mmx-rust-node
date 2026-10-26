@@ -1,5 +1,6 @@
 import { cx } from './internal/cx';
 import mmxLogo from '../../../branding/mmx-logo.svg';
+import mmxCompactLogo from '../../../branding/mmx-logo-compact.svg';
 
 // Official MMX mark, traced from the circular logo (256 × 256 grid).
 export const MMX_GLYPH =
@@ -14,7 +15,7 @@ export const MMX_GLYPH =
 export interface BrandMarkProps {
   /** Pixel size (default 32). */
   size?: number;
-  /** color: the selected gradient SVG; glyph: glyph only in currentColor. */
+  /** color: the selected SVG, compact through 64 px; glyph: currentColor. */
   variant?: 'color' | 'glyph';
   /** Accessible name; decorative when omitted. */
   label?: string;
@@ -26,7 +27,7 @@ export function BrandMark({ size = 32, variant = 'color', label, class: classNam
     return (
       <img
         class={cx('brand-mark', 'brand-mark--color', className)}
-        src={mmxLogo}
+        src={size <= 64 ? mmxCompactLogo : mmxLogo}
         width={size}
         height={size}
         alt={label ?? ''}

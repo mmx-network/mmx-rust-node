@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { compactLogo } from './compact-logo.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const app = resolve(here, '..');
@@ -20,6 +21,7 @@ const document = (size, title, body) =>
 /** Also exported so an offline SVG renderer can use exactly the same inputs. */
 export async function brandJobs() {
   const svg = await readFile(join(here, 'mmx-logo.svg'), 'utf8');
+  const compact = compactLogo(svg);
   const body = svg.replace(/<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
     .replace(/<title>.*?<\/title>/, '').replace(/<desc>.*?<\/desc>/, '').trim();
   const appIcon = document(1024, 'MMX Wallet',
@@ -33,10 +35,12 @@ export async function brandJobs() {
   const touch = square(0.88);
   const maskable = square(0.72);
   await writeFile(join(here, 'app-icon.svg'), appIcon);
+  await writeFile(join(here, 'mmx-logo-compact.svg'), compact);
   for (const destination of [
     join(app, 'public/favicon.svg'), join(explorer, 'public/favicon.svg'),
-    join(website, 'public/favicon.svg'), join(website, 'public/mmx-logo.svg'),
-  ]) await writeFile(destination, svg);
+    join(website, 'public/favicon.svg'),
+  ]) await writeFile(destination, compact);
+  await writeFile(join(website, 'public/mmx-logo.svg'), svg);
 
   const share = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
   <title>MMX Network</title>

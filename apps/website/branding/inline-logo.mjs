@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { compactLogo } from '../../wallet/branding/compact-logo.mjs';
 
 const source = new URL('../../wallet/branding/mmx-logo.svg', import.meta.url);
 
@@ -11,7 +12,8 @@ export function inlineLogos(html) {
     const height = /\bheight="(\d+)"/.exec(placeholder)?.[1];
     if (!width || !height) throw new Error('MMX logo placeholders need explicit dimensions');
     const prefix = `mmx-logo-${++index}-`;
-    return readFileSync(source, 'utf8')
+    const svg = readFileSync(source, 'utf8');
+    return (Number(width) <= 64 ? compactLogo(svg) : svg)
       .replace(/\bwidth="256"/, `width="${width}"`)
       .replace(/\bheight="256"/, `height="${height}"`)
       .replace('<svg ', '<svg data-mmx-logo="" aria-hidden="true" focusable="false" ')

@@ -52,6 +52,9 @@ Each instance gets unique definition IDs so its gradients, glyph and halo
 resolve locally. The hero's outer shadow is a separate CSS layer and never
 filters the foreground logo. A transparent gutter in the SVG prevents rim
 clipping; no runtime script is needed to insert the logos.
+Small placements use the compact derivation from the same canonical SVG,
+omitting blur and mask layers while retaining the geometry and colors. The
+hero keeps the full treatment.
 The static HTML includes a canonical URL, search/social descriptions, and
 `WebSite` microdata for the site name. `robots.txt` allows crawlers and points
 to the homepage sitemap; section anchors are not separate sitemap entries.

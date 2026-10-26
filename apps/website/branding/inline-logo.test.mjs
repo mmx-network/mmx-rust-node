@@ -18,6 +18,11 @@ test('inlines independent vector logos with local, collision-free references', (
     assert.ok(refs.length > 0);
     for (const reference of refs) assert.ok(ids.has(reference[1] ?? reference[2]));
     assert.ok(!/<image\b|<img\b|<script\b|<style\b|\sstyle=/.test(svg));
+    if (sizes[index] <= 64) {
+      assert.ok(!/<filter\b|<mask\b|<clipPath\b|\sfilter=|\smask=|\sclip-path=/.test(svg));
+    } else {
+      assert.ok(svg.includes('<filter'));
+    }
   }
 });
 

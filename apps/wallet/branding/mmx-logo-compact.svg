@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>MMX</title>
+  <desc>Compact MMX mark with the selected violet gradient, wide border, and nine-degree rotation.</desc>
+  <defs>
+    <path id="mmx-glyph" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
+    <linearGradient id="base" gradientUnits="userSpaceOnUse" x1="12.086" y1="-10.141" x2="243.914" y2="266.141">
+      <stop stop-color="#4c1d95"/>
+      <stop offset="1" stop-color="#1d102f"/>
+    </linearGradient>
+    <radialGradient id="light" gradientUnits="userSpaceOnUse" cx="76.8" cy="25.6" r="291.885">
+      <stop stop-color="#a670fa" stop-opacity="0.439216"/>
+      <stop offset="0.7" stop-color="#a670fa" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g transform="translate(4 4) scale(0.96875)">
+  <g transform="rotate(-9 128 128)">
+    <circle cx="128" cy="128" r="128" fill="url(#base)"/>
+    <circle cx="128" cy="128" r="128" fill="url(#light)"/>
+    <circle cx="128" cy="128" r="125" fill="none" stroke="#c084fc" stroke-opacity="0.6" stroke-width="6"/>
+    <g>
+    <g transform="translate(128 128) scale(1.1) translate(-128 -128)">
+      <use href="#mmx-glyph" fill="#fff"/>
+    </g>
+    </g>
+  </g>
+  </g>
+</svg>
