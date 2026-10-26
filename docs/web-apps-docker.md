@@ -13,7 +13,40 @@ certificates. Visitors use HTTPS at the CDN, including for the wallet's browser
 crypto and clipboard features. Browsers contact `https://rpc.mmx.network`
 directly; this container only serves static files and has no node or database.
 
-## Build and run
+## Pull and run on Gigahost
+
+The published image is `ghcr.io/mmx-network/mmx-apps:latest` (Linux amd64).
+No source checkout or build tools are needed on the server:
+
+```sh
+docker pull ghcr.io/mmx-network/mmx-apps:latest
+docker run -d --name mmx-apps --restart unless-stopped \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  -p 23147:8080 ghcr.io/mmx-network/mmx-apps:latest
+```
+
+Replace `23147` with a port assigned to your instance. In Gigahost's container
+settings, use `ghcr.io/mmx-network/mmx-apps:latest` as the image, expose container
+HTTP port `8080`, and map it to the assigned host port. If the platform expects
+the application to listen on the assigned port directly, set `PORT` to that
+number instead. Set both CDN origins to the instance IP and assigned HTTP port,
+preserving `wallet.mmx.network` and `explore.mmx.network` as their `Host` headers.
+
+With this repository's Compose file, pull and start without building:
+
+```sh
+docker compose pull
+HTTP_PORT=23147 docker compose up -d --no-build
+```
+
+The workflow publishes `latest` and `sha-<full commit SHA>` tags after both
+default/custom-RPC image smoke tests pass on `main`. Pull requests and other
+branches only validate. To pin a release, use its SHA tag or digest, including
+through `MMX_APPS_IMAGE` with Compose. To update, pull again and recreate the
+container; with Compose, repeat the two commands above.
+
+## Build from source
 
 From the repository root (Docker with BuildKit and Compose required):
 
@@ -60,6 +93,7 @@ generated WASM, desktop build output and dependency directories.
 
 | Setting | When | Default | Purpose |
 | --- | --- | --- | --- |
+| `MMX_APPS_IMAGE` | Compose startup/build | `ghcr.io/mmx-network/mmx-apps:latest` | Image to pull, run or build; accepts a pinned tag/digest |
 | `HTTP_PORT` | Compose startup | `8080` | Published host port within the instance's assigned slice |
 | `HTTP_BIND` | Compose startup | `0.0.0.0` | Host interface for the published port |
 | `PORT` | Container startup | `8080` | Internal HTTP listener, integer from 1024 to 65535 |

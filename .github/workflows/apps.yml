@@ -33,10 +33,16 @@ on:
       - '.github/workflows/apps.yml'
 permissions:
   contents: read
+concurrency:
+  group: mmx-apps-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   image:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,7 +52,19 @@ jobs:
           node-version: 24
       - run: node --test deploy/apps/prepare.test.mjs
       - run: docker compose config --quiet
-      - run: nice -n 19 ionice -c 3 docker build --tag mmx-apps .
+      - run: nice -n 19 ionice -c 3 docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag mmx-apps .
       - run: python3 deploy/apps/test-image.py mmx-apps
       - run: nice -n 19 ionice -c 3 docker build --build-arg VITE_RPC_URL=https://rpc.example.org:8443/api --tag mmx-apps:rpc-test .
       - run: python3 deploy/apps/test-image.py mmx-apps:rpc-test --rpc-origin https://rpc.example.org:8443
+      - name: Publish tested default-RPC image to GitHub Container Registry
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          apps_image=ghcr.io/mmx-network/mmx-apps
+          docker tag mmx-apps "$apps_image:sha-$GITHUB_SHA"
+          docker push "$apps_image:sha-$GITHUB_SHA"
+          docker tag mmx-apps "$apps_image:latest"
+          docker push "$apps_image:latest"

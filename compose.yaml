@@ -1,6 +1,6 @@
 services:
   apps:
-    image: mmx-apps:latest
+    image: ${MMX_APPS_IMAGE:-ghcr.io/mmx-network/mmx-apps:latest}
     build:
       context: .
       args:
