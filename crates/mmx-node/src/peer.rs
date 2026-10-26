@@ -10,6 +10,8 @@ use crate::{
     Node, Result,
 };
 use mmx_consensus::{Hash, Record, Value};
+#[cfg(test)]
+mod discovery_tests;
 mod identity;
 use std::{
     io::{Read, Write},
@@ -114,6 +116,7 @@ pub struct Connection {
     last_size: usize,
     received_at: Instant,
     expires_at: Option<Instant>,
+    incoming: bool,
     compressed_limit: usize,
 }
 struct Output {
@@ -194,11 +197,13 @@ impl Connection {
             last_size: 0,
             received_at: Instant::now(),
             expires_at: None,
+            incoming: false,
             compressed_limit: DEFAULT_COMPRESSED_LIMIT,
         })
     }
     fn incoming(stream: TcpStream, policy: &crate::router::RouterConfig) -> Result<Self> {
         let mut connection = Self::new(stream)?;
+        connection.incoming = true;
         policy.configure_inbound_socket(&socket2::SockRef::from(&connection.stream))?;
         connection.expires_at = policy
             .disconnect_interval
@@ -477,6 +482,9 @@ pub struct Client {
     auth_gossip: Vec<(Record, usize)>,
     auth_bytes: usize,
     stopping: Option<Arc<AtomicBool>>,
+    discovery_enabled: bool,
+    discovery_next: Instant,
+    discovery_pending: Option<(u32, Instant)>,
     _permit: crate::router::Permit,
 }
 impl Client {
@@ -525,6 +533,9 @@ impl Client {
             auth_gossip: Vec::new(),
             auth_bytes: 0,
             stopping,
+            discovery_enabled: false,
+            discovery_next: Instant::now(),
+            discovery_pending: None,
             _permit: permit,
         };
         client.authenticate()?;
@@ -591,6 +602,7 @@ impl Client {
             {
                 return Err(error("peer shutdown"));
             }
+            self.discover_if_due()?;
             if Instant::now() >= send_after && (!draining || pending.is_empty()) {
                 draining = false;
                 let mut batch = Vec::new();
@@ -631,6 +643,9 @@ impl Client {
                 continue;
             };
             if message.name == "mmx.Return" {
+                if self.discovery_return(&message)? {
+                    continue;
+                }
                 let Some((index, expected)) = pending.remove(&number(&message, "id")?) else {
                     continue;
                 };
@@ -685,7 +700,103 @@ impl Client {
         let height = self
             .synced_height()?
             .ok_or_else(|| error("peer is not synced"))?;
+        if !self.connection.incoming {
+            self.peer_state
+                .book
+                .confirm(self.connection.stream.peer_addr()?)?;
+        }
         Ok((id, height))
+    }
+    pub(crate) fn enable_discovery(&mut self, immediate: bool) {
+        if let Some(interval) = self.peer_state.router.discover_interval {
+            self.discovery_enabled = self.identity.as_ref().is_some_and(|identity| {
+                identity.role == mmx_types::mmx::node_type_e::FULL_NODE.value
+            });
+            self.discovery_next =
+                Instant::now() + if immediate { Duration::ZERO } else { interval };
+        }
+    }
+    fn discover_if_due(&mut self) -> Result<()> {
+        let Some(interval) = self.peer_state.router.discover_interval else {
+            return Ok(());
+        };
+        if !self.discovery_enabled || self.peer_state.router.max_peer_set == 0 {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if self
+            .discovery_pending
+            .is_some_and(|(_, deadline)| now >= deadline)
+        {
+            self.discovery_pending = None;
+        }
+        if now < self.discovery_next || self.discovery_pending.is_some() {
+            return Ok(());
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.connection.send(&record(
+            "mmx.Request",
+            [
+                ("id".into(), Value::Uint(id.into())),
+                (
+                    "method".into(),
+                    Value::Record(record(
+                        "mmx.Router.get_peers",
+                        [(
+                            "max_count".into(),
+                            Value::Uint(
+                                self.peer_state
+                                    .router
+                                    .max_peer_set
+                                    .min(crate::peer_book::DISCOVERY_COUNT)
+                                    as u64,
+                            ),
+                        )],
+                    )),
+                ),
+            ],
+        ))?;
+        self.discovery_next = now + interval;
+        self.discovery_pending =
+            Some((id, now + interval.min(self.peer_state.router.fetch_timeout)));
+        Ok(())
+    }
+    fn discovery_return(&mut self, message: &Record) -> Result<bool> {
+        let id = number(message, "id")?;
+        if !self
+            .discovery_pending
+            .is_some_and(|(pending, _)| id == pending)
+        {
+            return Ok(false);
+        }
+        let (_, deadline) = self.discovery_pending.take().unwrap();
+        if Instant::now() >= deadline {
+            return Ok(true);
+        }
+        // Discovery is optional: malformed/negative replies cannot poison
+        // addresses or fail an unrelated hash/body operation.
+        if let Ok(result) = message.field("result").and_then(Value::record) {
+            if result.name == "mmx.Router.get_peers.return" {
+                if let Ok(values) = result.field("_ret_0").and_then(Value::seq) {
+                    for value in values.iter().take(
+                        self.peer_state
+                            .router
+                            .max_peer_set
+                            .min(crate::peer_book::DISCOVERY_COUNT),
+                    ) {
+                        if let Ok(address) = value.text().and_then(|bytes| {
+                            std::str::from_utf8(bytes).map_err(|_| {
+                                mmx_consensus::Error::Input("invalid peer address".into())
+                            })
+                        }) {
+                            self.peer_state.book.learn(address)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(true)
     }
     pub fn synced_height(&mut self) -> Result<Option<u32>> {
         let height = self
@@ -815,6 +926,7 @@ impl Client {
         if message.name == "mmx.Request" {
             respond_with(&self.node, &self.peer_state, &mut self.connection, &message)
         } else if message.name == "mmx.Return" {
+            self.discovery_return(&message)?;
             Ok(())
         } else if self.identity.is_none() {
             // Native sends its VDF bootstrap before answering authentication.
@@ -832,6 +944,7 @@ impl Client {
         }
     }
     pub fn poll(&mut self) -> Result<()> {
+        self.discover_if_due()?;
         let now = Instant::now();
         let end = self.receive_deadline(now + Duration::from_secs(10))?;
         if let Some(message) = self.connection.receive_until(
@@ -927,6 +1040,7 @@ impl Server {
                                     Some(stop.clone()),
                                     permit,
                                 )?;
+                                client.enable_discovery(false);
                                 let mut query = Instant::now();
                                 while !stop.load(Ordering::Relaxed) {
                                     client.poll()?;

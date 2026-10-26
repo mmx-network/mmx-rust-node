@@ -64,6 +64,11 @@ distinct authenticated sync peers; `Router.num_peers_out` and
 `Router.min_sync_peers` control those counts.
 If discovery needs help, add `--peer HOST[:PORT]`; supplied peers replace the
 configured seed list, and discovery can find more peers from them.
+Discovery refreshes during operation, and authenticated outbound peer addresses
+are saved for later starts. An existing cache can bootstrap the node without
+seeds or fixed peers. Cache writes run in the background; see the
+[router configuration reference](docs/development.md#router-configuration)
+for storage and discovery controls.
 
 Check progress from another terminal:
 

@@ -978,7 +978,7 @@ fn explicit_network_and_data_dir_override_home_selectors_and_configured_database
 }
 
 #[test]
-fn native_router_file_with_local_overrides_starts_a_configured_listener_and_fixed_only_sync() {
+fn native_router_overrides_support_a_configured_listener_fixed_only_sync_and_cached_restart() {
     configured_services(false, false, true);
 }
 
@@ -1197,8 +1197,8 @@ fn configured_services(from_home: bool, overrides: bool, router_overrides: bool)
     if !from_home {
         args.extend([
             "-c".into(),
-            base.into_os_string(),
-            local.into_os_string(),
+            base.as_os_str().to_owned(),
+            local.as_os_str().to_owned(),
             "--data-dir".into(),
             root.join("rust-data").into_os_string(),
         ]);
@@ -1324,6 +1324,49 @@ fn configured_services(from_home: bool, overrides: bool, router_overrides: bool)
     wallets.close();
     node.close();
     drop(daemon);
+    if router_overrides {
+        // Remove every configured bootstrap address. The next process must
+        // rediscover the same temporary peer from its authenticated cache.
+        fs::write(
+            local.join("Router.json"),
+            json!({
+                "host":"127.0.0.1","port":0,"max_connections":4,
+                "num_peers_out":1,"min_sync_peers":1,"seed_peers":[],"fixed_peers":[]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(local.join("farmer"), "false").unwrap();
+        let mut restart_args = args.clone();
+        restart_args.extend([
+            "--no-services".into(),
+            "--opencl-device".into(),
+            "-1".into(),
+        ]);
+        let (restarted, _) =
+            Daemon::start_line_env(binary.to_str().unwrap(), &restart_args, root, &environment);
+        let line = restarted.line("P2P ");
+        let endpoint = line
+            .split_whitespace()
+            .nth(4)
+            .unwrap()
+            .trim_end_matches(',');
+        let rpc = client(endpoint, "Node");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while rpc
+            .call_value("mmx.Node.get_synced_height", json!({}))
+            .unwrap()["_ret_0"]
+            .is_null()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "restart did not recover using cached peers alone"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        rpc.close();
+        restarted.shutdown_successfully();
+    }
     for peer in &mut peers {
         peer.shutdown();
     }

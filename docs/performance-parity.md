@@ -902,9 +902,9 @@ caches now consume their native keys. The C++ default file supplies 8 outgoing
 peers and 5 observers. Explicit 1/1 and larger targets work too; the minimum
 is clamped to the outgoing target. Fixed peers have extra slots. As in C++,
 retry deadlines do not hold an underfilled pool below its target; the connection
-cycle controls retries during startup. Rust still does not probe/rotate a full
-pool on native retry deadlines. Known peers remain memory-only and discovery
-occurs on authentication rather than native's periodic discovery timer.
+cycle controls retries during startup. The peer recovery checkpoint below adds
+asynchronous periodic discovery, bounded full-pool probes and persisted
+authenticated endpoints without reproducing native timer/rotation mechanics.
 
 Existing bounded background connection/metadata ownership, identity
 deduplication, randomized candidate selection and immediate completion admission
@@ -1040,11 +1040,10 @@ Router concerns are:
    prompt cancellation, expiry and cleanup. Test slow readers and saturated
    sends while unrelated peers and RPC continue to progress. An event loop or
    native queue implementation is not prescribed.
-3. Peer management must recover from churn and restart, replenish useful peers
-   and avoid dependence on a stale initial pool or unavailable bootstrap sources.
-   Rust currently lacks periodic discovery, persisted learned peers and full-pool
-   refresh probes. Those mechanisms or an equivalent approach must establish
-   resilience; exact native timers, rotation policies and storage are optional.
+3. The peer recovery checkpoint below covers periodic discovery, bounded
+   full-pool probes and cached-only restart. Wider churn, eclipse resistance and
+   constrained-network comparisons remain; exact native timers, rotation
+   policies and storage formats are optional.
 4. Connection-role and sync policies must retain availability in the supported
    deployment scenarios, including NAT. Incoming historical sync exclusion,
    strict successful-observer minimums, fixed-peer qualification and absolute
@@ -1140,3 +1139,88 @@ Node/tools all-target Clippy passes with warnings denied; formatting and diff
 whitespace checks pass. Node/utility builds and comparisons used two build jobs,
 incremental/debug output disabled and low CPU/I/O priority. No live ledger/plot
 storage or unrelated process was used.
+
+### Peer discovery and restart recovery checkpoint (2026-10-26)
+
+Reference: C++ `141054c398d2bab6802174379ce3b191d4f3a499`,
+`Router.cpp::{main,connect,discover,on_connect,on_return,get_peers,save_data}`
+and its valid/public-address filters. Native combines seeds, known peers and
+retry candidates, refreshes discovery asynchronously, tests extra candidates
+while full, and saves known peers every five minutes and at shutdown.
+
+Managed Rust connections now issue correlated discovery requests during normal
+poll/RPC work, initially for outbound sync peers and periodically for full nodes
+in both directions. There is no extra discovery receive worker, no synchronous
+`get_peers` wait before admitting a qualified sync peer, and at most one pending
+request per connection. Optional replies have a deadline bounded by the fetch
+timeout and discovery period. Stale/unsolicited, malformed-content and exception
+replies do not populate the directory or fail unrelated RPCs. Ordinary RPC
+correlation, backpressure windows and body deadlines remain independent.
+
+The shared directory separates up to `max_peer_set` confirmed endpoints from
+the same number of untrusted hints. Hints cannot evict confirmed peers or enter
+the persistent cache. IP filtering rejects local/private and other conservative
+nonpublic ranges, including IPv4-mapped aliases; hostname lookups and incoming
+ephemeral source ports are not learned from gossip. Confirmed endpoints require
+an authenticated outgoing connection on our genesis, a full-node role and a
+synced-height response. Only confirmed public endpoints at the network's default
+peer port are advertised. Explicit private/custom-port connections can be cached
+for their configured use; IPv6 scope IDs survive the roundtrip. Confirmation is
+reachability/identity evidence, never permission to bypass block consensus.
+
+Candidate snapshots refresh only when the directory changes, avoiding address
+list copies on ordinary body windows. Removed candidates prune retry bookkeeping
+while retaining pending connection owners. A full pool may validate one extra
+candidate per discovery period, still respecting the connect cycle and ordinary
+per-address retry deadlines. Underfilled pools retain native-style immediate
+retries on a connect cycle. Connection budgeting includes retained old owners,
+including fixed peers. A higher advertised-height candidate can replace only
+an idle lower-height ordinary peer; fixed peers, busy owners and equal-height
+connections are retained. Probes that cannot be installed still add confirmed
+fallback endpoints. Optional probe thread-creation failure leaves the existing
+pool running. This is a bounded exploration policy, not native's random
+overconnection and trimming algorithm. Inbound historical observers, fork-check
+discovery and broader malicious-peer selection policies remain separate work.
+
+The executable loads one bounded, versioned JSON cache, namespaced by genesis
+and network peer port. `Router.storage_path` selects its directory (relative
+CLI paths use `MMX_NETWORK`); otherwise it lives in the Rust ledger directory.
+Startup can proceed from cached peers without seeds/fixed peers. The loader
+checks regular-file type, 64 KiB byte limit, version/network identity and at most
+1,024 entries, reapplies IP blocks and current capacity, and salvages valid
+numeric endpoints. Invalid/missing data never stops seeded startup. Existing
+C++ cache files are not read or rewritten.
+
+One owned writer snapshots confirmed addresses, releases the directory mutex,
+then serializes/writes/syncs a temporary file and atomically replaces the cache
+with a Unix directory sync. Dirty changes coalesce to the latest generation,
+with an immediate first dirty snapshot, at most one write per five minutes
+afterward, and a final dirty flush on graceful shutdown. There is no accumulating
+snapshot queue. Slow/failing writes do not hold directory/ledger locks or run on
+the coordinator/transport threads; replacement failures preserve the prior
+complete file, and write/sync failures are reported and retried on the bounded
+cadence. Shutdown joins the writer and can wait for
+its filesystem operation, as native shutdown can; this advisory-cache durability
+does not replace ledger durability. No ledger/plot scanning or broad state
+caching is introduced.
+
+Regressions cover independent hint/confirmed bounds, public filtering, mapped-IP
+blocks, confirmed-only advertisement, numeric ports/scopes, corrupt/oversized/
+nonregular cache handling, foreign-network rejection, atomic replacement failure,
+blocked-writer isolation and final-generation coalescing. Real TCP tests reorder
+discovery and ordinary replies, leave discovery unanswered, expire/retry it and
+inject stale/unsolicited/negative replies without disrupting ordinary RPCs. A
+gated scheduler test bounds full-pool probes to one, and an owned metadata job
+proves ahead-peer replacement cannot evict busy/fixed peers or churn an equal
+height. The real-daemon suite now shuts down a fixed-only node, removes all seed
+and fixed-peer config, restarts the same temporary ledger, and reaches sync
+using only the saved cache. These checks establish bounded behavior and recovery,
+not C++ throughput or long-running network parity.
+
+Validation: **168 node tests and 10 real-daemon integration tests passed**.
+Node/tools all-target Clippy passes with warnings denied, and formatting/diff
+whitespace checks pass. Builds use two jobs, incremental/debug output disabled
+and low CPU/I/O priority. Tests use RAM chains, loopback sockets and small
+temporary config/cache files; no live ledger/plots or unrelated processes were
+used. The blocked-writer test establishes isolation/coalescing, not storage or
+network performance parity under sustained load.

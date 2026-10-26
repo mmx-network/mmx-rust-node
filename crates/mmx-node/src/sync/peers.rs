@@ -25,7 +25,7 @@ pub const MAX_PEERS: usize = 8;
 // authenticated pools to fill a complete body-request pipeline as well.
 const MAX_BODY_INFLIGHT: usize = 32;
 type Missing = BTreeSet<(u32, Hash)>;
-type QualifiedPeer = (Hash, u32, Client, Vec<String>);
+type QualifiedPeer = (Hash, u32, Client);
 mod body;
 mod connect;
 mod metadata;
@@ -257,6 +257,37 @@ impl<S: PeerSource> PeerPool<S> {
         });
         self.refreshed = Instant::now() - self.query_interval;
         true
+    }
+    fn make_room_for_ahead_peer(
+        &mut self,
+        id: Hash,
+        height: u32,
+        connected: &mut BTreeMap<Hash, String>,
+        fixed: &BTreeSet<String>,
+    ) {
+        if self.peers.len() < self.maximum || self.peers.iter().any(|peer| peer.id == id) {
+            return;
+        }
+        let replace = self
+            .peers
+            .iter()
+            .enumerate()
+            .filter(|(_, peer)| {
+                peer.source.is_some()
+                    && peer.inflight.is_none()
+                    && peer.body.is_none()
+                    && peer.height < height
+                    && connected
+                        .get(&peer.id)
+                        .is_some_and(|address| !fixed.contains(address))
+            })
+            .min_by_key(|(_, peer)| peer.height)
+            .map(|(index, _)| index);
+        if let Some(index) = replace {
+            let old = self.peers.remove(index);
+            connected.remove(&old.id);
+            self.retired_backpressure += old.backpressure;
+        }
     }
     /// Native identity replacement has already shut down the old socket. Keep
     /// its metadata owner until it returns, then install the authenticated
@@ -949,7 +980,7 @@ pub fn run(
     stop: &Arc<AtomicBool>,
     once: bool,
 ) -> Result<()> {
-    let (genesis, own_id, policy) = {
+    let (genesis, own_id, policy, book) = {
         let local = node.lock().map_err(|_| error("node lock poisoned"))?;
         let genesis = local
             .chain
@@ -958,7 +989,8 @@ pub fn run(
             .ok_or_else(|| error("missing genesis"))?;
         let info = local.call(&crate::node::record("mmx.Router.get_id", []))?;
         let own_id = info.field("_ret_0")?.bytes()?.try_into()?;
-        (genesis, own_id, local.peer_state().router)
+        let state = local.peer_state();
+        (genesis, own_id, state.router, state.book)
     };
     let mut policy = (*policy).clone();
     policy.fixed_peers = policy
@@ -972,7 +1004,8 @@ pub fn run(
     addresses.dedup();
     let minimum = policy.min_sync_peers;
     let maximum = policy.pool_capacity();
-    let mut learned = BTreeSet::new();
+    let explicit = addresses.clone();
+    let mut directory_revision = 0;
     let mut pool = PeerPool::<Client>::with_config(vec![], &policy);
     let mut connected = BTreeMap::<Hash, String>::new();
     let mut retry_at = BTreeMap::<String, Instant>::new();
@@ -983,6 +1016,16 @@ pub fn run(
     let mut maintain = |pool: &mut PeerPool<Client>| -> Result<()> {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
+        }
+        if let Some((revision, discovered)) = book.candidates(directory_revision)? {
+            directory_revision = revision;
+            addresses = explicit.clone();
+            addresses.extend(discovered);
+            addresses.sort();
+            addresses.dedup();
+            retry_at.retain(|address, _| {
+                addresses.binary_search(address).is_ok() || connections.pending(address)
+            });
         }
         pool.remove_failed();
         connected.retain(|id, address| {
@@ -995,29 +1038,16 @@ pub fn run(
         for (address, result) in connections.finished() {
             retry_at.insert(address.clone(), Instant::now() + policy.peer_retry_interval);
             match result {
-                Ok((id, height, client, discovered)) => {
+                Ok((id, height, client)) => {
+                    // Higher advertised height only affects peer selection;
+                    // the new peer's chain/data still requires full validation.
+                    pool.make_room_for_ahead_peer(id, height, &mut connected, &policy.fixed_peers);
                     if pool.install_authenticated(id, client) {
                         println!(
                             "Sync peer {address}: authenticated {}, synced height {height}",
                             vnx::util::to_hex_string(&id[..8], true, false)
                         );
                         connected.insert(id, address);
-                    }
-                    for address in discovered {
-                        if learned.len() >= policy.max_peer_set {
-                            break;
-                        }
-                        // Native discovery returns numeric IP addresses.
-                        if let Ok(ip) = address.parse::<std::net::IpAddr>() {
-                            if policy.blocks_ip(ip) {
-                                continue;
-                            }
-                            let endpoint = std::net::SocketAddr::new(ip, port).to_string();
-                            if !addresses.contains(&endpoint) {
-                                addresses.push(endpoint);
-                                learned.insert(address);
-                            }
-                        }
                     }
                 }
                 Err(e) => eprintln!("Sync peer {address}: {e}"),
@@ -1026,7 +1056,7 @@ pub fn run(
         let connect_node = node.clone();
         let connect_stop = stop.clone();
         connections.refill(
-            pool.len(),
+            pool.peers.len(),
             &addresses,
             &connected,
             &mut retry_at,
@@ -1037,8 +1067,8 @@ pub fn run(
                     Some(connect_stop.clone()),
                 )?;
                 let (id, height) = client.qualify(genesis, own_id)?;
-                let discovered = client.known_peers().unwrap_or_default();
-                Ok((id, height, client, discovered))
+                client.enable_discovery(true);
+                Ok((id, height, client))
             },
         )?;
         // Avoid the ledger mutex on ordinary prefetch windows, so network I/O

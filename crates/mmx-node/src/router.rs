@@ -20,6 +20,8 @@ pub struct RouterConfig {
     pub max_peer_set: usize,
     pub connection_timeout: Option<Duration>,
     pub disconnect_interval: Option<Duration>,
+    pub discover_interval: Option<Duration>,
+    pub storage_path: Option<std::path::PathBuf>,
     pub query_interval: Duration,
     pub send_interval: Duration,
     pub connect_interval: Duration,
@@ -50,6 +52,8 @@ impl Default for RouterConfig {
             max_peer_set: 100,
             connection_timeout: Some(Duration::from_secs(180)),
             disconnect_interval: None,
+            discover_interval: Some(Duration::from_secs(60)),
+            storage_path: None,
             query_interval: Duration::from_secs(10),
             send_interval: Duration::from_millis(20),
             connect_interval: Duration::from_secs(10),
@@ -116,6 +120,10 @@ impl RouterConfig {
         if let Some(seconds) = config.read::<u32>("Router.disconnect_interval")? {
             value.disconnect_interval = (seconds > 0).then(|| Duration::from_secs(seconds.into()));
         }
+        if let Some(seconds) = config.read::<u32>("Router.discover_interval")? {
+            value.discover_interval = (seconds > 0).then(|| Duration::from_secs(seconds.into()));
+        }
+        value.storage_path = config.read("Router.storage_path")?;
         for (name, target) in [
             ("query_interval_ms", &mut value.query_interval),
             ("send_interval_ms", &mut value.send_interval),
@@ -198,7 +206,7 @@ impl RouterConfig {
         self.block_peers.contains(&canonical_host(address))
     }
     pub fn blocks_ip(&self, ip: IpAddr) -> bool {
-        self.block_peers.contains(&ip.to_string())
+        self.block_peers.contains(&canonical_ip(ip).to_string())
     }
     pub(crate) fn configure_inbound_socket(&self, socket: &socket2::Socket) -> Result<()> {
         socket.set_tcp_nodelay(self.tcp_no_delay)?;
@@ -237,8 +245,16 @@ impl RouterConfig {
 }
 fn canonical_host(address: &str) -> String {
     let host = host_part(address);
-    host.parse::<IpAddr>()
-        .map_or_else(|_| host.to_ascii_lowercase(), |ip| ip.to_string())
+    host.parse::<IpAddr>().map_or_else(
+        |_| host.to_ascii_lowercase(),
+        |ip| canonical_ip(ip).to_string(),
+    )
+}
+pub(crate) fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
+        ip => ip,
+    }
 }
 fn format_host(host: &str, port: u16) -> String {
     match host.trim_matches(['[', ']']).parse::<IpAddr>() {
@@ -348,6 +364,10 @@ mod tests {
             .set("Router.connection_timeout_ms", json!(0))
             .unwrap();
         config.set("Router.disconnect_interval", json!(7)).unwrap();
+        config.set("Router.discover_interval", json!(7)).unwrap();
+        config
+            .set("Router.storage_path", json!("router-cache"))
+            .unwrap();
         config.set("Router.tcp_keepalive", json!(false)).unwrap();
         config.set("Router.listen_queue_size", json!(17)).unwrap();
         config.set("Router.send_buffer_size", json!(65536)).unwrap();
@@ -375,15 +395,22 @@ mod tests {
         assert_eq!(policy.query_interval, Duration::from_millis(1234));
         assert_eq!(policy.connection_timeout, None);
         assert_eq!(policy.disconnect_interval, Some(Duration::from_secs(7)));
+        assert_eq!(policy.discover_interval, Some(Duration::from_secs(7)));
+        assert_eq!(
+            policy.storage_path,
+            Some(std::path::PathBuf::from("router-cache"))
+        );
         assert!(!policy.tcp_keepalive);
         assert_eq!(policy.listen_queue_size, 17);
         assert_eq!(policy.send_buffer_size, Some(65_536));
         assert_eq!(policy.receive_buffer_size, Some(32_768));
         config.set("Router.disconnect_interval", json!(0)).unwrap();
+        config.set("Router.discover_interval", json!(0)).unwrap();
         config.set("Router.send_buffer_size", json!(0)).unwrap();
         config.set("Router.receive_buffer_size", json!(-1)).unwrap();
         let policy = RouterConfig::from_config(&config).unwrap();
         assert_eq!(policy.disconnect_interval, None);
+        assert_eq!(policy.discover_interval, None);
         assert_eq!(policy.send_buffer_size, None);
         assert_eq!(policy.receive_buffer_size, None);
     }
@@ -436,6 +463,7 @@ mod tests {
         assert!(config.blocks("BAD.EXAMPLE:11337"));
         assert!(config.blocks_ip("0:0:0:0:0:0:0:1".parse().unwrap()));
         assert!(config.blocks_ip("192.0.2.1".parse().unwrap()));
+        assert!(config.blocks_ip("::ffff:192.0.2.1".parse().unwrap()));
         assert!(!config.blocks("good.example:11337"));
     }
     #[test]

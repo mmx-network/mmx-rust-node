@@ -16,6 +16,7 @@ use std::sync::{
 pub(crate) struct PeerState {
     pub router: Arc<crate::router::RouterConfig>,
     pub connections: crate::router::Connections,
+    pub book: crate::peer_book::Book,
     key: Arc<SigningKey>,
     id: Hash,
     info: Arc<Record>,
@@ -26,7 +27,7 @@ pub(crate) struct PeerState {
 }
 const SYNCED: u64 = 1 << 32;
 impl PeerState {
-    pub fn new(key: &SigningKey, genesis: Hash, height: u32) -> Result<Self> {
+    pub fn new(key: &SigningKey, genesis: Hash, height: u32, port: u16) -> Result<Self> {
         let id = mmx_crypto::public_key_address(
             key.verifying_key()
                 .to_encoded_point(true)
@@ -36,6 +37,7 @@ impl PeerState {
         Ok(Self {
             router: Arc::new(crate::router::RouterConfig::default()),
             connections: Default::default(),
+            book: crate::peer_book::Book::new(port, genesis),
             key: Arc::new(key.clone()),
             id,
             genesis,
@@ -109,7 +111,21 @@ impl PeerState {
                     Value::Bytes(signature.to_bytes().to_vec()),
                 ])
             }
-            "mmx.Router.get_peers" => Value::Sequence(vec![]),
+            "mmx.Router.get_peers" => {
+                let count = request
+                    .fields
+                    .get("max_count")
+                    .map(Value::uint)
+                    .transpose()?
+                    .unwrap_or(10);
+                Value::Sequence(
+                    self.book
+                        .public(count.min(crate::peer_book::DISCOVERY_COUNT as u64) as usize)?
+                        .into_iter()
+                        .map(|value| Value::String(value.into_bytes()))
+                        .collect(),
+                )
+            }
             "mmx.Node.get_height" => {
                 Value::Uint(u64::from(self.height.load(Ordering::Acquire) as u32))
             }

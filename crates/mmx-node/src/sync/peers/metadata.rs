@@ -381,6 +381,95 @@ mod replacement_tests {
         }
     }
     #[test]
+    fn an_ahead_probe_can_replace_only_an_idle_lagging_ordinary_peer() {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started, ready) = sync_channel(1);
+        let policy = crate::router::RouterConfig {
+            num_peers_out: 2,
+            min_sync_peers: 1,
+            fixed_peers: ["fixed".to_owned()].into(),
+            ..Default::default()
+        };
+        let mut pool = PeerPool::with_config(
+            vec![
+                (
+                    [1; 32],
+                    Source {
+                        height: 90,
+                        release: Some(release.clone()),
+                        started: Some(started),
+                    },
+                ),
+                (
+                    [2; 32],
+                    Source {
+                        height: 80,
+                        release: None,
+                        started: None,
+                    },
+                ),
+                (
+                    [3; 32],
+                    Source {
+                        height: 100,
+                        release: None,
+                        started: None,
+                    },
+                ),
+            ],
+            &policy,
+        );
+        for peer in &mut pool.peers {
+            peer.height = peer.source.as_ref().unwrap().height;
+        }
+        let mut connected = [
+            ([1; 32], "busy".into()),
+            ([2; 32], "fixed".into()),
+            ([3; 32], "idle".into()),
+        ]
+        .into();
+        let fixed = ["fixed".to_owned()].into();
+        let index = pool
+            .peers
+            .iter()
+            .position(|peer| peer.id == [1; 32])
+            .unwrap();
+        let query = pool.next_query();
+        pool.start_metadata(index, query, Kind::Status).unwrap();
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Release a blocked test owner even when an assertion fails.
+        struct Release(Arc<(Mutex<bool>, Condvar)>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                *self.0 .0.lock().unwrap() = true;
+                self.0 .1.notify_all();
+            }
+        }
+        let _release = Release(release);
+        pool.make_room_for_ahead_peer([4; 32], 100, &mut connected, &fixed);
+        assert_eq!(
+            pool.peers.len(),
+            3,
+            "equal height does not churn healthy peers"
+        );
+        pool.make_room_for_ahead_peer([4; 32], 110, &mut connected, &fixed);
+        assert_eq!(pool.peers.len(), 2);
+        assert!(
+            connected.contains_key(&[1; 32]),
+            "never evict the in-flight owner"
+        );
+        assert!(connected.contains_key(&[2; 32]), "never evict fixed peers");
+        assert!(!connected.contains_key(&[3; 32]));
+        assert!(pool.add(
+            [4; 32],
+            Source {
+                height: 110,
+                release: None,
+                started: None
+            }
+        ));
+    }
+    #[test]
     fn a_reconnect_waits_for_its_old_owner_and_late_returns_cannot_replace_the_new_owner() {
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let (started, ready) = sync_channel(1);

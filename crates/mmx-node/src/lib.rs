@@ -5,6 +5,7 @@ mod inbox;
 mod io;
 pub mod node;
 pub mod peer;
+mod peer_book;
 mod peer_state;
 pub mod production;
 mod proof_batch;

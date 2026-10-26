@@ -13,7 +13,7 @@ use mmx_vm::Storage;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
@@ -44,6 +44,8 @@ pub struct Node {
     pub(crate) tx_pool: crate::transactions::Pool,
     inbox: Inbox,
     peer_state: PeerState,
+    peer_directory: Option<PathBuf>,
+    peer_cache: Option<crate::peer_book::Cache>,
     vote_ids: BTreeSet<Hash>,
     vote_order: VecDeque<Hash>,
     pub(crate) rpc_workers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -106,7 +108,9 @@ impl Node {
             }
             Err(e) => return Err(e.into()),
         };
-        Self::from_chain(chain, key)
+        let mut node = Self::from_chain(chain, key)?;
+        node.peer_directory = Some(path.as_ref().to_owned());
+        Ok(node)
     }
     /// For embedded nodes and tests; the caller supplies an initialized chain.
     pub fn from_chain(chain: ForkChain, key: SigningKey) -> Result<Self> {
@@ -125,6 +129,7 @@ impl Node {
                 .hash_at(0)?
                 .ok_or_else(|| error("missing genesis"))?,
             tip.height,
+            u16::try_from(chain.selected().params().port).unwrap_or(0),
         )?;
         peer_state.set_earliest_height(chain.earliest_height());
         let tx_pool = crate::transactions::Pool::default();
@@ -157,6 +162,8 @@ impl Node {
             tx_pool,
             inbox: Inbox::default(),
             peer_state,
+            peer_directory: None,
+            peer_cache: None,
             vote_ids: BTreeSet::new(),
             vote_order: VecDeque::new(),
             rpc_workers: Default::default(),
@@ -294,8 +301,34 @@ impl Node {
                 .unwrap_or(0.1),
         )?;
         self.tx_pool.relay.configure_policy(&router)?;
-        self.peer_state.router = Arc::new(router);
+        let directory = router
+            .storage_path
+            .clone()
+            .or_else(|| self.peer_directory.clone());
+        let router = Arc::new(router);
+        self.peer_state.book.configure(router.clone())?;
+        self.peer_state.router = router;
+        if let Some(mut directory) = directory {
+            if directory.as_os_str().is_empty() {
+                directory = PathBuf::from(".");
+            }
+            let path = directory.join(self.peer_state.book.file_name());
+            if self
+                .peer_cache
+                .as_ref()
+                .is_none_or(|cache| cache.path != path)
+            {
+                self.peer_cache.take();
+                self.peer_cache = Some(crate::peer_book::Cache::start(
+                    self.peer_state.book.clone(),
+                    &directory,
+                )?);
+            }
+        }
         Ok(())
+    }
+    pub fn known_peer_addresses(&self) -> Result<Vec<String>> {
+        self.peer_state.book.verified()
     }
     pub fn pending_proofs(&self) -> usize {
         self.responses.len()

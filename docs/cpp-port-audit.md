@@ -732,3 +732,13 @@ reduced the slow-provider full-window median from 543.015 to 442.597 ms while
 the healthy case was comparable; this is not a native/network throughput claim.
 See the [completion checkpoint](performance-parity.md#independent-peer-completion-checkpoint-2026-10-26)
 for workload, bounds and remaining window-publication/deadline differences.
+
+Peer recovery now includes asynchronous periodic discovery, one bounded
+full-pool probe, confirmed-endpoint persistence and cached-only startup. Hints
+cannot displace the confirmed cache; private/unsafe gossip, stale responses and
+incoming ephemeral ports are excluded. Busy/fixed peers are retained during
+ahead-peer selection. One background writer coalesces atomic saves without
+holding the directory or ledger lock. A real daemon restarts and syncs after
+all bootstrap config is removed; storage-failure and slow-writer cases use small
+temporary files. See the [recovery checkpoint](performance-parity.md#peer-discovery-and-restart-recovery-checkpoint-2026-10-26)
+for bounds, native differences and remaining adversarial/load comparisons.

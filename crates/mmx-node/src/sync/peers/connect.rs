@@ -10,6 +10,9 @@ pub(super) struct Connections<S> {
     retry: Duration,
     interval: Duration,
     attempted: Option<Instant>,
+    probe: Option<String>,
+    probed: Option<Instant>,
+    probe_interval: Option<Duration>,
 }
 impl<S: Send + 'static> Connections<S> {
     pub fn new() -> Self {
@@ -20,6 +23,9 @@ impl<S: Send + 'static> Connections<S> {
             retry: Duration::from_secs(30),
             interval: Duration::ZERO,
             attempted: None,
+            probe: None,
+            probed: None,
+            probe_interval: None,
         }
     }
     pub fn with_config(config: &crate::router::RouterConfig) -> Self {
@@ -28,6 +34,7 @@ impl<S: Send + 'static> Connections<S> {
         value.fixed = config.fixed_peers.clone();
         value.retry = config.peer_retry_interval;
         value.interval = config.connect_interval;
+        value.probe_interval = config.discover_interval;
         value
     }
     pub fn refill(
@@ -80,7 +87,21 @@ impl<S: Send + 'static> Connections<S> {
         let (mut fixed, mut ordinary): (Vec<_>, Vec<_>) = candidates
             .into_iter()
             .partition(|address| self.fixed.contains(address));
-        ordinary.truncate(slots);
+        let probe = slots == 0
+            && active.saturating_sub(fixed_active) >= self.maximum
+            && ordinary_pending == 0
+            && self.probe.is_none()
+            && self.probe_interval.is_some_and(|interval| {
+                self.probed
+                    .is_none_or(|at| now.duration_since(at) >= interval)
+            });
+        ordinary.truncate(slots.max(usize::from(probe)));
+        if probe {
+            if let Some(address) = ordinary.first() {
+                self.probe = Some(address.clone());
+                self.probed = Some(now);
+            }
+        }
         fixed.extend(ordinary);
         let candidates = fixed;
         if candidates.is_empty() {
@@ -91,9 +112,18 @@ impl<S: Send + 'static> Connections<S> {
         for address in candidates {
             let endpoint = address.clone();
             let connect = connect.clone();
-            let job = thread::Builder::new()
+            let job = match thread::Builder::new()
                 .name("mmx-peer-connect".into())
-                .spawn(move || connect(&endpoint))?;
+                .spawn(move || connect(&endpoint))
+            {
+                Ok(job) => job,
+                Err(failure) if self.probe.as_ref() == Some(&address) => {
+                    self.probe = None;
+                    eprintln!("Peer probe {address}: {failure}");
+                    continue;
+                }
+                Err(failure) => return Err(failure.into()),
+            };
             retry_at.insert(address.clone(), now + self.retry);
             self.jobs.insert(address, job);
         }
@@ -109,6 +139,9 @@ impl<S: Send + 'static> Connections<S> {
         ready
             .into_iter()
             .map(|address| {
+                if self.probe.as_ref() == Some(&address) {
+                    self.probe = None;
+                }
                 let result = self
                     .jobs
                     .remove(&address)
@@ -118,6 +151,9 @@ impl<S: Send + 'static> Connections<S> {
                 (address, result)
             })
             .collect()
+    }
+    pub fn pending(&self, address: &str) -> bool {
+        self.jobs.contains_key(address)
     }
 }
 impl<S> Drop for Connections<S> {
@@ -138,6 +174,7 @@ mod tests {
             min_sync_peers: 1,
             fixed_peers: ["fixed".to_owned()].into(),
             connect_interval: Duration::ZERO,
+            discover_interval: None,
             ..Default::default()
         };
         let mut pending = Connections::<String>::with_config(&config);
@@ -225,5 +262,56 @@ mod tests {
             .unwrap();
         assert!(pending.jobs.contains_key(&address));
         assert_eq!(pending.retry, Duration::from_secs(360 * 60));
+    }
+    #[test]
+    fn a_full_pool_has_only_one_optional_probe_and_keeps_normal_retry_and_interval_bounds() {
+        let policy = crate::router::RouterConfig {
+            num_peers_out: 2,
+            min_sync_peers: 1,
+            connect_interval: Duration::ZERO,
+            discover_interval: Some(Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let mut pending = Connections::with_config(&policy);
+        let connected = [([1; 32], "one".to_owned()), ([2; 32], "two".to_owned())].into();
+        let addresses = vec![
+            "one".into(),
+            "two".into(),
+            "three".into(),
+            "four".into(),
+            "backoff".into(),
+        ];
+        let mut retries = [("backoff".into(), Instant::now() + Duration::from_secs(3600))].into();
+        pending
+            .refill(2, &addresses, &connected, &mut retries, |address| {
+                Ok(address.to_owned())
+            })
+            .unwrap();
+        assert_eq!(pending.jobs.len(), 1);
+        assert!(!pending.jobs.contains_key("backoff"));
+        pending
+            .refill(
+                2,
+                &addresses,
+                &connected,
+                &mut retries,
+                |_| -> Result<String> { panic!("only one probe may be pending") },
+            )
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while pending.finished().is_empty() {
+            assert!(Instant::now() < until);
+            thread::yield_now();
+        }
+        pending
+            .refill(
+                2,
+                &addresses,
+                &connected,
+                &mut retries,
+                |_| -> Result<String> { panic!("probe interval has not elapsed") },
+            )
+            .unwrap();
+        assert!(pending.jobs.is_empty());
     }
 }

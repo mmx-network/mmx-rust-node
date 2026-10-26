@@ -142,6 +142,12 @@ fn main() -> Result<()> {
     for path in &config_paths {
         config.load_tree(path)?;
     }
+    if let Some(path) = config.read::<PathBuf>("Router.storage_path")? {
+        config.set(
+            "Router.storage_path",
+            vnx::serde_json::to_value(layout.network_path(&path))?,
+        )?;
+    }
     let configured = !options.configs.is_empty() || layout.local_config().is_dir();
     let network = Network::from_config(&config, options.root.join("data"))?;
     let router = mmx_node::router::RouterConfig::from_config(&config)?;
@@ -173,12 +179,6 @@ fn main() -> Result<()> {
         if let Some(peers) = config.get("Router.seed_peers")? {
             options.peers = vnx::serde_json::from_value(peers)?;
         }
-        if options.peers.is_empty() && router.fixed_peers.is_empty() {
-            return Err(std::io::Error::other(
-                "no seed peers configured; specify --peer or --offline",
-            )
-            .into());
-        }
     }
     let port = u16::try_from(network.params.port)?;
     let peers: Vec<_> = options
@@ -196,6 +196,16 @@ fn main() -> Result<()> {
     };
     let mut state = Node::open(&data, &network)?;
     state.configure_router(&config)?;
+    if !options.offline
+        && peers.is_empty()
+        && router.fixed_peers.is_empty()
+        && state.known_peer_addresses()?.is_empty()
+    {
+        return Err(std::io::Error::other(
+            "no seed, fixed or cached peers; specify --peer or --offline",
+        )
+        .into());
+    }
     if let Some(height) = options.rollback {
         state.rollback_to(height)?;
     }

@@ -63,9 +63,11 @@ checkpoint compares `modules/Router.vni`, `config/default/Router.json`,
 | `max_connections` | Inbound admission counts inbound, outbound and pending authentication/dial sockets. Negative means unlimited. Default 100. Like native `connect_client()`, outgoing attempts may exceed this admission threshold. |
 | `num_peers_out`, `min_sync_peers` | Ordinary outgoing target and distinct successful sync observers. The native file supplies 8 and 5. Both must be positive; the minimum is clamped to the outgoing target, which cannot exceed a finite connection limit. |
 | `seed_peers`, `fixed_peers`, `master_nodes`, `block_peers` | Seeds remain independent of the learned-peer bound. Fixed/master peers have additional outgoing slots and bypass retry backoff. Blocked names are rejected before DNS; blocked resolved IPs and incoming IPs are rejected before authentication. |
-| `max_peer_set` | Learned candidate bound, default 100; each authentication asks for at most 32 addresses. Explicit seeds/fixed peers are separate. |
+| `max_peer_set` | Separate bounds for confirmed endpoints and untrusted hints, default 100 each. Discovery asks for at most 32 addresses. Explicit seeds/fixed peers are separate. |
 | `connection_timeout_ms`, `query_interval_ms`, `connect_interval_ms` | Receive-idle timeout, status/heartbeat period, and outgoing connection cycle. Native file: 180,000 / 10,000 / 10,000 ms. Nonpositive idle timeout disables it; the other periods must be positive. |
 | `disconnect_interval` | Maximum incoming connection age, in seconds; zero disables it, matching native. Traffic does not extend it, and outgoing sockets are exempt. |
+| `discover_interval` | Discovery and optional full-pool probe period, in seconds; default 60. Zero disables automatic discovery/probes. Each connection has at most one outstanding discovery request. |
+| `storage_path` | Peer cache directory; defaults to the Rust ledger directory. CLI-relative paths resolve under `MMX_NETWORK`. Cache names include the network genesis and peer port. |
 | `fetch_timeout_ms` | Full metadata/RPC deadline and one-eighth body lease/deadline. Native file: 180,000 ms, giving a 22,500 ms body lease. |
 | `sync_loss_delay`, `peer_retry_interval` | Seconds before stalled sync restarts, and minutes for retry deadlines, matching native units (60 seconds / 360 minutes). See retry scheduling differences below. |
 | `compress_level` | Native Zstd range 0–20. Native file uses compression level 0. |
@@ -91,14 +93,13 @@ native knob. Remaining work is assessed by operational outcomes:
 
 | Outcome | Current limitation or evidence still needed |
 | --- | --- |
-| Maintain a healthy, diverse peer pool through churn | Discovery runs on authentication, without periodic refresh or full-pool probing. An equivalent Rust policy need not reproduce native timer phasing. |
-| Recover connectivity after restart | Learned peers are memory-only, leaving startup dependent on seeds/fixed peers. Validate recovery when bootstrap sources fail; bounded peer persistence or another equivalent mechanism may provide resilience. |
+| Maintain a healthy, diverse peer pool through churn | Managed connections refresh discovery asynchronously; a full pool may validate one extra candidate at a time. An ahead candidate may replace only an idle, lower-height ordinary peer. Equal-height peers, fixed peers and in-flight owners are retained. Wider churn/adversarial comparisons remain. |
+| Recover connectivity after restart | Authenticated synced full-node outbound endpoints are saved atomically by one background writer. A real-daemon restart test removes all seeds/fixed peers and recovers from this cache alone. |
 | Deliver ready work promptly despite slow peers | Body replies now reach the scheduler individually, retaining partial successes and replenishing a shared 32-request budget independently of slow owners. Window publication still accounts for every observed candidate or its lease. Controlled previous/current measurements are recorded below; saturated network comparisons remain. |
 | Remain responsive and bounded under send pressure | Independent senders exist, but synchronous writes/response work can delay connection expiry. Equivalent backpressure, priority delivery, cleanup and memory bounds matter more than reproducing native queue classes or knob names. |
 | Use available connections effectively | Incoming peers exchange gossip/RPC but are not historical sync observers; fixed peers must qualify as synced full nodes. The effect on connectivity and sync availability needs consideration, including NAT deployments. |
 | Establish automatic inbound reachability where requested | `open_port` / UPnP is unimplemented. Outgoing connections and manual port forwarding remain available; automatic mapping is a separate missing capability. |
 
-Native `discover_interval` and peer `storage_path` are not implemented.
 `max_queue_ms`, `max_write_queue` and `priority_queue_size` do not map directly
 to the current Rust sender. Native `stats_interval_ms`, `update_interval_ms`
 and `show_warnings` controls are unsupported; useful diagnostics and maintenance
@@ -109,6 +110,33 @@ need not be copied; protocol compatibility and any required alternate node role
 must still be implemented correctly. Deliberate defaults and quorum/deadline
 policies above and below require evidence for their availability and latency
 tradeoffs rather than automatic replacement with C++ values.
+
+Peer discovery replies do not gate sync admission or an unrelated RPC. Late,
+unsolicited and negative discovery replies cannot populate the directory or
+change ordinary RPC backpressure windows. Hints accept only conservatively
+filtered public numeric IPs at the network port; private, loopback, link-local,
+multicast, documentation and IPv4-mapped local addresses are rejected. Explicit
+configured endpoints may still use private addresses/custom ports. Incoming
+source ports are never inferred to be listening ports. Only confirmed public
+endpoints at the native network port are advertised by `Router.get_peers`.
+
+Hints and confirmed endpoints each have their own `max_peer_set` bound, so
+untrusted hints cannot evict the restart cache. Recent confirmed endpoints keep
+their actual ports and IPv6 scope IDs. At most 1,024 confirmed entries / 64 KiB
+are persisted in `rust-peers-<network-port>-<genesis>.json`. One small cache file
+is read during startup; missing, corrupt, oversized, foreign-network or
+nonregular files are ignored with diagnostics. Runtime writes occur outside
+directory/ledger locks, coalesce changes, run no more often than every five
+minutes after the first dirty snapshot, and flush on graceful shutdown. A
+temporary file, file sync, atomic replacement and Unix directory sync preserve
+complete cache snapshots. Storage errors leave the node running. The C++
+`known_peers.dat` file is neither imported nor modified.
+
+The cache is advisory: every address must authenticate, match genesis and
+qualify as a synced full node before historical sync use. Ahead-peer selection
+uses advertised height only for connectivity; consensus validation is unchanged.
+Full-pool probes share the connection cycle and per-address retry policy, use
+one extra bounded slot, and never interrupt an existing connection owner.
 
 Cache sizes apply to each existing first-seen cache, without a new payload cache.
 The independent 100,000-entry receipt bound remains even when hash retention is
@@ -138,12 +166,12 @@ duplicate identities and self-connections. Native peer discovery fills the pool;
 sync waits below `Router.min_sync_peers`. The coordinator continuously refills
 toward `Router.num_peers_out`, including between historical windows. Fixed/master
 peers have additional slots. Connection/authentication/discovery attempts run
-in the background, with active ordinary peers plus pending ordinary attempts
-capped at the outgoing target. Slow or unavailable seeds do not block the
+in the background, with retained ordinary owners plus pending ordinary attempts
+capped at the outgoing target, plus at most one full-pool probe. Slow or unavailable seeds do not block the
 existing pool, and completed connections are admitted without waiting for the
 next connect cycle. The seed/candidate list is independent of that active limit;
-normal startup reads native `Router.seed_peers` and learns up to
-`Router.max_peer_set` additional addresses through authenticated peers.
+normal startup combines native `Router.seed_peers`, confirmed cached endpoints
+and bounded hints learned through authenticated peers.
 For every height, `get_block_hash_ex` collects `(block hash, content hash)` from
 at least the configured minimum of distinct peers. Every unique content hash is
 fetched once with `get_block(hash)` and recomputed/authenticated before archival. Hashes are not
