@@ -61,9 +61,11 @@ checkpoint compares `modules/Router.vni`, `config/default/Router.json`,
 | `seed_peers`, `fixed_peers`, `master_nodes`, `block_peers` | Seeds remain independent of the learned-peer bound. Fixed/master peers have additional outgoing slots and bypass retry backoff. Blocked names are rejected before DNS; blocked resolved IPs and incoming IPs are rejected before authentication. |
 | `max_peer_set` | Learned candidate bound, default 100; each authentication asks for at most 32 addresses. Explicit seeds/fixed peers are separate. |
 | `connection_timeout_ms`, `query_interval_ms`, `connect_interval_ms` | Receive-idle timeout, status/heartbeat period, and outgoing connection cycle. Native file: 180,000 / 10,000 / 10,000 ms. Nonpositive idle timeout disables it; the other periods must be positive. |
+| `disconnect_interval` | Maximum incoming connection age, in seconds; zero disables it, matching native. Traffic does not extend it, and outgoing sockets are exempt. |
 | `fetch_timeout_ms` | Full metadata/RPC deadline and one-eighth body lease/deadline. Native file: 180,000 ms, giving a 22,500 ms body lease. |
 | `sync_loss_delay`, `peer_retry_interval` | Seconds before stalled sync restarts, and minutes for retry deadlines, matching native units (60 seconds / 360 minutes). See retry scheduling differences below. |
-| `compress_level`, `tcp_no_delay` | Native Zstd range 0–20 and socket no-delay override. Native file uses compression level 0. |
+| `compress_level` | Native Zstd range 0–20. Native file uses compression level 0. |
+| `tcp_no_delay`, `tcp_keepalive`, `send_buffer_size`, `receive_buffer_size`, `listen_queue_size` | Incoming listener/accepted-socket controls, matching native `TcpServer`. Keepalive defaults true, backlog 100, and nonpositive buffer sizes retain OS defaults. Outgoing sockets use native `TcpEndpoint` defaults: no-delay/keepalive enabled and OS buffer sizes. The OS may clamp buffer sizes and backlog. |
 | `max_hash_cache`, `max_sent_cache`, `do_relay`, `send_interval_ms` | Existing first-seen and per-peer echo-cache limits, forwarded-publication switch, and idle sender period. Native file sets 200,000 / 20,000 entries; native sender period is 20 ms. Reliable local publications and receive receipts still work with forwarding disabled. |
 | `max_msg_size`, `max_vdf_segments`, `relay_target_ms`, `max_tx_upload`, `max_pending_cost` | Previously implemented compressed-frame bound, early VDF segment bound, fanout stages, and transaction upload accounting continue to use their native names and units. |
 
@@ -76,13 +78,13 @@ When these keys are absent, the embedded Rust API retains its earlier defaults
 of a loopback listener, three sync observers, and 15-second RPC/body deadlines.
 Loading the C++ default file explicitly supplies its public listener, five
 observers and 180-second fetch setting. Rust retains `tcp_no_delay = true` when
-absent; native's inherited listener default is false. This preserves the existing
-Rust latency choice while allowing an explicit native override.
+absent on incoming sockets; native's inherited listener default is false. This
+preserves the existing Rust latency choice while allowing an explicit native
+override. Outgoing no-delay remains enabled as in native `TcpEndpoint`.
 
 The following settings still lack equivalent implementations: `open_port`
-(UPnP), periodic `discover_interval`, `disconnect_interval`, `stats_interval_ms`,
+(UPnP), periodic `discover_interval`, `stats_interval_ms`,
 `update_interval_ms`, `max_queue_ms`, `max_write_queue`, `priority_queue_size`,
-`listen_queue_size`, send/receive socket buffer sizes, `tcp_keepalive`,
 `show_warnings`, `node_version`, `mode`, Router topic/server names, and
 `storage_path` for persistent known-peer storage. The Rust sender uses bounded
 synchronous writes rather than the native asynchronous write queue. Discovery
@@ -100,8 +102,12 @@ and absolute partial-frame deadlines, and 64 MiB decode bounds. Body groups stil
 join their bounded providers before processing that group's results; their
 deadline is the body lease. Native handles individual returns independently.
 RPC deadlines are absolute rather than native fetch-job inactivity timers, and
-failed/empty bodies retain the full lease. These scheduling and resource
-differences need comparative workloads; see [performance parity](performance-parity.md#router-configuration-checkpoint-2026-10-26).
+failed/empty bodies retain the full lease. Incoming lifetime expiry uses an
+absolute receive deadline, including authentication and partial frames; native
+checks age with its update timer and integer-second rounding. Synchronous
+response work or writes can delay Rust's receive-loop expiry check. These
+scheduling and resource differences need comparative workloads; see
+[performance parity](performance-parity.md#router-configuration-checkpoint-2026-10-26).
 
 ## Sync, networking and validation
 

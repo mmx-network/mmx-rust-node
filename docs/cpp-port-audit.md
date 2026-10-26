@@ -711,3 +711,10 @@ are listed in the [configuration reference](development.md#router-configuration)
 the [performance checkpoint](performance-parity.md#router-configuration-checkpoint-2026-10-26)
 records source revisions, bounds and deliberate scheduling differences. Full
 Router configuration or performance parity is not claimed.
+
+The socket/lifetime follow-up also honors inherited keepalive, send/receive
+buffers and listener backlog, plus incoming-only `disconnect_interval` age
+limits. Listener/accepted options and outgoing native endpoint defaults are
+tested separately; busy incoming expiry releases admission capacity while an
+outgoing sibling stays connected. Synchronous writes/response work can still
+delay receive-loop expiry checks, unlike native's asynchronous event loop.

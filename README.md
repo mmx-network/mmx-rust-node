@@ -59,7 +59,9 @@ Choose `--data-dir` on a fast local disk with room for the growing ledger.
 Existing wallet keys and plot files are compatible and can be reused.
 
 The node discovers peers from the network configuration and syncs from genesis.
-It targets eight distinct authenticated peers and needs at least three to sync.
+The C++ default Router config targets eight outgoing peers and requires five
+distinct authenticated sync peers; `Router.num_peers_out` and
+`Router.min_sync_peers` control those counts.
 If discovery needs help, add `--peer HOST[:PORT]`; supplied peers replace the
 configured seed list, and discovery can find more peers from them.
 

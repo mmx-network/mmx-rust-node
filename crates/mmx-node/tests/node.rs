@@ -197,6 +197,87 @@ fn router_idle_timeout_applies_while_the_peer_is_still_authenticating() {
 }
 
 #[test]
+fn router_inbound_lifetime_caps_an_unauthenticated_partial_frame_with_idle_expiry_disabled() {
+    let (network, _, _, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config.set("Router.disconnect_interval", json!(1)).unwrap();
+    config
+        .set("Router.connection_timeout_ms", json!(0))
+        .unwrap();
+    config.set("Router.fetch_timeout_ms", json!(8000)).unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", local).unwrap();
+    let before = std::time::Instant::now();
+    let mut socket = TcpStream::connect(server.address()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    socket.write_all(&[0]).unwrap(); // An unfinished frame header cannot extend the lifetime.
+    loop {
+        match socket.read(&mut [0; 4096]) {
+            Ok(0) => break,
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Err(e) => panic!("partial-frame peer outlived its configured lifetime: {e}"),
+        }
+    }
+    assert!(before.elapsed() >= Duration::from_millis(900));
+    assert!(before.elapsed() < Duration::from_secs(3));
+    drop(socket);
+    server.shutdown();
+}
+
+#[test]
+fn router_lifetime_disconnects_busy_inbound_peers_and_preserves_outgoing_connections() {
+    let (network, _, _, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config.set("Router.max_connections", json!(2)).unwrap();
+    config.set("Router.num_peers_out", json!(1)).unwrap();
+    config.set("Router.min_sync_peers", json!(1)).unwrap();
+    config.set("Router.disconnect_interval", json!(1)).unwrap();
+    config
+        .set("Router.connection_timeout_ms", json!(0))
+        .unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let mut remote = peer::Server::bind("127.0.0.1:0", node(&network)).unwrap();
+    let mut outgoing = peer::Client::connect(&remote.address().to_string(), local.clone()).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", local).unwrap();
+    let before = std::time::Instant::now();
+    let mut incoming =
+        peer::Client::connect(&server.address().to_string(), node(&network)).unwrap();
+    let mut replies = 0;
+    let mut closed = false;
+    while before.elapsed() < Duration::from_secs(3) {
+        if incoming.height().is_err() {
+            closed = true;
+            break;
+        }
+        replies += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        closed,
+        "busy incoming connection outlived its configured lifetime"
+    );
+    assert!(
+        replies >= 5,
+        "connection must authenticate and serve traffic first"
+    );
+    assert!(before.elapsed() >= Duration::from_millis(900));
+    assert!(
+        outgoing.height().is_ok(),
+        "outgoing sockets are exempt from lifetime expiry"
+    );
+    // The expired inbound socket releases its shared admission slot.
+    let replacement = peer::Client::connect(&server.address().to_string(), node(&network)).unwrap();
+    drop((replacement, incoming, outgoing));
+    server.shutdown();
+    remote.shutdown();
+}
+
+#[test]
 fn cpp_database_is_rejected_before_creating_rust_ledger_files() {
     let (network, _, _, _) = fixture();
     let dir = tempfile::tempdir().unwrap();

@@ -13,7 +13,7 @@ use mmx_consensus::{Hash, Record, Value};
 mod identity;
 use std::{
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -113,6 +113,7 @@ pub struct Connection {
     relay_receipts: Option<RelayPeer>,
     last_size: usize,
     received_at: Instant,
+    expires_at: Option<Instant>,
     compressed_limit: usize,
 }
 struct Output {
@@ -175,6 +176,7 @@ impl Connection {
     }
     pub fn new(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;
+        socket2::SockRef::from(&stream).set_keepalive(true)?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         let output = Output {
             stream: stream.try_clone()?,
@@ -190,8 +192,17 @@ impl Connection {
             relay_receipts: None,
             last_size: 0,
             received_at: Instant::now(),
+            expires_at: None,
             compressed_limit: DEFAULT_COMPRESSED_LIMIT,
         })
+    }
+    fn incoming(stream: TcpStream, policy: &crate::router::RouterConfig) -> Result<Self> {
+        let mut connection = Self::new(stream)?;
+        policy.configure_inbound_socket(&socket2::SockRef::from(&connection.stream))?;
+        connection.expires_at = policy
+            .disconnect_interval
+            .map(|period| Instant::now() + period);
+        Ok(connection)
     }
     pub fn send(&mut self, value: &Record) -> Result<()> {
         self.send_batch(std::slice::from_ref(value))
@@ -494,9 +505,6 @@ impl Client {
         permit: crate::router::Permit,
     ) -> Result<Self> {
         connection
-            .stream
-            .set_nodelay(peer_state.router.tcp_no_delay)?;
-        connection
             .output
             .lock()
             .map_err(|_| error("peer output poisoned"))?
@@ -528,6 +536,23 @@ impl Client {
     fn call_many(&mut self, methods: Vec<Record>) -> Result<Vec<Value>> {
         self.call_many_with_timeout(methods, self.peer_state.router.fetch_timeout)
     }
+    fn receive_deadline(&self, mut end: Instant) -> Result<Instant> {
+        let now = Instant::now();
+        if let Some(lifetime) = self.connection.expires_at {
+            if now >= lifetime {
+                return Err(error("peer inbound connection lifetime exceeded"));
+            }
+            end = end.min(lifetime);
+        }
+        if let Some(timeout) = self.peer_state.router.connection_timeout {
+            let idle = self.connection.received_at + timeout;
+            if now >= idle {
+                return Err(error("peer receive idle timeout"));
+            }
+            end = end.min(idle);
+        }
+        Ok(end)
+    }
     fn call_many_with_timeout(
         &mut self,
         methods: Vec<Record>,
@@ -541,16 +566,7 @@ impl Client {
         let mut request_window = methods.len().clamp(1, MAX_RPC_REQUESTS);
         let mut draining = false;
         while (!pending.is_empty() || !queued.is_empty()) && Instant::now() < end {
-            let connection_end = self
-                .peer_state
-                .router
-                .connection_timeout
-                .map_or(end, |timeout| {
-                    end.min(self.connection.received_at + timeout)
-                });
-            if Instant::now() >= connection_end {
-                return Err(error("peer receive idle timeout"));
-            }
+            let connection_end = self.receive_deadline(end)?;
             if self
                 .stopping
                 .as_ref()
@@ -785,16 +801,7 @@ impl Client {
     }
     pub fn poll(&mut self) -> Result<()> {
         let now = Instant::now();
-        let end = self
-            .peer_state
-            .router
-            .connection_timeout
-            .map_or(now + Duration::from_secs(10), |timeout| {
-                (now + Duration::from_secs(10)).min(self.connection.received_at + timeout)
-            });
-        if now >= end {
-            return Err(error("peer receive idle timeout"));
-        }
+        let end = self.receive_deadline(now + Duration::from_secs(10))?;
         if let Some(message) = self.connection.receive_until(
             Duration::from_millis(500).min(end.saturating_duration_since(now)),
             end,
@@ -846,7 +853,7 @@ impl Server {
             local.enable_background_transactions()?;
             (local.inbox(), local.peer_state(), local.transaction_relay())
         };
-        let listener = TcpListener::bind(address)?;
+        let listener = peer_state.router.bind_listener(address)?;
         let address = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -880,7 +887,7 @@ impl Server {
                         workers.push(thread::spawn(move || {
                             let run = || -> Result<()> {
                                 let mut client = Client::from_connection(
-                                    Connection::new(stream)?,
+                                    Connection::incoming(stream, &peer_state.router)?,
                                     node,
                                     inbox,
                                     peer_state,
@@ -943,6 +950,40 @@ impl Drop for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn native_listener_socket_settings_do_not_override_outgoing_endpoint_defaults() {
+        let policy = crate::router::RouterConfig {
+            tcp_no_delay: false,
+            tcp_keepalive: false,
+            send_buffer_size: Some(65_536),
+            receive_buffer_size: Some(32_768),
+            listen_queue_size: 7,
+            disconnect_interval: Some(Duration::from_secs(1)),
+            ..Default::default()
+        };
+        let listener = policy.bind_listener("127.0.0.1:0").unwrap();
+        let socket = socket2::SockRef::from(&listener);
+        assert!(!socket.keepalive().unwrap());
+        assert!(!socket.tcp_nodelay().unwrap());
+        assert!(socket.send_buffer_size().unwrap() >= 65_536);
+        assert!(socket.recv_buffer_size().unwrap() >= 32_768);
+        let address = listener.local_addr().unwrap();
+        let outgoing =
+            Connection::connect_with_policy(&address.to_string(), Some(&policy)).unwrap();
+        let incoming = Connection::incoming(listener.accept().unwrap().0, &policy).unwrap();
+        let socket = socket2::SockRef::from(&incoming.stream);
+        assert!(!socket.keepalive().unwrap());
+        assert!(!socket.tcp_nodelay().unwrap());
+        assert!(socket.send_buffer_size().unwrap() >= 65_536);
+        assert!(socket.recv_buffer_size().unwrap() >= 32_768);
+        assert!(incoming.expires_at.is_some());
+        let socket = socket2::SockRef::from(&outgoing.stream);
+        assert!(socket.keepalive().unwrap());
+        assert!(socket.tcp_nodelay().unwrap());
+        assert!(outgoing.expires_at.is_none());
+    }
 
     #[test]
     fn compressed_header_limit_rejects_before_waiting_for_or_allocating_a_body() {

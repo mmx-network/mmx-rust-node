@@ -2,7 +2,7 @@
 use crate::{error, Result};
 use std::{
     collections::BTreeSet,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -19,6 +19,7 @@ pub struct RouterConfig {
     pub min_sync_peers: usize,
     pub max_peer_set: usize,
     pub connection_timeout: Option<Duration>,
+    pub disconnect_interval: Option<Duration>,
     pub query_interval: Duration,
     pub send_interval: Duration,
     pub connect_interval: Duration,
@@ -30,6 +31,10 @@ pub struct RouterConfig {
     pub block_peers: BTreeSet<String>,
     pub compress_level: i32,
     pub tcp_no_delay: bool,
+    pub tcp_keepalive: bool,
+    pub send_buffer_size: Option<usize>,
+    pub receive_buffer_size: Option<usize>,
+    pub listen_queue_size: i32,
     pub max_hash_cache: usize,
     pub max_sent_cache: usize,
     pub do_relay: bool,
@@ -44,6 +49,7 @@ impl Default for RouterConfig {
             min_sync_peers: 3,
             max_peer_set: 100,
             connection_timeout: Some(Duration::from_secs(180)),
+            disconnect_interval: None,
             query_interval: Duration::from_secs(10),
             send_interval: Duration::from_millis(20),
             connect_interval: Duration::from_secs(10),
@@ -55,6 +61,10 @@ impl Default for RouterConfig {
             block_peers: BTreeSet::new(),
             compress_level: 0,
             tcp_no_delay: true,
+            tcp_keepalive: true,
+            send_buffer_size: None,
+            receive_buffer_size: None,
+            listen_queue_size: 100,
             max_hash_cache: 200_000,
             max_sent_cache: 20_000,
             do_relay: true,
@@ -103,6 +113,9 @@ impl RouterConfig {
         if let Some(ms) = config.read::<i32>("Router.connection_timeout_ms")? {
             value.connection_timeout = (ms > 0).then(|| Duration::from_millis(ms as u64));
         }
+        if let Some(seconds) = config.read::<u32>("Router.disconnect_interval")? {
+            value.disconnect_interval = (seconds > 0).then(|| Duration::from_secs(seconds.into()));
+        }
         for (name, target) in [
             ("query_interval_ms", &mut value.query_interval),
             ("send_interval_ms", &mut value.send_interval),
@@ -143,6 +156,18 @@ impl RouterConfig {
             return Err(error("Router.compress_level must be between 0 and 20"));
         }
         read!(tcp_no_delay, "tcp_no_delay", bool);
+        read!(tcp_keepalive, "tcp_keepalive", bool);
+        read!(listen_queue_size, "listen_queue_size", i32);
+        for (key, target) in [
+            ("send_buffer_size", &mut value.send_buffer_size),
+            ("receive_buffer_size", &mut value.receive_buffer_size),
+        ] {
+            if let Some(size) = config.read::<i32>(&format!("Router.{key}"))? {
+                // TcpEndpoint only sets positive sizes; zero/negative retain
+                // the operating system's defaults.
+                *target = (size > 0).then_some(size as usize);
+            }
+        }
         if let Some(n) = config.read::<u32>("Router.max_hash_cache")? {
             value.max_hash_cache = n as usize;
         }
@@ -174,6 +199,40 @@ impl RouterConfig {
     }
     pub fn blocks_ip(&self, ip: IpAddr) -> bool {
         self.block_peers.contains(&ip.to_string())
+    }
+    pub(crate) fn configure_inbound_socket(&self, socket: &socket2::Socket) -> Result<()> {
+        socket.set_tcp_nodelay(self.tcp_no_delay)?;
+        socket.set_keepalive(self.tcp_keepalive)?;
+        if let Some(size) = self.send_buffer_size {
+            socket.set_send_buffer_size(size)?;
+        }
+        if let Some(size) = self.receive_buffer_size {
+            socket.set_recv_buffer_size(size)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn bind_listener(&self, address: &str) -> Result<TcpListener> {
+        let mut last = None;
+        for address in address.to_socket_addrs()? {
+            let bind = || -> Result<TcpListener> {
+                let socket = socket2::Socket::new(
+                    socket2::Domain::for_address(address),
+                    socket2::Type::STREAM,
+                    Some(socket2::Protocol::TCP),
+                )?;
+                socket.set_reuse_address(true)?;
+                self.configure_inbound_socket(&socket)?;
+                socket.bind(&address.into())?;
+                socket.listen(self.listen_queue_size)?;
+                socket.set_nonblocking(true)?;
+                Ok(socket.into())
+            };
+            match bind() {
+                Ok(listener) => return Ok(listener),
+                Err(failure) => last = Some(failure),
+            }
+        }
+        Err(last.unwrap_or_else(|| error("peer listener has no addresses")))
     }
 }
 fn canonical_host(address: &str) -> String {
@@ -288,6 +347,13 @@ mod tests {
         config
             .set("Router.connection_timeout_ms", json!(0))
             .unwrap();
+        config.set("Router.disconnect_interval", json!(7)).unwrap();
+        config.set("Router.tcp_keepalive", json!(false)).unwrap();
+        config.set("Router.listen_queue_size", json!(17)).unwrap();
+        config.set("Router.send_buffer_size", json!(65536)).unwrap();
+        config
+            .set("Router.receive_buffer_size", json!(32768))
+            .unwrap();
         config
             .set("Router.fixed_peers", json!(["one.example"]))
             .unwrap();
@@ -308,6 +374,18 @@ mod tests {
         assert_eq!(policy.peer_retry_interval, Duration::from_secs(420));
         assert_eq!(policy.query_interval, Duration::from_millis(1234));
         assert_eq!(policy.connection_timeout, None);
+        assert_eq!(policy.disconnect_interval, Some(Duration::from_secs(7)));
+        assert!(!policy.tcp_keepalive);
+        assert_eq!(policy.listen_queue_size, 17);
+        assert_eq!(policy.send_buffer_size, Some(65_536));
+        assert_eq!(policy.receive_buffer_size, Some(32_768));
+        config.set("Router.disconnect_interval", json!(0)).unwrap();
+        config.set("Router.send_buffer_size", json!(0)).unwrap();
+        config.set("Router.receive_buffer_size", json!(-1)).unwrap();
+        let policy = RouterConfig::from_config(&config).unwrap();
+        assert_eq!(policy.disconnect_interval, None);
+        assert_eq!(policy.send_buffer_size, None);
+        assert_eq!(policy.receive_buffer_size, None);
     }
     #[test]
     fn bad_config_is_rejected_before_connections_or_ledger_start() {

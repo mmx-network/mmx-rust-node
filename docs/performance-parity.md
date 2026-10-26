@@ -884,12 +884,14 @@ Deliberate differences and missing optimizations:
 - Sender publication notifications remain immediate; `send_interval_ms` controls
   idle waits rather than exact native timer phasing. `do_relay` gates forwarded
   publications while preserving reliable local broadcasts, receipts and VDF
-  bootstrap. UPnP, periodic disconnects, native socket buffer/keepalive/backlog
-  knobs and Router topic/server/version/mode overrides remain unported.
+  bootstrap. UPnP and Router topic/server/version/mode overrides remain unported.
+  The socket/lifetime follow-up below covers native buffer/keepalive/backlog
+  controls and periodic inbound disconnects.
 - Missing settings retain legacy Rust loopback/three-observer/15-second RPC and
   body fallbacks; loading the native JSON overrides them. Absent `tcp_no_delay`
-  retains Rust's enabled latency setting, unlike the inherited native listener
-  default. Explicit false is supported.
+  retains Rust's enabled incoming latency setting, unlike the inherited native
+  listener default. Explicit false is supported on incoming sockets; outgoing
+  no-delay follows native endpoint defaults as detailed below.
 
 Regression workloads use only synthetic RAM chains, loopback sockets and small
 temporary config files: native default/override layering and units; concurrent
@@ -913,3 +915,52 @@ Validation: **152 node tests and 10 real-daemon integration tests passed**.
 Node/tools all-target Clippy passes with warnings denied; formatting and diff
 whitespace checks pass. Node and utility binaries build with two jobs,
 incremental/debug output disabled and low CPU/I/O priority.
+
+### Incoming socket settings and connection lifetime
+
+Additional reference: `vnx-base/src/Endpoint.cpp::{set_socket_options,
+set_tcp_socket_options,TcpEndpoint::open,bind,listen,accept,set_options}`,
+`vnx-base/interface/{Endpoint,TcpEndpoint}.vni`,
+`vnx-addons/src/TcpServer.cpp::{main,connect_client}`, and
+`Router.cpp::{connect_to,update}` at the same native revision.
+
+`listen_queue_size` now reaches `listen()` when creating the socket, preserving
+the native backlog default of 100. `tcp_keepalive`, `send_buffer_size`, and
+`receive_buffer_size` configure both the listener before bind/listen and every
+accepted socket before authentication. Native zero/negative buffer sizes leave
+OS defaults; the OS can clamp effective sizes and backlog. Socket setup uses
+the cross-platform `socket2` API, retaining IPv4/IPv6 address iteration and
+nonblocking accepts. Failed setup drops its socket instead of publishing a
+partially configured listener. Existing decode, admission and worker bounds are
+unchanged.
+
+Direction matters: native Router constructs a separate outgoing `TcpEndpoint`,
+whose defaults enable no-delay and keepalive with OS buffer defaults. Its
+inherited Router socket settings configure the listening endpoint and accepted
+sockets. Rust now follows that distinction, correcting the first checkpoint's
+application of `Router.tcp_no_delay` to outgoing sockets too. The retained Rust
+incoming no-delay fallback remains enabled when the key is absent; explicit
+false works. Both directions now enable native TCP keepalive by default.
+
+`disconnect_interval` now limits incoming connection age in seconds, independent
+of receive activity. Zero disables it; outgoing connections are exempt, matching
+`Router::update`. A bounded deadline check in the existing receive/RPC loops
+also covers authentication and partial frames, without a timer thread per peer.
+Dropping the connection releases its shared admission lease. Native checks on
+its update timer after integer-second rounding; Rust enforces an absolute
+receive deadline and can expire up to a timer tick/rounding interval sooner.
+Synchronous response work or blocked writes can still delay receive-loop checks;
+native's event loop and asynchronous sender remain an optimization gap.
+
+New regressions inspect actual listener/accepted/outgoing socket options and
+OS buffer sizes, native buffer-disable/seconds semantics, and a busy
+authenticated incoming peer expiring while its outgoing sibling remains usable.
+A partial frame before authentication also expires with receive-idle expiry
+disabled. A replacement peer confirms admission capacity is released. The existing
+network and actual-daemon tests cover the changed listener construction.
+These are bounded loopback checks, not connection-load or latency parity
+measurements. No live ledger/plot data or unrelated service was used.
+
+Follow-up validation: **155 node tests and 10 daemon integration tests passed**.
+Node/tools all-target Clippy, formatting and diff whitespace checks pass. Builds
+retain the two-job, nonincremental, no-debug, low CPU/I/O priority policy.
