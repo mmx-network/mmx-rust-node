@@ -24,6 +24,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from webdriver_client import WebDriverClient
 
 APP, DRIVER = sys.argv[1], sys.argv[2]
 PRODUCT = "MMX Wallet"
@@ -84,6 +85,7 @@ return !event.defaultPrevented;
 
 failures = []
 secrets = []
+client = WebDriverClient("127.0.0.1", PORT)
 
 
 def check(name, condition, detail=""):
@@ -93,14 +95,7 @@ def check(name, condition, detail=""):
 
 
 def webdriver(method, path, body=None):
-    data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return json.load(response).get("value")
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"WebDriver {method} {path}: {e.read()[:300]!r}") from None
+    return client.request(method, path, body)
 
 
 def xdotool(*args):
@@ -480,6 +475,7 @@ finally:
             webdriver("DELETE", f"/session/{session}")
         except Exception as e:  # the app may already be gone
             print(f"note  {e}")
+    client.close()
     # Stop only the driver's own process group (driver, WebKitWebDriver, app).
     try:
         os.killpg(driver.pid, signal.SIGTERM)

@@ -91,6 +91,7 @@ jobs:
         with:
           node-version: 24
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: python3 -m unittest discover -s src-tauri/tests -p 'test_*.py' -v
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-default-features
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --no-default-features --all-targets -- -D warnings
       # Same libraries as the Linux build container (scripts/Dockerfile.linux).
