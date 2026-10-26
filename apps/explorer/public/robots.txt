@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /healthz
+Allow: /
+Sitemap: https://explore.mmx.network/sitemap.xml

@@ -1,12 +1,26 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" itemscope itemtype="https://schema.org/WebSite">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="referrer" content="no-referrer" />
     <meta name="color-scheme" content="light dark" />
     <meta name="format-detection" content="telephone=no" />
-    <meta name="description" content="Send and receive MMX." />
+    <meta name="description" content="Send and receive MMX with the MMX web wallet. Create or import wallets, manage contacts, and review transactions with local signing in your browser." />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <link rel="canonical" href="https://wallet.mmx.network/" />
+    <meta itemprop="name" content="MMX Wallet" />
+    <link itemprop="url" href="https://wallet.mmx.network/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="MMX Wallet" />
+    <meta property="og:title" content="MMX Wallet" />
+    <meta property="og:description" content="Send and receive MMX with the MMX web wallet. Create or import wallets, manage contacts, and review transactions with local signing in your browser." />
+    <meta property="og:url" content="https://wallet.mmx.network/" />
+    <meta property="og:image" content="https://wallet.mmx.network/icon-512.png" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
+    <meta property="og:image:alt" content="MMX Wallet" />
+    <meta name="twitter:card" content="summary" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <link rel="manifest" href="./manifest.webmanifest" />
@@ -14,6 +28,14 @@
   </head>
   <body>
     <div id="app"></div>
+    <noscript>
+      <main>
+        <h1>MMX Wallet</h1>
+        <p>Send and receive MMX, create or import wallets, manage contacts, and review your transaction history. Transactions are signed locally in your browser.</p>
+        <p>Enable JavaScript to use the wallet.</p>
+        <nav aria-label="MMX resources"><a href="https://mmx.network/">MMX Network</a> · <a href="https://explore.mmx.network/">Block explorer</a> · <a href="https://docs.mmx.network/">Documentation</a></nav>
+      </main>
+    </noscript>
     <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>

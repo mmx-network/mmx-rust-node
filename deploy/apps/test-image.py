@@ -11,7 +11,10 @@ import subprocess
 import time
 import uuid
 from contextlib import contextmanager
+from html.parser import HTMLParser
+from urllib.robotparser import RobotFileParser
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 
 
 def docker(*args, check=True):
@@ -97,17 +100,85 @@ def security(headers, rpc_origin, wallet, website=False):
         assert "max-age=" in headers["strict-transport-security"]
 
 
+class SearchMetadata(HTMLParser):
+    def __init__(self, html):
+        super().__init__()
+        self.meta = {}
+        self.canonicals = []
+        self.site_urls = []
+        self.website_scopes = 0
+        self.feed(html)
+
+    def handle_starttag(self, tag, attributes):
+        attrs = dict(attributes)
+        if "itemscope" in attrs and attrs.get("itemtype") == "https://schema.org/WebSite":
+            self.website_scopes += 1
+        if tag == "meta":
+            for key in ["name", "property", "itemprop"]:
+                if key in attrs:
+                    self.meta[(key, attrs[key])] = attrs.get("content", "")
+        if tag == "link":
+            if attrs.get("rel") == "canonical":
+                self.canonicals.append(attrs.get("href"))
+            if attrs.get("itemprop") == "url":
+                self.site_urls.append(attrs.get("href"))
+
+
+def check_search(port, host, html, rpc_origin, wallet, website):
+    public_host = "mmx.network" if website else "wallet.mmx.network" if wallet else "explore.mmx.network"
+    name = "MMX Network" if website else "MMX Wallet" if wallet else "MMX Explorer"
+    canonical = f"https://{public_host}/"
+    metadata = SearchMetadata(html.decode())
+    assert metadata.canonicals == [canonical], metadata.canonicals
+    assert metadata.website_scopes == 1
+    assert metadata.site_urls == [canonical]
+    assert metadata.meta[("itemprop", "name")] == name
+    assert len(metadata.meta[("name", "description")]) > 80
+    directives = {value.strip() for value in metadata.meta[("name", "robots")].split(",")}
+    assert {"index", "follow", "max-image-preview:large"} <= directives
+    assert not {"noindex", "nofollow", "none"} & directives
+    assert metadata.meta[("property", "og:url")] == canonical
+    assert metadata.meta[("property", "og:site_name")] == name
+    assert name in metadata.meta[("property", "og:title")]
+    assert metadata.meta[("property", "og:description")] == metadata.meta[("name", "description")]
+    assert metadata.meta[("property", "og:image")].startswith("https://")
+    assert metadata.meta[("name", "twitter:card")] in ["summary", "summary_large_image"]
+    # Microdata supplies the site name without weakening the no-inline-script CSP.
+    assert not re.search(rb'<script\b(?![^>]*\bsrc=)[^>]*>', html)
+
+    status, headers, robots = request(port, host, "/robots.txt")
+    assert status == 200 and headers["content-type"].startswith("text/plain")
+    assert headers["cache-control"] == "no-cache"
+    security(headers, rpc_origin, wallet, website)
+    rules = RobotFileParser()
+    rules.parse(robots.decode().splitlines())
+    assert rules.site_maps() == [f"{canonical}sitemap.xml"]
+    for agent in ["Googlebot", "bingbot", "ExampleBot"]:
+        assert rules.can_fetch(agent, canonical)
+        assert rules.can_fetch(agent, f"{canonical}assets/example.js")
+        assert not rules.can_fetch(agent, f"{canonical}healthz")
+
+    status, headers, sitemap = request(port, host, "/sitemap.xml")
+    assert status == 200 and "xml" in headers["content-type"]
+    assert headers["cache-control"] == "no-cache"
+    security(headers, rpc_origin, wallet, website)
+    root = ElementTree.fromstring(sitemap)
+    namespace = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+    assert root.tag == f"{namespace}urlset"
+    assert [loc.text for loc in root.findall(f"{namespace}url/{namespace}loc")] == [canonical]
+
+
 def check_site(port, host, rpc_origin, wallet=False, website=False):
     status, headers, html = request(port, host)
     assert status == 200, (host, status)
-    title = b"<title>MMX" if website else b"<title>MMX Wallet</title>" if wallet else b"<title>MMX Explorer</title>"
+    title = b"<title>MMX" if website else b"<title>MMX Wallet</title>" if wallet else b"<title>MMX Explorer"
     assert title in html
+    check_search(port, host, html, rpc_origin, wallet, website)
     if website:
         assert b"https://wallet.mmx.network" in html
         assert b'<link rel="canonical" href="https://mmx.network/">' in html
         assert re.search(rb'<meta name="description" content="[^"]+">', html)
         for path, content_type in [
-            ("/robots.txt", "text/plain"), ("/sitemap.xml", "xml"),
             ("/site.webmanifest", "application/manifest+json"), ("/share.png", "image/png"),
         ]:
             status, public_headers, body = request(port, host, path)
@@ -232,7 +303,7 @@ def main():
         env = [part for setting in settings for part in ["--env", setting]]
         result = docker("run", "--rm", "--network", "none", *env, args.image, "true", check=False)
         assert result.returncode != 0, settings
-    print(f"{args.image}: website/wallet/explorer routing and isolation, port/host overrides, CSP, caching, gzip, WASM, read-only/non-root runtime, root-owned console and invalid settings passed")
+    print(f"{args.image}: website/wallet/explorer routing and isolation, search metadata/robots/sitemaps, port/host overrides, CSP, caching, gzip, WASM, read-only/non-root runtime, root-owned console and invalid settings passed")
 
 
 if __name__ == "__main__":

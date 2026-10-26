@@ -183,6 +183,40 @@ chunk that is no longer at the origin and was never cached by the CDN. For
 uninterrupted older sessions, retain previous hashed assets in CDN/object
 storage across deployments. Keep the previous image tag for rollback.
 
+## Search discovery
+
+Each site serves its own `/robots.txt` and `/sitemap.xml`. Crawlers can access
+the homepage and all rendering assets; only `/healthz` is excluded. Sitemaps
+list the canonical HTTPS homepage on each production domain, including when
+runtime hostname overrides are used for testing. The website's `www` alias
+declares `https://mmx.network/` as canonical as well.
+
+All three homepages include descriptive titles and descriptions, canonical
+links, Open Graph/social-card metadata, and `WebSite` structured data for their
+site names. Structured data uses HTML microdata, so no inline scripts or CSP
+exceptions are needed. The public website's content is already static HTML;
+the wallet and explorer also provide descriptions and resource links when
+JavaScript is disabled.
+
+The wallet's screens and explorer's block, transaction, address and farmer
+views use URL fragments. Only the app homepages are listed in their sitemaps;
+fragments are not separate indexable documents. Making individual public
+explorer records searchable would require regular URL routes, crawlable
+record content, per-record metadata, and meaningful HTTP status codes. It is
+separate from homepage discovery.
+
+After deploying the image, verify the production domains in Google Search
+Console and submit these sitemaps:
+
+- `https://mmx.network/sitemap.xml`
+- `https://wallet.mmx.network/sitemap.xml`
+- `https://explore.mmx.network/sitemap.xml`
+
+Use URL Inspection to check each homepage's rendered content and canonical URL
+and request recrawling. Ensure the CDN passes through crawler files and does
+not challenge search crawlers, require login, or add `noindex` headers. HTTPS
+and HTTP-to-HTTPS redirects are configured at the CDN, which terminates TLS.
+
 ## Verify
 
 ```sh
@@ -195,6 +229,8 @@ filesystems and ephemeral loopback host ports. It checks all three sites,
 including the website's `www` alias, default and overridden hostnames/ports,
 separate site content and policies, security headers, successful/error/conditional cache
 policies, gzip, WASM MIME/range responses, and rejection of invalid settings.
+It also checks each site's robots rules, sitemap XML, canonical and social
+metadata, and structured site name on both production and overridden hosts.
 It also starts nginx with root-owned inherited console pipes and verifies both
 HTTP delivery and request logging after the supervisor drops privileges.
 It makes no requests to a chain server and does not access ledger/plot storage.

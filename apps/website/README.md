@@ -47,6 +47,9 @@ existing SafeTrade and NonKYC market links are retained from `mmx-website`.
 and a social preview rendered from `branding/share.svg`. The icon source is
 `../wallet/branding/mmx-logo.svg`; its render script also refreshes this site's
 SVG/PNG assets. The hero uses the same SVG as the header and footer.
+The static HTML includes a canonical URL, search/social descriptions, and
+`WebSite` microdata for the site name. `robots.txt` allows crawlers and points
+to the homepage sitemap; section anchors are not separate sitemap entries.
 `public/_headers` is the
 production policy source; its CSP is also embedded in the built HTML. There
 are no API connections, inline scripts, or inline styles. Only fingerprinted

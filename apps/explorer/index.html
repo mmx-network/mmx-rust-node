@@ -1,16 +1,37 @@
 <!doctype html>
-<html lang="en" data-scheme="light" data-layout="topbar">
+<html lang="en" data-scheme="light" data-layout="topbar" itemscope itemtype="https://schema.org/WebSite">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Explore MMX blocks, transactions, addresses and farmers." />
+    <meta name="description" content="Explore the MMX blockchain. Browse recent blocks and transactions, look up addresses and farmers, and follow network activity with the MMX block explorer." />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
     <meta name="theme-color" content="#f6f5fb" />
+    <link rel="canonical" href="https://explore.mmx.network/" />
+    <meta itemprop="name" content="MMX Explorer" />
+    <link itemprop="url" href="https://explore.mmx.network/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="MMX Explorer" />
+    <meta property="og:title" content="MMX Explorer — MMX Block Explorer" />
+    <meta property="og:description" content="Explore the MMX blockchain. Browse recent blocks and transactions, look up addresses and farmers, and follow network activity with the MMX block explorer." />
+    <meta property="og:url" content="https://explore.mmx.network/" />
+    <meta property="og:image" content="https://mmx.network/share.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="MMX Network" />
+    <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <title>MMX Explorer</title>
+    <title>MMX Explorer — MMX Block Explorer</title>
   </head>
   <body>
     <div id="app"></div>
-    <noscript>Enable JavaScript to browse the MMX explorer.</noscript>
+    <noscript>
+      <main>
+        <h1>MMX Block Explorer</h1>
+        <p>Browse recent MMX blocks and transactions, look up addresses and farmers, and follow activity on the MMX blockchain.</p>
+        <p>Enable JavaScript to browse live blockchain data.</p>
+        <nav aria-label="MMX resources"><a href="https://mmx.network/">MMX Network</a> · <a href="https://wallet.mmx.network/">Web wallet</a> · <a href="https://docs.mmx.network/">Documentation</a></nav>
+      </main>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /healthz
+Allow: /
+Sitemap: https://wallet.mmx.network/sitemap.xml
