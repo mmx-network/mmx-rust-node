@@ -1,17 +1,21 @@
 # MMX apps Docker image
 
-`mmx-apps` builds and serves the new web wallet and explorer. One nginx process
-serves both sites on the same HTTP port, selected by the request's `Host` header:
+`mmx-apps` builds and serves the MMX website, new web wallet and explorer. One
+nginx process serves all three sites on the same HTTP port, selected by the
+request's `Host` header:
 
 | Hostname | App |
 | --- | --- |
+| `mmx.network`, `www.mmx.network` | `apps/website`, the public MMX website |
 | `wallet.mmx.network` | `apps/wallet`, including its production Rust/WASM core |
 | `explore.mmx.network` | `apps/explorer` |
 
 TLS terminates at the CDN. The origin does not redirect HTTP to HTTPS or need
 certificates. Visitors use HTTPS at the CDN, including for the wallet's browser
 crypto and clipboard features. Browsers contact `https://rpc.mmx.network`
-directly; this container only serves static files and has no node or database.
+directly; the website makes no runtime API requests. This container only
+serves static files and has no node or database. The website links to the wallet
+at `https://wallet.mmx.network`.
 
 ## Pull and run on Gigahost
 
@@ -36,8 +40,8 @@ Replace `23147` with a port assigned to your instance. In Gigahost's container
 settings, use `ghcr.io/mmx-network/mmx-apps:latest` as the image, expose container
 HTTP port `8080`, and map it to the assigned host port. If the platform expects
 the application to listen on the assigned port directly, set `PORT` to that
-number instead. Set both CDN origins to the instance IP and assigned HTTP port,
-preserving `wallet.mmx.network` and `explore.mmx.network` as their `Host` headers.
+number instead. Set each CDN origin to the instance IP and assigned HTTP port,
+preserving its public hostname as the `Host` header.
 
 With this repository's Compose file, pull and start without building:
 
@@ -73,7 +77,7 @@ HTTP_PORT=23147 docker compose up -d
 The `vendor/vnx-rust` submodule is needed for Cargo workspace resolution.
 The sibling C++ repository is not needed to build or run this image.
 
-Replace `23147` with any port assigned to the instance. Both sites share that
+Replace `23147` with any port assigned to the instance. All three sites share that
 port; configure each CDN origin as the instance's IP and this HTTP port.
 The CDN must preserve the public `Host` header, or set it to the corresponding
 hostname in the table. Unrecognized hosts return 404; `/healthz` returns 200
@@ -82,6 +86,8 @@ regardless of hostname for load balancers and the built-in health check.
 Test each host locally:
 
 ```sh
+curl -I -H 'Host: mmx.network' http://127.0.0.1:23147/
+curl -I -H 'Host: www.mmx.network' http://127.0.0.1:23147/
 curl -I -H 'Host: wallet.mmx.network' http://127.0.0.1:23147/
 curl -I -H 'Host: explore.mmx.network' http://127.0.0.1:23147/
 ```
@@ -97,7 +103,7 @@ docker run -d --name mmx-apps --restart unless-stopped \
 ```
 
 Docker builds the wallet core with two Rust jobs, no incremental compilation
-or debug symbols, then builds both frontends sequentially at low priority.
+or debug symbols, then builds all three frontends sequentially at low priority.
 Cargo/npm download caches persist in BuildKit; build tools, sources and
 dependencies are absent from the small nginx runtime image. `.dockerignore`
 limits the build context to source inputs and excludes local `.env` files,
@@ -119,6 +125,8 @@ filesystem.
 | `PORT` | Container startup | `8080` | Internal HTTP listener, integer from 1024 to 65535 |
 | `WALLET_HOST` | Container startup | `wallet.mmx.network` | Wallet hostname, without scheme, path or port |
 | `EXPLORER_HOST` | Container startup | `explore.mmx.network` | Explorer hostname, without scheme, path or port |
+| `WEBSITE_HOST` | Container startup | `mmx.network` | Website hostname, without scheme, path or port |
+| `WEBSITE_WWW_HOST` | Container startup | `www.mmx.network` | Website alias, without scheme, path or port |
 | `VITE_RPC_URL` | Image build | `https://rpc.mmx.network` | Public chain WebAPI used by both apps |
 
 Usually only `HTTP_PORT` needs changing. Platforms using host networking or
@@ -128,8 +136,10 @@ expecting a `PORT` variable can change the internal listener too:
 docker run -d --name mmx-apps -e PORT=23147 -p 23147:23147 mmx-apps
 ```
 
-Compose also accepts `PORT`, and maps `HTTP_PORT` to that listener. Hostnames
-must be distinct. Changing runtime settings does not require rebuilding.
+Compose also accepts `PORT`, and maps `HTTP_PORT` to that listener. All four
+hostnames must be distinct, ignoring case. Changing runtime settings does not
+require rebuilding. The website's wallet, explorer and canonical public links
+continue to point at the production domains when runtime hosts are overridden.
 The chain server is embedded in JavaScript and each app's Content Security
 Policy, so changing it requires a new image:
 
@@ -144,7 +154,7 @@ is a different interface. The apps also accept loopback HTTP for local testing.
 
 ## CDN caching
 
-Both apps emit content-hashed JavaScript, CSS and font filenames. The wallet's
+All sites emit content-hashed JavaScript, CSS and font filenames. The wallet's
 WASM file is content-hashed too. nginx sends:
 
 | Response | `Cache-Control` |
@@ -181,8 +191,9 @@ python3 deploy/apps/test-image.py mmx-apps
 ```
 
 The smoke test starts disposable, non-root containers with read-only root
-filesystems and ephemeral loopback host ports. It checks both default and
-overridden hostnames/ports, security headers, successful/error/conditional cache
+filesystems and ephemeral loopback host ports. It checks all three sites,
+including the website's `www` alias, default and overridden hostnames/ports,
+separate site content and policies, security headers, successful/error/conditional cache
 policies, gzip, WASM MIME/range responses, and rejection of invalid settings.
 It also starts nginx with root-owned inherited console pipes and verifies both
 HTTP delivery and request logging after the supervisor drops privileges.
@@ -190,10 +201,10 @@ It makes no requests to a chain server and does not access ledger/plot storage.
 The [web apps image workflow](../.github/workflows/apps.yml) runs the build and
 these tests on relevant source changes.
 
-## Add docs and website later
+## Add another static site
 
-Add their build steps to the `web-build` stage and copy their static outputs
-into separate directories under `/srv/mmx`. Add a `server` block for each
+Add its build steps to the `web-build` stage and copy its static output
+into a separate directory under `/srv/mmx`. Add a `server` block for its
 hostname in `deploy/apps/nginx.conf.template`; add policy/precompression inputs
 to `prepare.mjs` if appropriate. All sites can share the existing HTTP port.
 Keep separate hostnames and generated policies, especially for the wallet.

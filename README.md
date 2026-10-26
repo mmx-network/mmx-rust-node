@@ -139,10 +139,13 @@ build` in that directory to build its static site, or `npm run dev` to preview
 it on port 5175. It includes paged blocks, transactions, farmers and address
 activity, and talks directly to the public WebAPI without a local ledger.
 
-To build and serve both web apps behind a CDN, use the
+The public website in [`apps/website`](apps/website/README.md) uses the new wallet's visual
+style and links to the browser wallet at `https://wallet.mmx.network`.
+To build and serve the website and both web apps behind a CDN, use the
 [`mmx-apps` Docker image](docs/web-apps-docker.md). One HTTP origin routes
-`wallet.mmx.network` and `explore.mmx.network` by hostname; set `HTTP_PORT`
-with Compose to use a port from the host's assigned slice.
+`mmx.network`, `www.mmx.network`, `wallet.mmx.network` and `explore.mmx.network`
+by hostname; set `HTTP_PORT` with Compose to use a port from the host's assigned
+slice.
 
 For farming, restart the node with the private farmer endpoint configured:
 

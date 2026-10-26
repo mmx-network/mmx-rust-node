@@ -43,10 +43,14 @@ async function precompress(directory) {
   }
 }
 
-async function prepare(root) {
+export async function prepare(root) {
   const generated = join(root, 'deploy/apps/generated');
   await mkdir(generated, { recursive: true });
-  for (const [name, output] of [['wallet', 'apps/wallet/dist/web'], ['explorer', 'apps/explorer/dist']]) {
+  for (const [name, output] of [
+    ['wallet', 'apps/wallet/dist/web'],
+    ['explorer', 'apps/explorer/dist'],
+    ['website', 'apps/website/dist'],
+  ]) {
     const directory = join(root, output);
     const headers = nginxHeaders(await readFile(join(directory, '_headers'), 'utf8'));
     await writeFile(join(generated, `${name}-headers.conf`), headers);

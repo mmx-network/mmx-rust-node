@@ -70,4 +70,14 @@ http {
         add_header Cache-Control $cache_control always;
         include /etc/nginx/mmx/locations.conf;
     }
+
+    server {
+        listen ${PORT};
+        listen [::]:${PORT};
+        server_name ${WEBSITE_HOST} ${WEBSITE_WWW_HOST};
+        root /srv/mmx/website;
+        include /etc/nginx/mmx/website-headers.conf;
+        add_header Cache-Control $cache_control always;
+        include /etc/nginx/mmx/locations.conf;
+    }
 }
