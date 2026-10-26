@@ -12,9 +12,10 @@ use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
     },
+    thread::Thread,
     time::{Duration, Instant},
 };
 type RelayEntries = BTreeMap<u64, Item>;
@@ -55,7 +56,10 @@ struct Ready {
 pub(crate) struct Relay {
     state: Arc<Mutex<RelayState>>,
     latest: Arc<AtomicU64>,
-    wake: Arc<(Mutex<()>, Condvar)>,
+}
+struct Profile {
+    value: u64,
+    wake: Option<Thread>,
 }
 struct RelayState {
     max_hash_cache: usize,
@@ -68,7 +72,7 @@ struct RelayState {
     verified: Seen,
     envelopes: Seen,
     params: Option<Arc<mmx_types::mmx::ChainParams>>,
-    members: BTreeMap<u64, u64>,
+    members: BTreeMap<u64, Profile>,
     next_member: u64,
     target: Duration,
     upload: Option<upload::Budget>,
@@ -239,7 +243,7 @@ impl Relay {
         let mut members: Vec<_> = state
             .members
             .iter()
-            .filter(|(_, profile)| allows(**profile, &record, reliable))
+            .filter(|(_, profile)| allows(profile.value, &record, reliable))
             .map(|(id, _)| *id)
             .collect();
         members.shuffle(&mut rand::thread_rng());
@@ -267,12 +271,12 @@ impl Relay {
         self.notify()
     }
     fn notify(&self) -> Result<()> {
-        let _guard = self
-            .wake
-            .0
-            .lock()
-            .map_err(|_| error("relay notification poisoned"))?;
-        self.wake.1.notify_all();
+        let state = self.state.lock().map_err(|_| error("relay poisoned"))?;
+        for member in state.members.values() {
+            if let Some(wake) = &member.wake {
+                wake.unpark();
+            }
+        }
         Ok(())
     }
     /// Only ledger/proof-verified publications seed this cache. A claimed hash
@@ -509,7 +513,10 @@ impl Relay {
         let id = state.next_member;
         state.members.insert(
             id,
-            (1 << 32) | u64::from(mmx_types::mmx::node_type_e::FULL_NODE.value),
+            Profile {
+                value: (1 << 32) | u64::from(mmx_types::mmx::node_type_e::FULL_NODE.value),
+                wake: None,
+            },
         );
         Ok(RelayPeer {
             received: Arc::new(Mutex::new(PeerCache {
@@ -549,6 +556,7 @@ impl Relay {
         member: Option<u64>,
         known: &Seen,
         completed: &BTreeSet<u64>,
+        max_records: usize,
     ) -> Result<Ready> {
         let state = self.state.lock().map_err(|_| error("relay poisoned"))?;
         let mut next = self.latest.load(Ordering::Acquire);
@@ -578,7 +586,7 @@ impl Relay {
             }
             if member
                 .and_then(|id| state.members.get(&id))
-                .is_some_and(|profile| !allows(*profile, &item.record, item.reliable))
+                .is_some_and(|profile| !allows(profile.value, &item.record, item.reliable))
             {
                 processed.push(*seq);
                 continue;
@@ -597,7 +605,7 @@ impl Relay {
                 next = next.min(seq - 1);
                 continue;
             }
-            if !out.is_empty() && (out.len() >= 16 || bytes + item.size > 256 * 1024) {
+            if !out.is_empty() && (out.len() >= max_records || bytes + item.size > 256 * 1024) {
                 next = next.min(seq - 1);
                 break;
             }
@@ -616,44 +624,22 @@ impl Relay {
     }
     #[cfg(test)]
     fn since(&self, cursor: u64, class: usize) -> Result<(u64, Vec<Arc<Record>>)> {
-        let ready = self.for_peer(cursor, class, None, &Seen::default(), &BTreeSet::new())?;
+        let ready = self.for_peer(cursor, class, None, &Seen::default(), &BTreeSet::new(), 16)?;
         Ok((
             ready.cursor,
             ready.records.into_iter().map(|d| d.record).collect(),
         ))
     }
+    #[cfg(test)]
     pub(crate) fn sequence(&self) -> u64 {
         self.latest.load(Ordering::Acquire)
     }
-    pub(crate) fn stop_waiter(&self, stop: &AtomicBool) {
-        let _guard = self
-            .wake
-            .0
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        stop.store(true, Ordering::Release);
-        self.wake.1.notify_all();
-    }
-    pub(crate) fn wait(&self, observed: u64, stop: &AtomicBool) -> Result<()> {
-        let interval = self
+    pub(crate) fn send_interval(&self) -> Result<Duration> {
+        Ok(self
             .state
             .lock()
             .map_err(|_| error("relay poisoned"))?
-            .send_interval;
-        let guard = self
-            .wake
-            .0
-            .lock()
-            .map_err(|_| error("relay notification poisoned"))?;
-        if self.sequence() == observed && !stop.load(Ordering::Acquire) {
-            drop(
-                self.wake
-                    .1
-                    .wait_timeout(guard, interval)
-                    .map_err(|_| error("relay notification poisoned"))?,
-            );
-        }
-        Ok(())
+            .send_interval)
     }
 }
 #[derive(Clone, Default)]
@@ -709,7 +695,22 @@ impl RelayPeer {
                     .members
                     .get_mut(&member.id)
                 {
-                    *profile = u64::from(role) | if synced { 1 << 32 } else { 0 };
+                    profile.value = u64::from(role) | if synced { 1 << 32 } else { 0 };
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn set_waker(&self, wake: Thread) -> Result<()> {
+        if let Some(member) = &self.member {
+            if let Some(state) = member.state.upgrade() {
+                if let Some(profile) = state
+                    .lock()
+                    .map_err(|_| error("relay poisoned"))?
+                    .members
+                    .get_mut(&member.id)
+                {
+                    profile.wake = Some(wake);
                 }
             }
         }
@@ -752,9 +753,23 @@ impl RelayPeer {
         }
         Ok(())
     }
-    pub fn flush(
+    #[cfg(test)]
+    pub fn flush(&mut self, relay: &Relay, send: impl FnMut(&Record) -> Result<()>) -> Result<()> {
+        self.flush_with_limit(relay, 16, send)
+    }
+    /// Revisit control work and newly published consensus between TX bodies,
+    /// including when a previous body took most of its write deadline.
+    pub(crate) fn flush_one(
         &mut self,
         relay: &Relay,
+        send: impl FnMut(&Record) -> Result<()>,
+    ) -> Result<()> {
+        self.flush_with_limit(relay, 1, send)
+    }
+    fn flush_with_limit(
+        &mut self,
+        relay: &Relay,
+        max_records: usize,
         mut send: impl FnMut(&Record) -> Result<()>,
     ) -> Result<()> {
         // Consensus first; receipts are immediate and independent of the
@@ -771,6 +786,8 @@ impl RelayPeer {
                 ))?;
             }
             self.acknowledgements[class] = next;
+        }
+        for class in 0..2 {
             let ready = {
                 let known = self
                     .received
@@ -782,6 +799,7 @@ impl RelayPeer {
                     self.member.as_ref().map(|m| m.id),
                     &known.seen,
                     &self.completed[class],
+                    max_records,
                 )?
             };
             self.completed[class].extend(
@@ -790,6 +808,7 @@ impl RelayPeer {
                     .into_iter()
                     .filter(|seq| *seq > ready.cursor),
             );
+            let mut sent_body = false;
             for delivery in ready.records {
                 let seq = delivery.seq;
                 let r = delivery.record;
@@ -814,6 +833,7 @@ impl RelayPeer {
                 if should_send {
                     send(&r)?;
                     self.note(&r)?;
+                    sent_body = true;
                 }
                 // Native drops unreliable messages refused by upload credits.
                 // A new publication or local RPC submission is a separate event.
@@ -823,6 +843,9 @@ impl RelayPeer {
             }
             self.cursors[class] = ready.cursor;
             self.completed[class].retain(|seq| *seq > ready.cursor);
+            if max_records == 1 && sent_body {
+                return Ok(());
+            }
             if class == 0 {
                 // Live consensus first, then bounded bootstrap VDFs, then TXs.
                 // Failed writes leave the front available until disconnect or
@@ -838,7 +861,7 @@ impl RelayPeer {
                         .ids
                         .contains(&hash(&record, "content_hash")?);
                     if !known {
-                        if count == 16 || (count > 0 && bytes + size > 256 * 1024) {
+                        if count == max_records || (count > 0 && bytes + size > 256 * 1024) {
                             break;
                         }
                         send(&record)?;
@@ -847,6 +870,9 @@ impl RelayPeer {
                         bytes += size;
                     }
                     self.replay.pop_front();
+                }
+                if max_records == 1 && count > 0 {
+                    return Ok(());
                 }
             }
         }
@@ -1267,6 +1293,45 @@ mod tests {
                 ("static_cost".into(), Value::Uint(20_000)),
             ],
         ))
+    }
+    #[test]
+    fn a_sender_rechecks_live_consensus_between_each_transaction_without_replaying_work() {
+        let relay = Relay::default();
+        relay.set_target(Duration::ZERO).unwrap();
+        let mut peer = relay.attach().unwrap();
+        for id in 1..=3 {
+            relay.publish([id; 32], transaction(id), 100).unwrap();
+        }
+        let mut sent = Vec::new();
+        let mut notices = BTreeSet::new();
+        for pass in 0..7 {
+            peer.flush_one(&relay, |record| {
+                if record.name == "mmx.ReceiveNote" {
+                    notices.insert(hash(record, "hash")?);
+                } else {
+                    let id = hash(record, "content_hash")?;
+                    sent.push(id);
+                    if pass == 1 {
+                        assert!(
+                            notices.contains(&[6; 32]),
+                            "live consensus delayed a TX receipt"
+                        );
+                    }
+                    if pass == 0 {
+                        // Arrives while the first TX's send callback is busy.
+                        relay.publish([4; 32], message(4), 100)?;
+                        relay.publish([5; 32], message(5), 100)?;
+                        relay.publish([6; 32], transaction(6), 100)?;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            sent,
+            vec![[1; 32], [4; 32], [5; 32], [2; 32], [3; 32], [6; 32]]
+        );
     }
     #[test]
     fn local_submissions_and_consensus_bypass_forwarded_transaction_upload_limits() {

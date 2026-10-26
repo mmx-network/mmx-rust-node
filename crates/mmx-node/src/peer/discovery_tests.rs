@@ -4,7 +4,7 @@ use mmx_execution::chain::{forks::ForkChain, genesis::Assets};
 use mmx_types::VnxType;
 use vnx::serde_json::{self, json, Value as Json};
 
-fn node(seed: u8) -> Arc<Mutex<Node>> {
+pub(super) fn node(seed: u8) -> Arc<Mutex<Node>> {
     let genesis: Json = include_str!("../../../mmx-execution/tests/fixtures/chain.jsonl")
         .lines()
         .map(|line| serde_json::from_str::<Json>(line).unwrap())

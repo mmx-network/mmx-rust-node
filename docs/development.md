@@ -71,6 +71,7 @@ checkpoint compares `modules/Router.vni`, `config/default/Router.json`,
 | `fetch_timeout_ms` | Full metadata/RPC deadline and one-eighth body lease/deadline. Native file: 180,000 ms, giving a 22,500 ms body lease. |
 | `sync_loss_delay`, `peer_retry_interval` | Seconds before stalled sync restarts, and minutes for retry deadlines, matching native units (60 seconds / 360 minutes). See retry scheduling differences below. |
 | `compress_level` | Native Zstd range 0–20. Native file uses compression level 0. |
+| `max_write_queue` | Compressed output byte threshold per connection, default 10 MiB. Must be positive. Like native admission before encoding, one batch of at most 64 MiB + 8 bytes can cross the threshold. The in-flight batch stays charged until completion; at most 256 ordinary messages are retained. A separate 32-message / 16 KiB reserve carries pre-dispatch overflow replies. |
 | `tcp_no_delay`, `tcp_keepalive`, `send_buffer_size`, `receive_buffer_size`, `listen_queue_size` | Incoming listener/accepted-socket controls, matching native `TcpServer`. Keepalive defaults true, backlog 100, and nonpositive buffer sizes retain OS defaults. Outgoing sockets use native `TcpEndpoint` defaults: no-delay/keepalive enabled and OS buffer sizes. The OS may clamp buffer sizes and backlog. |
 | `max_hash_cache`, `max_sent_cache`, `do_relay`, `send_interval_ms` | Existing first-seen and per-peer echo-cache limits, forwarded-publication switch, and idle sender period. Native file sets 200,000 / 20,000 entries; native sender period is 20 ms. Reliable local publications and receive receipts still work with forwarding disabled. |
 | `max_msg_size`, `max_vdf_segments`, `relay_target_ms`, `max_tx_upload`, `max_pending_cost` | Previously implemented compressed-frame bound, early VDF segment bound, fanout stages, and transaction upload accounting continue to use their native names and units. |
@@ -96,12 +97,22 @@ native knob. Remaining work is assessed by operational outcomes:
 | Maintain a healthy, diverse peer pool through churn | Managed connections refresh discovery asynchronously; a full pool may validate one extra candidate at a time. An ahead candidate may replace only an idle, lower-height ordinary peer. Equal-height peers, fixed peers and in-flight owners are retained. Wider churn/adversarial comparisons remain. |
 | Recover connectivity after restart | Authenticated synced full-node outbound endpoints are saved atomically by one background writer. A real-daemon restart test removes all seeds/fixed peers and recovers from this cache alone. |
 | Deliver ready work promptly despite slow peers | Body replies now reach the scheduler individually, retaining partial successes and replenishing a shared 32-request budget independently of slow owners. Window publication still accounts for every observed candidate or its lease. Controlled previous/current measurements are recorded below; saturated network comparisons remain. |
-| Remain responsive and bounded under send pressure | Independent senders exist, but synchronous writes/response work can delay connection expiry. Equivalent backpressure, priority delivery, cleanup and memory bounds matter more than reproducing native queue classes or knob names. |
-| Use available connections effectively | Incoming peers exchange gossip/RPC but are not historical sync observers; fixed peers must qualify as synced full nodes. The effect on connectivity and sync availability needs consideration, including NAT deployments. |
+| Remain responsive and bounded under send pressure | One ordered writer owns socket writes from authentication onward, without holding the encoder/queue lock during I/O. Blocked sends reject peer RPC before dispatch, preserve bounded overload replies, and close on absolute write/age deadlines. Controlled socket saturation, recovery and cancellation are tested; sustained throughput/fanout comparisons remain. |
+| Preserve connection-role security and availability | Historical sync is outbound-only by intentional security policy. Incoming peers still exchange gossip and restricted RPC; authenticated inbound peers cannot qualify as historical observers or download sources. Fixed peers must qualify as synced full nodes. NAT/limited-outbound deployment availability still needs workload evidence. |
 | Establish automatic inbound reachability where requested | `open_port` / UPnP is unimplemented. Outgoing connections and manual port forwarding remain available; automatic mapping is a separate missing capability. |
 
-`max_queue_ms`, `max_write_queue` and `priority_queue_size` do not map directly
-to the current Rust sender. Native `stats_interval_ms`, `update_interval_ms`
+`max_queue_ms` and `priority_queue_size` do not map directly to the Rust sender.
+Control work is serviced at frame boundaries, then live consensus, bootstrap
+VDFs and transactions. Gossip bodies stay in the shared bounded relay store;
+they do not accumulate in per-peer transaction queues. Encoded frames retain
+FIFO order because VNX schema declarations span frames. The writer checks for
+new control/consensus work between bodies, so a started frame is the unavoidable
+unit of send latency. Every queued batch has a ten-second absolute deadline,
+including queue time, capped by incoming connection age. Partial progress does
+not extend it. Exhausting an ordinary queue returns an error; exhausting the
+overflow reserve closes the managed connection rather than silently losing RPC
+results. Encoding/compression and synchronous ledger response work still need
+CPU/latency comparisons under load. Native `stats_interval_ms`, `update_interval_ms`
 and `show_warnings` controls are unsupported; useful diagnostics and maintenance
 behavior remain requirements, without requiring identical logging/timer knobs.
 Arbitrary `node_version`, `mode`, Router topic names and `node_server` overrides

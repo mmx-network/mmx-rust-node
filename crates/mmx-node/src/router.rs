@@ -32,6 +32,7 @@ pub struct RouterConfig {
     pub fixed_peers: BTreeSet<String>,
     pub block_peers: BTreeSet<String>,
     pub compress_level: i32,
+    pub max_write_queue: usize,
     pub tcp_no_delay: bool,
     pub tcp_keepalive: bool,
     pub send_buffer_size: Option<usize>,
@@ -64,6 +65,7 @@ impl Default for RouterConfig {
             fixed_peers: BTreeSet::new(),
             block_peers: BTreeSet::new(),
             compress_level: 0,
+            max_write_queue: 10 * 1024 * 1024,
             tcp_no_delay: true,
             tcp_keepalive: true,
             send_buffer_size: None,
@@ -86,6 +88,12 @@ impl RouterConfig {
             };
         }
         read!(host, "host", String);
+        if let Some(bytes) = config.read::<u64>("Router.max_write_queue")? {
+            value.max_write_queue = usize::try_from(bytes)?;
+            if value.max_write_queue == 0 {
+                return Err(error("Router.max_write_queue must be positive"));
+            }
+        }
         value.port = config.read("Router.port")?;
         if value.host.is_empty() || value.port.is_some_and(|p| p > u16::MAX as i32) {
             return Err(error("invalid Router.host or Router.port"));
@@ -354,6 +362,7 @@ mod tests {
         assert_eq!(policy.max_hash_cache, 200_000);
         assert_eq!(policy.max_sent_cache, 20_000);
         assert_eq!(policy.compress_level, 0);
+        assert_eq!(policy.max_write_queue, 10 * 1024 * 1024);
 
         config.set("Router.max_connections", json!(-1)).unwrap();
         config.set("Router.num_peers_out", json!(2)).unwrap();
@@ -370,6 +379,9 @@ mod tests {
             .unwrap();
         config.set("Router.tcp_keepalive", json!(false)).unwrap();
         config.set("Router.listen_queue_size", json!(17)).unwrap();
+        config
+            .set("Router.max_write_queue", json!(123_456))
+            .unwrap();
         config.set("Router.send_buffer_size", json!(65536)).unwrap();
         config
             .set("Router.receive_buffer_size", json!(32768))
@@ -402,6 +414,7 @@ mod tests {
         );
         assert!(!policy.tcp_keepalive);
         assert_eq!(policy.listen_queue_size, 17);
+        assert_eq!(policy.max_write_queue, 123_456);
         assert_eq!(policy.send_buffer_size, Some(65_536));
         assert_eq!(policy.receive_buffer_size, Some(32_768));
         config.set("Router.disconnect_interval", json!(0)).unwrap();
@@ -424,6 +437,8 @@ mod tests {
             ("query_interval_ms", json!(0)),
             ("connect_interval_ms", json!(0)),
             ("compress_level", json!(21)),
+            ("max_write_queue", json!(0)),
+            ("max_write_queue", json!(-1)),
             ("port", json!(65536)),
             ("fixed_peers", json!(["bad.example:invalid"])),
         ] {

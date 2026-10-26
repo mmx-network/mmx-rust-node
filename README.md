@@ -62,6 +62,8 @@ The node discovers peers from the network configuration and syncs from genesis.
 The C++ default Router config targets eight outgoing peers and requires five
 distinct authenticated sync peers; `Router.num_peers_out` and
 `Router.min_sync_peers` control those counts.
+Historical sync intentionally uses outbound connections only. Incoming peers
+still exchange gossip and use the restricted peer RPC service.
 If discovery needs help, add `--peer HOST[:PORT]`; supplied peers replace the
 configured seed list, and discovery can find more peers from them.
 Discovery refreshes during operation, and authenticated outbound peer addresses

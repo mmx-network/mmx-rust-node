@@ -929,8 +929,11 @@ resource use, peer isolation and recovery under load must be comparable.
 - Rust requires the configured number of fresh successful distinct hash
   observations; native can count failed/empty observers toward completion.
   Rust fetches every observed content candidate once without majority filtering.
-  Incoming connections are not historical sync observers, and fixed peers must
-  qualify as synced full nodes before pool admission.
+  Historical sync intentionally uses outbound connections only, limiting who
+  can become a historical observer/download source. Inbound gossip and the
+  restricted peer RPC service remain bidirectional. Fixed peers must qualify
+  as synced full nodes before pool admission; all downloaded data still needs
+  full consensus validation.
 - The independent completion checkpoint below removes body/poll join barriers
   and retains partial successes as individual replies arrive. Absolute RPC
   deadlines differ from native inactivity timers; failed/empty bodies retain
@@ -939,8 +942,9 @@ resource use, peer isolation and recovery under load must be comparable.
 - Native uses an event loop and asynchronous write queues. Rust retains an
   incoming worker and independent sender per authenticated socket, plus bounded
   connection/metadata workers. Raising configured limits changes thread and
-  memory costs. `max_write_queue`, `priority_queue_size` and native timer/queue
-  controls without equivalents are explicitly unimplemented, not enforced.
+  memory costs. The send-pressure checkpoint below enables `max_write_queue`
+  and bounded ordered output from authentication onward. `priority_queue_size`
+  and native timer/topic queue controls without equivalents remain unsupported.
 - Sender publication notifications remain immediate; `send_interval_ms` controls
   idle waits rather than exact native timer phasing. `do_relay` gates forwarded
   publications while preserving reliable local broadcasts, receipts and VDF
@@ -1009,9 +1013,10 @@ also covers authentication and partial frames, without a timer thread per peer.
 Dropping the connection releases its shared admission lease. Native checks on
 its update timer after integer-second rounding; Rust enforces an absolute
 receive deadline and can expire up to a timer tick/rounding interval sooner.
-Synchronous response work or blocked writes can still delay receive-loop checks;
-prompt cleanup under those conditions remains a reliability/performance concern,
-regardless of the architecture chosen to address it.
+The send-pressure checkpoint below removes blocked socket writes from the
+receiver's mutex path and independently caps the writer by inbound age.
+Synchronous ledger/encoding work can still delay receive-owner cleanup; its
+latency under load remains a reliability/performance concern.
 
 New regressions inspect actual listener/accepted/outgoing socket options and
 OS buffer sizes, native buffer-disable/seconds semantics, and a busy
@@ -1036,19 +1041,20 @@ Router concerns are:
 1. Independent body/poll completion is implemented and covered by the checkpoint
    below. Continue representative saturated-network comparisons of completion
    latency, retries and duplicate downloads while retaining the same bounds.
-2. Send pressure must preserve consensus/control priority, bounded memory and
-   prompt cancellation, expiry and cleanup. Test slow readers and saturated
-   sends while unrelated peers and RPC continue to progress. An event loop or
-   native queue implementation is not prescribed.
+2. The send-pressure checkpoint below covers bounded queues, control/consensus
+   priority, slow-reader recovery, cancellation and expiry with saturated
+   sockets. Sustained constrained-network, large-record and fanout comparisons
+   remain. An event loop or native queue implementation is not prescribed.
 3. The peer recovery checkpoint below covers periodic discovery, bounded
    full-pool probes and cached-only restart. Wider churn, eclipse resistance and
    constrained-network comparisons remain; exact native timers, rotation
    policies and storage formats are optional.
 4. Connection-role and sync policies must retain availability in the supported
-   deployment scenarios, including NAT. Incoming historical sync exclusion,
-   strict successful-observer minimums, fixed-peer qualification and absolute
-   deadlines need explicit availability/robustness evidence. They are not
-   automatically better or worse solely because they differ from C++.
+   deployment scenarios, including NAT. Historical sync is outbound-only by
+   security policy. Strict successful-observer minimums, fixed-peer
+   qualification and absolute deadlines need explicit availability/robustness
+   evidence. They are not automatically better or worse solely because they
+   differ from C++.
 5. Automatic port mapping remains unavailable where deployments require it.
    Manual reachability and outbound bidirectional communication do not implement
    that capability; whether to add UPnP is a feature-scope decision.
@@ -1179,8 +1185,9 @@ an idle lower-height ordinary peer; fixed peers, busy owners and equal-height
 connections are retained. Probes that cannot be installed still add confirmed
 fallback endpoints. Optional probe thread-creation failure leaves the existing
 pool running. This is a bounded exploration policy, not native's random
-overconnection and trimming algorithm. Inbound historical observers, fork-check
-discovery and broader malicious-peer selection policies remain separate work.
+overconnection and trimming algorithm. Historical sync remains outbound-only
+by security policy. Fork-check discovery and broader malicious-peer selection
+policies remain separate work.
 
 The executable loads one bounded, versioned JSON cache, namespaced by genesis
 and network peer port. `Router.storage_path` selects its directory (relative
@@ -1224,3 +1231,99 @@ and low CPU/I/O priority. Tests use RAM chains, loopback sockets and small
 temporary config/cache files; no live ledger/plots or unrelated processes were
 used. The blocked-writer test establishes isolation/coalescing, not storage or
 network performance parity under sustained load.
+
+## Peer send pressure and outbound sync policy (2026-10-26)
+
+Reference inspected at C++ `141054c398d2bab6802174379ce3b191d4f3a499`:
+`Router::{send_to,on_request,on_pause,on_resume,send,recv_notify}`,
+`vnx-addons/src/MsgServer.cpp::{send_to,on_write}` and
+`TcpServer::{send_to,on_write,on_disconnect}`. Native uses nonblocking socket
+writes and bounded compressed buffers, rejects blocked-peer RPC with
+`vnx.OverflowException` before invoking Node, and reserves priority for consensus
+while dropping ordinary unreliable traffic under pressure. Schema declarations
+span frames, so an already encoded/partially written frame cannot be reordered
+or abandoned without closing the connection.
+
+Rust now starts one owned writer before authentication and attaches the existing
+gossip sender after identity/network checks. It replaces the former sender
+thread rather than adding another sender per authenticated socket. All managed
+socket writes run outside the encoder/queue mutex, allowing the receive owner
+to continue reading receipts, gossip and correlated replies or cheaply enqueue
+control work while a write is blocked. Unmanaged low-level `Connection` helpers
+retain synchronous sends. Enqueue/encoding failures are transactional: no batch
+prefix is published and no schema state advances. Accepted frames retain FIFO
+ownership until sent or connection cancellation/failure; write errors close the
+socket and discard the remaining queue rather than reusing advanced schemas.
+
+`Router.max_write_queue` now controls the compressed byte admission threshold
+(10 MiB default, positive values only). Admission below that threshold can cross
+it by one batch bounded to 64 MiB + 8 bytes, like native's pre-encoding threshold
+but with a bounded Rust RPC batch rather than just one message. At most 256
+ordinary messages are charged, including the in-flight batch. Compressed data
+uses exact-sized boxed buffers; queue metadata and temporary serialization/
+compression allocations are additional bounded costs. Unlike native's decrement
+on each partial write, Rust conservatively keeps the whole batch charged until
+completion. This prevents moving the batch to the writer from opening an
+unaccounted second queue. Existing raw/decoded frame bounds remain unchanged.
+
+Socket partial writes/timeouts or a full ordinary queue trigger pre-dispatch
+overflow replies. The separate rejection reserve is limited to 32 messages and
+16 KiB; exhausting it closes the managed connection. Successful responses are
+retained, and the existing client retries only explicitly rejected requests.
+Other queue-admission errors propagate to the connection owner, with no silent
+reliable-message loss. Unlike native's receive pause, Rust keeps decoding until
+the bounded reserve is exhausted, allowing receipts and replies to progress.
+An overload reply cannot bypass bytes of a previously started frame.
+
+The writer drains queued control work before selecting another gossip body.
+Gossip payloads stay shared in the existing bounded relay store, with only one
+body selected per writer pass. Both receipt classes precede body selection, so
+live consensus cannot starve transaction receipts. Every pass revisits live
+consensus before VDF bootstrap or transactions; receipt/cache suppression,
+randomized fanout timing, upload credit/refusal rules and reliable local
+publication behavior remain.
+No transaction backlog is pre-encoded ahead of new consensus. Thread wake tokens
+retain enqueue/publication/stop notifications across idle transitions; ordinary
+RPC enqueue wakes only its own writer rather than all peer workers. Idle waits
+still use `send_interval_ms`. Native `priority_queue_size` and `max_queue_ms`
+are not mapped to these different queue/scheduling mechanisms.
+
+Every queued batch has a ten-second absolute deadline from admission, capped by
+inbound maximum age; partial write progress does not renew it. The writer uses
+short socket waits, preserves the same timeout setting across ordinary writes,
+and interrupts both directions on expiry/failure/unwind. Drop signals the owned
+writer, wakes it and shuts down the socket before joining, including a stalled
+write or a long idle interval. Inbound age is enforced independently of receiver
+progress. Synchronous response execution/encoding can still delay receive-owner
+cleanup, even though socket writes no longer hold its mutex.
+
+Historical synchronization intentionally remains outbound-only, per the
+requested security policy. Incoming peers exchange gossip and restricted peer
+RPC but cannot qualify as historical observers/download sources, even after
+successful authentication. Outbound identity/genesis/observer qualification and
+full consensus validation remain mandatory. This is an intentional boundary,
+not pending inbound historical-sync functionality. Availability with restricted
+outbound access or particular NAT deployments still needs explicit evidence.
+
+New real-socket regressions saturate output with a 1 MiB incompressible record,
+4 KiB send buffer and 32 KiB receive buffer. They verify a held ledger mutex is
+never reached by rejected RPC, receiver completion within 750 ms while the
+socket stays blocked, another authenticated peer's RPC progress, schema-correct
+recovery, transactional failed batches, byte/count/rejection bounds, cancellation
+within one second, and inbound expiry without a receive owner. A trickle-read
+case verifies a 200 ms test batch deadline despite partial write progress. A
+relay scheduler regression publishes new consensus during a TX send and checks
+it precedes the next TX without replaying completed work or delaying TX receipts.
+Authenticated incoming RPC remains usable while historical qualification is
+rejected.
+
+These are controlled correctness/isolation workloads, not a C++ throughput or
+network performance-parity claim. Sustained saturated-network latency, loss,
+churn, fanout CPU, large-frame encoding/compression time and peak resident memory
+still need representative comparisons. No live ledger/plot scans or unrelated
+process changes were used.
+
+Validation: **175 node tests (121 unit + 54 integration) and 10 real-daemon
+integration tests passed**. Node/tools all-target Clippy passes with warnings
+denied; formatting and diff whitespace checks pass. Builds/tests use two jobs,
+incremental/debug symbols disabled and low CPU/I/O priority.

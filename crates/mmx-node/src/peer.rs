@@ -13,8 +13,10 @@ use mmx_consensus::{Hash, Record, Value};
 #[cfg(test)]
 mod discovery_tests;
 mod identity;
+mod output;
+use output::{Output, Worker};
 use std::{
-    io::{Read, Write},
+    io::Read,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -111,47 +113,13 @@ pub struct Connection {
     stream: TcpStream,
     registry: vnx::Registry,
     output: Arc<Mutex<Output>>,
-    relay_worker: Option<RelayWorker>,
+    writer: Option<Worker>,
     relay_receipts: Option<RelayPeer>,
     last_size: usize,
     received_at: Instant,
     expires_at: Option<Instant>,
     incoming: bool,
     compressed_limit: usize,
-}
-struct Output {
-    stream: TcpStream,
-    outbound: mmx_consensus::StreamEncoder,
-    compressed_limit: usize,
-    compress_level: i32,
-}
-struct RelayWorker {
-    stop: Arc<AtomicBool>,
-    thread: JoinHandle<()>,
-    wake: Relay,
-}
-impl Output {
-    fn send_batch(&mut self, values: &[Record]) -> Result<()> {
-        let mut outbound = self.outbound.clone();
-        let mut batch = Vec::new();
-        for value in values {
-            let frame = frame_bytes_with_options(
-                &outbound.encode(value)?,
-                self.compressed_limit,
-                self.compress_level,
-            )?;
-            if batch.len().saturating_add(frame.len()) > MAX_FRAME + 8 {
-                return Err(error("peer write batch exceeds limit"));
-            }
-            batch.extend_from_slice(&frame);
-        }
-        if let Err(e) = self.stream.write_all(&batch) {
-            let _ = self.stream.shutdown(std::net::Shutdown::Both);
-            return Err(e.into());
-        }
-        self.outbound = outbound;
-        Ok(())
-    }
 }
 impl Connection {
     pub fn connect(address: &str) -> Result<Self> {
@@ -182,17 +150,12 @@ impl Connection {
         stream.set_nodelay(true)?;
         socket2::SockRef::from(&stream).set_keepalive(true)?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-        let output = Output {
-            stream: stream.try_clone()?,
-            outbound: Default::default(),
-            compressed_limit: DEFAULT_COMPRESSED_LIMIT,
-            compress_level: 3,
-        };
+        let output = Output::new(stream.try_clone()?, DEFAULT_COMPRESSED_LIMIT);
         Ok(Self {
             stream,
             registry: vnx::Registry::new(),
             output: Arc::new(Mutex::new(output)),
-            relay_worker: None,
+            writer: None,
             relay_receipts: None,
             last_size: 0,
             received_at: Instant::now(),
@@ -214,50 +177,52 @@ impl Connection {
         self.send_batch(std::slice::from_ref(value))
     }
     fn send_batch(&mut self, values: &[Record]) -> Result<()> {
-        // Gossip and replies share one ordered schema/output state. The reader
-        // owns its independent decoder and never holds this mutex across reads.
+        // Gossip and replies share ordered schemas and bounded queued frames.
+        // Production socket writes run without this encoder/queue mutex.
         self.output
             .lock()
             .map_err(|_| error("peer output poisoned"))?
             .send_batch(values)
     }
+    fn start_writer(&mut self, limit: usize, interval: Duration) -> Result<()> {
+        if self.writer.is_some() {
+            return Err(error("peer writer already started"));
+        }
+        self.writer = Some(Worker::start(
+            self.output.clone(),
+            self.stream.try_clone()?,
+            limit,
+            interval,
+            self.expires_at,
+        )?);
+        Ok(())
+    }
     fn start_relay(&mut self, relay: Relay, role: u32, synced: bool) -> Result<RelayPeer> {
-        if self.relay_worker.is_some() {
+        if self.relay_receipts.is_some() {
             return Err(error("peer relay already started"));
         }
         self.set_compressed_limit(relay.compressed_limit()?)?;
-        let mut sender = relay.attach()?;
+        if self.writer.is_none() {
+            self.start_writer(
+                crate::router::RouterConfig::default().max_write_queue,
+                relay.send_interval()?,
+            )?;
+        }
+        let sender = relay.attach()?;
         sender.set_profile(role, synced)?;
         let receiver = sender.receipt_view();
-        let output = self.output.clone();
-        let socket = self.stream.try_clone()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = stop.clone();
-        let wake = relay.clone();
-        let thread = thread::Builder::new()
-            .name("mmx-peer-send".into())
-            .spawn(move || {
-                let mut run = || -> Result<()> {
-                    while !stopping.load(Ordering::Relaxed) {
-                        let observed = relay.sequence();
-                        sender.flush(&relay, |record| {
-                            output
-                                .lock()
-                                .map_err(|_| error("peer output poisoned"))?
-                                .send_batch(std::slice::from_ref(record))
-                        })?;
-                        relay.wait(observed, &stopping)?;
-                    }
-                    Ok(())
-                };
-                if let Err(error) = run() {
-                    if !stopping.load(Ordering::Relaxed) {
-                        eprintln!("Peer relay closed: {error}");
-                    }
-                    let _ = socket.shutdown(std::net::Shutdown::Both);
-                }
-            })?;
-        self.relay_worker = Some(RelayWorker { stop, thread, wake });
+        sender.set_waker(
+            self.writer
+                .as_ref()
+                .ok_or_else(|| error("no peer writer"))?
+                .thread
+                .thread()
+                .clone(),
+        )?;
+        self.output
+            .lock()
+            .map_err(|_| error("peer output poisoned"))?
+            .attach(relay, sender)?;
         self.relay_receipts = Some(receiver.clone());
         Ok(receiver)
     }
@@ -394,8 +359,9 @@ impl Connection {
 }
 impl Drop for Connection {
     fn drop(&mut self) {
-        if let Some(worker) = self.relay_worker.take() {
-            worker.wake.stop_waiter(&worker.stop);
+        if let Some(worker) = self.writer.take() {
+            worker.stop.store(true, Ordering::Release);
+            worker.thread.thread().unpark();
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
             let _ = worker.thread.join();
         }
@@ -420,6 +386,28 @@ fn respond_with(
     request: &Record,
 ) -> Result<()> {
     let id = number(request, "id")?;
+    {
+        let mut output = connection
+            .output
+            .lock()
+            .map_err(|_| error("peer output poisoned"))?;
+        if output.pressured() {
+            // Native Router::on_request rejects before dispatch. The caller
+            // can safely retry this ID's operation without losing successes.
+            return output.reject(&record(
+                "mmx.Return",
+                [
+                    ("id".into(), Value::Uint(id.into())),
+                    (
+                        "result".into(),
+                        Value::Record(Record::from_generated(
+                            &mmx_types::vnx::OverflowException::default(),
+                        )?),
+                    ),
+                ],
+            ));
+        }
+    }
     let method = request.field("method")?.record()?;
     let call = || -> Result<Record> {
         // Router::on_request is deliberately narrower than the public RPC API.
@@ -520,6 +508,10 @@ impl Client {
             .map_err(|_| error("peer output poisoned"))?
             .compress_level = peer_state.router.compress_level;
         connection.set_compressed_limit(relay.compressed_limit()?)?;
+        connection.start_writer(
+            peer_state.router.max_write_queue,
+            peer_state.router.send_interval,
+        )?;
         let mut client = Self {
             connection,
             node,
@@ -686,6 +678,9 @@ impl Client {
     /// Authenticate the native node ID, reject aliases/self-connections, and
     /// qualify only synced full nodes on our genesis before using sync data.
     pub fn qualify(&mut self, genesis: Hash, own_id: Hash) -> Result<(Hash, u32)> {
+        if self.connection.incoming {
+            return Err(error("historical sync requires an outbound connection"));
+        }
         let identity = self
             .identity
             .as_ref()
@@ -700,11 +695,9 @@ impl Client {
         let height = self
             .synced_height()?
             .ok_or_else(|| error("peer is not synced"))?;
-        if !self.connection.incoming {
-            self.peer_state
-                .book
-                .confirm(self.connection.stream.peer_addr()?)?;
-        }
+        self.peer_state
+            .book
+            .confirm(self.connection.stream.peer_addr()?)?;
         Ok((id, height))
     }
     pub(crate) fn enable_discovery(&mut self, immediate: bool) {
@@ -1096,6 +1089,7 @@ impl Drop for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::net::TcpListener;
 
     #[test]
@@ -1119,7 +1113,8 @@ mod tests {
                     true,
                 )
                 .unwrap();
-            let stop = connection.relay_worker.as_ref().unwrap().stop.clone();
+            let stop = connection.writer.as_ref().unwrap().stop.clone();
+            let wake = connection.writer.as_ref().unwrap().thread.thread().clone();
             if idle_first {
                 thread::sleep(Duration::from_millis(20));
             }
@@ -1131,7 +1126,8 @@ mod tests {
             let result = ready.recv_timeout(Duration::from_secs(2));
             // Always release the test worker, including on regression.
             if result.is_err() {
-                relay.stop_waiter(&stop);
+                stop.store(true, Ordering::Release);
+                wake.unpark();
             }
             worker.join().unwrap();
             assert!(

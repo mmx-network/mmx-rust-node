@@ -12,6 +12,12 @@ lost capabilities, operational control or guarantees are. Keep meaningful
 config names and units compatible where practical, and document unsupported
 settings and deliberate differences in `docs/performance-parity.md`.
 
+Historical chain synchronization uses outbound connections only. Preserve this
+intentional security boundary: inbound peers must not become historical sync
+observers or download sources. Inbound gossip and the restricted peer RPC
+service remain bidirectional; outbound sync still requires authentication,
+observer qualification and full consensus validation.
+
 Judge alternatives by observable behavior and representative workloads,
 including slow resources, failures, overload, cancellation and recovery. A
 working fixture or a simpler implementation alone does not establish equivalent
