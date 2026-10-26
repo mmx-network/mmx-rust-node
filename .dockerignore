@@ -1,0 +1,38 @@
+# Only web sources and the Cargo workspace needed to resolve the wallet build.
+# In particular, never send a local ledger, plots, keys or .env files to Docker.
+**
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!vendor/
+!vendor/vnx-rust/
+!vendor/vnx-rust/**
+!apps/
+!apps/wallet/
+!apps/wallet/**
+!apps/explorer/
+!apps/explorer/**
+!deploy/
+!deploy/apps/
+!deploy/apps/**
+**/.git
+**/target
+**/node_modules
+**/dist
+**/artifacts
+**/test-results
+**/playwright-report
+**/.wasm-test
+**/__pycache__
+**/src-tauri
+**/src-tauri/**
+**/.env
+**/.env.*
+apps/wallet/src/backend/web/pkg
+crates/*/tests
+crates/*/benches
+# The web build typechecks the shared desktop payload regression test too.
+!apps/wallet/src-tauri/
+!apps/wallet/src-tauri/tests/
+!apps/wallet/src-tauri/tests/payloads.json

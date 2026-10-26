@@ -40,8 +40,13 @@ Content-Security-Policy for that server into `index.html` and
 
 ## Serve
 
-Serve the contents of `dist/web` over HTTPS only, with these headers on every
-response (ready-made in this directory):
+The [`mmx-apps` Docker image](../../../docs/web-apps-docker.md) builds and serves
+the wallet and explorer together, with hostname routing and a configurable HTTP
+port. It supports a plain HTTP origin behind a CDN that terminates HTTPS.
+
+The public site must use HTTPS. For direct hosting, serve the contents of
+`dist/web` over HTTPS, with these headers on every response (ready-made in this
+directory):
 
 | File | Server |
 | --- | --- |

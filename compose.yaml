@@ -1,0 +1,26 @@
+services:
+  apps:
+    image: mmx-apps:latest
+    build:
+      context: .
+      args:
+        VITE_RPC_URL: ${VITE_RPC_URL:-https://rpc.mmx.network}
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-8080}:${PORT:-8080}"
+    environment:
+      PORT: ${PORT:-8080}
+      WALLET_HOST: ${WALLET_HOST:-wallet.mmx.network}
+      EXPLORER_HOST: ${EXPLORER_HOST:-explore.mmx.network}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

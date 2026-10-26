@@ -80,6 +80,9 @@ request intervals, deliberate differences and remaining comparisons.
 
 ## Hosting
 
+The [`mmx-apps` Docker image](../../docs/web-apps-docker.md) builds and serves
+the explorer and wallet together on a configurable HTTP port behind a CDN.
+
 Serve `dist/` as a static site. Hash routing needs no server-side route rewrite
 and works under a subdirectory. The build emits a Content Security Policy into
 `index.html` and a `_headers` file suitable for static hosts supporting that

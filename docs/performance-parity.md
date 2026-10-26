@@ -754,6 +754,38 @@ API contract, not native/Rust throughput parity. No live ledger/plot storage is
 read by the tests. Native UI/browser CPU, rendering, network latency and
 large-contract comparisons remain unmeasured.
 
+## Web app HTTP image
+
+The `mmx-apps` Docker image builds the production web wallet (including WASM)
+and explorer, served by hostname on one configurable HTTP port behind a CDN.
+Reference paths read first: C++ `src/mmx_node.cpp` (`FileServer_1`/`HttpServer`
+setup), `vnx-addons/src/FileServer.cpp` (`http_request_async`, range/chunk
+reads and cheap path/method checks), `vnx-addons/src/HttpServer.cpp` (immediate
+reply, bounded write/chunk handling and compression workers), and the native
+Dockerfile/entrypoint.
+
+This is a separate static origin, not a port of the native authenticated node
+HTTP API. nginx uses concurrent nonblocking delivery, sendfile, conditional
+and byte-range reads, and immediate file/host/method rejection. There are two
+workers with 1024 connections each; files are not buffered in an application
+cache. Compressible build outputs get gzip sidecars once at build time instead
+of native per-request compression work. Only successful hashed assets get
+one-year immutable caching; HTML revalidates and errors use no-store. Each
+app's generated security policy is translated at build time, including custom
+RPC origins. There is no ledger/plot access, file-upload/delete API or directory
+listing in this image. Rust builds use two jobs without incremental/debug
+state, and frontend builds run sequentially with two-worker environment limits.
+
+Regression checks exercise real disposable read-only/non-root containers,
+default/overridden hostnames and ports, gzip/plain delivery, cache headers on
+200/206/304/404/405 responses, framing/security headers and WASM MIME/range
+handling. They use synthetic loopback requests without contacting chain APIs.
+Native/nginx concurrent static throughput, CPU/RSS and cold-file latency have
+not been compared; these tests do not claim performance parity. A replacement
+image contains only one release's assets, so uninterrupted older lazy-loaded
+sessions require retaining previous hashes at the CDN/object origin. CDN
+behavior itself requires verification against the chosen provider's settings.
+
 ## Review fixes, 2026-10-25
 
 Native source inspected: `Node.cpp::{add_block,add_transaction,write_block}`,
