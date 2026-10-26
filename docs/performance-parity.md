@@ -713,6 +713,8 @@ and UI components. It does not change any node, consensus, database, farming or
 wallet state code and still uses the existing public WebAPI.
 Primary navigation uses text links at the top on every screen size; this
 layout change adds no API requests or changes to refresh scheduling.
+Network space is displayed with one decimal place (the native explorer uses
+three); the GB source units and decimal unit conversion are unchanged.
 
 The overview's TPS statistic reuses the displayed headers' transaction counts
 and millisecond timestamps. It divides the mean count per block by the observed

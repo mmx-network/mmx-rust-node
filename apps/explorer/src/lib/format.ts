@@ -1,6 +1,7 @@
 import type { Amount, Timed, Transfer } from './types';
 
 const numbers = new Intl.NumberFormat('en-US', { maximumFractionDigits: 12 });
+const spaceNumbers = new Intl.NumberFormat('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 export const number = (value: number | string | null | undefined): string =>
   value == null ? '—' : numbers.format(Number(value));
 export const short = (value: string, size = 10): string =>
@@ -40,8 +41,8 @@ export function date(value: Timed): string {
 export function networkSpace(total: number | undefined): string {
   if (total == null || !Number.isFinite(total) || total < 0) return '—';
   // NetworkInfo.total_space is in GB, as used by the C++ explorer.
-  if (total >= 1e9) return `${number(total / 1e9)} EB`;
-  if (total >= 1e6) return `${number(total / 1e6)} PB`;
-  if (total >= 1e3) return `${number(total / 1e3)} TB`;
-  return `${number(total)} GB`;
+  if (total >= 1e9) return `${spaceNumbers.format(total / 1e9)} EB`;
+  if (total >= 1e6) return `${spaceNumbers.format(total / 1e6)} PB`;
+  if (total >= 1e3) return `${spaceNumbers.format(total / 1e3)} TB`;
+  return `${spaceNumbers.format(total)} GB`;
 }
