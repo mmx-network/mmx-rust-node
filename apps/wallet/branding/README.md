@@ -5,6 +5,10 @@ design, with a violet gradient, larger white X, restrained halo, plain wide
 border, and -9-degree rotation. It is a self-contained SVG without embedded
 raster images, fonts, or external resources.
 
+The halo is a separate filtered copy beneath the solid, unfiltered glyph so
+the X stays sharp at navigation sizes. Avoid filtering the whole logo for
+outer shadows; the rail uses a circular CSS box shadow instead.
+
 `BrandMark` imports this SVG for colored icons in the wallet and explorer. The
 glyph-only variant remains available for monochrome interface decorations.
 The website uses a generated copy for its header, footer, wallet illustration,

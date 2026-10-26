@@ -527,7 +527,9 @@ html {
   [data-layout='rail'] .shell__brand .brand-mark {
     width: 30px;
     height: 30px;
-    filter: drop-shadow(0 0 10px var(--ob-glow-accent));
+    /* Cast the dock glow without filtering the SVG's sharp foreground. */
+    border-radius: 50%;
+    box-shadow: 0 0 20px var(--ob-glow-accent);
   }
   /* Inset hairlines: dividers that stop short of the glass edge. */
   [data-layout='rail'] .shell__switcher {
