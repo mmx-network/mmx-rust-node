@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vite';
+import { inlineLogos } from './branding/inline-logo.mjs';
 
 // Keep the standalone preview's policy aligned with the nginx response policy.
 // frame-ancestors is enforced by the HTTP header, not by the meta element.
@@ -11,6 +12,9 @@ export default defineConfig({
   base: '/',
   clearScreen: false,
   plugins: [{
+    name: 'website:logos',
+    transformIndexHtml: { order: 'pre', handler: inlineLogos },
+  }, {
     name: 'website:security',
     transformIndexHtml: {
       order: 'post',

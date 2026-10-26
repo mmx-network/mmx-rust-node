@@ -71,7 +71,7 @@ p { color: var(--text-muted); line-height: 1.75; }
 .status-dot { display: inline-block; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--edge); }
 .skip-link { position: absolute; left: 16px; top: -100px; z-index: 10; padding: 12px 18px; background: var(--surface-solid); border: 1px solid var(--accent); border-radius: 8px; }
 .skip-link:focus { top: 16px; }
-.header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 104px; border-bottom: 1px solid var(--border); }
+.header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 104px; box-shadow: inset 0 -1px var(--border); }
 .brand { display: inline-flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .brand > span { font-family: var(--font-display); font-size: 24px; font-weight: 650; letter-spacing: 0.045em; line-height: 1; }
 .brand-sub { display: block; margin-top: 5px; color: var(--text-muted); font-size: 8px; font-weight: 400; letter-spacing: 0.24em; }
@@ -108,8 +108,10 @@ p { color: var(--text-muted); line-height: 1.75; }
 .orbit-outer { width: 94%; height: 94%; border-style: dashed; opacity: 0.5; }
 .orbit-middle { width: 72%; height: 72%; box-shadow: inset 0 0 50px -30px var(--accent); }
 .orbit-inner { width: 49%; height: 49%; border-color: var(--edge); background: var(--surface); }
-.orbit-center { position: absolute; top: 50%; left: 50%; width: 34%; height: 34%; border-radius: 50%; filter: drop-shadow(0 0 25px #8b5cf670) drop-shadow(0 18px 35px #0005); transform: translate(-50%, -50%); }
-.orbit-center img { display: block; width: 100%; height: 100%; }
+.orbit-center { position: absolute; inset: 0; margin: auto; width: 34%; height: 34%; border-radius: 50%; }
+/* Shadow the coin's circular backing, keeping the foreground SVG unfiltered. */
+.orbit-center::before { content: ''; position: absolute; inset: 1.5625%; border-radius: 50%; box-shadow: 0 0 50px #8b5cf670, 0 18px 70px #0005; }
+.orbit-center > svg { position: relative; display: block; width: 100%; height: 100%; }
 .orbit-node { position: absolute; width: 7px; height: 7px; border-radius: 50%; background: #b197fc; box-shadow: 0 0 0 5px #8b5cf61a, 0 0 18px #8b5cf6; }
 .node-a { top: 17%; left: 34%; }
 .node-b { top: 64%; right: 17%; }
@@ -305,7 +307,7 @@ h2 { margin-top: 20px; font-size: clamp(32px, 3.2vw, 44px); letter-spacing: -0.0
   .wrap { width: calc(100% - 40px); }
   .header-actions { gap: 8px; }
   .brand > span { font-size: 21px; }
-  .brand img { width: 32px; height: 32px; }
+  .brand > svg { width: 32px; height: 32px; }
   .button-small { padding: 9px 12px; gap: 12px; font-size: 11px; }
   .theme-toggle { padding: 8px; }
   .header nav { gap: 28px; }

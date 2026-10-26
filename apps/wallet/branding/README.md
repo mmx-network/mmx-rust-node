@@ -8,11 +8,13 @@ raster images, fonts, or external resources.
 The halo is a separate filtered copy beneath the solid, unfiltered glyph so
 the X stays sharp at navigation sizes. Avoid filtering the whole logo for
 outer shadows; the rail uses a circular CSS box shadow instead.
+The artwork has a four-unit transparent gutter so antialiasing at the coin's
+rim stays inside the SVG viewport instead of being clipped at its edges.
 
 `BrandMark` imports this SVG for colored icons in the wallet and explorer. The
 glyph-only variant remains available for monochrome interface decorations.
-The website uses a generated copy for its header, footer, wallet illustration,
-and hero art.
+The website inserts the canonical SVG into its HTML for the header, footer,
+wallet illustration and hero art, with unique IDs for each instance.
 
 From `apps/wallet`, after installing dependencies and the local Playwright
 Chromium runtime, regenerate the assets with:

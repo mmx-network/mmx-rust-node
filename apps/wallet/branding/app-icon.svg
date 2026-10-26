@@ -23,6 +23,8 @@
       <circle cx="128" cy="129.5" r="126.5" fill="#000"/>
     </mask>
   </defs>
+  <!-- A transparent gutter keeps the circular rim away from the image's clip edge. -->
+  <g transform="translate(4 4) scale(0.96875)">
   <g transform="rotate(-9 128 128)">
     <circle cx="128" cy="128" r="128" fill="url(#base)"/>
     <circle cx="128" cy="128" r="128" fill="url(#light)"/>
@@ -35,4 +37,5 @@
       <use href="#mmx-glyph" fill="#fff"/>
     </g>
     </g>
+  </g>
   </g></g></svg>

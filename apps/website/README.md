@@ -46,7 +46,12 @@ existing SafeTrade and NonKYC market links are retained from `mmx-website`.
 `public/` includes crawler metadata, the manifest, the selected MMX icons,
 and a social preview rendered from `branding/share.svg`. The icon source is
 `../wallet/branding/mmx-logo.svg`; its render script also refreshes this site's
-SVG/PNG assets. The hero uses the same SVG as the header and footer.
+SVG/PNG assets. `branding/inline-logo.mjs` inserts that canonical SVG directly
+into the header, hero, wallet illustration, and footer at build/dev time.
+Each instance gets unique definition IDs so its gradients, glyph and halo
+resolve locally. The hero's outer shadow is a separate CSS layer and never
+filters the foreground logo. A transparent gutter in the SVG prevents rim
+clipping; no runtime script is needed to insert the logos.
 The static HTML includes a canonical URL, search/social descriptions, and
 `WebSite` microdata for the site name. `robots.txt` allows crawlers and points
 to the homepage sitemap; section anchors are not separate sitemap entries.

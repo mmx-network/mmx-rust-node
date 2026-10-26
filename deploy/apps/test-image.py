@@ -175,6 +175,19 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
     assert title in html
     check_search(port, host, html, rpc_origin, wallet, website)
     if website:
+        # The real build must contain independent SVGs at every logo placement,
+        # with local paint references even when all four are in one document.
+        logos = re.findall(rb'<svg\b[^>]*\bdata-mmx-logo[^>]*>[\s\S]*?</svg>', html)
+        assert len(logos) == 4
+        document_ids = set()
+        for logo in logos:
+            ElementTree.fromstring(logo)
+            ids = set(re.findall(rb'\bid="([^"]+)"', logo))
+            assert not document_ids & ids
+            document_ids.update(ids)
+            for url_id, href_id in re.findall(rb'url\(#([^)]+)\)|href="#([^"]+)"', logo):
+                assert (url_id or href_id) in ids
+        assert not re.search(rb'<img\b[^>]*\bdata-mmx-logo', html)
         assert b"https://wallet.mmx.network" in html
         assert b'<link rel="canonical" href="https://mmx.network/">' in html
         assert re.search(rb'<meta name="description" content="[^"]+">', html)
