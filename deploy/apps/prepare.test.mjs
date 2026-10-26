@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nginxHeaders } from './prepare.mjs';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import { nginxHeaders, prepare } from './prepare.mjs';
 
 const csp = "default-src 'none'; connect-src 'self' https://rpc.example.org:8443; frame-ancestors 'none'";
 
@@ -21,4 +25,30 @@ test('fails closed on missing policies, framing protection or conflicting cachin
     assert.throws(() => nginxHeaders(source), /Content-Security-Policy/);
   }
   assert.throws(() => nginxHeaders(`/*\n  Content-Security-Policy: ${csp}\n  Cache-Control: public\n`), /Cache-Control/);
+});
+
+test('prepares all three sites with isolated policies and precompressed HTML', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mmx-apps-prepare-'));
+  try {
+    const sites = [
+      ['wallet', 'apps/wallet/dist/web', csp],
+      ['explorer', 'apps/explorer/dist', csp.replace('rpc.example.org:8443', 'explore.example.org')],
+      ['website', 'website/dist', "default-src 'self'; connect-src 'none'; frame-ancestors 'none'"],
+    ];
+    for (const [name, output, policy] of sites) {
+      const directory = join(root, output);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, '_headers'), `/*\n  Content-Security-Policy: ${policy}\n`);
+      await writeFile(join(directory, 'index.html'), `<title>${name}</title>`.repeat(100));
+    }
+    await prepare(root);
+    for (const [name, output, policy] of sites) {
+      assert.equal(await readFile(join(root, 'deploy/apps/generated', `${name}-headers.conf`), 'utf8'),
+        `add_header Content-Security-Policy "${policy}" always;\n`);
+      assert.deepEqual(gunzipSync(await readFile(join(root, output, 'index.html.gz'))),
+        await readFile(join(root, output, 'index.html')));
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

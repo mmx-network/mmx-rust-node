@@ -41,19 +41,27 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     nice -n 19 ionice -c 3 npm ci --no-audit --no-fund
 COPY apps/explorer/ ./
 RUN nice -n 19 ionice -c 3 npm run build
+WORKDIR /build/website
+COPY website/package.json website/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    nice -n 19 ionice -c 3 npm ci --no-audit --no-fund
+COPY website/ ./
+RUN nice -n 19 ionice -c 3 npm run build
 COPY deploy/apps/ /build/deploy/apps/
 RUN nice -n 19 ionice -c 3 node /build/deploy/apps/prepare.mjs /build
 
 FROM nginx:1.30.6-alpine AS runtime
 LABEL org.opencontainers.image.title="mmx-apps" \
-    org.opencontainers.image.description="MMX web wallet and explorer HTTP origin" \
+    org.opencontainers.image.description="MMX website, web wallet and explorer HTTP origin" \
     org.opencontainers.image.source="https://github.com/mmx-network/mmx-rust-node"
 COPY --from=web-build /build/apps/wallet/dist/web/ /srv/mmx/wallet/
 COPY --from=web-build /build/apps/explorer/dist/ /srv/mmx/explorer/
+COPY --from=web-build /build/website/dist/ /srv/mmx/website/
 COPY --from=web-build /build/deploy/apps/generated/ /etc/nginx/mmx/
 COPY deploy/apps/nginx.conf.template deploy/apps/locations.conf /etc/nginx/mmx/
 COPY --chmod=755 deploy/apps/entrypoint.sh /usr/local/bin/mmx-apps-entrypoint
-ENV PORT=8080 WALLET_HOST=wallet.mmx.network EXPLORER_HOST=explore.mmx.network
+ENV PORT=8080 WALLET_HOST=wallet.mmx.network EXPLORER_HOST=explore.mmx.network \
+    WEBSITE_HOST=mmx.network WEBSITE_WWW_HOST=www.mmx.network
 USER nginx
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

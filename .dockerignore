@@ -13,6 +13,8 @@
 !apps/wallet/**
 !apps/explorer/
 !apps/explorer/**
+!website/
+!website/**
 !deploy/
 !deploy/apps/
 !deploy/apps/**

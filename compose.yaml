@@ -11,6 +11,8 @@ services:
       PORT: ${PORT:-8080}
       WALLET_HOST: ${WALLET_HOST:-wallet.mmx.network}
       EXPLORER_HOST: ${EXPLORER_HOST:-explore.mmx.network}
+      WEBSITE_HOST: ${WEBSITE_HOST:-mmx.network}
+      WEBSITE_WWW_HOST: ${WEBSITE_WWW_HOST:-www.mmx.network}
     restart: unless-stopped
     read_only: true
     tmpfs:
