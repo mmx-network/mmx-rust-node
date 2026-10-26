@@ -9,6 +9,7 @@ mod peer_state;
 pub mod production;
 mod proof_batch;
 mod relay;
+pub mod router;
 pub mod rpc;
 pub mod sync;
 mod transactions;

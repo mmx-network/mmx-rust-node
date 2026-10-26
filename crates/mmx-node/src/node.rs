@@ -269,6 +269,7 @@ impl Node {
     }
     /// Apply native Router transport policy before starting peers.
     pub fn configure_router(&mut self, config: &vnx::config::Config) -> Result<()> {
+        let router = crate::router::RouterConfig::from_config(config)?;
         let target = config
             .read::<i32>("Router.relay_target_ms")?
             .unwrap_or(2000);
@@ -291,7 +292,10 @@ impl Node {
             config
                 .read::<f64>("Router.max_pending_cost")?
                 .unwrap_or(0.1),
-        )
+        )?;
+        self.tx_pool.relay.configure_policy(&router)?;
+        self.peer_state.router = Arc::new(router);
+        Ok(())
     }
     pub fn pending_proofs(&self) -> usize {
         self.responses.len()

@@ -21,7 +21,6 @@ use std::{
 
 pub const MIN_PEERS: usize = 3;
 pub const MAX_PEERS: usize = 8;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 // Preserve the previous eight-peer worst-case bound while allowing smaller
 // authenticated pools to fill a complete body-request pipeline as well.
 const MAX_GROUP_CONTENTS: usize = 32;
@@ -81,6 +80,9 @@ struct Peer<S> {
 }
 pub struct PeerPool<S> {
     peers: Vec<Peer<S>>,
+    minimum: usize,
+    maximum: usize,
+    query_interval: Duration,
     timeout: Duration,
     // Complete content responses (including invalid ones) are never fetched
     // twice within a height job, even when the driver repeats a tip probe.
@@ -138,13 +140,17 @@ impl Published {
     }
 }
 impl<S: PeerSource> PeerPool<S> {
-    pub fn new(mut peers: Vec<(Hash, S)>) -> Self {
+    pub fn new(peers: Vec<(Hash, S)>) -> Self {
+        let config = crate::router::RouterConfig::default();
+        Self::with_config(peers, &config)
+    }
+    pub fn with_config(mut peers: Vec<(Hash, S)>, config: &crate::router::RouterConfig) -> Self {
         peers.shuffle(&mut rand::thread_rng());
         let mut ids = BTreeSet::new();
         let peers = peers
             .into_iter()
             .filter(|(id, _)| ids.insert(*id))
-            .take(MAX_PEERS)
+            .take(config.pool_capacity())
             .map(|(id, source)| Peer {
                 id,
                 source: Some(source),
@@ -160,13 +166,16 @@ impl<S: PeerSource> PeerPool<S> {
             .collect();
         Self {
             peers,
-            timeout: FETCH_TIMEOUT,
+            minimum: config.min_sync_peers,
+            maximum: config.pool_capacity(),
+            query_interval: config.query_interval,
+            timeout: config.body_timeout,
             completed: BTreeMap::new(),
-            refreshed: Instant::now() - Duration::from_secs(10),
+            refreshed: Instant::now() - config.query_interval,
             body_requests: 0,
             body_retries: 0,
             retired_backpressure: 0,
-            metadata: metadata::Queue::new(),
+            metadata: metadata::Queue::new(config.pool_capacity()),
             query: 0,
         }
     }
@@ -196,7 +205,7 @@ impl<S: PeerSource> PeerPool<S> {
         self.retired_backpressure + self.peers.iter().map(|p| p.backpressure).sum::<u64>()
     }
     pub fn add(&mut self, id: Hash, source: S) -> bool {
-        if self.peers.len() >= MAX_PEERS || self.peers.iter().any(|p| p.id == id) {
+        if self.peers.len() >= self.maximum || self.peers.iter().any(|p| p.id == id) {
             return false;
         }
         self.peers.push(Peer {
@@ -211,7 +220,7 @@ impl<S: PeerSource> PeerPool<S> {
             latency: Duration::MAX,
             backpressure: 0,
         });
-        self.refreshed = Instant::now() - Duration::from_secs(10);
+        self.refreshed = Instant::now() - self.query_interval;
         true
     }
     /// Native identity replacement has already shut down the old socket. Keep
@@ -236,7 +245,7 @@ impl<S: PeerSource> PeerPool<S> {
             peer.latency = Duration::MAX;
             peer.backpressure = 0;
         }
-        self.refreshed = Instant::now() - Duration::from_secs(10);
+        self.refreshed = Instant::now() - self.query_interval;
         true
     }
     pub fn poll(&mut self) -> Result<()> {
@@ -986,10 +995,10 @@ pub fn run(
     mut addresses: Vec<String>,
     port: u16,
     node: &Arc<Mutex<Node>>,
-    stop: &AtomicBool,
+    stop: &Arc<AtomicBool>,
     once: bool,
 ) -> Result<()> {
-    let (genesis, own_id) = {
+    let (genesis, own_id, policy) = {
         let local = node.lock().map_err(|_| error("node lock poisoned"))?;
         let genesis = local
             .chain
@@ -998,14 +1007,25 @@ pub fn run(
             .ok_or_else(|| error("missing genesis"))?;
         let info = local.call(&crate::node::record("mmx.Router.get_id", []))?;
         let own_id = info.field("_ret_0")?.bytes()?.try_into()?;
-        (genesis, own_id)
+        (genesis, own_id, local.peer_state().router)
     };
+    let mut policy = (*policy).clone();
+    policy.fixed_peers = policy
+        .fixed_peers
+        .iter()
+        .map(|address| crate::router::endpoint(address, port))
+        .collect::<Result<_>>()?;
+    addresses.extend(policy.fixed_peers.iter().cloned());
+    addresses.retain(|address| !policy.blocks(address));
     addresses.sort();
     addresses.dedup();
-    let mut pool = PeerPool::<Client>::new(vec![]);
+    let minimum = policy.min_sync_peers;
+    let maximum = policy.pool_capacity();
+    let mut learned = BTreeSet::new();
+    let mut pool = PeerPool::<Client>::with_config(vec![], &policy);
     let mut connected = BTreeMap::<Hash, String>::new();
     let mut retry_at = BTreeMap::<String, Instant>::new();
-    let mut connections = connect::Connections::<QualifiedPeer>::new();
+    let mut connections = connect::Connections::<QualifiedPeer>::with_config(&policy);
     let mut changed = Instant::now();
     let mut last_height = 0;
     let mut reported_peers = 0;
@@ -1014,9 +1034,15 @@ pub fn run(
             return Ok(());
         }
         pool.remove_failed();
-        connected.retain(|id, _| pool.peers.iter().any(|peer| peer.id == *id));
+        connected.retain(|id, address| {
+            let retained = pool.peers.iter().any(|peer| peer.id == *id);
+            if !retained {
+                retry_at.insert(address.clone(), Instant::now() + policy.peer_retry_interval);
+            }
+            retained
+        });
         for (address, result) in connections.finished() {
-            retry_at.insert(address.clone(), Instant::now() + Duration::from_secs(30));
+            retry_at.insert(address.clone(), Instant::now() + policy.peer_retry_interval);
             match result {
                 Ok((id, height, client, discovered)) => {
                     if pool.install_authenticated(id, client) {
@@ -1027,14 +1053,18 @@ pub fn run(
                         connected.insert(id, address);
                     }
                     for address in discovered {
-                        if addresses.len() >= 512 {
+                        if learned.len() >= policy.max_peer_set {
                             break;
                         }
                         // Native discovery returns numeric IP addresses.
                         if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+                            if policy.blocks_ip(ip) {
+                                continue;
+                            }
                             let endpoint = std::net::SocketAddr::new(ip, port).to_string();
                             if !addresses.contains(&endpoint) {
                                 addresses.push(endpoint);
+                                learned.insert(address);
                             }
                         }
                     }
@@ -1043,13 +1073,18 @@ pub fn run(
             }
         }
         let connect_node = node.clone();
+        let connect_stop = stop.clone();
         connections.refill(
             pool.len(),
             &addresses,
             &connected,
             &mut retry_at,
             move |address| {
-                let mut client = Client::connect(address, connect_node.clone())?;
+                let mut client = Client::connect_stoppable(
+                    address,
+                    connect_node.clone(),
+                    Some(connect_stop.clone()),
+                )?;
                 let (id, height) = client.qualify(genesis, own_id)?;
                 let discovered = client.known_peers().unwrap_or_default();
                 Ok((id, height, client, discovered))
@@ -1062,22 +1097,19 @@ pub fn run(
             node.lock()
                 .map_err(|_| error("node lock poisoned"))?
                 .sync_peers = reported_peers;
-            if reported_peers >= MIN_PEERS {
-                println!("Sync using {reported_peers} distinct peers (minimum {MIN_PEERS}, maximum {MAX_PEERS})");
+            if reported_peers >= minimum {
+                println!("Sync using {reported_peers} distinct peers (minimum {minimum}, maximum {maximum})");
             }
         }
         Ok(())
     };
     while !stop.load(Ordering::Relaxed) {
         maintain(&mut pool)?;
-        if pool.len() < MIN_PEERS {
+        if pool.len() < minimum {
             node.lock()
                 .map_err(|_| error("node lock poisoned"))?
                 .begin_resync();
-            eprintln!(
-                "Sync waiting for peers: {} / {MIN_PEERS} minimum",
-                pool.len()
-            );
+            eprintln!("Sync waiting for peers: {} / {minimum} minimum", pool.len());
             pool.poll()?;
             for _ in 0..10 {
                 if stop.load(Ordering::Relaxed) {
@@ -1128,7 +1160,7 @@ pub fn run(
                 last_height = current;
                 changed = Instant::now();
             }
-            if remote > current && changed.elapsed() > Duration::from_secs(60) {
+            if remote > current && changed.elapsed() > policy.sync_loss_delay {
                 local.begin_resync();
             }
             Ok(())

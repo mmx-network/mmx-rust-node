@@ -24,12 +24,13 @@ Defaults: --mmx-root ../mmx-node; network from $MMX_HOME/NETWORK or mainnet.
   MMX_NETWORK overrides the network state directory, otherwise MMX_DATA/<network>
   (MMX_DATA comes from MMX_HOME/config/local/MMX_DATA, the env, or MMX_HOME).
   Ledger: <network directory>/db, or Node.database_path; --data-dir overrides both.
-  P2P 127.0.0.1:<network port>, VNX RPC 127.0.0.1:11331,
+  P2P Router.host:<network port> (127.0.0.1 without config), VNX RPC 127.0.0.1:11331,
   HTTP JSON-RPC http://127.0.0.1:11380/rpc.
 OpenCL GPU 0 is used when available, with CPU fallback; --opencl-device -1 disables it.
 Historical sync uses configured native seed peers unless --peer is supplied.
 --offline serves the stored ledger without contacting peers.
---sync-once exits after coordinated sync. Sync requires 3–8 distinct synced peers. --rollback-to keeps that height.
+--sync-once exits after coordinated sync. Router.min_sync_peers / num_peers_out control peer counts.
+--p2p-listen overrides Router.host / port. --rollback-to keeps that height.
 History is retained by default. --purge-before reclaims older history before serving,
 keeps HEIGHT available, and prevents RPC reads or rollback below HEIGHT (native databases).";
 struct Options {
@@ -143,6 +144,7 @@ fn main() -> Result<()> {
     }
     let configured = !options.configs.is_empty() || layout.local_config().is_dir();
     let network = Network::from_config(&config, options.root.join("data"))?;
+    let router = mmx_node::router::RouterConfig::from_config(&config)?;
     let remote_harvesters = config.read::<bool>("allow_remote")?.unwrap_or(false)
         || config
             .read::<String>("Farmer.harvester_endpoint")?
@@ -171,7 +173,7 @@ fn main() -> Result<()> {
         if let Some(peers) = config.get("Router.seed_peers")? {
             options.peers = vnx::serde_json::from_value(peers)?;
         }
-        if options.peers.is_empty() {
+        if options.peers.is_empty() && router.fixed_peers.is_empty() {
             return Err(std::io::Error::other(
                 "no seed peers configured; specify --peer or --offline",
             )
@@ -182,14 +184,8 @@ fn main() -> Result<()> {
     let peers: Vec<_> = options
         .peers
         .iter()
-        .map(|s| {
-            if s.contains(':') {
-                s.clone()
-            } else {
-                format!("{s}:{port}")
-            }
-        })
-        .collect();
+        .map(|address| mmx_node::router::endpoint(address, port))
+        .collect::<Result<_>>()?;
     let data = match options.data {
         Some(path) => path,
         None => layout.network_path(
@@ -235,15 +231,18 @@ fn main() -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let signal = stop.clone();
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
-    let mut p2p = peer::Server::bind(
-        &options.p2p.unwrap_or_else(|| format!("127.0.0.1:{port}")),
-        node.clone(),
-    )?;
+    let mut p2p = options
+        .p2p
+        .or_else(|| router.listen_address(port))
+        .map(|address| peer::Server::bind(&address, node.clone()))
+        .transpose()?;
     let mut vnx = rpc::vnx_server(options.rpc.parse()?, node.clone())?;
     let mut http = rpc::HttpServer::bind(&options.http, node.clone())?;
     println!(
         "P2P {}, VNX RPC {}, HTTP http://{}/rpc",
-        p2p.address(),
+        p2p.as_ref()
+            .map(|server| server.address().to_string())
+            .unwrap_or_else(|| "disabled".into()),
         vnx.endpoint(),
         http.address()
     );
@@ -324,7 +323,9 @@ fn main() -> Result<()> {
     if let Some(farming) = &mut farming {
         farming.shutdown();
     }
-    p2p.shutdown();
+    if let Some(server) = &mut p2p {
+        server.shutdown();
+    }
     http.shutdown();
     vnx.shutdown();
     for worker in workers {

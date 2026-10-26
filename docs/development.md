@@ -45,30 +45,88 @@ cargo run -p mmx-execution --example bootstrap -- ../mmx-node mainnet ./tmp/main
 The following sections describe implementation and test coverage. For supported
 user workflows and current limitations, use the [user guide](../README.md).
 
+## Router configuration
+
+Rust consumes native `Router.json` through the existing config layers. Explicit
+CLI listener/seed arguments take precedence; settings apply at startup. This
+checkpoint compares `modules/Router.vni`, `config/default/Router.json`,
+`src/Router.cpp`, and the inherited VNX TCP/message server at C++ revision
+`141054c398d2bab6802174379ce3b191d4f3a499`.
+
+| Native keys | Rust behavior |
+| --- | --- |
+| `host`, `port` | P2P listener address; absent port uses the network port, negative port disables listening. `--p2p-listen` overrides both. |
+| `max_connections` | Inbound admission counts inbound, outbound and pending authentication/dial sockets. Negative means unlimited. Default 100. Like native `connect_client()`, outgoing attempts may exceed this admission threshold. |
+| `num_peers_out`, `min_sync_peers` | Ordinary outgoing target and distinct successful sync observers. The native file supplies 8 and 5. Both must be positive; the minimum is clamped to the outgoing target, which cannot exceed a finite connection limit. |
+| `seed_peers`, `fixed_peers`, `master_nodes`, `block_peers` | Seeds remain independent of the learned-peer bound. Fixed/master peers have additional outgoing slots and bypass retry backoff. Blocked names are rejected before DNS; blocked resolved IPs and incoming IPs are rejected before authentication. |
+| `max_peer_set` | Learned candidate bound, default 100; each authentication asks for at most 32 addresses. Explicit seeds/fixed peers are separate. |
+| `connection_timeout_ms`, `query_interval_ms`, `connect_interval_ms` | Receive-idle timeout, status/heartbeat period, and outgoing connection cycle. Native file: 180,000 / 10,000 / 10,000 ms. Nonpositive idle timeout disables it; the other periods must be positive. |
+| `fetch_timeout_ms` | Full metadata/RPC deadline and one-eighth body lease/deadline. Native file: 180,000 ms, giving a 22,500 ms body lease. |
+| `sync_loss_delay`, `peer_retry_interval` | Seconds before stalled sync restarts, and minutes for retry deadlines, matching native units (60 seconds / 360 minutes). See retry scheduling differences below. |
+| `compress_level`, `tcp_no_delay` | Native Zstd range 0–20 and socket no-delay override. Native file uses compression level 0. |
+| `max_hash_cache`, `max_sent_cache`, `do_relay`, `send_interval_ms` | Existing first-seen and per-peer echo-cache limits, forwarded-publication switch, and idle sender period. Native file sets 200,000 / 20,000 entries; native sender period is 20 ms. Reliable local publications and receive receipts still work with forwarding disabled. |
+| `max_msg_size`, `max_vdf_segments`, `relay_target_ms`, `max_tx_upload`, `max_pending_cost` | Previously implemented compressed-frame bound, early VDF segment bound, fanout stages, and transaction upload accounting continue to use their native names and units. |
+
+Explicit `HOST:PORT` peers retain their port, including bracketed IPv6. Addresses
+from native discovery have no port and use the selected network's peer port.
+`Router.port` changes the listener, not the destination port for discovered peers,
+matching C++. `--peer` replaces the seed list; fixed/master peers are still added.
+
+When these keys are absent, the embedded Rust API retains its earlier defaults
+of a loopback listener, three sync observers, and 15-second RPC/body deadlines.
+Loading the C++ default file explicitly supplies its public listener, five
+observers and 180-second fetch setting. Rust retains `tcp_no_delay = true` when
+absent; native's inherited listener default is false. This preserves the existing
+Rust latency choice while allowing an explicit native override.
+
+The following settings still lack equivalent implementations: `open_port`
+(UPnP), periodic `discover_interval`, `disconnect_interval`, `stats_interval_ms`,
+`update_interval_ms`, `max_queue_ms`, `max_write_queue`, `priority_queue_size`,
+`listen_queue_size`, send/receive socket buffer sizes, `tcp_keepalive`,
+`show_warnings`, `node_version`, `mode`, Router topic/server names, and
+`storage_path` for persistent known-peer storage. The Rust sender uses bounded
+synchronous writes rather than the native asynchronous write queue. Discovery
+currently runs on authentication. The bounded coordinator does not perform
+native full-pool retry probes; underfilled pools retry each connect cycle as
+C++ does. Incoming sockets exchange gossip/RPC but do not enter the historical
+sync observer pool; fixed peers must qualify as synced full nodes too.
+
+Cache sizes apply to each existing first-seen cache, without a new payload cache.
+The independent 100,000-entry receipt bound remains even when hash retention is
+zero. Sender notifications deliver completed publications immediately, with
+`send_interval_ms` controlling idle waits rather than reproducing native timer
+phasing. Transport retains its separate three-second connect, ten-second write
+and absolute partial-frame deadlines, and 64 MiB decode bounds. Body groups still
+join their bounded providers before processing that group's results; their
+deadline is the body lease. Native handles individual returns independently.
+RPC deadlines are absolute rather than native fetch-job inactivity timers, and
+failed/empty bodies retain the full lease. These scheduling and resource
+differences need comparative workloads; see [performance parity](performance-parity.md#router-configuration-checkpoint-2026-10-26).
+
 ## Sync, networking and validation
 
 One coordinator owns historical download jobs. It selects a random pool of
-up to eight synced full nodes, verifies each native signed node ID and genesis, and
-rejects duplicate identities and self-connections. Native peer discovery fills
-the pool; sync waits when fewer than three qualified peers are available.
-The coordinator continuously refills toward eight, including when three through
-seven healthy peers remain, including between windows during historical sync.
-Connection/authentication/discovery attempts run in
-the background, with active peers plus pending attempts capped at eight and
-per-address retries delayed 30 seconds. Slow or unavailable seeds do not block
-the existing pool. The seed/candidate list is independent of that active limit;
-normal startup reads the native `Router.seed_peers` and learns more addresses
-through authenticated peers (up to 512 discovery candidates).
+synced full nodes, verifies each native signed node ID and genesis, and rejects
+duplicate identities and self-connections. Native peer discovery fills the pool;
+sync waits below `Router.min_sync_peers`. The coordinator continuously refills
+toward `Router.num_peers_out`, including between historical windows. Fixed/master
+peers have additional slots. Connection/authentication/discovery attempts run
+in the background, with active ordinary peers plus pending ordinary attempts
+capped at the outgoing target. Slow or unavailable seeds do not block the
+existing pool, and completed connections are admitted without waiting for the
+next connect cycle. The seed/candidate list is independent of that active limit;
+normal startup reads native `Router.seed_peers` and learns up to
+`Router.max_peer_set` additional addresses through authenticated peers.
 For every height, `get_block_hash_ex` collects `(block hash, content hash)` from
-at least three distinct peers. Every unique content hash is fetched once with
-`get_block(hash)` and recomputed/authenticated before archival. Hashes are not
+at least the configured minimum of distinct peers. Every unique content hash is
+fetched once with `get_block(hash)` and recomputed/authenticated before archival. Hashes are not
 majority-voted: two lying peers cannot hide the third peer's valid candidate.
-A second provider is tried only after the original 15-second request lease
+A second provider is tried only after the original body request lease
 expires. Restart, rewind and tip probes reuse matching archived content.
 
 This ports the height-job approach in native `Router::process()` and
-`Node::sync_result()`, with the requested minimum of three. Upstream declares
-two in `modules/Router.vni` and configures five in `config/default/Router.json`.
+`Node::sync_result()`, using the configured minimum. Upstream declares two in
+`modules/Router.vni` and configures five in `config/default/Router.json`.
 In the inspected C++ revision
 [`ca6438b`](https://github.com/mmx-network/mmx-node/blob/ca6438b37c08007106d58efe4a990f6ecb276649/src/Router.cpp#L586),
 each height job queries a random subset of up to `min_sync_peers + 3` synced
@@ -79,11 +137,11 @@ The native body lease is `fetch_timeout_ms / 8` (22.5 seconds with its default
 configuration), although exceptions and disconnects can release it early.
 Native completion counts failed/empty replies together with successful
 claimants and can finish while other requests remain outstanding. Rust instead
-requires three fresh successful hash-window responses before downloading and
-processes every distinct content observed in that window. It retains the full
-15-second body lease after unsuccessful responses. The native setting of eight
-limits outgoing synced connections; Rust caps its coordinator pool at eight
-distinct authenticated identities.
+requires the configured number of fresh successful hash-window responses before
+downloading and processes every distinct content observed in that window. It retains the full
+body lease after unsuccessful responses. The native outgoing setting limits
+synced connections; Rust caps its ordinary coordinator pool at that many
+distinct authenticated identities, with extra slots for fixed peers.
 All candidates reach native fork choice, CPU proof checks and ledger
 validation; a rejected candidate does not discard another peer's valid block.
 Unknown parents trigger bounded backwards discovery above genesis, including
@@ -102,12 +160,12 @@ fill a complete pipeline while retaining the previous eight-peer maximum.
 Common content is fetched from its
 fastest successful hash claimant; a slower provider is tried only after the request
 lease expires. Hash requests fan out to available pool members. Each height window
-completes after at least three independent replies, including other replies already
-ready at that point, matching native job completion without majority voting. Later
+completes after the configured minimum of independent successful replies, including
+other replies already ready at that point, without majority voting. Later
 replies restore their connection owner and update status, but cannot count toward
 another window. A connection owns at most one metadata operation; every outstanding
 owner is joined before the pool closes. Whole frames share a ten-second deadline
-across header and payload reads, also bounded by the client's fifteen-second RPC
+across header and payload reads, also bounded by the configured RPC/body
 deadline. Trickling bytes cannot extend either deadline; failed frames close the
 connection.
 
@@ -281,8 +339,8 @@ its listener endpoint, whose `accept()` applies it to incoming peer sockets.
 `MsgServer::send_to()` submits each compressed frame immediately. Although the
 standalone native `TcpEndpoint` defaults to no-delay for outgoing connections,
 that is not the Router listener's default. This accounts for the observed Nagle
-buffering on responses from an unmodified native listener; Rust also enables
-`TCP_NODELAY` on its own peer sockets.
+buffering on responses from an unmodified native listener; Rust enables
+`TCP_NODELAY` on its own peer sockets unless `Router.tcp_no_delay` overrides it.
 
 Two local mainnet replays of heights 4000–6000 compared 64-height and 128-height
 windows, reversing binary order for the second run. The 64-height binary reached

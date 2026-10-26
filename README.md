@@ -75,16 +75,22 @@ The result includes the current height, `synced`, `sync_peers`, and
 `earliest_height`. Farming starts receiving challenges once the node is synced.
 Press Ctrl-C for a clean shutdown; restart with the same data directory to resume.
 
-All node listeners bind to loopback by default:
+Peer listening follows the loaded native `Router.json`; RPC listeners use
+loopback by default:
 
 | Interface | Default address | Override |
 | --- | --- | --- |
-| Peer connections | `127.0.0.1:11337` on mainnet | `--p2p-listen` |
+| Peer connections | `Router.host` / `Router.port`, mainnet port `11337` | `--p2p-listen` |
 | Native VNX RPC | `127.0.0.1:11331` | `--rpc-listen` |
 | HTTP JSON-RPC | `http://127.0.0.1:11380/rpc` | `--http-listen` |
 
-To accept incoming mainnet peers, use `--p2p-listen 0.0.0.0:11337` and allow
-TCP port 11337 through your firewall. Keep wallet and signing endpoints private.
+The C++ default config sets `Router.host` to `0.0.0.0`; without that setting,
+Rust retains its loopback fallback. `--p2p-listen 0.0.0.0:11337` also accepts
+incoming mainnet peers when TCP port 11337 is reachable. The native
+`Router.max_connections` default of 100 now governs inbound admission, counting
+outbound and pending sockets too. See the [router configuration reference](docs/development.md#router-configuration)
+for supported settings and remaining differences. Keep wallet and signing
+endpoints private.
 
 ## Wallet and solo farming
 

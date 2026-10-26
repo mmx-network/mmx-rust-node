@@ -14,6 +14,8 @@ use std::sync::{
 
 #[derive(Clone)]
 pub(crate) struct PeerState {
+    pub router: Arc<crate::router::RouterConfig>,
+    pub connections: crate::router::Connections,
     key: Arc<SigningKey>,
     id: Hash,
     info: Arc<Record>,
@@ -32,6 +34,8 @@ impl PeerState {
                 .try_into()?,
         );
         Ok(Self {
+            router: Arc::new(crate::router::RouterConfig::default()),
+            connections: Default::default(),
             key: Arc::new(key.clone()),
             id,
             genesis,

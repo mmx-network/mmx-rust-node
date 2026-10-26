@@ -964,17 +964,22 @@ fn remote_plot_to_farmer_to_rust_node_produces_a_live_block() {
 
 #[test]
 fn node_starts_configured_wallet_farmer_remote_harvester_and_timelord_services() {
-    configured_services(false, false);
+    configured_services(false, false, false);
 }
 
 #[test]
 fn mmx_home_auto_loads_native_layers_and_passes_wallet_and_network_paths_to_children() {
-    configured_services(true, false);
+    configured_services(true, false, false);
 }
 
 #[test]
 fn explicit_network_and_data_dir_override_home_selectors_and_configured_database_path() {
-    configured_services(true, true);
+    configured_services(true, true, false);
+}
+
+#[test]
+fn native_router_file_with_local_overrides_starts_a_configured_listener_and_fixed_only_sync() {
+    configured_services(false, false, true);
 }
 
 #[test]
@@ -1044,7 +1049,7 @@ fn standalone_wallet_discovers_home_and_role_config_with_cli_overrides() {
     daemon.shutdown_successfully();
 }
 
-fn configured_services(from_home: bool, overrides: bool) {
+fn configured_services(from_home: bool, overrides: bool, router_overrides: bool) {
     use mmx_execution::chain::network::BINARY_FILES;
     let (mut network, _, _) = synthetic_network();
     network.params.vdf_segment_size = 100_000;
@@ -1117,14 +1122,32 @@ fn configured_services(from_home: bool, overrides: bool) {
             mmx_node::peer::Server::bind("127.0.0.1:0", synced_test_node(&network, id)).unwrap(),
         );
     }
-    fs::write(
-        base.join("Router.json"),
-        serde_json::to_vec(
-            &json!({"seed_peers":peers.iter().map(|p|p.address().to_string()).collect::<Vec<_>>()}),
+    if router_overrides {
+        fs::write(
+            base.join("Router.json"),
+            include_str!("../../mmx-node/tests/fixtures/router-default.json"),
         )
-        .unwrap(),
-    )
-    .unwrap();
+        .unwrap();
+        fs::write(
+            local.join("Router.json"),
+            json!({
+                "host":"127.0.0.1", "port":0, "max_connections":4,
+                "num_peers_out":1, "min_sync_peers":1,
+                "fixed_peers":[peers[0].address().to_string()]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    } else {
+        fs::write(
+            base.join("Router.json"),
+            serde_json::to_vec(
+                &json!({"seed_peers":peers.iter().map(|p|p.address().to_string()).collect::<Vec<_>>()}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
     let endpoint = |name: &str| format!("unix://{}", root.join(name).display());
     let wallet = endpoint("wallet.sock");
     let farmer = endpoint("farmer.sock");
@@ -1188,9 +1211,10 @@ fn configured_services(from_home: bool, overrides: bool) {
             state.join("cli-ledger").into_os_string(),
         ]);
     }
+    if !router_overrides {
+        args.extend(["--p2p-listen".into(), "127.0.0.1:0".into()]);
+    }
     args.extend([
-        "--p2p-listen".into(),
-        "127.0.0.1:0".into(),
         "--rpc-listen".into(),
         "127.0.0.1:0".into(),
         "--http-listen".into(),
@@ -1202,6 +1226,21 @@ fn configured_services(from_home: bool, overrides: bool) {
     }
     let (daemon, _) = Daemon::start_line_env(binary.to_str().unwrap(), &args, root, &environment);
     let line = daemon.line("P2P ");
+    if router_overrides {
+        let address: std::net::SocketAddr = line
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(',')
+            .parse()
+            .unwrap();
+        assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
+        assert_ne!(
+            address.port(),
+            0,
+            "configured port 0 must allocate a listener"
+        );
+    }
     daemon.line("Wallet VNX RPC ");
     daemon.line("TimeLord VNX RPC ");
     if from_home {
@@ -1275,7 +1314,7 @@ fn configured_services(from_home: bool, overrides: bool) {
     {
         assert!(
             Instant::now() < deadline,
-            "node did not sync from its three configured peers"
+            "node did not sync from its configured seed/fixed peers"
         );
         thread::sleep(Duration::from_millis(50));
     }

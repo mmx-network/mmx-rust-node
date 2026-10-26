@@ -142,6 +142,52 @@ fn counts(events: &Arc<Mutex<Vec<Event>>>) -> BTreeMap<Hash, usize> {
     out
 }
 #[test]
+fn configured_peer_capacity_and_quorum_replace_the_old_eight_three_constants() {
+    let (_, node, blocks) = fixture();
+    let events = Arc::new(Mutex::new(vec![]));
+    let policy = crate::router::RouterConfig {
+        num_peers_out: 12,
+        min_sync_peers: 5,
+        ..Default::default()
+    };
+    let make_peers = |count: u8| {
+        (1..=count)
+            .map(|id| ([id; 32], Fake::new(id, &blocks, &events)))
+            .collect()
+    };
+    let pool = PeerPool::with_config(make_peers(20), &policy);
+    assert_eq!(pool.len(), 12);
+    drop(pool);
+    let mut pool = PeerPool::with_config(make_peers(6), &policy);
+    pool.peers[0].source.as_mut().unwrap().fail_hash = true;
+    pool.peers[1].source.as_mut().unwrap().fail_hash = true;
+    assert!(pool.window(1, 1, &node, &AtomicBool::new(false)).is_err());
+    assert!(
+        counts(&events).is_empty(),
+        "no body is fetched below configured quorum"
+    );
+    drop(pool);
+    events.lock().unwrap().clear();
+    let mut pool = PeerPool::with_config(make_peers(6), &policy);
+    let window = pool.window(1, 1, &node, &AtomicBool::new(false)).unwrap();
+    assert_eq!(window.heights[0].len(), 1);
+    assert!(counts(&events).values().all(|count| *count == 1));
+    drop(pool);
+    let policy = crate::router::RouterConfig {
+        num_peers_out: 1,
+        min_sync_peers: 1,
+        ..Default::default()
+    };
+    let mut pool = PeerPool::with_config(make_peers(1), &policy);
+    assert_eq!(
+        pool.window(1, 1, &node, &AtomicBool::new(false))
+            .unwrap()
+            .heights[0]
+            .len(),
+        1
+    );
+}
+#[test]
 fn genesis_only_network_finishes_coordinated_sync_without_readmitting_genesis() {
     let (_, node, blocks) = fixture();
     let events = Arc::new(Mutex::new(vec![]));

@@ -34,8 +34,8 @@ pub(super) struct Queue {
     receiver: Option<Receiver<Reply>>,
 }
 impl Queue {
-    pub fn new() -> Self {
-        let (sender, receiver) = sync_channel(MAX_PEERS);
+    pub fn new(capacity: usize) -> Self {
+        let (sender, receiver) = sync_channel(capacity);
         Self {
             sender,
             receiver: Some(receiver),
@@ -206,7 +206,7 @@ impl<S: PeerSource> PeerPool<S> {
     }
     pub fn refresh(&mut self) -> Result<u32> {
         self.drain_metadata()?;
-        if self.refreshed.elapsed() >= Duration::from_secs(10) {
+        if self.refreshed.elapsed() >= self.query_interval {
             for peer in &mut self.peers {
                 if peer.active {
                     peer.needs_status = true;
@@ -220,10 +220,13 @@ impl<S: PeerSource> PeerPool<S> {
             .iter()
             .filter(|p| p.active && p.qualified)
             .count()
-            < MIN_PEERS
+            < self.minimum
         {
-            if self.len() < MIN_PEERS || !self.peers.iter().any(|p| p.inflight.is_some()) {
-                return Err(error("sync requires at least three distinct synced peers"));
+            if self.len() < self.minimum || !self.peers.iter().any(|p| p.inflight.is_some()) {
+                return Err(error(format!(
+                    "sync requires at least {} distinct synced peers",
+                    self.minimum
+                )));
             }
             self.receive_metadata(Duration::from_millis(50))?;
             self.start_statuses()?;
@@ -273,7 +276,7 @@ impl<S: PeerSource> PeerPool<S> {
                     replies.push((observation.peer, observation.hashes));
                 }
             }
-            if replies.len() >= MIN_PEERS {
+            if replies.len() >= self.minimum {
                 return Ok(replies);
             }
             // Draining can return a stale connection owner after every current
@@ -282,10 +285,13 @@ impl<S: PeerSource> PeerPool<S> {
                 .peers
                 .iter()
                 .any(|p| p.active && p.qualified && p.source.is_some() && !asked.contains(&p.id));
-            if self.len() < MIN_PEERS
+            if self.len() < self.minimum
                 || (!available && !self.peers.iter().any(|p| p.inflight.is_some()))
             {
-                return Err(error("fewer than three peers answered the hash window"));
+                return Err(error(format!(
+                    "fewer than {} peers answered the hash window",
+                    self.minimum
+                )));
             }
             if available {
                 continue;

@@ -20,7 +20,7 @@ locators. Existing native payload records are read in place without migration.
 | Area | C++ reference and important choices | Rust coverage and remaining checks |
 | --- | --- | --- |
 | Database | `src/DataBase.cpp`: buffered append log, sorted blocks, versioned rollback, flush thresholds | `crates/mmx-db/src/{native,journal,sorted}.rs`: append values once, index references, positional reads, bounded reader handles, batched checkpoints, historical versions. Rust synchronizes each published journal commit; compare durability and write throughput explicitly before changing this policy. |
-| Sync | `src/Router.cpp` height jobs and `src/Node.cpp`: random peer subsets, content-hash observations, unique body downloads, overlapping bounded jobs | `crates/mmx-node/src/sync/peers*`: 3–8 distinct authenticated peers, all observed content candidates, content deduplication and timeout reassignment, background peer refill and prefetch. Socket tests cover competing branches, duplicate providers and refill while syncing. Repeat throughput measurements after scheduling/storage changes. |
+| Sync | `src/Router.cpp` height jobs and `src/Node.cpp`: random peer subsets, content-hash observations, unique body downloads, overlapping bounded jobs | `crates/mmx-node/src/sync/peers*`: configured distinct authenticated peer pool, all observed content candidates, content deduplication and timeout reassignment, background peer refill and prefetch. Socket tests cover competing branches, duplicate providers and refill while syncing. See the Router configuration checkpoint for default/timeout changes and scheduling differences. Repeat throughput measurements after scheduling/storage changes. |
 | Proof/VDF work | `src/Node_verify.cpp`, `src/pos/verify*.cpp`: cheap checks, worker pools, SHA-NI/ARM/AVX batching and accelerated recompute | `crates/mmx-consensus`, `crates/mmx-crypto/src/recursive` and `crates/mmx-opencl`: bounded work admission, parallel F1, GPU VDF/F1 kernels and runtime-dispatched CPU lane batching. Native CPU kernel and old/new Rust proof benchmarks are recorded below; full-node and ARM throughput parity remain unmeasured. |
 | Harvesting | `src/Harvester.cpp`, `src/pos/Prover.cpp`: concurrent plot jobs, publish each proof immediately, network challenge deadline, estimated Y park search, post-filter before full proof, retained headers | `crates/mmx-farming` and `crates/mmx-tools`: shared bounded Rayon workers for plot reads and nested F1, streaming proofs, `challenge_delay * block_interval_ms`, density-based Y search, positional reads, per-proof park reuse, retained headers and per-quality error isolation. A stalled-plot regression test verifies that another plot can publish first. The daemon now dispatches owned per-plot jobs while its service loop handles later challenges/reports. Worker and queued-context bounds, original deadlines and per-plot leases isolate stalled reads; compare sustained slow-drive throughput before large-farm migration. |
 | Wallet/farmer | `src/Wallet.cpp`, `src/Farmer.cpp`: retained farmer identities, separate signing work, native key derivation and RPC | Rust retains farmer keys, uses a private signer and a restricted remote harvester listener, and tests native signatures and wallet spending through actual daemons. Large-wallet/history latency and signing under sustained harvester traffic still need comparative measurements. Pool partial submission and other unported RPCs remain listed in README. |
@@ -820,3 +820,96 @@ Mixed/duplicate device names use pure selection fixtures; no mixed-GPU hardware
 performance result is claimed. Full mainnet replay, saturated RPC/harvester
 latency and native/Rust transaction throughput remain comparative workloads to
 measure; correctness tests do not establish those performance claims.
+
+## Router configuration checkpoint (2026-10-26)
+
+Reference: C++ `141054c398d2bab6802174379ce3b191d4f3a499`,
+`modules/Router.vni`, `config/default/Router.json`, `src/Router.cpp`
+(`init`, `connect`, `process`, `on_connect`, discovery and relay/cache paths),
+and `vnx-addons/modules/{TcpServer,MsgServer}.vni` plus their implementations.
+The native default JSON is retained as
+`crates/mmx-node/tests/fixtures/router-default.json`. The
+[configuration reference](development.md#router-configuration) lists supported
+keys, precedence, units, validation and the remaining unsupported settings.
+
+Native `max_connections` is an inbound admission threshold, not a strict total
+socket cap: `TcpServer::do_poll()` counts inbound, outbound and connecting
+sockets, while `connect_client()` can still dial above the threshold. Rust now
+uses a shared atomic count with RAII ownership before authentication/dialing,
+replacing the fixed 32-inbound-worker cap. The C++ file supplies 100; eight
+outgoing sockets leave 92 inbound slots. Rejected names/IPs do not authenticate,
+and blocked names avoid DNS entirely. Configuration is parsed before opening
+the ledger. Negative limits disable the admission bound as in native.
+
+Outgoing targets, sync minimums, fixed/master peers, candidate bounds, listener
+settings, idle/query/connect/fetch periods, compression and the existing relay
+caches now consume their native keys. The C++ default file supplies 8 outgoing
+peers and 5 observers. Explicit 1/1 and larger targets work too; the minimum
+is clamped to the outgoing target. Fixed peers have extra slots. As in C++,
+retry deadlines do not hold an underfilled pool below its target; the connection
+cycle controls retries during startup. Rust still does not probe/rotate a full
+pool on native retry deadlines. Known peers remain memory-only and discovery
+occurs on authentication rather than native's periodic discovery timer.
+
+Existing bounded background connection/metadata ownership, identity
+deduplication, randomized candidate selection and immediate completion admission
+are retained. New attempts wait for the configured connect cycle; completed
+attempts do not. The metadata reply queue scales with configured pool capacity.
+Body groups retain their independent 32-content bound rather than multiplying
+it by the configured peer count. The full fetch deadline now follows config;
+body leases and body RPC deadlines use its native one-eighth value (22.5 seconds
+with the C++ file), so a silent provider cannot occupy a group for the full
+180-second fetch interval. No payload/state cache was added. Configured
+first-seen limits apply to each existing seen cache, while receipts retain their
+separate 100,000-entry bound. Per-peer cache limits use a shared atomic setting
+without adding a global relay lock to each received-message cache update.
+
+Deliberate differences and missing optimizations:
+
+- Rust requires the configured number of fresh successful distinct hash
+  observations; native can count failed/empty observers toward completion.
+  Rust fetches every observed content candidate once without majority filtering.
+  Incoming connections are not historical sync observers, and fixed peers must
+  qualify as synced full nodes before pool admission.
+- Body workers still join each bounded group before processing its results;
+  native processes individual asynchronous returns immediately. Absolute RPC
+  deadlines differ from native inactivity timers; failed/empty bodies retain
+  their lease instead of releasing it early. The separate three-second connect,
+  ten-second write/partial-frame guards and 64 MiB decode limits remain.
+- Native uses an event loop and asynchronous write queues. Rust retains an
+  incoming worker and independent sender per authenticated socket, plus bounded
+  connection/metadata workers. Raising configured limits changes thread and
+  memory costs. `max_write_queue`, `priority_queue_size` and native timer/queue
+  controls without equivalents are explicitly unimplemented, not enforced.
+- Sender publication notifications remain immediate; `send_interval_ms` controls
+  idle waits rather than exact native timer phasing. `do_relay` gates forwarded
+  publications while preserving reliable local broadcasts, receipts and VDF
+  bootstrap. UPnP, periodic disconnects, native socket buffer/keepalive/backlog
+  knobs and Router topic/server/version/mode overrides remain unported.
+- Missing settings retain legacy Rust loopback/three-observer/15-second RPC and
+  body fallbacks; loading the native JSON overrides them. Absent `tcp_no_delay`
+  retains Rust's enabled latency setting, unlike the inherited native listener
+  default. Explicit false is supported.
+
+Regression workloads use only synthetic RAM chains, loopback sockets and small
+temporary config files: native default/override layering and units; concurrent
+atomic admission; shared incoming/outgoing/pending accounting; 35 incoming peers
+with a 40-connection setting; blocked names/IPs; idle authentication expiry;
+compression level 20 interoperability; a silent body returning ownership at its
+one-second configured lease instead of the eight-second full timeout; 1/1 and
+5/12 observer/target settings; content deduplication; fixed-peer extra slots;
+underfilled retries; and completion delivery inside a throttled connect period.
+An actual-daemon test loads the C++ file with local overrides, starts the
+configured listener without a CLI listener override, and syncs from one fixed
+peer without seeds. Existing wallet, farmer, harvester and timelord daemon tests
+also exercise the shared config/startup paths.
+Existing competing-branch, backpressure, relay-priority and stale-owner tests
+remain part of validation. These establish behavior and resource bounds, not
+C++ performance parity. No live ledger/plot reads, migrations, cache warming or
+production-service interruption were used. Comparative saturated-connection,
+slow-body and mainnet sync measurements remain outstanding.
+
+Validation: **152 node tests and 10 real-daemon integration tests passed**.
+Node/tools all-target Clippy passes with warnings denied; formatting and diff
+whitespace checks pass. Node and utility binaries build with two jobs,
+incremental/debug output disabled and low CPU/I/O priority.

@@ -60,10 +60,13 @@ fn frame_bytes(raw: &[u8]) -> Result<Vec<u8>> {
     frame_bytes_with_limit(raw, MAX_FRAME)
 }
 fn frame_bytes_with_limit(raw: &[u8], compressed_limit: usize) -> Result<Vec<u8>> {
+    frame_bytes_with_options(raw, compressed_limit, 3)
+}
+fn frame_bytes_with_options(raw: &[u8], compressed_limit: usize, level: i32) -> Result<Vec<u8>> {
     if raw.len() > MAX_FRAME {
         return Err(error("peer record exceeds frame limit"));
     }
-    let data = zstd::stream::encode_all(raw, 3)?;
+    let data = zstd::stream::encode_all(raw, level)?;
     if data.len() > compressed_limit {
         return Err(error("compressed peer frame exceeds limit"));
     }
@@ -116,6 +119,7 @@ struct Output {
     stream: TcpStream,
     outbound: mmx_consensus::StreamEncoder,
     compressed_limit: usize,
+    compress_level: i32,
 }
 struct RelayWorker {
     stop: Arc<AtomicBool>,
@@ -126,7 +130,11 @@ impl Output {
         let mut outbound = self.outbound.clone();
         let mut batch = Vec::new();
         for value in values {
-            let frame = frame_bytes_with_limit(&outbound.encode(value)?, self.compressed_limit)?;
+            let frame = frame_bytes_with_options(
+                &outbound.encode(value)?,
+                self.compressed_limit,
+                self.compress_level,
+            )?;
             if batch.len().saturating_add(frame.len()) > MAX_FRAME + 8 {
                 return Err(error("peer write batch exceeds limit"));
             }
@@ -142,8 +150,20 @@ impl Output {
 }
 impl Connection {
     pub fn connect(address: &str) -> Result<Self> {
+        Self::connect_with_policy(address, None)
+    }
+    fn connect_with_policy(
+        address: &str,
+        policy: Option<&crate::router::RouterConfig>,
+    ) -> Result<Self> {
+        if policy.is_some_and(|p| p.blocks(address)) {
+            return Err(error("peer is blocked by Router.block_peers"));
+        }
         let mut last = None;
         for addr in address.to_socket_addrs()? {
+            if policy.is_some_and(|p| p.blocks_ip(addr.ip())) {
+                continue;
+            }
             match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
                 Ok(stream) => return Self::new(stream),
                 Err(e) => last = Some(e),
@@ -160,6 +180,7 @@ impl Connection {
             stream: stream.try_clone()?,
             outbound: Default::default(),
             compressed_limit: DEFAULT_COMPRESSED_LIMIT,
+            compress_level: 3,
         };
         Ok(Self {
             stream,
@@ -443,16 +464,25 @@ pub struct Client {
     auth_gossip: Vec<(Record, usize)>,
     auth_bytes: usize,
     stopping: Option<Arc<AtomicBool>>,
+    _permit: crate::router::Permit,
 }
 impl Client {
     pub fn connect(address: &str, node: Arc<Mutex<Node>>) -> Result<Self> {
+        Self::connect_stoppable(address, node, None)
+    }
+    pub(crate) fn connect_stoppable(
+        address: &str,
+        node: Arc<Mutex<Node>>,
+        stopping: Option<Arc<AtomicBool>>,
+    ) -> Result<Self> {
         let (inbox, peer_state, relay) = {
             let mut local = node.lock().map_err(|_| error("node lock poisoned"))?;
             local.enable_background_transactions()?;
             (local.inbox(), local.peer_state(), local.transaction_relay())
         };
-        let connection = Connection::connect(address)?;
-        Self::from_connection(connection, node, inbox, peer_state, relay, None)
+        let permit = peer_state.connections.outbound()?;
+        let connection = Connection::connect_with_policy(address, Some(&peer_state.router))?;
+        Self::from_connection(connection, node, inbox, peer_state, relay, stopping, permit)
     }
     fn from_connection(
         mut connection: Connection,
@@ -461,7 +491,16 @@ impl Client {
         peer_state: PeerState,
         relay: Relay,
         stopping: Option<Arc<AtomicBool>>,
+        permit: crate::router::Permit,
     ) -> Result<Self> {
+        connection
+            .stream
+            .set_nodelay(peer_state.router.tcp_no_delay)?;
+        connection
+            .output
+            .lock()
+            .map_err(|_| error("peer output poisoned"))?
+            .compress_level = peer_state.router.compress_level;
         connection.set_compressed_limit(relay.compressed_limit()?)?;
         let mut client = Self {
             connection,
@@ -476,6 +515,7 @@ impl Client {
             auth_gossip: Vec::new(),
             auth_bytes: 0,
             stopping,
+            _permit: permit,
         };
         client.authenticate()?;
         Ok(client)
@@ -486,14 +526,31 @@ impl Client {
             .ok_or_else(|| error("missing peer result"))
     }
     fn call_many(&mut self, methods: Vec<Record>) -> Result<Vec<Value>> {
+        self.call_many_with_timeout(methods, self.peer_state.router.fetch_timeout)
+    }
+    fn call_many_with_timeout(
+        &mut self,
+        methods: Vec<Record>,
+        timeout: Duration,
+    ) -> Result<Vec<Value>> {
         let mut pending = std::collections::BTreeMap::new();
         let mut results = vec![None; methods.len()];
         let mut queued: std::collections::VecDeque<_> = (0..methods.len()).collect();
-        let end = Instant::now() + Duration::from_secs(15);
+        let end = Instant::now() + timeout;
         let mut send_after = Instant::now();
         let mut request_window = methods.len().clamp(1, MAX_RPC_REQUESTS);
         let mut draining = false;
         while (!pending.is_empty() || !queued.is_empty()) && Instant::now() < end {
+            let connection_end = self
+                .peer_state
+                .router
+                .connection_timeout
+                .map_or(end, |timeout| {
+                    end.min(self.connection.received_at + timeout)
+                });
+            if Instant::now() >= connection_end {
+                return Err(error("peer receive idle timeout"));
+            }
             if self
                 .stopping
                 .as_ref()
@@ -529,12 +586,13 @@ impl Client {
             let mut idle = end
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(500));
+            idle = idle.min(connection_end.saturating_duration_since(Instant::now()));
             if !queued.is_empty() && Instant::now() < send_after {
                 idle = idle.min(send_after.saturating_duration_since(Instant::now()));
             }
             let Some(message) = self.connection.receive_until(
                 idle.max(Duration::from_millis(1)),
-                end.min(Instant::now() + Duration::from_secs(10)),
+                connection_end.min(Instant::now() + Duration::from_secs(10)),
             )?
             else {
                 continue;
@@ -639,7 +697,10 @@ impl Client {
         if hashes.len() > MAX_BODY_REQUESTS {
             return Err(error("peer body request window exceeds limit"));
         }
-        self.call_many(
+        // The coordinator borrows this connection for a bounded body group.
+        // Return ownership at the native body lease, rather than holding up
+        // all providers for the full metadata/fetch inactivity timeout.
+        self.call_many_with_timeout(
             hashes
                 .iter()
                 .map(|hash| {
@@ -649,6 +710,7 @@ impl Client {
                     )
                 })
                 .collect(),
+            self.peer_state.router.body_timeout,
         )?
         .into_iter()
         .map(|value| match value {
@@ -659,14 +721,18 @@ impl Client {
         .collect()
     }
     pub fn known_peers(&mut self) -> Result<Vec<String>> {
+        let maximum = self.peer_state.router.max_peer_set.min(32);
+        if maximum == 0 {
+            return Ok(vec![]);
+        }
         let value = self.call(record(
             "mmx.Router.get_peers",
-            [("max_count".into(), Value::Uint(32))],
+            [("max_count".into(), Value::Uint(maximum as u64))],
         ))?;
         value
             .seq()?
             .iter()
-            .take(32)
+            .take(maximum)
             .map(|v| Ok(std::str::from_utf8(v.text()?)?.to_owned()))
             .collect()
     }
@@ -718,7 +784,21 @@ impl Client {
         }
     }
     pub fn poll(&mut self) -> Result<()> {
-        if let Some(message) = self.connection.receive(Duration::from_millis(500))? {
+        let now = Instant::now();
+        let end = self
+            .peer_state
+            .router
+            .connection_timeout
+            .map_or(now + Duration::from_secs(10), |timeout| {
+                (now + Duration::from_secs(10)).min(self.connection.received_at + timeout)
+            });
+        if now >= end {
+            return Err(error("peer receive idle timeout"));
+        }
+        if let Some(message) = self.connection.receive_until(
+            Duration::from_millis(500).min(end.saturating_duration_since(now)),
+            end,
+        )? {
             self.handle(message)?;
         }
         Ok(())
@@ -771,6 +851,7 @@ impl Server {
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let running = stop.clone();
+        let policy = peer_state.router.clone();
         let thread = thread::spawn(move || {
             let mut workers: Vec<JoinHandle<()>> = Vec::new();
             while !running.load(Ordering::Relaxed) {
@@ -783,7 +864,14 @@ impl Server {
                     }
                 }
                 match listener.accept() {
-                    Ok((stream, _)) if workers.len() < 32 => {
+                    Ok((stream, address)) => {
+                        if policy.blocks_ip(address.ip()) {
+                            continue;
+                        }
+                        let Some(permit) = peer_state.connections.inbound(policy.max_connections)
+                        else {
+                            continue;
+                        };
                         let node = node.clone();
                         let inbox = inbox.clone();
                         let peer_state = peer_state.clone();
@@ -798,16 +886,12 @@ impl Server {
                                     peer_state,
                                     relay,
                                     Some(stop.clone()),
+                                    permit,
                                 )?;
                                 let mut query = Instant::now();
                                 while !stop.load(Ordering::Relaxed) {
-                                    if client.connection.received_at.elapsed()
-                                        > Duration::from_secs(180)
-                                    {
-                                        return Err(error("peer receive idle timeout"));
-                                    }
                                     client.poll()?;
-                                    if query.elapsed() >= Duration::from_secs(10)
+                                    if query.elapsed() >= client.peer_state.router.query_interval
                                         && client.identity.as_ref().is_some_and(|identity| {
                                             identity.role
                                                 == mmx_types::mmx::node_type_e::FULL_NODE.value
@@ -824,7 +908,6 @@ impl Server {
                             }
                         }));
                     }
-                    Ok(_) => (),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(20))
                     }

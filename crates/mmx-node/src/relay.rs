@@ -12,7 +12,7 @@ use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
@@ -58,6 +58,10 @@ pub(crate) struct Relay {
     wake: Arc<(Mutex<()>, Condvar)>,
 }
 struct RelayState {
+    max_hash_cache: usize,
+    max_sent_cache: Arc<AtomicUsize>,
+    do_relay: bool,
+    send_interval: Duration,
     entries: [RelayEntries; 2],
     notices: [BTreeMap<u64, [u8; 32]>; 2],
     ids: BTreeMap<[u8; 32], (usize, u64)>,
@@ -78,6 +82,10 @@ struct RelayState {
 impl Default for RelayState {
     fn default() -> Self {
         Self {
+            max_hash_cache: MAX_VERIFIED_IDS,
+            max_sent_cache: Arc::new(AtomicUsize::new(20_000)),
+            do_relay: true,
+            send_interval: Duration::from_millis(20),
             entries: Default::default(),
             notices: Default::default(),
             ids: Default::default(),
@@ -172,7 +180,8 @@ impl Relay {
             if record.name == "mmx.ProofOfTime" {
                 state.history.insert(record.clone(), size)?;
             }
-            state.verified.remember(content, MAX_VERIFIED_IDS);
+            let limit = state.max_hash_cache;
+            state.verified.remember(content, limit);
             // Promote an existing early publication without resetting its
             // native fanout timing or retransmitting its payload.
             if let Some((class, seq)) = state.ids.get(&id).copied() {
@@ -188,6 +197,9 @@ impl Relay {
                 }
             }
         } else {
+            if !state.do_relay && !reliable {
+                return Ok(());
+            }
             let max_segments = state.max_segments;
             if size > 32 * 1024 * 1024
                 || state.verified.ids.contains(&content)
@@ -203,6 +215,9 @@ impl Relay {
                 state.ids.remove(&id);
                 state.early_bytes -= size;
             }
+        }
+        if !state.do_relay && !reliable {
+            return Ok(());
         }
         if let Some((class, seq)) = state.ids.remove(&id) {
             state.entries[class].remove(&seq);
@@ -376,7 +391,8 @@ impl Relay {
             if state.verified.ids.contains(&id) || state.envelopes.ids.contains(&id) {
                 return Ok(());
             }
-            state.envelopes.remember(id, MAX_VERIFIED_IDS);
+            let limit = state.max_hash_cache;
+            state.envelopes.remember(id, limit);
             let seq = self
                 .latest
                 .load(Ordering::Relaxed)
@@ -415,6 +431,18 @@ impl Relay {
             .lock()
             .map_err(|_| error("relay poisoned"))?
             .target = target;
+        Ok(())
+    }
+    pub(crate) fn configure_policy(&self, config: &crate::router::RouterConfig) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| error("relay poisoned"))?;
+        state.max_hash_cache = config.max_hash_cache;
+        state
+            .max_sent_cache
+            .store(config.max_sent_cache, Ordering::Release);
+        state.do_relay = config.do_relay;
+        state.send_interval = config.send_interval;
+        state.verified.prune(config.max_hash_cache);
+        state.envelopes.prune(config.max_hash_cache);
         Ok(())
     }
     pub(crate) fn configure_upload(
@@ -484,6 +512,10 @@ impl Relay {
             (1 << 32) | u64::from(mmx_types::mmx::node_type_e::FULL_NODE.value),
         );
         Ok(RelayPeer {
+            received: Arc::new(Mutex::new(PeerCache {
+                limit: state.max_sent_cache.clone(),
+                ..Default::default()
+            })),
             cursors: [self.latest.load(Ordering::Acquire); 2],
             acknowledgements: [self.latest.load(Ordering::Acquire); 2],
             replay: state.history.snapshot(),
@@ -536,6 +568,10 @@ impl Relay {
             if scanned == 256 {
                 next = next.min(seq - 1);
                 break;
+            }
+            if !state.do_relay && !item.reliable {
+                processed.push(*seq);
+                continue;
             }
             if completed.contains(seq) {
                 continue;
@@ -590,6 +626,11 @@ impl Relay {
         self.latest.load(Ordering::Acquire)
     }
     pub(crate) fn wait(&self, observed: u64) -> Result<()> {
+        let interval = self
+            .state
+            .lock()
+            .map_err(|_| error("relay poisoned"))?
+            .send_interval;
         let guard = self
             .wake
             .0
@@ -599,7 +640,7 @@ impl Relay {
             drop(
                 self.wake
                     .1
-                    .wait_timeout(guard, std::time::Duration::from_millis(20))
+                    .wait_timeout(guard, interval)
                     .map_err(|_| error("relay notification poisoned"))?,
             );
         }
@@ -615,10 +656,19 @@ pub(crate) struct RelayPeer {
     received: Arc<Mutex<PeerCache>>,
     replay: history::Replay,
 }
-#[derive(Default)]
 struct PeerCache {
     seen: Seen,
     uploads: upload::Pending,
+    limit: Arc<AtomicUsize>,
+}
+impl Default for PeerCache {
+    fn default() -> Self {
+        Self {
+            seen: Seen::default(),
+            uploads: upload::Pending::default(),
+            limit: Arc::new(AtomicUsize::new(20_000)),
+        }
+    }
 }
 #[derive(Default)]
 struct Seen {
@@ -626,13 +676,17 @@ struct Seen {
     order: std::collections::VecDeque<[u8; 32]>,
 }
 impl Seen {
+    fn prune(&mut self, limit: usize) {
+        while self.order.len() > limit {
+            if let Some(old) = self.order.pop_front() {
+                self.ids.remove(&old);
+            }
+        }
+    }
     fn remember(&mut self, id: [u8; 32], limit: usize) {
         if self.ids.insert(id) {
             self.order.push_back(id);
-            if self.order.len() > limit {
-                let old = self.order.pop_front().unwrap();
-                self.ids.remove(&old);
-            }
+            self.prune(limit);
         }
     }
 }
@@ -681,7 +735,8 @@ impl RelayPeer {
                 .received
                 .lock()
                 .map_err(|_| error("peer relay cache poisoned"))?;
-            seen.seen.remember(id, 20_000);
+            let limit = seen.limit.load(Ordering::Acquire);
+            seen.seen.remember(id, limit);
             if record.name == "mmx.ReceiveNote" {
                 seen.uploads.acknowledge(&id, Instant::now());
             }
@@ -793,6 +848,75 @@ impl RelayPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn router_cache_limits_and_relay_switch_keep_receipts_and_local_publications() {
+        let relay = Relay::default();
+        relay.set_target(Duration::ZERO).unwrap();
+        let policy = crate::router::RouterConfig {
+            max_hash_cache: 2,
+            max_sent_cache: 1,
+            do_relay: false,
+            ..Default::default()
+        };
+        relay.configure_policy(&policy).unwrap();
+        let mut peer = relay.attach().unwrap();
+        for id in 1..=4 {
+            relay.publish([id; 32], message(id), 100).unwrap();
+        }
+        assert!(!relay.knows(&message(1)).unwrap());
+        assert!(relay.knows(&message(4)).unwrap());
+        assert_eq!(relay.state.lock().unwrap().verified.ids.len(), 2);
+        assert_eq!(
+            relay.sequence(),
+            0,
+            "relay=false does not forward received publications"
+        );
+        relay
+            .publish_with_origin([5; 32], transaction(5), 100, true)
+            .unwrap();
+        let mut sent = vec![];
+        peer.flush(&relay, |record| {
+            sent.push(record.name.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            sent.iter().any(|name| name == "mmx.Transaction"),
+            "local publications remain reliable"
+        );
+        peer.note(&record(
+            "mmx.ReceiveNote",
+            [("hash".into(), bytes([6; 32]))],
+        ))
+        .unwrap();
+        peer.note(&record(
+            "mmx.ReceiveNote",
+            [("hash".into(), bytes([7; 32]))],
+        ))
+        .unwrap();
+        assert_eq!(peer.received.lock().unwrap().seen.ids.len(), 1);
+        let disabled = crate::router::RouterConfig {
+            max_hash_cache: 0,
+            max_sent_cache: 0,
+            ..Default::default()
+        };
+        relay.configure_policy(&disabled).unwrap();
+        sent.clear();
+        relay
+            .publish_with_origin([8; 32], transaction(8), 100, true)
+            .unwrap();
+        peer.flush(&relay, |record| {
+            sent.push(record.name.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert!(relay.state.lock().unwrap().verified.ids.is_empty());
+        assert!(peer.received.lock().unwrap().seen.ids.is_empty());
+        assert!(
+            sent.iter().any(|name| name == "mmx.ReceiveNote"),
+            "cache=0 must not disable receipt delivery"
+        );
+    }
     #[test]
     fn native_role_filters_rank_only_recipients_and_local_transactions_require_sync() {
         let relay = Relay::default();

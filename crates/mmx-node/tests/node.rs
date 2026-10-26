@@ -76,6 +76,127 @@ fn node(network: &Network) -> Arc<Mutex<Node>> {
 }
 
 #[test]
+fn router_admission_uses_the_shared_native_budget_before_authentication() {
+    let (network, _, _, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config.set("Router.max_connections", json!(2)).unwrap();
+    config.set("Router.num_peers_out", json!(1)).unwrap();
+    config.set("Router.min_sync_peers", json!(1)).unwrap();
+    config.set("Router.compress_level", json!(20)).unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let remote = node(&network);
+    let mut remote_server = peer::Server::bind("127.0.0.1:0", remote.clone()).unwrap();
+    let outbound =
+        peer::Client::connect(&remote_server.address().to_string(), local.clone()).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", local).unwrap();
+    let mut pending = TcpStream::connect(server.address()).unwrap();
+    pending
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert_eq!(
+        pending.read(&mut [0; 1]).unwrap(),
+        1,
+        "second slot is reserved before authentication"
+    );
+    let mut refused = TcpStream::connect(server.address()).unwrap();
+    refused
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let result = refused.read(&mut [0; 1]);
+    assert!(
+        matches!(result, Ok(0))
+            || matches!(result, Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset)
+    );
+    drop((refused, outbound));
+    let replacement = peer::Client::connect(&server.address().to_string(), node(&network)).unwrap();
+    drop((replacement, pending));
+    server.shutdown();
+    remote_server.shutdown();
+}
+
+#[test]
+fn router_accepts_more_than_the_old_32_inbound_workers_when_configured() {
+    let (network, _, _, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config.set("Router.max_connections", json!(40)).unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", local).unwrap();
+    let mut sockets = vec![];
+    for _ in 0..35 {
+        let mut socket = TcpStream::connect(server.address()).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(socket.read(&mut [0; 1]).unwrap(), 1);
+        sockets.push(socket);
+    }
+    drop(sockets);
+    server.shutdown();
+}
+
+#[test]
+fn router_block_list_rejects_sockets_and_hosts_before_authentication_or_dns() {
+    let (network, _, _, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config
+        .set(
+            "Router.block_peers",
+            json!(["127.0.0.1", "blocked.invalid"]),
+        )
+        .unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", local.clone()).unwrap();
+    let mut socket = TcpStream::connect(server.address()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let result = socket.read(&mut [0; 1]);
+    assert!(
+        matches!(result, Ok(0))
+            || matches!(result, Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset)
+    );
+    let error = peer::Client::connect("blocked.invalid:11337", local)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("Router.block_peers"));
+    drop(socket);
+    server.shutdown();
+}
+
+#[test]
+fn router_idle_timeout_applies_while_the_peer_is_still_authenticating() {
+    let (network, _, _, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config
+        .set("Router.connection_timeout_ms", json!(100))
+        .unwrap();
+    config.set("Router.fetch_timeout_ms", json!(5000)).unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let mut server = peer::Server::bind("127.0.0.1:0", local).unwrap();
+    let mut socket = TcpStream::connect(server.address()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let before = std::time::Instant::now();
+    let mut buffer = [0; 4096];
+    loop {
+        match socket.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Err(e) => panic!("idle socket was not closed: {e}"),
+        }
+    }
+    assert!(before.elapsed() < Duration::from_secs(3));
+    drop(socket);
+    server.shutdown();
+}
+
+#[test]
 fn cpp_database_is_rejected_before_creating_rust_ledger_files() {
     let (network, _, _, _) = fixture();
     let dir = tempfile::tempdir().unwrap();
@@ -111,6 +232,39 @@ fn answer_authentication(connection: &mut peer::Connection) {
         peer::respond(&identity, connection, &request).unwrap();
     }
 }
+
+#[test]
+fn configured_body_lease_releases_a_silent_provider_before_the_full_fetch_timeout() {
+    let (network, _, _, _) = fixture();
+    let local = node(&network);
+    let config = vnx::config::Config::new();
+    config.set("Router.fetch_timeout_ms", json!(8000)).unwrap();
+    local.lock().unwrap().configure_router(&config).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (done, wait) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut connection = peer::Connection::new(listener.accept().unwrap().0).unwrap();
+        answer_authentication(&mut connection);
+        let request = connection.receive(Duration::from_secs(3)).unwrap().unwrap();
+        assert_eq!(
+            request.field("method").unwrap().record().unwrap().name,
+            "mmx.Node.get_block"
+        );
+        // Retain the socket without replying; the caller must release itself.
+        wait.recv_timeout(Duration::from_secs(10)).unwrap();
+    });
+    let mut client = peer::Client::connect(&address.to_string(), local).unwrap();
+    let before = std::time::Instant::now();
+    let failure = client.blocks_by_hash(&[[1; 32]]).unwrap_err();
+    let elapsed = before.elapsed();
+    done.send(()).unwrap();
+    server.join().unwrap();
+    assert!(failure.to_string().contains("peer request timed out"));
+    assert!(elapsed >= Duration::from_secs(1));
+    assert!(elapsed < Duration::from_secs(4), "body waited {elapsed:?}");
+}
+
 struct TestPeer {
     connection: peer::Connection,
     bootstrap: std::collections::VecDeque<Record>,
