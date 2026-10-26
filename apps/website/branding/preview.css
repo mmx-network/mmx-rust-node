@@ -13,6 +13,10 @@
 .icon-details > p:not(.eyebrow) { min-height: 66px; margin-top: 12px; font-size: 12px; }
 .icon-sizes { display: flex; align-items: center; gap: 16px; min-height: 82px; margin-block: 10px 14px; }
 .icon-sizes img { flex-shrink: 0; }
+.earlier-studies { margin-top: 36px; border-top: 1px solid var(--border); padding-top: 24px; }
+.earlier-studies summary { width: fit-content; padding: 8px 0; color: var(--text-muted); font-size: 13px; cursor: pointer; }
+.earlier-studies summary:hover { color: var(--accent); }
+.earlier-studies summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; }
 @media (max-width: 1000px) { .icon-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 620px) {
   .preview-header { align-items: flex-start; padding-block: 20px; }
