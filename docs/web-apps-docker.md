@@ -52,6 +52,10 @@ branches only validate. To pin a release, use its SHA tag or digest, including
 through `MMX_APPS_IMAGE` with Compose. To update, pull again and recreate the
 container; with Compose, repeat the two commands above.
 
+On platforms that import an image into a VM disk, restarting the instance can
+reuse the old imported image. Select the new SHA tag and redeploy/reimport the
+image when applying an update.
+
 For an existing package, link `mmx-network/mmx-rust-node` under its repository
 source and grant this repository write access under **Manage Actions access**
 in the package settings so the workflow can publish with `GITHUB_TOKEN`.
@@ -98,6 +102,12 @@ Cargo/npm download caches persist in BuildKit; build tools, sources and
 dependencies are absent from the small nginx runtime image. `.dockerignore`
 limits the build context to source inputs and excludes local `.env` files,
 generated WASM, desktop build output and dependency directories.
+
+Error and request logs use the inherited standard error stream. nginx does not
+reopen `/dev/stdout`, `/dev/stderr` or `/var/log/nginx/error.log`, which can be
+inaccessible after a VM supervisor opens root-owned console pipes and drops to
+the image's `nginx` user. The image stays non-root and supports a read-only root
+filesystem.
 
 ## Configuration
 
@@ -174,6 +184,8 @@ The smoke test starts disposable, non-root containers with read-only root
 filesystems and ephemeral loopback host ports. It checks both default and
 overridden hostnames/ports, security headers, successful/error/conditional cache
 policies, gzip, WASM MIME/range responses, and rejection of invalid settings.
+It also starts nginx with root-owned inherited console pipes and verifies both
+HTTP delivery and request logging after the supervisor drops privileges.
 It makes no requests to a chain server and does not access ledger/plot storage.
 The [web apps image workflow](../.github/workflows/apps.yml) runs the build and
 these tests on relevant source changes.

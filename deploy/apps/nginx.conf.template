@@ -1,6 +1,6 @@
 worker_processes 2;
 pid /tmp/mmx-apps/nginx.pid;
-error_log /dev/stderr warn;
+error_log stderr warn;
 
 events {
     worker_connections 1024;
@@ -10,7 +10,10 @@ http {
     include /etc/nginx/mime.types;
     types { application/manifest+json webmanifest; }
     default_type application/octet-stream;
-    access_log /dev/stdout;
+    # nginx's empty log filename uses the inherited stderr descriptor directly.
+    # VM consoles can be writable through inherited FDs but forbid reopening
+    # /dev/stdout or /dev/stderr after the supervisor drops privileges.
+    access_log "" combined;
     server_tokens off;
     charset utf-8;
     sendfile on;

@@ -59,4 +59,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -q -O /dev/null "http://127.0.0.1:${PORT}/healthz" || exit 1
 ENTRYPOINT ["/usr/local/bin/mmx-apps-entrypoint"]
-CMD ["nginx", "-c", "/tmp/mmx-apps/nginx.conf", "-g", "daemon off;"]
+CMD ["nginx", "-e", "stderr", "-c", "/tmp/mmx-apps/nginx.conf", "-g", "daemon off;"]

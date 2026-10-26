@@ -782,6 +782,15 @@ RPC origins. There is no ledger/plot access, file-upload/delete API or directory
 listing in this image. Rust builds use two jobs without incremental/debug
 state, and frontend builds run sequentially with two-worker environment limits.
 
+The Gigahost console follow-up uses nginx's inherited stderr descriptor for
+startup, error and request logs (`-e stderr`, `error_log stderr` and an empty
+access-log filename via nginx's `ngx_conf_open_file`). This preserves request
+logs without reopening root-owned VM console pipes, adding a log relay process
+or writing temporary log files. Log delivery remains immediate; both access and
+error records now share stderr. A disposable supervisor fixture opens console
+pipes as root, drops to nginx and verifies startup, delivery and logging. The
+previous published image fails that fixture with the reported permission error.
+
 Regression checks exercise real disposable read-only/non-root containers,
 default/overridden hostnames and ports, gzip/plain delivery, cache headers on
 200/206/304/404/405 responses, framing/security headers and WASM MIME/range

@@ -6,6 +6,7 @@ import gzip
 import http.client
 import json
 import re
+import shlex
 import subprocess
 import time
 import uuid
@@ -18,7 +19,7 @@ def docker(*args, check=True):
 
 
 @contextmanager
-def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explorer="explore.mmx.network", overrides=False):
+def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explorer="explore.mmx.network", overrides=False, root_console=False):
     token = str(uuid.uuid4())
     args = [
         "run", "--detach", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
@@ -28,10 +29,23 @@ def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explo
     ]
     if overrides:
         args += ["--env", f"PORT={port}", "--env", f"WALLET_HOST={wallet}", "--env", f"EXPLORER_HOST={explorer}"]
-    container = docker(*args, image).stdout.strip()
+    if root_console:
+        # VM supervisors can open console pipes as root before dropping UID.
+        # Keep those inherited descriptors, then exec the image's actual command
+        # as nginx. Reopening /dev/stdout or /dev/stderr must not be necessary.
+        config = json.loads(docker("image", "inspect", "--format", "{{json .Config}}", image).stdout)
+        command = shlex.join(config["Entrypoint"] + config["Cmd"])
+        args += ["--user", "0:0", "--cap-add", "SETUID", "--cap-add", "SETGID", "--entrypoint", "/bin/sh"]
+        container = docker(*args, image, "-c", f"exec su -p -s /bin/sh nginx -c {shlex.quote(command)}").stdout.strip()
+    else:
+        container = docker(*args, image).stdout.strip()
     try:
         inspect = json.loads(docker("inspect", container).stdout)[0]
-        binding = inspect["NetworkSettings"]["Ports"][f"{port}/tcp"][0]
+        bindings = inspect["NetworkSettings"].get("Ports", {}).get(f"{port}/tcp")
+        if not bindings:
+            logs = docker("logs", container)
+            raise AssertionError(logs.stdout + logs.stderr or str(inspect["State"]))
+        binding = bindings[0]
         host_port = int(binding["HostPort"])
         for attempt in range(100):
             try:
@@ -165,11 +179,26 @@ def main():
             status, _, body = request(port, host)
             assert status == 200 and title in body
 
+    with running_image(args.image, image_id, root_console=True) as (container, port, wallet, explorer):
+        status = docker("exec", "--user", "nginx", container, "cat", "/proc/1/status").stdout
+        uid = docker("exec", "--user", "nginx", container, "id", "-u").stdout.strip()
+        assert uid != "0" and re.search(rf"^Uid:\s+{uid}\s+{uid}\s+{uid}\s+{uid}$", status, re.MULTILINE)
+        # Verify the fixture really forbids reopening its supervisor's pipes.
+        for descriptor in ["1", "2"]:
+            result = docker("exec", "--user", "nginx", container, "test", "-w", f"/proc/1/fd/{descriptor}", check=False)
+            assert result.returncode != 0, f"Console FD {descriptor} is unexpectedly reopenable"
+        check_site(port, wallet, rpc_origin, wallet=True)
+        check_site(port, explorer, rpc_origin, wallet=False)
+        logs = docker("logs", container)
+        assert '"GET / HTTP/1.1" 200' in logs.stderr
+        assert '"GET /missing HTTP/1.1" 404' in logs.stderr
+        assert "Permission denied" not in logs.stderr and "could not open error log" not in logs.stderr
+
     for settings in [["PORT=0"], ["PORT=65536"], ["PORT=80;bad"], ["WALLET_HOST=bad;host"], ["WALLET_HOST=EXPLORE.MMX.NETWORK"]]:
         env = [part for setting in settings for part in ["--env", setting]]
         result = docker("run", "--rm", "--network", "none", *env, args.image, "true", check=False)
         assert result.returncode != 0, settings
-    print(f"{args.image}: HTTP routing, port/host overrides, CSP, caching, gzip, WASM, read-only/non-root runtime and invalid settings passed")
+    print(f"{args.image}: HTTP routing, port/host overrides, CSP, caching, gzip, WASM, read-only/non-root runtime, root-owned console and invalid settings passed")
 
 
 if __name__ == "__main__":
