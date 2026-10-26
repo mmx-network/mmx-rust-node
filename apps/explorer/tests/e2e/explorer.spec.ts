@@ -6,6 +6,15 @@ test.beforeEach(async ({ request }) => {
   await request.get(`${RPC}/__state?reset=1`);
 });
 
+test('shows TPS using the existing 20-header request only', async ({ page, request }) => {
+  await page.goto('/');
+  const tps = page.locator('.stat').filter({ has: page.getByText('TPS', { exact: true }) });
+  await expect(tps.locator('.stat__value')).toHaveText('2.3');
+  await expect(tps).toContainText('Average over the last 20 blocks');
+  const state = (await (await request.get(`${RPC}/__state`)).json()) as { requests: string[] };
+  expect(state.requests.sort()).toEqual(['/headers?limit=20', '/node/info']);
+});
+
 test('pages blocks with stable heights and visits genesis', async ({ page, request }) => {
   await page.goto('/');
   await expect(page.locator('tbody tr')).toHaveCount(20);

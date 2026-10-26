@@ -714,6 +714,14 @@ wallet state code and still uses the existing public WebAPI.
 Primary navigation uses text links at the top on every screen size; this
 layout change adds no API requests or changes to refresh scheduling.
 
+The overview's TPS statistic reuses the displayed headers' transaction counts
+and millisecond timestamps. It divides the mean count per block by the observed
+mean block interval (20 timestamps span 19 intervals), rather than inflating
+throughput by dividing all 20 counts by only 19 intervals. Missing/inconsistent
+headers show an unavailable value. This adds no RPC reads, retained state or
+polling changes; the browser regression asserts the original two initial
+requests (network info and 20 headers).
+
 Native request bounds and visible-page polling remain: 20 headers / 10 s,
 100 transactions / 10 s, 200 ranked farmers / 30 s, farmer summary and 100
 farmed headers / 30 s, balances / 10 s, approximately 200 history rows / 60 s,

@@ -8,6 +8,9 @@ signing code, Tauri or WASM.
 Blocks, Transactions and Farmers are available as text links across the top on
 desktop and mobile.
 
+The Blocks overview shows average TPS over the latest 20 blocks, calculated
+from the already-fetched transaction counts and observed block intervals.
+
 ## Develop and build
 
 Node.js 22.18+ (24 recommended). From this checkout:

@@ -1,9 +1,51 @@
 import { describe, expect, it } from 'vitest';
 import { ApiClient } from '../../src/lib/api';
-import { blockPage } from '../../src/lib/blocks';
+import { blockPage, transactionsPerSecond } from '../../src/lib/blocks';
 import type { Block } from '../../src/lib/types';
 
 const block = (height: number): Block => ({ height, hash: height.toString(16).padStart(64, '0') });
+
+describe('TPS from the displayed headers', () => {
+  const headers = (): Block[] =>
+    Array.from({ length: 20 }, (_, index) => ({
+      ...block(20 - index),
+      tx_count: 23,
+      time_stamp: 1_000_000 - index * 10_000,
+    }));
+
+  it('reports steady throughput without treating 20 timestamps as 20 intervals', () => {
+    expect(transactionsPerSecond(headers())).toBeCloseTo(2.3);
+  });
+
+  it('includes all transaction counts and uses measured, irregular intervals', () => {
+    expect(
+      transactionsPerSecond([
+        { ...block(3), tx_count: 20, time_stamp: 5000 },
+        { ...block(2), tx_count: 0, time: 3.5 },
+        { ...block(1), tx_count: 40, time_stamp: 1000 },
+      ]),
+    ).toBeCloseTo(10);
+  });
+
+  it('distinguishes no traffic from an unavailable measurement', () => {
+    expect(transactionsPerSecond(headers().map((row) => ({ ...row, tx_count: 0 })))).toBe(0);
+    expect(transactionsPerSecond([])).toBeNull();
+    expect(transactionsPerSecond(headers().slice(0, 1))).toBeNull();
+    for (const invalid of [
+      { time_stamp: undefined },
+      { time_stamp: 1_000_000 },
+      { tx_count: undefined },
+      { tx_count: -1 },
+      { tx_count: NaN },
+      { height: 0 },
+    ]) {
+      const rows = headers();
+      rows[1] = { ...rows[1]!, ...invalid };
+      expect(transactionsPerSecond(rows)).toBeNull();
+    }
+  });
+});
+
 function chain(tip: number) {
   const requests: string[] = [];
   const client = new ApiClient(undefined, async (input) => {

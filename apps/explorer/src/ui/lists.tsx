@@ -1,7 +1,7 @@
 import { PageHeader } from '@wallet/ui/components/Layout';
 import { Badge } from '@wallet/ui/components/Badge';
 import { api, endpoint } from '../lib/api';
-import { blockPage } from '../lib/blocks';
+import { blockPage, transactionsPerSecond } from '../lib/blocks';
 import { amount, networkSpace, number } from '../lib/format';
 import { href, type Paging, type Section } from '../lib/router';
 import { useResource } from '../lib/resource';
@@ -10,6 +10,7 @@ import { Card, Feedback, Icon, PAGE_SIZE, Pager, Panel, Stat, pageSlice } from '
 import { BlocksTable, FarmersTable, TransactionsTable } from './tables';
 
 export const rowsOf = <T,>(value: T[] | null): T[] => (Array.isArray(value) ? value.filter((row) => row !== null) : []);
+const tpsFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 });
 
 export function Blocks({ page = 1, at, network }: Paging & { network: NodeInfo | null }) {
   const offset = page > 1 && at !== undefined ? Math.max(0, at - (page - 1) * PAGE_SIZE) : undefined;
@@ -19,6 +20,7 @@ export function Blocks({ page = 1, at, network }: Paging & { network: NodeInfo |
     : endpoint('/headers', { limit: PAGE_SIZE, ...(offset === undefined ? {} : { offset }) });
   const resource = useResource<Block[]>(path, page === 1 ? 10_000 : 0, (signal) => blockPage(api, offset, signal));
   const rows = rowsOf(resource.data);
+  const tps = transactionsPerSecond(rows);
   const first = rows[0];
   const last = rows.at(-1);
   const anchor = at ?? first?.height;
@@ -74,10 +76,10 @@ export function Blocks({ page = 1, at, network }: Paging & { network: NodeInfo |
               foot="Latest block"
             />
             <Stat
-              label="Transactions"
+              label="TPS"
               icon="activity"
-              value={number(rows.reduce((sum, row) => sum + (row.tx_count ?? 0), 0))}
-              foot={`Across the latest ${number(rows.length)} blocks`}
+              value={tps === null ? '—' : tpsFormat.format(tps)}
+              foot={`Average over the last ${number(rows.length)} blocks`}
             />
           </div>
         </div>
