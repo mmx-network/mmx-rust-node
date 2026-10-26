@@ -33,7 +33,7 @@ test('prepares all three sites with isolated policies and precompressed HTML', a
     const sites = [
       ['wallet', 'apps/wallet/dist/web', csp],
       ['explorer', 'apps/explorer/dist', csp.replace('rpc.example.org:8443', 'explore.example.org')],
-      ['website', 'website/dist', "default-src 'self'; connect-src 'none'; frame-ancestors 'none'"],
+      ['website', 'apps/website/dist', "default-src 'self'; connect-src 'none'; frame-ancestors 'none'"],
     ];
     for (const [name, output, policy] of sites) {
       const directory = join(root, output);

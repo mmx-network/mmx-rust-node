@@ -6,7 +6,7 @@ request's `Host` header:
 
 | Hostname | App |
 | --- | --- |
-| `mmx.network`, `www.mmx.network` | `website`, the public MMX website |
+| `mmx.network`, `www.mmx.network` | `apps/website`, the public MMX website |
 | `wallet.mmx.network` | `apps/wallet`, including its production Rust/WASM core |
 | `explore.mmx.network` | `apps/explorer` |
 

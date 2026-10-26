@@ -49,7 +49,7 @@ export async function prepare(root) {
   for (const [name, output] of [
     ['wallet', 'apps/wallet/dist/web'],
     ['explorer', 'apps/explorer/dist'],
-    ['website', 'website/dist'],
+    ['website', 'apps/website/dist'],
   ]) {
     const directory = join(root, output);
     const headers = nginxHeaders(await readFile(join(directory, '_headers'), 'utf8'));

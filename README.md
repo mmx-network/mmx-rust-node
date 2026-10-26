@@ -139,7 +139,7 @@ build` in that directory to build its static site, or `npm run dev` to preview
 it on port 5175. It includes paged blocks, transactions, farmers and address
 activity, and talks directly to the public WebAPI without a local ledger.
 
-The public website in [`website`](website/README.md) uses the new wallet's visual
+The public website in [`apps/website`](apps/website/README.md) uses the new wallet's visual
 style and links to the browser wallet at `https://wallet.mmx.network`.
 To build and serve the website and both web apps behind a CDN, use the
 [`mmx-apps` Docker image](docs/web-apps-docker.md). One HTTP origin routes

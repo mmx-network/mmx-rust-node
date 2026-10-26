@@ -48,5 +48,5 @@ are no API connections, inline scripts, or inline styles. Only fingerprinted
 The root Dockerfile builds this site into the shared `mmx-apps` image. nginx
 selects it using `WEBSITE_HOST` and `WEBSITE_WWW_HOST` on the same HTTP port as
 the wallet and explorer, with a separate security policy. Unknown files return
-404. See [the deployment guide](../docs/web-apps-docker.md) for origin/CDN
+404. See [the deployment guide](../../docs/web-apps-docker.md) for origin/CDN
 configuration and image verification.
