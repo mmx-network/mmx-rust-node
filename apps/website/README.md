@@ -28,6 +28,10 @@ theme switch, follows the system scheme until a choice is made, and remembers
 that choice when browser storage is available. The wallet preview is an
 illustration of the welcome screen, not an embedded wallet.
 
+For the SVG icon experiments, open `/branding/` on the dev server. The
+[icon studies](branding/README.md) include the hero treatment and five variants
+with different gradients, borders, or glyph lighting, shown at several sizes.
+
 ## Content and deployment
 
 Edit `index.html` for content and links, `src/style.css` for presentation, and

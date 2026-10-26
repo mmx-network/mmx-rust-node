@@ -1,0 +1,23 @@
+.preview-header { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding-block: 28px; border-bottom: 1px solid var(--border); }
+.preview-actions { display: flex; align-items: center; gap: 22px; }
+.icon-preview { padding-block: 42px 64px; }
+.icon-preview h1 { margin-top: 16px; font-size: clamp(30px, 4vw, 48px); letter-spacing: -0.045em; }
+.preview-intro { max-width: 680px; margin-top: 16px; font-size: 14px; }
+.icon-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; margin-top: 34px; }
+.icon-card { overflow: hidden; }
+.icon-stage { display: grid; place-items: center; min-height: 245px; background: radial-gradient(ellipse at 50% 50%, var(--glow), transparent 72%); border-bottom: 1px solid var(--border); }
+.icon-stage img { display: block; }
+.icon-details { padding: 24px; }
+.icon-details .eyebrow { font-size: 9px; }
+.icon-details h2 { margin-top: 10px; font-size: 24px; }
+.icon-details > p:not(.eyebrow) { min-height: 66px; margin-top: 12px; font-size: 12px; }
+.icon-sizes { display: flex; align-items: center; gap: 16px; min-height: 82px; margin-block: 10px 14px; }
+.icon-sizes img { flex-shrink: 0; }
+@media (max-width: 1000px) { .icon-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) {
+  .preview-header { align-items: flex-start; padding-block: 20px; }
+  .preview-actions { gap: 12px; }
+  .preview-actions .text-link { font-size: 10px; gap: 7px; padding-block: 11px; }
+  .icon-grid { grid-template-columns: 1fr; }
+  .icon-details > p:not(.eyebrow) { min-height: 0; }
+}
