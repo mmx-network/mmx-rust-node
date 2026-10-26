@@ -306,26 +306,32 @@ pub(crate) struct Connections(Arc<AtomicUsize>);
 pub(crate) struct Permit(Arc<AtomicUsize>);
 impl Connections {
     pub fn inbound(&self, limit: Option<usize>) -> Option<Permit> {
-        self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                if limit.is_some_and(|limit| count >= limit) {
-                    None
-                } else {
-                    count.checked_add(1)
-                }
-            })
-            .ok()
-            .map(|_| Permit(self.0.clone()))
+        self.reserve(limit)
     }
     // C++ connect_client is not rejected by max_connections: fixed/outbound
     // peers can still connect when inbound clients have filled the listener.
     pub fn outbound(&self) -> Result<Permit> {
-        self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .map(|_| Permit(self.0.clone()))
-            .map_err(|_| error("peer connection count overflow"))
+        self.reserve(None)
+            .ok_or_else(|| error("peer connection count overflow"))
+    }
+    fn reserve(&self, limit: Option<usize>) -> Option<Permit> {
+        // fetch_update is deprecated on new Rust, while its renamed replacement
+        // requires a newer compiler than our MSRV. Keep the same CAS algorithm
+        // and memory ordering with primitives supported by Rust 1.89.
+        let mut count = self.0.load(Ordering::Acquire);
+        loop {
+            if limit.is_some_and(|limit| count >= limit) {
+                return None;
+            }
+            let next = count.checked_add(1)?;
+            match self
+                .0
+                .compare_exchange_weak(count, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Some(Permit(self.0.clone())),
+                Err(current) => count = current,
+            }
+        }
     }
 }
 impl Drop for Permit {
@@ -497,6 +503,29 @@ mod tests {
         assert_eq!(counts.0.load(Ordering::Acquire), 100);
         drop(unlimited);
         assert_eq!(counts.0.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn denied_admission_preserves_zero_limits_and_never_wraps_the_counter() {
+        let counts = Connections::default();
+        assert!(counts.inbound(Some(0)).is_none());
+        assert_eq!(counts.0.load(Ordering::Acquire), 0);
+        let outgoing = counts.outbound().unwrap();
+        assert!(counts.inbound(Some(0)).is_none());
+        assert_eq!(counts.0.load(Ordering::Acquire), 1);
+        drop(outgoing);
+        assert_eq!(counts.0.load(Ordering::Acquire), 0);
+
+        let counts = Connections(Arc::new(AtomicUsize::new(usize::MAX - 1)));
+        let last = counts.inbound(None).unwrap();
+        assert_eq!(counts.0.load(Ordering::Acquire), usize::MAX);
+        assert!(counts.inbound(None).is_none());
+        assert!(counts.outbound().is_err());
+        assert_eq!(counts.0.load(Ordering::Acquire), usize::MAX);
+        drop(last);
+        assert_eq!(counts.0.load(Ordering::Acquire), usize::MAX - 1);
+        let replacement = counts.outbound().unwrap();
+        drop(replacement);
+        assert_eq!(counts.0.load(Ordering::Acquire), usize::MAX - 1);
     }
     #[test]
     fn simultaneous_inbound_admission_cannot_exceed_its_budget() {

@@ -1329,3 +1329,19 @@ Validation: **175 node tests (121 unit + 54 integration) and 10 real-daemon
 integration tests passed**. Node/tools all-target Clippy passes with warnings
 denied; formatting and diff whitespace checks pass. Builds/tests use two jobs,
 incremental/debug symbols disabled and low CPU/I/O priority.
+
+## Admission counter compiler compatibility (2026-10-27)
+
+Rust 1.99.1 deprecates `AtomicUsize::fetch_update`, failing the warning-denying
+workspace CI job. Its renamed replacement is newer than the Rust 1.89 minimum.
+Connection admission now uses the same checked compare-and-exchange loop and
+Acquire/AcqRel ordering directly, preserving lock-free bounded admission, cheap
+rejection, outgoing exemption and permit release. The reference remains
+`vnx-addons/src/TcpServer.cpp::{do_poll,connect_client}`; no scheduling, socket
+or consensus policy changes are intended. Existing concurrent admission tests
+and a new zero-limit/overflow regression cover the boundary behavior. This
+compatibility fix makes no new performance-parity claim.
+
+The workspace all-target Clippy failure was reproduced and cleared with Rust
+1.99.1 and warnings denied. The exact counter source and its three admission
+regressions also compile and pass independently with Rust 1.89.0.
