@@ -95,6 +95,11 @@ p { color: var(--text-muted); line-height: 1.75; }
 .hero { display: grid; grid-template-columns: 1.1fr 1fr; gap: 8px; align-items: center; padding-block: 90px 72px; }
 .hero h1 { margin-top: 24px; font-size: clamp(50px, 5.1vw, 72px); line-height: 1.07; letter-spacing: -0.05em; }
 .hero-description { max-width: 445px; margin-top: 27px; font-size: 15px; }
+.hero-markets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin-top: 18px; }
+.hero-markets > span { color: var(--text-faint); font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; }
+.hero-markets a { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding-block: 8px; color: var(--text-muted); font-size: 12px; font-weight: 500; }
+.hero-markets a span { color: var(--accent); }
+.hero-markets a:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 5px; }
 .hero-note { margin-top: 24px; font-size: 11px; color: var(--text-faint); }
 .network-art { position: relative; width: 100%; aspect-ratio: 1; isolation: isolate; }
 .network-art::before { content: ''; position: absolute; inset: 8%; z-index: -1; background: radial-gradient(ellipse, var(--glow), transparent 70%); }
