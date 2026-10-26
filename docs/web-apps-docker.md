@@ -18,6 +18,12 @@ directly; this container only serves static files and has no node or database.
 The published image is `ghcr.io/mmx-network/mmx-apps:latest` (Linux amd64).
 No source checkout or build tools are needed on the server:
 
+Public packages can be pulled without a login. If the package is private, run
+`docker login ghcr.io` first, or configure a registry credential on Gigahost:
+your GitHub username and a classic personal access token with `read:packages`.
+GitHub initially creates packages as private; an administrator can change this
+in the [package settings](https://github.com/orgs/mmx-network/packages/container/mmx-apps/settings).
+
 ```sh
 docker pull ghcr.io/mmx-network/mmx-apps:latest
 docker run -d --name mmx-apps --restart unless-stopped \
@@ -45,6 +51,10 @@ default/custom-RPC image smoke tests pass on `main`. Pull requests and other
 branches only validate. To pin a release, use its SHA tag or digest, including
 through `MMX_APPS_IMAGE` with Compose. To update, pull again and recreate the
 container; with Compose, repeat the two commands above.
+
+For an existing package, link `mmx-network/mmx-rust-node` under its repository
+source and grant this repository write access under **Manage Actions access**
+in the package settings so the workflow can publish with `GITHUB_TOKEN`.
 
 ## Build from source
 
