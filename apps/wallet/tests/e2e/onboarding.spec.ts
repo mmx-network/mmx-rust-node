@@ -149,7 +149,7 @@ test('creates a wallet with a passphrase', async ({ page }) => {
   expect(await storedText(page)).not.toContain(passphrase);
   await page.getByRole('dialog', { name: 'Recovery phrase', exact: true }).getByRole('button', { name: 'Done' }).click();
   await lockWallet(page);
-  // This created wallet cached ten addresses. More addresses need fresh authorization,
+  // This created wallet cached three addresses. More addresses need fresh authorization,
   // and deriving them alone must not open a spending session.
   await page.getByRole('spinbutton', { name: 'Number of addresses' }).fill('12');
   await page.getByRole('button', { name: 'Save', exact: true }).click();

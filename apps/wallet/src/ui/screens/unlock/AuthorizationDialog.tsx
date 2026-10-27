@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { UnlockRequest, WalletInfo } from '../../../backend/types';
 import { credentialUsername, holdSensitive, lockVersion, platform } from '../../../state';
-import { Banner, Button, Dialog, Field, PasswordInput, TextInput } from '../../components';
+import { Banner, Button, Dialog, Field, PasswordInput, Stack, TextInput } from '../../components';
 import { PASSPHRASE_FIELD, PASSWORD_MANAGER_IGNORE } from '../welcome/flow';
 
 interface AuthorizationProps {
@@ -57,26 +57,28 @@ export function AuthorizationDialog({ open, wallet, busy, error, onClose, onAuth
           onAuthorize(phrase ? { mnemonic: typed } : wallet.withPassphrase ? { passphrase: typed } : {});
         }}
       >
-        {phrase ? (
-          <Field label="Wallet">
-            <TextInput name="username" autocomplete="username" value={credentialUsername(wallet.name, wallet.fingerprint)} readOnly />
-          </Field>
-        ) : null}
-        {phrase || wallet.withPassphrase ? (
-          <Field label={phrase ? 'Recovery phrase' : 'Passphrase'}>
-            <PasswordInput
-              name={phrase ? 'password' : 'wallet-passphrase'}
-              {...(phrase ? { autocomplete: 'current-password' } : PASSPHRASE_FIELD)}
-              value={value}
-              onValue={setValue}
-              inputRef={ref}
-              disabled={busy}
-              data-autofocus=""
-            />
-          </Field>
-        ) : null}
-        {error ? <Banner tone="danger">{error}</Banner> : null}
-        <Button type="submit" variant="primary" loading={busy}>Unlock</Button>
+        <Stack gap={4}>
+          {phrase ? (
+            <Field label="Wallet">
+              <TextInput name="username" autocomplete="username" value={credentialUsername(wallet.name, wallet.fingerprint)} readOnly />
+            </Field>
+          ) : null}
+          {phrase || wallet.withPassphrase ? (
+            <Field label={phrase ? 'Recovery phrase' : 'Passphrase'}>
+              <PasswordInput
+                name={phrase ? 'password' : 'wallet-passphrase'}
+                {...(phrase ? { autocomplete: 'current-password' } : PASSPHRASE_FIELD)}
+                value={value}
+                onValue={setValue}
+                inputRef={ref}
+                disabled={busy}
+                data-autofocus=""
+              />
+            </Field>
+          ) : null}
+          {error ? <Banner tone="danger">{error}</Banner> : null}
+          <div><Button type="submit" variant="primary" loading={busy}>Unlock</Button></div>
+        </Stack>
       </form>
     </Dialog>
   );

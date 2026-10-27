@@ -1,5 +1,6 @@
 /** Finds used addresses after an import (`/address/history?limit=1`, bounded concurrency). */
 import type { RpcClient } from './rpc';
+import { DEFAULT_ADDRESS_COUNT, MAX_ADDRESSES } from '../lib/appstate';
 
 export interface DiscoveryOptions {
   concurrency?: number;
@@ -31,6 +32,6 @@ export async function findLastUsedIndex(
 }
 
 /** Address count after discovery: at least `minimum`, enough to include the last used address. */
-export function discoveredCount(lastUsed: number, minimum = 10, maximum = 100): number {
+export function discoveredCount(lastUsed: number, minimum = DEFAULT_ADDRESS_COUNT, maximum = MAX_ADDRESSES): number {
   return Math.min(maximum, Math.max(minimum, lastUsed + 1));
 }

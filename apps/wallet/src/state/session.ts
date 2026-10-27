@@ -26,6 +26,7 @@ import {
   loadOlderPage,
   maxHeight,
   PAGE_LIMIT,
+  REFRESH_OVERLAP,
   refreshAddress,
   totalRows,
   WALLET_ROW_CAP,
@@ -94,6 +95,8 @@ interface Session {
   addresses: string[];
   balances: Map<string, AddressBalance>;
   history: Map<string, AddressHistory>;
+  /** Last successful history check per address; failed checks remain due. */
+  historyCheckedAt: Map<string, number>;
   /**
    * Addresses whose history changed since their balance was last fetched.
    * Kept on the session so a failed sync cannot lose a needed refetch.
@@ -278,6 +281,7 @@ export async function openSession(walletId: string): Promise<boolean> {
     addresses: list as string[],
     balances: new Map(),
     history: new Map(),
+    historyCheckedAt: new Map(),
     balanceDirty: new Set(),
     seenTop: new Map(),
     headTimeMs: 0,
@@ -421,6 +425,7 @@ export async function applyAddresses(raw: readonly string[]): Promise<void> {
         if (!pages) return;
         added.forEach((a, i) => {
           s.history.set(a, pages[i]!);
+          s.historyCheckedAt.set(a, Date.now());
           markSeen(s, a);
         });
         for (const [a, b] of balances) {
@@ -434,6 +439,7 @@ export async function applyAddresses(raw: readonly string[]): Promise<void> {
     if (s !== current) return;
     const keep = new Set(next);
     for (const a of [...s.history.keys()]) if (!keep.has(a)) s.history.delete(a);
+    for (const a of [...s.historyCheckedAt.keys()]) if (!keep.has(a)) s.historyCheckedAt.delete(a);
     for (const a of [...s.balances.keys()]) if (!keep.has(a)) s.balances.delete(a);
     for (const a of [...s.balanceDirty]) if (!keep.has(a)) s.balanceDirty.delete(a);
     for (const a of [...s.seenTop.keys()]) if (!keep.has(a)) s.seenTop.delete(a);
@@ -453,6 +459,8 @@ export async function applyAddresses(raw: readonly string[]): Promise<void> {
 const POLL_VISIBLE_MS = 10_000;
 const POLL_HIDDEN_MS = 30_000;
 const MIN_SYNC_INTERVAL_MS = 20_000;
+/** Empty spare addresses need checking, but not on every active-wallet refresh. */
+const IDLE_ADDRESS_INTERVAL_MS = 60_000;
 /** Longest wait between automatic retries of a failing sync. */
 const MAX_SYNC_RETRY_MS = 5 * 60_000;
 const FULL_BALANCE_INTERVAL_MS = 5 * 60_000;
@@ -484,6 +492,10 @@ async function poll(): Promise<void> {
   pollTimer = null;
   const s = current;
   if (!s) return;
+  if (isHidden()) {
+    schedulePoll(POLL_HIDDEN_MS);
+    return;
+  }
   try {
     const p = await ensureParams();
     const info = await rpc().nodeInfo();
@@ -551,6 +563,11 @@ async function firstError<T>(tasks: Promise<T>[]): Promise<T[]> {
 }
 
 async function runSync(s: Session, force = false): Promise<void> {
+  if (s !== current) return;
+  if (!force && isHidden()) {
+    s.needsSync = true;
+    return;
+  }
   if (s.syncing) {
     // Run again when this one ends; a forced request (user refresh) then
     // skips the minimum interval and the failure delay as it would have.
@@ -571,13 +588,26 @@ async function runSync(s: Session, force = false): Promise<void> {
     await withLock(s, async () => {
       /** Addresses with new rows found by this sync's refresh. */
       const changed = new Set<string>();
+      const full = s.lastFullBalanceAt === 0 || startedAt - s.lastFullBalanceAt >= FULL_BALANCE_INTERVAL_MS;
+      const ownRecipients = new Set(pendingTxs.peek()
+        .filter((x) => x.walletId === s.walletId && (x.status === 'pending' || x.status === 'confirmed') && onNetwork(x, p.network))
+        .map((x) => x.to));
+      const targets = s.addresses.filter((a, index) => {
+        if (force || full || !s.history.has(a)) return true;
+        const history = s.history.get(a)!;
+        const active = index === 0 || history.top >= head - REFRESH_OVERLAP ||
+          s.balances.get(a)?.rows.some((row) => row.amount > 0n) || ownRecipients.has(a);
+        const interval = active ? MIN_SYNC_INTERVAL_MS : IDLE_ADDRESS_INTERVAL_MS;
+        return startedAt - (s.historyCheckedAt.get(a) ?? 0) >= interval;
+      });
       const historyTask = firstError(
-        s.addresses.map(async (a) => {
+        targets.map(async (a) => {
           const h = s.history.get(a);
           if (!h) {
             const fresh = await loadFirstPage(rpc(), a, p);
             if (s === current) {
               s.history.set(a, fresh);
+              s.historyCheckedAt.set(a, Date.now());
               s.balanceDirty.add(a);
             }
             return;
@@ -592,6 +622,7 @@ async function runSync(s: Session, force = false): Promise<void> {
           }
           if (s === current) {
             s.history.set(a, result.history);
+            s.historyCheckedAt.set(a, Date.now());
             if (result.changed) {
               s.balanceDirty.add(a);
               changed.add(a);
@@ -599,7 +630,6 @@ async function runSync(s: Session, force = false): Promise<void> {
           }
         }),
       );
-      const full = s.lastFullBalanceAt === 0 || startedAt - s.lastFullBalanceAt >= FULL_BALANCE_INTERVAL_MS;
       if (full) {
         // Wait for both so no request mutates the session after the lock is released.
         const [history, balances] = await Promise.allSettled([historyTask, fetchBalances(rpc(), s.addresses, p)]);
@@ -618,9 +648,9 @@ async function runSync(s: Session, force = false): Promise<void> {
       } else {
         await historyTask;
       }
-      const targets = s.addresses.filter((a) => s.balanceDirty.has(a) || !s.balances.has(a));
-      if (targets.length > 0) {
-        const balances = await fetchBalances(rpc(), targets, p);
+      const balanceTargets = s.addresses.filter((a) => s.balanceDirty.has(a) || !s.balances.has(a));
+      if (balanceTargets.length > 0) {
+        const balances = await fetchBalances(rpc(), balanceTargets, p);
         if (s !== current) return;
         for (const [a, b] of balances) {
           s.balances.set(a, b);
@@ -731,7 +761,7 @@ export function trackPending(p: PendingTx): void {
 async function extendHistory(s: Session, done: () => boolean, maxRounds: number): Promise<void> {
   await withLock(s, async () => {
     for (let round = 0; round < maxRounds; round++) {
-      if (s !== current || done() || !canExtend(s.history, s.addresses)) return;
+      if (s !== current || isHidden() || done() || !canExtend(s.history, s.addresses)) return;
       let targets = addressesToExtend(s.history, s.addresses);
       if (targets.length === 0) return;
       const room = Math.max(1, Math.floor((WALLET_ROW_CAP - totalRows(s.history, s.addresses)) / PAGE_LIMIT));
@@ -784,7 +814,7 @@ let coverageRun: { session: Session; range: SeriesRange; again: SeriesRange | nu
  */
 async function ensureCoverage(range: SeriesRange): Promise<void> {
   const s = current;
-  if (!s) return;
+  if (!s || isHidden()) return;
   if (coverageRun?.session === s) {
     coverageRun.again = range;
     return;
@@ -962,7 +992,11 @@ export function startSessionEffects(): () => void {
   });
   if (typeof document === 'undefined') return stopCoverage;
   const onVisible = () => {
-    if (document.visibilityState === 'visible' && current) schedulePoll(0);
+    if (document.visibilityState === 'visible' && current) {
+      current.needsSync = true;
+      schedulePoll(0);
+      void ensureCoverage(seriesRange.peek());
+    }
   };
   const onOnline = () => {
     if (current) schedulePoll(0);

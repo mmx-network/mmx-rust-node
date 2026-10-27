@@ -9,7 +9,7 @@ import { randomId } from './id';
 import { sanitizeText, validateName, type NameError } from './text';
 
 export const MAX_ADDRESSES = 100;
-export const DEFAULT_ADDRESS_COUNT = 10;
+export const DEFAULT_ADDRESS_COUNT = 3;
 export const LABEL_MAX = 32;
 export const WALLET_NAME_MAX = 64;
 export const CONTACT_NAME_MAX = 64;

@@ -31,7 +31,7 @@ describe('wallet entries', () => {
     expect(parseWalletRecord({ name: 5, withPassphrase: 'no', addressCount: 101, verified: 'yes', added: -1 })).toEqual({
       name: 'Wallet',
       withPassphrase: true,
-      addressCount: 10,
+      addressCount: 3,
       verified: true,
       added: 0,
     });

@@ -22,6 +22,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllTimers();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -83,12 +84,98 @@ function receivedToasts(S: State): string[] {
   return S.toasts.value.filter((t) => t.message.startsWith('Received')).map((t) => t.message);
 }
 
+describe('RPC traffic', () => {
+  async function emptyWallet() {
+    const ctx = await boot();
+    const words = await ctx.S.newRecoveryPhrase();
+    await ctx.S.createWallet({ name: 'Empty', mnemonic: words });
+    await settle(1200);
+    const paths: string[] = [];
+    intercept(ctx.backend, (path) => { paths.push(path); return undefined; });
+    return { ...ctx, paths, addrs: ctx.S.addresses.value.slice() };
+  }
+
+  function historyCalls(paths: string[], address: string): number {
+    return paths.filter((path) => path.startsWith(`/address/history?id=${address}&`)).length;
+  }
+
+  it('defaults to three addresses and checks unused spare addresses less often', async () => {
+    const { paths, addrs } = await emptyWallet();
+    expect(addrs).toHaveLength(3);
+    await settle(120_000);
+    const counts = addrs.map((address) => historyCalls(paths, address));
+    expect(counts[0]).toBeGreaterThanOrEqual(4);
+    expect(counts[0]).toBeLessThanOrEqual(6);
+    expect(counts[1]).toBeGreaterThanOrEqual(1);
+    expect(counts[1]).toBeLessThanOrEqual(2);
+    expect(counts[2]).toBeGreaterThanOrEqual(1);
+    expect(counts[2]).toBeLessThanOrEqual(2);
+    expect(counts.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(10);
+  });
+
+  it('checks every address immediately when the user refreshes', async () => {
+    const { S, paths, addrs } = await emptyWallet();
+    S.refreshNow();
+    await settle(1000);
+    for (const address of addrs) expect(historyCalls(paths, address)).toBe(1);
+  });
+
+  it('detects funds sent to an unused address and then refreshes it frequently', async () => {
+    const { S, backend, paths, addrs } = await emptyWallet();
+    receive(backend, addrs[2]!, 2_000_000n, txid('2'));
+    await settle(70_000);
+    expect(S.nativeAsset.value!.total).toBe(2_000_000n);
+    expect(S.activity.value.some((item) => item.txid === txid('2'))).toBe(true);
+    const before = historyCalls(paths, addrs[2]!);
+    await settle(30_000);
+    expect(historyCalls(paths, addrs[2]!)).toBeGreaterThan(before);
+  });
+
+  it('does not poll a hidden wallet and catches up after returning', async () => {
+    const { S, backend, paths, addrs } = await emptyWallet();
+    const document = { visibilityState: 'hidden' };
+    vi.stubGlobal('document', document);
+    receive(backend, addrs[2]!, 3_000_000n, txid('3'));
+    await settle(90_000);
+    expect(paths).toEqual([]);
+    document.visibilityState = 'visible';
+    await settle(31_000);
+    expect(S.nativeAsset.value!.total).toBe(3_000_000n);
+    expect(S.activity.value.some((item) => item.txid === txid('3'))).toBe(true);
+  });
+
+  it.each(['pending', 'confirmed'] as const)('checks own-send recipients frequently while %s and awaiting history', async (status) => {
+    const { S, session, paths, addrs } = await emptyWallet();
+    session.trackPending({
+      txid: txid('4'), walletId: S.activeWalletId.value!, to: addrs[2]!,
+      contract: NATIVE_CONTRACT, symbol: 'MMX', decimals: 6, amount: 1_000_000n,
+      fee: 50_000n, expires: 1e9, createdAt: Date.now(), status,
+    });
+    await settle(30_000);
+    expect(historyCalls(paths, addrs[2]!)).toBeGreaterThan(0);
+    expect(historyCalls(paths, addrs[1]!)).toBe(0);
+  });
+
+  it('keeps loaded balances and history when unlocking the current wallet', async () => {
+    const { S, backend, session } = await boot();
+    const paths: string[] = [];
+    intercept(backend, (path) => { paths.push(path); return undefined; });
+    const balances = session.balanceMap.value;
+    const history = session.historyMap.value;
+    await S.unlockWallet(S.activeWalletId.value!, {}, { navigateTo: null });
+    await settle(1000);
+    expect(paths.filter((path) => path.startsWith('/address'))).toEqual([]);
+    expect(session.balanceMap.value).toBe(balances);
+    expect(session.historyMap.value).toBe(history);
+  });
+});
+
 describe('balances after a failed sync', () => {
   it('refetches the balance of an address whose new rows arrived in a sync that failed', async () => {
     const { S, backend, types } = await boot();
     const addrs = S.addresses.value;
     const target = addrs[1]!;
-    const flaky = addrs[5]!;
+    const flaky = addrs[0]!;
     let failFlaky = true;
     intercept(backend, (path) => {
       if (failFlaky && path.startsWith(`/address/history?id=${flaky}&`)) {
@@ -112,7 +199,7 @@ describe('balances after a failed sync', () => {
   it('keeps a full balance snapshot when only history failed', async () => {
     const { S, backend, types } = await boot();
     const addrs = S.addresses.value;
-    const broken = addrs[2]!;
+    const broken = addrs[0]!;
     const probe = addrs[7]!;
     let probeFetches = 0;
     intercept(backend, (path) => {
@@ -135,7 +222,7 @@ describe('balances after a failed sync', () => {
 describe('retry backoff', () => {
   it('spaces failing syncs at least 20 s apart and increasingly further', async () => {
     const { S, backend, types } = await boot();
-    const broken = S.addresses.value[2]!;
+    const broken = S.addresses.value[0]!;
     const attempts: number[] = [];
     intercept(backend, (path) => {
       if (!path.startsWith(`/address/history?id=${broken}&`) || !path.includes('&since=')) return undefined;
@@ -158,7 +245,7 @@ describe('retry backoff', () => {
 
   it('a refresh by hand during a failing retry runs again as soon as it ends', async () => {
     const { S, backend, types } = await boot();
-    const broken = S.addresses.value[2]!;
+    const broken = S.addresses.value[0]!;
     const attempts: number[] = [];
     intercept(backend, (path) => {
       if (!path.startsWith(`/address/history?id=${broken}&`) || !path.includes('&since=')) return undefined;
@@ -178,7 +265,7 @@ describe('retry backoff', () => {
 
   it('starts over at the minimum interval after a success', async () => {
     const { S, backend, types } = await boot();
-    const broken = S.addresses.value[2]!;
+    const broken = S.addresses.value[0]!;
     let failing = true;
     const attempts: number[] = [];
     intercept(backend, (path) => {

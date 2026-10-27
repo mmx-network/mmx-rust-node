@@ -154,7 +154,7 @@ export function Shell({
         <BrandMark size={28} class="shell__mobilebrand" label="MMX Wallet" />
         <WalletSwitcher {...switcherProps} class="shell__mobileswitcher" />
         <NetworkStatus {...network} display="auto" class="shell__mobilestatus" />
-        {canLock || onUnlock ? <IconButton icon="lock" label={canLock ? 'Lock' : 'Unlock'} class="shell__mobilelock" onClick={canLock ? onLock : onUnlock} /> : null}
+        {canLock || onUnlock ? <IconButton icon={canLock ? 'unlock' : 'lock'} label={canLock ? 'Lock' : 'Unlock'} class="shell__mobilelock" onClick={canLock ? onLock : onUnlock} /> : null}
       </header>
 
       <header class="shell__nav">
@@ -202,11 +202,11 @@ export function Shell({
           <div class="shell__lock">
             {iconOnly ? (
               <Tooltip content={canLock ? 'Lock' : 'Unlock'} placement={tooltip} describe={false}>
-                <IconButton icon="lock" label={canLock ? 'Lock' : 'Unlock'} noTitle onClick={canLock ? onLock : onUnlock} />
+                <IconButton icon={canLock ? 'unlock' : 'lock'} label={canLock ? 'Lock' : 'Unlock'} noTitle onClick={canLock ? onLock : onUnlock} />
               </Tooltip>
             ) : (
               <button type="button" class="nav-item nav-item--quiet" onClick={canLock ? onLock : onUnlock}>
-                <Icon name="lock" class="nav-item__icon" />
+                <Icon name={canLock ? 'unlock' : 'lock'} class="nav-item__icon" />
                 <span class="nav-item__label">{canLock ? 'Lock' : 'Unlock'}</span>
               </button>
             )}

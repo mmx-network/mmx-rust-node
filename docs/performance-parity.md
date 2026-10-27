@@ -698,7 +698,21 @@ server rather than measured against C++.
   behind the load balancer cannot leave stale or missing rows. History is cached
   in memory per open wallet only (capped at 20,000 rows); nothing is persisted.
 - Pending transfers are checked with `/transaction?id=` only while pending; a
-  sync runs at most every 20 s, polling `/node/info` every 10 s (30 s hidden).
+  sync runs at most every 20 s, polling `/node/info` every 10 s while visible.
+  Automatic UI polling and chart-history extension pause while hidden and resume
+  when visible. The first address, funded/recently active addresses and recipients
+  of own pending sends retain the 20 s cadence; unused spare addresses are checked
+  once a minute. Manual refresh checks every address immediately. This deliberate
+  latency tradeoff is needed because public `/address` has no history-change marker
+  and `/address/history` accepts one address, unlike C++'s batched node calls.
+  The shared web/desktop UI defaults new wallets to three addresses, preserving
+  saved counts and the one-time import scan of up to 100 addresses. Unlocking the
+  current wallet reuses its public view instead of fetching every address again.
+  Fake-clock regressions bound a three-address unused wallet to at most 10 history
+  reads over two minutes, versus the previous default's roughly 60 reads (ten
+  addresses every 20 s). They cover manual refresh, new funds on spare addresses,
+  hidden/resumed polling and reuse on unlock. This is request-count evidence from
+  a synthetic fixture; production latency and server-load comparisons remain open.
 - Max and Review fetch `/chain/info`, `/node/info` and fresh balances every time
   (web and desktop) so a transfer is never signed against stale balances.
 - Review signs and checks transfers locally (hashes, cost, signatures, fee payer

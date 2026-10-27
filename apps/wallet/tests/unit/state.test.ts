@@ -372,11 +372,11 @@ describe('wallet management', () => {
     expect(S.discovery.value).toBeNull();
   });
 
-  it('imports an unused phrase with ten addresses and creates wallets', async () => {
+  it('imports an unused phrase with three addresses and creates wallets', async () => {
     const { S } = await boot();
     const words = Array.from({ length: 24 }, (_, i) => ['zoo', 'abandon', 'ability'][i % 3]).join(' ');
     const info = await S.importWallet({ name: 'Empty', mnemonic: words, passphrase: '' });
-    expect(info.addressCount).toBe(10);
+    expect(info.addressCount).toBe(3);
     expect(info.withPassphrase).toBe(false);
     expect(await codeOf(S.importWallet({ name: 'Dup', mnemonic: words }))).toBe('wallet_exists');
     expect(await codeOf(S.importWallet({ name: '', mnemonic: words }))).toBe('invalid_argument');

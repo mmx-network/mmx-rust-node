@@ -205,8 +205,9 @@ describe('discovery', () => {
   });
 
   it('computes the address count', () => {
-    expect(discoveredCount(-1)).toBe(10);
-    expect(discoveredCount(3)).toBe(10);
+    expect(discoveredCount(-1)).toBe(3);
+    expect(discoveredCount(1)).toBe(3);
+    expect(discoveredCount(3)).toBe(4);
     expect(discoveredCount(9)).toBe(10);
     expect(discoveredCount(10)).toBe(11);
     expect(discoveredCount(99)).toBe(100);

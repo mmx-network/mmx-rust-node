@@ -262,11 +262,14 @@ test('shows why a transfer cannot be sent', async ({ page, rpc, consoleGuard }) 
 });
 
 test('shows received transfers with their sender', async ({ page, rpc }) => {
+  await page.clock.install();
   const sender = testAddress('e2e-erin');
   const wallet = await openFundedWallet(page, (address) => rpc.fund({ address, amount: '1000000' }));
   await rpc.fund({ address: wallet.addresses[1]!, amount: '4200000', from: sender, memo: 'Thanks!' });
   await rpc.advance(1);
   await pollNow(page);
+  // An unused spare address is checked once a minute, then becomes active.
+  await page.clock.fastForward(61_000);
   await expect(page.getByText('Received 4.2 MMX')).toBeVisible({ timeout: 40_000 });
   await expect(page.locator('.overview-hero')).toContainText('5.2');
 

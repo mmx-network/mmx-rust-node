@@ -61,7 +61,7 @@ unverified token can be called "MMX".
 | `createWallet({ name, mnemonic, passphrase? })` | `Promise<WalletInfo>` | Call only after the words were confirmed (desktop: three picked words; web: the saved phrase filled in again). Stores the wallet, opens it and goes to Overview. Empty passphrase = none. Errors: `wallet_exists`, `invalid_argument` (name). |
 | `beginSetup()` / `setupActive` / `setupNotice` / `clearSetupNotice()` | setup state | Held recovery words count as an open wallet for auto-lock; `beginSetup()` returns a release function. After a lock ended a setup, `setupNotice` holds one line for the welcome screen. |
 | — | — | Web: while `activeWallet.verified === false` (stored unconfirmed by an earlier version) the app starts on `#/unlock`; show the confirm step for that wallet there. |
-| `importWallet({ name, mnemonic, passphrase?, expectedFingerprint? })` | `Promise<WalletInfo>` | Accepts pasted phrases in any common format. Scans up to 100 addresses and sets the count to max(10, last used + 1), then opens the wallet. Errors: `invalid_mnemonic`, `wallet_exists`, `invalid_argument` (name). |
+| `importWallet({ name, mnemonic, passphrase?, expectedFingerprint? })` | `Promise<WalletInfo>` | Accepts pasted phrases in any common format. Scans up to 100 addresses and sets the count to max(3, last used + 1), then opens the wallet. Errors: `invalid_mnemonic`, `wallet_exists`, `invalid_argument` (name). |
 | `discovery` | `Signal<{ checked, total } \| null>` | Progress of the address scan during import. |
 | `suggestWalletName(base = 'Wallet')` | `string` | First free "Wallet", "Wallet 2", … |
 | `renameWallet(id, name)` | `Promise<void>` | 1–64 characters. |
@@ -99,6 +99,14 @@ way are kept and followed again after unlocking; removing a wallet passes
 | `pendingOutgoingTotals` | `Computed<Map<contract, bigint>>` | What open sends take out of the wallet (MMX includes fees; a move to an own address counts only its fee). |
 | `pendingReservedTotals` | `Computed<Map<contract, bigint>>` | Amount + fee of every open send, own moves included; subtract it from the balance for what can be sent now. |
 | `refreshNow()` | `void` | Poll and refresh immediately. |
+
+Automatic polling pauses while hidden and catches up when the app becomes visible.
+Visible node checks run every 10 s; history syncs run at most every 20 s on new
+blocks. The first address, funded/recently active addresses and own pending-send
+recipients use that cadence; other addresses are checked once a minute. A manual
+refresh checks every address. Unlocking the visible wallet preserves the current
+history and balances. New GUI wallets default to three addresses; saved counts
+are preserved.
 
 ### Activity
 

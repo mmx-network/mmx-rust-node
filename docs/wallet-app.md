@@ -7,7 +7,7 @@ is shown in the product UI.
 ## 1. Goals
 
 - Finished end-user product: send/receive with optional memo, multiple wallets
-  (switching), multiple addresses per wallet (default 10, configurable 1–100),
+  (switching), multiple addresses per wallet (default 3, configurable 1–100),
   public RPC for chain data, import/export via 24 recovery words, transaction
   history, balance history, address book with labels (send again, identify
   senders), wallet creation, passphrase support with fingerprint-based detection
@@ -342,14 +342,21 @@ passphrase, otherwise `fingerprint(seed, None)`.
 - Balance history: per contract (default MMX), walk confirmed rows newest→oldest from
   the current confirmed balance (RECEIVE/REWARD/VDF_REWARD/PROJECT_REWARD add, SPEND
   and TXFEE subtract) producing step points; ranges 1W, 1M, 3M, 1Y, All.
-- Refresh: poll `/node/info` every 10 s while visible (30 s hidden/backgrounded). On
-  a new height, at most every 20 s: history `since` for each address; balances for
-  addresses with new rows (all addresses every 5 min); pending statuses. Failed syncs
-  back off from 20 s, doubling up to 5 min; a manual refresh skips the wait.
+- Refresh: poll `/node/info` every 10 s while visible; automatic polling and older
+  history coverage pause while hidden and resume when visible. On a new height,
+  sync at most every 20 s: check pending statuses and refresh history for the first
+  address, funded addresses, addresses with activity in the newest 6 blocks and
+  recipients of own pending sends. Other addresses are checked once a minute;
+  incoming funds there can take up to about a minute to appear. Fetch balances
+  for addresses with changed history, and all balances every 5 min. Failed syncs
+  back off from 20 s, doubling up to 5 min. Manual refresh checks every address
+  immediately. Unlocking the visible wallet reuses its public chain view.
 
 ### 6.5 Screens
 Shell: wallet switcher (name; list of wallets, add wallet), navigation (Overview,
 Send, Receive, Activity, Contacts, Settings), network status, lock (when lockable).
+The lock control shows a closed padlock while locked and an open padlock when
+spending is enabled. Unlock dialogs space fields and the submit button by 16 px.
 Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
 
 - Onboarding: Create new wallet / Import with recovery phrase (web adds: Open a wallet
@@ -365,7 +372,7 @@ Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
 - Import: name, 24 words (per-word validation and suggestions from the BIP39 list,
   paste splits), optional passphrase (typed twice). After import scan up to 100 addresses
   (`/address/history?limit=1`, concurrency 4) and set the address count to
-  max(10, last used index + 1).
+  max(3, last used index + 1). Existing saved address counts stay unchanged.
 - Overview: total MMX (large), pending outgoing, verified token list (empty on
   mainnet), "other tokens"
   (unverified, collapsed, warning icon, symbol + short contract), balance chart with

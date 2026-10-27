@@ -85,7 +85,13 @@ export async function activateWallet(id: WalletId, options: { navigateTo?: Route
   opening.value = true;
   let opened: boolean;
   try {
-    opened = await openSession(id);
+    if (sessionWalletId.value === id) {
+      // Unlocking adds signing keys; the public chain view is already loaded.
+      await reconcileAddresses();
+      opened = sessionWalletId.value === id;
+    } else {
+      opened = await openSession(id);
+    }
   } finally {
     opening.value = false;
   }
