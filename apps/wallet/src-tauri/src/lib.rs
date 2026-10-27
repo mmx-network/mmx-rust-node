@@ -191,9 +191,13 @@ mod desktop {
         session: State<'_, Session>,
         request: Request<'_>,
     ) -> Result<Vec<String>> {
-        let args::AddressCount { id, count } = decode(&request)?;
+        let args::AddressCount {
+            id,
+            count,
+            passphrase,
+        } = decode(&request)?;
         let service = session.service()?;
-        blocking(move || service.set_address_count(&id, count)).await
+        blocking(move || service.set_address_count_authorized(&id, count, passphrase)).await
     }
 
     #[tauri::command]
@@ -208,9 +212,9 @@ mod desktop {
         session: State<'_, Session>,
         request: Request<'_>,
     ) -> Result<Zeroizing<String>> {
-        let args::Wallet { id } = decode(&request)?;
+        let args::Unlock { id, passphrase } = decode(&request)?;
         let service = session.service()?;
-        blocking(move || service.mnemonic(&id)).await
+        blocking(move || service.mnemonic_authorized(&id, passphrase)).await
     }
 
     #[tauri::command]

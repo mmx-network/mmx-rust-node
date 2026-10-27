@@ -2,19 +2,21 @@
  * Web wallet metadata in localStorage (docs/wallet-app.md §6.6):
  *
  *   "mmx-wallet/v1" = { wallets: { [fingerprint]: { name, withPassphrase,
- *                       addressCount, verified, added } },
+ *                       addressCount, addresses, seedWords?, verified, added } },
  *                       activeWallet, labels, contacts, settings }
  *   "mmx-wallet/lock" = changes when "Lock" was chosen in a tab, so the other
  *                       tabs lock too (the value itself means nothing)
  *
- * Never contains recovery words, passphrases or keys. Every read validates
- * the data; a damaged wallet entry is skipped without affecting the others
+ * Passphrase wallets keep plaintext base recovery words; regular wallets
+ * keep no seed. Passphrases and signing keys are never persisted. Every read
+ * validates the data; a damaged wallet entry is skipped without affecting the others
  * and is left untouched in storage. Every write re-reads the current value
  * first, so changes made by another tab are not overwritten.
  */
 import { BackendError, type AppState, type WalletId } from '../types';
 import { DEFAULT_ADDRESS_COUNT, MAX_ADDRESSES, sanitizeAppState, WALLET_NAME_MAX } from '../../lib/appstate';
 import { sanitizeText } from '../../lib/text';
+import { normalizeAddress } from '../../lib/address';
 
 export const STORAGE_KEY = 'mmx-wallet/v1';
 /** An unreadable value is moved here before it would be overwritten. */
@@ -39,6 +41,9 @@ export interface WalletRecord {
   verified: boolean;
   /** When the wallet was added (ms); orders the wallet list. */
   added: number;
+  addresses?: string[];
+  /** Stored only for passphrase-protected wallets; spending still requires the passphrase. */
+  seedWords?: string;
 }
 
 type Root = Record<string, unknown>;
@@ -64,6 +69,9 @@ export function parseWalletRecord(v: unknown): WalletRecord | null {
   const name = sanitizeText(v.name, WALLET_NAME_MAX).trim() || 'Wallet';
   const count = v.addressCount;
   const added = v.added;
+  const addresses = Array.isArray(v.addresses) && v.addresses.length >= 1 && v.addresses.length <= MAX_ADDRESSES &&
+    v.addresses.every((a) => typeof a === 'string' && normalizeAddress(a) === a) && new Set(v.addresses).size === v.addresses.length
+    ? v.addresses as string[] : undefined;
   return {
     name,
     withPassphrase: typeof v.withPassphrase === 'boolean' ? v.withPassphrase : true,
@@ -73,6 +81,9 @@ export function parseWalletRecord(v: unknown): WalletRecord | null {
         : DEFAULT_ADDRESS_COUNT,
     verified: v.verified !== false,
     added: typeof added === 'number' && Number.isFinite(added) && added >= 0 ? added : 0,
+    ...(addresses ? { addresses } : {}),
+    ...(v.withPassphrase === true && typeof v.seedWords === 'string' && /^[a-z]+(?: [a-z]+){23}$/u.test(v.seedWords) && v.seedWords.length <= 512
+      ? { seedWords: v.seedWords } : {}),
   };
 }
 

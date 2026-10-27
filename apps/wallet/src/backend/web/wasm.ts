@@ -35,6 +35,7 @@ export interface VaultHandle {
 
 /** The part of the WASM API the web backend uses. */
 export interface WasmApi {
+  watch_max_amount(addressesJson: string, balancesJson: string, paramsJson: string, currency: string, memo: string | null, feeLevel: number): string;
   generate_mnemonic(): string;
   normalize_mnemonic(words: string): string;
   fingerprint(words: string, passphrase?: string | null): string;

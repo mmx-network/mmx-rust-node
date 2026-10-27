@@ -15,6 +15,8 @@ export interface WalletInfo {
   fingerprint: string;
   withPassphrase: boolean;
   locked: boolean;
+  /** Public addresses are cached, so the wallet can be observed while signing is locked. */
+  canView?: boolean;
   addressCount: number;
   /** Set when the wallet cannot be read (desktop: corrupt key file). */
   error?: string;
@@ -23,6 +25,8 @@ export interface WalletInfo {
    * saved credential was confirmed. Missing means confirmed.
    */
   verified?: boolean;
+  /** Web: a passphrase-protected wallet has its base seed stored locally. */
+  hasStoredSeed?: boolean;
 }
 
 export interface Contact {
@@ -144,9 +148,9 @@ export interface Backend {
   lockAll(opts?: LockOptions): Promise<void>;
   renameWallet(id: WalletId, name: string): Promise<void>;
   /** Returns the wallet's addresses after the change. */
-  setAddressCount(id: WalletId, n: number): Promise<string[]>;
+  setAddressCount(id: WalletId, n: number, passphrase?: string): Promise<string[]>;
   removeWallet(id: WalletId): Promise<void>;
-  revealMnemonic(id: WalletId): Promise<string>;
+  revealMnemonic(id: WalletId, passphrase?: string): Promise<string>;
   getAddresses(id: WalletId): Promise<string[]>;
   setActiveWallet(id: WalletId): Promise<void>;
 

@@ -36,3 +36,16 @@ export function cancelSetup(): boolean {
 export function clearSetupNotice(): void {
   setupNotice.value = null;
 }
+
+const sensitiveHolders = new Set<symbol>();
+/** Credentials or recovery words displayed outside onboarding also expire. */
+export const sensitiveActive = signal(false);
+export function holdSensitive(): () => void {
+  const token = Symbol('sensitive');
+  sensitiveHolders.add(token);
+  sensitiveActive.value = true;
+  return () => {
+    sensitiveHolders.delete(token);
+    sensitiveActive.value = sensitiveHolders.size > 0;
+  };
+}

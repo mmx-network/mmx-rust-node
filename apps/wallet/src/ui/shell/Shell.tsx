@@ -22,6 +22,7 @@ export interface ShellProps {
   network: NetworkInfo;
   canLock: boolean;
   onLock(): void;
+  onUnlock?(): void;
   children: ComponentChildren;
 }
 
@@ -112,6 +113,7 @@ export function Shell({
   network,
   canLock,
   onLock,
+  onUnlock,
   children,
 }: ShellProps) {
   const mainRef = useRef<HTMLElement>(null);
@@ -152,7 +154,7 @@ export function Shell({
         <BrandMark size={28} class="shell__mobilebrand" label="MMX Wallet" />
         <WalletSwitcher {...switcherProps} class="shell__mobileswitcher" />
         <NetworkStatus {...network} display="auto" class="shell__mobilestatus" />
-        {canLock ? <IconButton icon="lock" label="Lock" class="shell__mobilelock" onClick={onLock} /> : null}
+        {canLock || onUnlock ? <IconButton icon="lock" label={canLock ? 'Lock' : 'Unlock'} class="shell__mobilelock" onClick={canLock ? onLock : onUnlock} /> : null}
       </header>
 
       <header class="shell__nav">
@@ -196,16 +198,16 @@ export function Shell({
         <div class="shell__status">
           <NetworkStatus {...network} display={railSwitcher ? 'dot' : 'full'} />
         </div>
-        {canLock ? (
+        {canLock || onUnlock ? (
           <div class="shell__lock">
             {iconOnly ? (
-              <Tooltip content="Lock" placement={tooltip} describe={false}>
-                <IconButton icon="lock" label="Lock" noTitle onClick={onLock} />
+              <Tooltip content={canLock ? 'Lock' : 'Unlock'} placement={tooltip} describe={false}>
+                <IconButton icon="lock" label={canLock ? 'Lock' : 'Unlock'} noTitle onClick={canLock ? onLock : onUnlock} />
               </Tooltip>
             ) : (
-              <button type="button" class="nav-item nav-item--quiet" onClick={onLock}>
+              <button type="button" class="nav-item nav-item--quiet" onClick={canLock ? onLock : onUnlock}>
                 <Icon name="lock" class="nav-item__icon" />
-                <span class="nav-item__label">Lock</span>
+                <span class="nav-item__label">{canLock ? 'Lock' : 'Unlock'}</span>
               </button>
             )}
           </div>

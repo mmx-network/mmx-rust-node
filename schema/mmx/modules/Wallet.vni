@@ -144,6 +144,9 @@ module Wallet implements vnx.addons.HttpComponent {
 	void remove_account(uint index, uint account);
 	
 	void set_address_count(uint index, uint count);
+
+	@Permission(permission_e.SPENDING)
+	void set_address_count_ex(uint index, uint count, optional<string> passphrase);
 	
 	vector<string> get_mnemonic_wordlist(string lang = "en") const;
 	

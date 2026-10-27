@@ -5,6 +5,8 @@ import { errorMessage } from '../../../lib/errors';
 import { validateName } from '../../../lib/text';
 import {
   activeWalletId,
+  lockVersion,
+  holdSensitive,
   checkHiddenFunds,
   copyToClipboard,
   notify,
@@ -13,7 +15,7 @@ import {
   renameWallet,
   revealMnemonic,
   setAddressCount,
-  verifyPassphrase,
+  unlockWallet,
   type HiddenFundsCheck,
 } from '../../../state';
 import {
@@ -33,6 +35,7 @@ import {
 } from '../../components';
 import { PASSPHRASE_FIELD, PASSWORD_MANAGER_IGNORE, useMounted } from '../welcome/flow';
 import { fundedMessage } from './text';
+import { AuthorizationDialog } from '../unlock/AuthorizationDialog';
 
 function nameError(name: string): string | undefined {
   switch (validateName(name, WALLET_NAME_MAX)) {
@@ -115,21 +118,30 @@ function AddressCount({ wallet }: { wallet: WalletInfo }) {
   const [count, setCount] = useState(wallet.addressCount);
   const [busy, setBusy] = useState(false);
   const [check, setCheck] = useState<CountCheck | null>(null);
+  const [authorizeCount, setAuthorizeCount] = useState<number | null>(null);
+  const [passphraseError, setPassphraseError] = useState<string | undefined>();
   const mounted = useMounted();
 
   useEffect(() => setCount(wallet.addressCount), [wallet.id, wallet.addressCount]);
   const changed = count !== wallet.addressCount;
 
-  const apply = async (target: number): Promise<void> => {
+  const apply = async (target: number, secret?: string): Promise<void> => {
     const id = wallet.id;
     setBusy(true);
     try {
-      await setAddressCount(target);
+      await setAddressCount(target, secret);
+      if (mounted.current) setAuthorizeCount(null);
       // Another wallet may be open by now: don't report this change there.
       if (activeWalletId.value === id) {
         notify(target === 1 ? 'This wallet now uses 1 address.' : `This wallet now uses ${target} addresses.`, 'success');
       }
     } catch (e) {
+      const code = toBackendError(e).code;
+      if (mounted.current && (code === 'locked' || code === 'passphrase_required' || code === 'invalid_passphrase')) {
+        setAuthorizeCount(target);
+        setPassphraseError(code === 'invalid_passphrase' ? errorMessage(e) : undefined);
+        return;
+      }
       notify(errorMessage(e), 'error');
       if (mounted.current) setCount(wallet.addressCount);
     } finally {
@@ -187,17 +199,31 @@ function AddressCount({ wallet }: { wallet: WalletInfo }) {
         }}
         onCancel={() => setCheck(null)}
       />
+      {authorizeCount !== null ? <AuthorizationDialog open wallet={wallet} busy={busy} error={passphraseError}
+        onClose={() => { setAuthorizeCount(null); setPassphraseError(undefined); }} onAuthorize={async (request) => {
+          const target = authorizeCount;
+          setBusy(true);
+          try {
+            if (!wallet.withPassphrase) await unlockWallet(wallet.id, request, { navigateTo: null });
+            setBusy(false);
+            await apply(target, request.passphrase);
+          } catch (e) { setPassphraseError(errorMessage(e)); setBusy(false); }
+        }} /> : null}
     </>
   );
 }
 
 function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
-  const [stage, setStage] = useState<'idle' | 'confirm' | 'loading'>('idle');
+  const [stage, setStage] = useState<'idle' | 'confirm' | 'authorize' | 'loading'>('idle');
+  const [authorizing, setAuthorizing] = useState(false);
   const [words, setWords] = useState<string[] | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [passphraseError, setPassphraseError] = useState<string | undefined>(undefined);
   const passphraseRef = useRef<HTMLInputElement>(null);
   const mounted = useMounted();
+  const lockedAt = lockVersion.value;
+  const holding = words !== null || stage !== 'idle';
+  useEffect(() => holding ? holdSensitive() : undefined, [holding]);
   // Someone at an open wallet must still know the passphrase to see the words.
   const ask = wallet.withPassphrase;
 
@@ -207,7 +233,7 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
     setStage('idle');
     setPassphrase('');
     setPassphraseError(undefined);
-  }, [wallet.id]);
+  }, [wallet.id, lockedAt]);
 
   const close = (): void => {
     setStage('idle');
@@ -217,6 +243,7 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
 
   const reveal = async (): Promise<void> => {
     if (stage === 'loading') return;
+    const started = lockVersion.peek();
     const typed = passphraseRef.current?.value ?? passphrase;
     if (ask && !typed) {
       setPassphraseError('Enter your passphrase.');
@@ -226,9 +253,10 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
     setStage('loading');
     setPassphraseError(undefined);
     try {
-      if (ask) await verifyPassphrase(wallet.id, typed);
-      const phrase = await revealMnemonic(wallet.id);
-      if (!mounted.current) return;
+      setPassphrase('');
+      if (passphraseRef.current) passphraseRef.current.value = '';
+      const phrase = await revealMnemonic(wallet.id, ask ? typed : undefined);
+      if (!mounted.current || started !== lockVersion.peek()) return;
       setWords(phrase.trim().split(/\s+/));
       close();
     } catch (e) {
@@ -251,11 +279,11 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
 
   return (
     <>
-      <Button size="sm" icon="key" onClick={() => setStage('confirm')}>
+      <Button size="sm" icon="key" onClick={() => setStage(platform.value === 'web' && wallet.locked && !ask ? 'authorize' : 'confirm')}>
         Show
       </Button>
       <ConfirmDialog
-        open={stage !== 'idle'}
+        open={stage === 'confirm' || stage === 'loading'}
         title="Show recovery phrase?"
         message="Anyone who sees these words can take your funds. Make sure no one is watching your screen."
         confirmLabel="Show phrase"
@@ -287,6 +315,17 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
           </form>
         ) : null}
       </ConfirmDialog>
+      {stage === 'authorize' ? <AuthorizationDialog open wallet={wallet} busy={authorizing} error={passphraseError}
+        onClose={close} onAuthorize={async (request) => {
+          setAuthorizing(true);
+          try {
+            await unlockWallet(wallet.id, request, { navigateTo: null });
+            await reveal();
+          } catch (e) {
+            if (!mounted.current) return;
+            setPassphraseError(errorMessage(e));
+          } finally { if (mounted.current) setAuthorizing(false); }
+        }} /> : null}
       <Dialog
         open={words !== null}
         onClose={() => setWords(null)}

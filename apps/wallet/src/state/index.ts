@@ -7,6 +7,7 @@ export {
   canLock,
   contacts,
   initError,
+  lockVersion,
   initialized,
   opening,
   phase,
@@ -108,7 +109,7 @@ export {
   type HiddenFundsCheck,
   type LockRequest,
 } from './wallets';
-export { beginSetup, clearSetupNotice, setupActive, setupNotice } from './setup';
+export { holdSensitive, beginSetup, clearSetupNotice, setupActive, setupNotice } from './setup';
 export {
   amountErrorMessage,
   backToEdit,

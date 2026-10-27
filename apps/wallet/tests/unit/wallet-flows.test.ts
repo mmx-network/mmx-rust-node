@@ -331,7 +331,6 @@ describe('passphrase fields', () => {
     'create/WalletDetails.tsx',
     'unlock/forms.tsx',
     'settings/WalletSettings.tsx',
-    'send/SendForm.tsx',
   ];
 
   it('are never offered to password managers as passwords', async () => {
@@ -348,7 +347,8 @@ describe('passphrase fields', () => {
       }
       count += fields.length;
     }
-    // Details (passphrase + repeat), unlock passphrase step, desktop unlock, reveal prompt, send prompt.
-    expect(count).toBe(6);
+    // Details (passphrase + repeat), unlock passphrase step, desktop unlock, reveal prompt.
+    // Browser tests check the shared AuthorizationDialog in each credential mode.
+    expect(count).toBe(5);
   });
 });

@@ -192,7 +192,7 @@ describe('onboarding actions', () => {
     expect(S.autoLockDelayMinutes()).toBeNull();
     const release = S.beginSetup();
     // Words on screen count as an open wallet.
-    expect(S.autoLockDelayMinutes()).toBe(24 * 60);
+    expect(S.autoLockDelayMinutes()).toBe(5);
     await S.lock({ inactivity: true });
     expect(S.setupActive.value).toBe(false);
     expect(S.route.value.name).toBe('welcome');
@@ -211,7 +211,7 @@ describe('onboarding actions', () => {
     // What the import screen does while words sit in its form.
     S.beginSetup();
     S.markActivity(Date.now());
-    expect(S.autoLockDelayMinutes()).toBe(24 * 60);
+    expect(S.autoLockDelayMinutes()).toBe(5);
     expect(S.idleExpired(Date.now() + 24 * 60 * 60_000)).toBe(true);
     await S.lock({ inactivity: true });
     expect(S.route.value.name).toBe('welcome');

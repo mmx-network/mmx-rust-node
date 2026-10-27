@@ -132,12 +132,32 @@ describe('passphrase wallets (desktop)', () => {
     expect(S.phase.value).toBe('ready');
   });
 
+  it('resets the five-minute timeout on spending even without a DOM activity event', async () => {
+    const { S, M, backend } = await boot();
+    const savings = S.wallets.value.find((w) => w.name === 'Savings')!;
+    await S.unlockWallet(savings.id, { passphrase: M.MOCK_PASSPHRASE });
+    const trading = S.wallets.value.find((w) => w.name === 'Trading')!;
+    const to = (await backend.getAddresses(trading.id))[0]!;
+    await S.selectWallet(S.wallets.value.find((w) => w.name === 'Main')!.id);
+    await settle();
+    await S.startSend({ to, amount: '0.1' });
+    S.markActivity(START);
+    vi.setSystemTime(START + 4 * 60_000);
+    expect(await S.reviewSend()).toBe(true);
+    expect(S.idleExpired(START + 5 * 60_000)).toBe(false);
+    expect(S.idleExpired(START + 9 * 60_000)).toBe(true);
+    vi.setSystemTime(START + 8 * 60_000);
+    await S.setSendFeeLevel(2);
+    expect(S.idleExpired(START + 9 * 60_000)).toBe(false);
+    expect(S.idleExpired(START + 13 * 60_000)).toBe(true);
+  });
+
   it('auto-locks only unlocked passphrase wallets', async () => {
     const { S, M } = await boot();
     expect(S.autoLockDelayMinutes()).toBeNull();
     const savings = S.wallets.value.find((w) => w.name === 'Savings')!;
     await S.unlockWallet(savings.id, { passphrase: M.MOCK_PASSPHRASE });
-    expect(S.autoLockDelayMinutes()).toBe(24 * 60);
+    expect(S.autoLockDelayMinutes()).toBe(5);
     await S.setAutoLockMinutes(0);
     expect(S.autoLockDelayMinutes()).toBeNull();
     expect(await codeOf(S.setAutoLockMinutes(7))).toBe('invalid_argument');
@@ -393,7 +413,7 @@ describe('web wallet', () => {
     await settle();
     expect(S.phase.value).toBe('ready');
     expect(S.canLock.value).toBe(true);
-    expect(S.autoLockDelayMinutes()).toBe(24 * 60);
+    expect(S.autoLockDelayMinutes()).toBe(5);
     // "Never" turns the idle lock off on the web too (closing the tab still locks).
     await S.setAutoLockMinutes(0);
     expect(S.autoLockDelayMinutes()).toBeNull();

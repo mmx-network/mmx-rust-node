@@ -17,6 +17,7 @@ import {
   setBackend,
   setWallets,
   usableWallets,
+  wallets,
 } from './core';
 import { startIdleLock } from './idle';
 import { homeRoute, navigate, route, routeAllowed, startRouter } from './router';
@@ -52,7 +53,7 @@ async function start(override?: Backend): Promise<void> {
     if (unverified) navigate('unlock', undefined, { replace: true });
     if (preferred) {
       activeWalletId.value = preferred.id;
-      if (!preferred.locked) {
+      if (!preferred.locked || preferred.canView) {
         try {
           await openSession(preferred.id);
         } catch (e) {
@@ -90,6 +91,7 @@ export function startRouteGuard(): () => void {
 async function onExternalChange(): Promise<void> {
   try {
     const open = sessionWalletId.value;
+    const wasUnlocked = open && wallets.value.find((w) => w.id === open)?.locked === false;
     await reloadAppState();
     const list = await refreshWallets();
     const active = list.find((w) => w.id === activeWalletId.value);
@@ -98,7 +100,7 @@ async function onExternalChange(): Promise<void> {
       const next = usableWallets.value[0];
       if (next) await activateWallet(next.id);
       else activeWalletId.value = undefined;
-    } else if (open && list.find((w) => w.id === open)?.locked) {
+    } else if (wasUnlocked && list.find((w) => w.id === open)?.locked) {
       // The open wallet was locked from another tab: clean up as for a local lock.
       await lockedElsewhere();
     } else {

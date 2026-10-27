@@ -1,8 +1,9 @@
 import { useSignalEffect } from '@preact/signals';
 import type { ComponentType } from 'preact';
-import { useEffect } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import {
   activeWalletId,
+  activeWallet,
   canLock,
   dismissToast,
   init,
@@ -19,6 +20,7 @@ import {
   startRouter,
   toasts,
   wallets,
+  unlockWallet,
   type FlowRouteId,
   type RouteId,
   type Toast,
@@ -41,6 +43,7 @@ import ReceiveScreen from './ui/screens/receive';
 import SendScreen from './ui/screens/send';
 import SettingsScreen from './ui/screens/settings';
 import UnlockScreen from './ui/screens/unlock';
+import { AuthorizationDialog } from './ui/screens/unlock/AuthorizationDialog';
 import WelcomeScreen from './ui/screens/welcome';
 
 const SHELL_SCREENS: Record<RouteId, ComponentType> = {
@@ -100,6 +103,9 @@ function StartError({ message }: { message: string }) {
 }
 
 export function App() {
+  const [authorizing, setAuthorizing] = useState(false);
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | undefined>();
   useEffect(() => {
     const stop = startRouter();
     void init();
@@ -138,9 +144,20 @@ export function App() {
           network={network.value}
           canLock={canLock.value}
           onLock={onLock}
+          onUnlock={activeWallet.value?.locked ? () => { setUnlockError(undefined); setAuthorizing(true); } : undefined}
         >
           <Screen />
         </Shell>
+        {authorizing && activeWallet.value ? <AuthorizationDialog open wallet={activeWallet.value} busy={unlockBusy} error={unlockError}
+          onClose={() => setAuthorizing(false)} onAuthorize={async (request) => {
+            const id = activeWalletId.value;
+            if (!id || unlockBusy) return;
+            setUnlockBusy(true);
+            setUnlockError(undefined);
+            try { await unlockWallet(id, request, { navigateTo: null }); setAuthorizing(false); }
+            catch (e) { setUnlockError(errorMessage(e)); }
+            finally { setUnlockBusy(false); }
+          }} /> : null}
         {toastLayer}
       </>
     );

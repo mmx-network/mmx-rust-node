@@ -57,8 +57,9 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
       await backend.broadcast(id, prepared.txid);
       const again = await codeOf(backend.broadcast(id, prepared.txid));
       await backend.lockAll();
-      const locked = await codeOf(backend.getAddresses(id));
-      return { wrong, opened, list, prepared, again, locked, stored: JSON.stringify({ ...localStorage }) };
+      const publicAddresses = await backend.getAddresses(id);
+      const locked = await codeOf(backend.prepareSend({ walletId: id, to, contract: native, amount: '1000000', feeLevel: 1 }));
+      return { wrong, opened, list, prepared, again, locked, publicAddresses, stored: JSON.stringify({ ...localStorage }) };
     },
     { id: created.wallet.id, words: created.mnemonic, to: recipient, native: NATIVE },
   );
@@ -69,6 +70,7 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
   expect(result.prepared.amount).toBe('2500000');
   expect(result.again).toBe('prepared_not_found');
   expect(result.locked).toBe('locked');
+  expect(result.publicAddresses).toEqual(addresses);
   expectNoWords(result.stored, created.mnemonic);
 
   const broadcasts = await rpc.broadcasts();

@@ -140,6 +140,15 @@ export async function importWallet(
 
 /** Web: unlocks the selected wallet with its words (and passphrase when asked). */
 export async function unlockWithWords(page: Page, words: string, passphrase?: string): Promise<void> {
+  const dialog = page.getByRole('dialog', { name: 'Unlock for spending' });
+  if (!(await page.getByRole('heading', { name: 'Unlock your wallet' }).isVisible())) {
+    if (!(await dialog.isVisible())) await page.getByRole('button', { name: 'Unlock', exact: true }).first().click();
+    const pass = dialog.locator('input[name=wallet-passphrase]');
+    if (await pass.count()) await pass.fill(passphrase ?? '');
+    else await dialog.locator('input[name=password]').fill(words);
+    await dialog.getByRole('button', { name: 'Unlock', exact: true }).click();
+    return;
+  }
   await expect(page.getByRole('heading', { name: 'Unlock your wallet' })).toBeVisible();
   await page.locator('input[name=password]').fill(words);
   await page.getByRole('button', { name: 'Unlock', exact: true }).click();
@@ -153,7 +162,7 @@ export async function unlockWithWords(page: Page, words: string, passphrase?: st
 /** Locks the wallet from the shell. */
 export async function lockWallet(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Lock', exact: true }).first().click();
-  await expect(page).toHaveURL(/#\/unlock$/u);
+  await expect(page.getByRole('button', { name: 'Unlock', exact: true }).first()).toBeVisible();
 }
 
 /** Everything this origin keeps in localStorage, as one string. */

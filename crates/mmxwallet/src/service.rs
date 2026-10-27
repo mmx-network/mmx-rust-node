@@ -45,7 +45,7 @@ const MAX_CONTACTS: usize = 1000;
 /// Wallets with labels in one app state (labels of unlisted wallets are dropped).
 const MAX_LABELLED_WALLETS: usize = 1000;
 const MAX_AUTO_LOCK_MINUTES: u32 = 24 * 60;
-const DEFAULT_AUTO_LOCK_MINUTES: u32 = 24 * 60;
+const DEFAULT_AUTO_LOCK_MINUTES: u32 = 5;
 const DEFAULT_FEE_LEVEL: u32 = 1;
 const MAX_MNEMONIC_INPUT: usize = 4096;
 const SYMBOL_MAX_CHARS: usize = 24;
@@ -91,6 +91,7 @@ pub struct WalletInfo {
     /// A (non-empty) passphrase is needed to open the wallet.
     pub with_passphrase: bool,
     pub locked: bool,
+    pub can_view: bool,
     pub address_count: u32,
     /// `invalid_key_file` or `io_error` when the key file cannot be used.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,8 +204,9 @@ pub struct Service {
     dir: PathBuf,
     /// Serializes changes to key files and `mmxwallet.json` (local disk only).
     files: Mutex<()>,
-    /// Passphrases of unlocked wallets that need one, by wallet id.
-    unlocked: Mutex<HashMap<String, Zeroizing<String>>>,
+    /// Derived signing keys for unlocked passphrase wallets. No passphrase is retained.
+    unlocked: Mutex<HashMap<String, std::sync::Arc<Wallet>>>,
+    session_epoch: std::sync::atomic::AtomicU64,
     /// Reviewed, signed transfers by uppercase transaction ID.
     prepared: Mutex<HashMap<String, Prepared>>,
     /// Funds of broadcast transfers not in a block yet, by wallet id.
@@ -470,6 +472,7 @@ impl Service {
                 dir,
                 files: Mutex::new(()),
                 unlocked: Mutex::new(HashMap::new()),
+                session_epoch: std::sync::atomic::AtomicU64::new(0),
                 prepared: Mutex::new(HashMap::new()),
                 reserved: Mutex::new(HashMap::new()),
                 rpc: Mutex::new(Arc::new(rpc)),
@@ -591,18 +594,38 @@ impl Service {
         protection: Protection,
         passphrase: Option<Zeroizing<String>>,
     ) -> Result<WalletInfo> {
+        let epoch = self
+            .session_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
         let id = format!("wallet_{fingerprint}.dat");
+        let derived = key.unlock(
+            passphrase.as_deref().map(String::as_str).unwrap_or(""),
+            0,
+            count,
+        )?;
+        let public = derived.addresses.clone();
+        let signing = std::sync::Arc::new(derived);
+        drop(passphrase);
         storage::save_key(&self.dir.join(&id), key)?;
         // The key file is the wallet; its settings fall back to defaults if
-        // they cannot be saved, so the new wallet is still returned.
+        // they cannot be read. Cache writes must succeed before starting a session.
         if let Ok(mut config) = self.config_for_write() {
             config::set_wallet_name(&mut config, &id, &name);
             config::set_num_addresses(&mut config, &id, count);
+            config::set_cached_addresses(&mut config, &id, &fingerprint, &public);
             config::set_active(&mut config, Some(&id));
-            let _ = config::save(&self.dir, config);
+            config::save(&self.dir, config)?;
         }
-        if let (Protection::Passphrase, Some(p)) = (protection, passphrase) {
-            guard(&self.unlocked).insert(id.clone(), p);
+        if protection == Protection::Passphrase {
+            let mut unlocked = guard(&self.unlocked);
+            if epoch
+                != self
+                    .session_epoch
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(locked());
+            }
+            unlocked.insert(id.clone(), signing);
         }
         Ok(WalletInfo {
             id,
@@ -610,6 +633,7 @@ impl Service {
             fingerprint,
             with_passphrase: protection == Protection::Passphrase,
             locked: false,
+            can_view: true,
             address_count: count,
             error: None,
         })
@@ -618,6 +642,9 @@ impl Service {
     /// Opens a wallet that needs a passphrase. Wallets without one (or with
     /// an empty one) are always open and ignore `passphrase`.
     pub fn unlock(&self, id: &str, passphrase: Zeroizing<String>) -> Result<WalletInfo> {
+        let epoch = self
+            .session_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
         run(|| {
             let (id, path) = self.wallet_file(id)?;
             let key = storage::read_key(&path)?;
@@ -631,18 +658,36 @@ impl Service {
                 {
                     return Err(Error::new("invalid_passphrase", "wrong passphrase"));
                 }
-                guard(&self.unlocked).insert(id.clone(), passphrase);
+                let count = self.address_count(&id)?;
+                let wallet = key.unlock(&passphrase, 0, count)?;
+                let addresses = wallet.addresses.clone();
+                let signing = std::sync::Arc::new(wallet);
+                let _files = guard(&self.files);
+                let mut config = self.config_for_write()?;
+                config::set_cached_addresses(&mut config, &id, &fingerprint, &addresses);
+                config::save(&self.dir, config)?;
+                let mut unlocked = guard(&self.unlocked);
+                if epoch
+                    != self
+                        .session_epoch
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return Err(locked());
+                }
+                unlocked.insert(id.clone(), signing);
             }
             let config = config::read_lenient(&self.dir);
             Ok(describe(&config, id, Ok((fingerprint, protection)), true))
         })
     }
 
-    /// Forgets the wallet's passphrase and its prepared transfers. Wallets
+    /// Drops the wallet's signing keys and its prepared transfers. Wallets
     /// that open without a passphrase stay open.
     pub fn lock(&self, id: &str) -> Result<()> {
         run(|| {
             let id = validate::wallet_id(id)?;
+            self.session_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             if guard(&self.unlocked).remove(id).is_some() {
                 guard(&self.prepared).retain(|_, p| p.wallet != id);
             }
@@ -651,6 +696,8 @@ impl Service {
     }
 
     pub fn lock_all(&self) {
+        self.session_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let ids: HashSet<String> = guard(&self.unlocked).drain().map(|(id, _)| id).collect();
         guard(&self.prepared).retain(|_, p| !ids.contains(&p.wallet));
     }
@@ -668,21 +715,68 @@ impl Service {
 
     /// Sets how many addresses the wallet uses (1–100) and returns them.
     pub fn set_address_count(&self, id: &str, count: u32) -> Result<Vec<String>> {
+        self.set_address_count_authorized(id, count, None)
+    }
+
+    pub fn set_address_count_authorized(
+        &self,
+        id: &str,
+        count: u32,
+        passphrase: Option<Zeroizing<String>>,
+    ) -> Result<Vec<String>> {
         run(|| {
             let count = validate::num_addresses(count)?;
-            let addresses: Vec<String> = self
-                .open_wallet(id, count)?
-                .0
-                .addresses
-                .iter()
-                .map(ToString::to_string)
-                .collect();
+            let epoch = self
+                .session_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
+            let (id, path) = self.wallet_file(id)?;
+            let key = storage::read_key(&path)?;
+            let (fp, _) = detect(&key)?;
+            let mut derived = None;
+            let cached = config::cached_addresses(&config::read_lenient(&self.dir), &id, &fp);
+            let addresses = if cached.as_ref().is_some_and(|a| a.len() >= count as usize) {
+                cached.unwrap()
+            } else {
+                let wallet = self
+                    .derive_wallet(&id, count, passphrase.as_deref().map(String::as_str))?
+                    .0;
+                if cached
+                    .as_ref()
+                    .is_some_and(|old| old.iter().zip(&wallet.addresses).any(|(a, b)| a != b))
+                {
+                    return Err(Error::new(
+                        "wallet_mismatch",
+                        "cached addresses do not match the wallet",
+                    ));
+                }
+                let addresses = wallet.addresses.clone();
+                derived = Some(std::sync::Arc::new(wallet));
+                addresses
+            };
+            drop(passphrase);
             let _files = guard(&self.files);
-            let (id, _) = self.wallet_file(id)?;
+            if epoch
+                != self
+                    .session_epoch
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(locked());
+            }
             let mut config = self.config_for_write()?;
             config::set_num_addresses(&mut config, &id, count);
+            config::set_cached_addresses(&mut config, &id, &fp, &addresses);
             config::save(&self.dir, config)?;
-            Ok(addresses)
+            if let Some(wallet) = derived {
+                let mut sessions = guard(&self.unlocked);
+                if sessions.contains_key(&id) {
+                    sessions.insert(id.clone(), wallet);
+                }
+            }
+            Ok(addresses
+                .iter()
+                .take(count as usize)
+                .map(ToString::to_string)
+                .collect())
         })
     }
 
@@ -711,24 +805,52 @@ impl Service {
 
     /// The wallet's 24 recovery words (the wallet must be open).
     pub fn mnemonic(&self, id: &str) -> Result<Zeroizing<String>> {
+        self.mnemonic_authorized(id, None)
+    }
+
+    pub fn mnemonic_authorized(
+        &self,
+        id: &str,
+        passphrase: Option<Zeroizing<String>>,
+    ) -> Result<Zeroizing<String>> {
         run(|| {
             let (id, path) = self.wallet_file(id)?;
             let key = storage::read_key(&path)?;
-            self.passphrase(&id, &key)?;
+            self.passphrase(&id, &key, passphrase.as_deref().map(String::as_str))?;
             Ok(Zeroizing::new(seed_to_words(&key.seed_value)))
         })
     }
 
     pub fn addresses(&self, id: &str) -> Result<Vec<String>> {
         run(|| {
-            let count = self.address_count(id)?;
-            Ok(self
-                .open_wallet(id, count)?
-                .0
-                .addresses
-                .iter()
-                .map(ToString::to_string)
-                .collect())
+            let (id, path) = self.wallet_file(id)?;
+            let key = storage::read_key(&path)?;
+            let (fp, protection) = detect(&key)?;
+            let config = config::read_lenient(&self.dir);
+            let count = config::num_addresses(&config, &id);
+            if let Some(addresses) =
+                config::cached_addresses(&config, &id, &fp).filter(|a| a.len() >= count as usize)
+            {
+                return Ok(addresses
+                    .iter()
+                    .take(count as usize)
+                    .map(ToString::to_string)
+                    .collect());
+            }
+            if protection == Protection::Passphrase {
+                return Err(Error::new(
+                    "passphrase_required",
+                    "derive addresses with the passphrase",
+                ));
+            }
+            let wallet = self.open_wallet(&id, count)?.0;
+            let public = wallet.addresses.clone();
+            drop(wallet);
+            let _files = guard(&self.files);
+            let mut config = self.config_for_write()?;
+            config::set_cached_addresses(&mut config, &id, &fp, &public);
+            config::save(&self.dir, config)?;
+            Ok(public.iter().map(ToString::to_string).collect())
         })
     }
 
@@ -927,8 +1049,12 @@ impl Service {
             let currency = validate::currency(currency)?;
             let memo = validate::memo(memo)?;
             let fee_ratio = validate::fee_ratio(fee_level)?;
-            let count = self.address_count(id)?;
-            let (wallet, _) = self.open_wallet(id, count)?;
+            let wallet = Wallet::watch_only(
+                self.addresses(id)?
+                    .iter()
+                    .map(|a| a.parse())
+                    .collect::<mmx_wallet::Result<Vec<_>>>()?,
+            )?;
             let rpc = self.client();
             let params = rpc.params()?;
             let mut state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
@@ -953,16 +1079,28 @@ impl Service {
     /// [`Service::broadcast`] for 10 minutes, bound to the wallet.
     pub fn prepare_send(&self, request: &SendRequest) -> Result<PreparedSend> {
         run(|| {
+            let epoch = self
+                .session_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
             let to = validate::recipient(&request.to)?;
             let currency = validate::currency(&request.contract)?;
             let amount = validate::atomic_amount(&request.amount)?;
             let memo = validate::memo(request.memo.as_deref())?;
             let fee_ratio = validate::fee_ratio(request.fee_level)?;
             let count = self.address_count(&request.wallet_id)?;
-            let (wallet, with_passphrase) = self.open_wallet(&request.wallet_id, count)?;
+            let addresses = self
+                .addresses(&request.wallet_id)?
+                .iter()
+                .map(|a| a.parse())
+                .collect::<mmx_wallet::Result<Vec<_>>>()?;
+            let (_, path) = self.wallet_file(&request.wallet_id)?;
+            let with_passphrase = detect(&storage::read_key(&path)?)?.1 == Protection::Passphrase;
+            if with_passphrase && !guard(&self.unlocked).contains_key(&request.wallet_id) {
+                return Err(locked());
+            }
             let rpc = self.client();
             let params = rpc.params()?;
-            let mut state = remote::State::fetch(&rpc, &wallet.addresses, &params)?;
+            let mut state = remote::State::fetch(&rpc, &addresses, &params)?;
             self.reserve(&rpc, &request.wallet_id, &params.network, &mut state);
             let native = currency == Address::default();
             let (decimals, symbol) = if native {
@@ -971,7 +1109,15 @@ impl Service {
                 let total = state.totals.get(&currency).ok_or_else(insufficient_funds)?;
                 (total.decimals, display_symbol(&total.symbol, &currency))
             };
-            // Signed and verified (hashes, cost, signatures) by `transfer`.
+            // Acquire signing keys only after network reads. A protected session
+            // retains its keys until manual or inactivity lock.
+            let (wallet, _) = self.open_wallet(&request.wallet_id, count)?;
+            if wallet.addresses[..count as usize] != addresses {
+                return Err(Error::new(
+                    "wallet_mismatch",
+                    "cached addresses do not match the wallet",
+                ));
+            }
             let tx = wallet.transfer(
                 &state.balances,
                 &params,
@@ -1003,10 +1149,15 @@ impl Service {
             let txid = tx.id_hex().to_ascii_uppercase();
             let expires = tx.expires;
             // Kept only if the wallet was not locked meanwhile; `lock` removes
-            // the passphrase before the prepared transfers, so holding
+            // the signing keys before the prepared transfers, so holding
             // `unlocked` here closes the gap.
             let unlocked = guard(&self.unlocked);
-            if with_passphrase && !unlocked.contains_key(&request.wallet_id) {
+            if epoch
+                != self
+                    .session_epoch
+                    .load(std::sync::atomic::Ordering::Acquire)
+                || (with_passphrase && !unlocked.contains_key(&request.wallet_id))
+            {
                 return Err(locked());
             }
             self.keep_prepared(
@@ -1183,37 +1334,57 @@ impl Service {
         Ok(config::num_addresses(&config::read_lenient(&self.dir), id))
     }
 
-    /// The passphrase that opens the key file (empty for wallets without
-    /// one, the remembered one for unlocked wallets, else `locked`) and
-    /// whether the wallet needs one.
-    fn passphrase(&self, id: &str, key: &KeyFile) -> Result<(Zeroizing<String>, bool)> {
-        let none = || Ok((Zeroizing::new(String::new()), false));
-        let Some(stored) = key.finger_print.as_deref() else {
-            return none();
-        };
-        let remembered = guard(&self.unlocked).get(id).cloned();
-        if let Some(p) = remembered {
-            if fingerprint(&key.seed_value, Some(p.as_str())) == stored {
-                return Ok((p, true));
-            }
-        }
+    /// Validates an operation's secret. No passphrase is ever remembered.
+    fn passphrase(
+        &self,
+        _id: &str,
+        key: &KeyFile,
+        supplied: Option<&str>,
+    ) -> Result<(Zeroizing<String>, bool)> {
         match detect(key)?.1 {
-            Protection::None | Protection::Empty => none(),
+            Protection::None | Protection::Empty => Ok((Zeroizing::new(String::new()), false)),
             Protection::Passphrase => {
-                // The key file changed since it was unlocked.
-                guard(&self.unlocked).remove(id);
-                Err(locked())
+                let pass = supplied
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| Error::new("passphrase_required", "passphrase required"))?;
+                if key.finger_print.as_deref()
+                    != Some(fingerprint(&key.seed_value, Some(pass)).as_str())
+                {
+                    return Err(Error::new("invalid_passphrase", "wrong passphrase"));
+                }
+                Ok((Zeroizing::new(pass.to_owned()), true))
             }
         }
     }
 
-    /// The derived wallet and whether it needs a passphrase.
-    fn open_wallet(&self, id: &str, count: u32) -> Result<(Wallet, bool)> {
+    fn derive_wallet(
+        &self,
+        id: &str,
+        count: u32,
+        supplied: Option<&str>,
+    ) -> Result<(Wallet, bool)> {
         let (id, path) = self.wallet_file(id)?;
         let key = storage::read_key(&path)?;
-        let (passphrase, with_passphrase) = self.passphrase(&id, &key)?;
+        let (passphrase, with_passphrase) = self.passphrase(&id, &key, supplied)?;
         let wallet = Wallet::derive(&key.seed_value, &passphrase, 0, count)?;
         Ok((wallet, with_passphrase))
+    }
+
+    /// Shares the current signing session; regular wallets derive from disk.
+    fn open_wallet(&self, id: &str, count: u32) -> Result<(std::sync::Arc<Wallet>, bool)> {
+        let (id, path) = self.wallet_file(id)?;
+        let key = storage::read_key(&path)?;
+        if detect(&key)?.1 == Protection::Passphrase {
+            let wallet = guard(&self.unlocked).get(&id).cloned().ok_or_else(locked)?;
+            if wallet.addresses.len() < count as usize {
+                return Err(Error::new(
+                    "passphrase_required",
+                    "derive missing addresses with the passphrase",
+                ));
+            }
+            return Ok((wallet, true));
+        }
+        Ok((std::sync::Arc::new(key.unlock("", 0, count)?), false))
     }
 
     /// The configuration to modify. An unreadable file is set aside first so
@@ -1241,12 +1412,15 @@ fn describe(
     match key {
         Ok((fingerprint, protection)) => {
             let with_passphrase = protection == Protection::Passphrase;
+            let can_view = config::cached_addresses(config, &id, &fingerprint)
+                .is_some_and(|a| a.len() >= address_count as usize);
             WalletInfo {
                 id,
                 name,
                 fingerprint,
                 with_passphrase,
                 locked: with_passphrase && !unlocked,
+                can_view,
                 address_count,
                 error: None,
             }
@@ -1257,6 +1431,7 @@ fn describe(
             fingerprint: String::new(),
             with_passphrase: false,
             locked: true,
+            can_view: false,
             address_count,
             error: Some(
                 if e.code == "io_error" {

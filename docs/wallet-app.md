@@ -15,8 +15,9 @@ is shown in the product UI.
 - Desktop: Windows (NSIS installer), Linux (AppImage + deb), macOS (dmg,
   universal). Built on the `mmxwallet` crate (same wallet directory, key file
   format and `mmxwallet.json` as the CLI and the C++ node GUI).
-- Web: static site, seed stored in the user's password manager, seed and keys
-  never leave the browser, same features and look.
+- Web: static site; regular wallets use the password manager, passphrase wallets
+  also keep their base recovery words locally. Seeds and keys never leave the
+  browser; same features and look.
 - Consensus-critical code (key derivation, fingerprint, mnemonic, address
   encoding, transaction hashing/signing, fee cost) exists exactly once, in Rust
   (`crates/mmx-wallet`). Desktop links it natively; web runs it as WASM.
@@ -100,6 +101,7 @@ validate_address(s) -> bool
 parse_amount(text, decimals) -> String              // atomic units, throws invalid_amount
 format_amount(atomic: String, decimals) -> String
 static_fee(params_json, inputs, owners, memo: Option<String>, fee_level) -> String
+watch_max_amount(addresses_json, balances_json, params_json, currency, memo, fee_level) -> String
 class Vault {
   // Opens a seed. expected_fingerprint: the wallet's known fingerprint (or None for a
   // first import). Detection rules (§6.3). Seed, passphrase and keys live only inside
@@ -128,8 +130,8 @@ and identical fingerprints/addresses/mnemonics for the fixtures in
 ## 5. `mmxwallet::service` (desktop backend)
 
 `pub struct Service` — `Send + Sync`, shared via `Arc`. Holds the wallet directory,
-a `Mutex` for config writes, unlocked passphrases (`Zeroizing<String>`, keyed by
-wallet id), prepared transactions (id → wallet id, signed bytes, created_at; dropped
+a `Mutex` for config writes, unlocked signing keys (`Arc<Wallet>`, keyed by
+wallet id; no retained passphrase), prepared transactions (id → wallet id, signed bytes, created_at; dropped
 after 10 minutes or on use). Blocking (ureq); the Tauri layer calls it from
 `spawn_blocking`.
 
@@ -148,10 +150,10 @@ import(name, mnemonic: Zeroizing<String>, passphrase, count) -> WalletInfo
 unlock(id, passphrase: Zeroizing<String>) -> WalletInfo      // invalid_passphrase on fingerprint mismatch
 lock(id) / lock_all()
 rename(id, name)                    // 1..=64 chars after trim, no control chars
-set_address_count(id, n)            // 1..=100
+set_address_count_authorized(id, n, passphrase?) // 1..=100; missing addresses require passphrase
 remove(id)                          // moves the file to <dir>/removed/<id>.<unix-ts> (never deletes)
-mnemonic(id) -> Zeroizing<String>
-addresses(id) -> Vec<Address>       // locked → error `locked`
+mnemonic_authorized(id, passphrase?) -> Zeroizing<String> // protected wallets always require passphrase
+addresses(id) -> Vec<Address>       // public cache remains available while locked
 set_active(id)
 app_state() -> AppState / set_app_state(AppState)            // contacts (≤ 1000), labels, settings (validated);
                                     // set_app_state never writes active_wallet (only set_active does)
@@ -237,7 +239,7 @@ No CDN, no analytics, no telemetry, no remote fonts, no service worker.
 ```ts
 type WalletId = string;            // desktop: key file name; web: fingerprint
 interface WalletInfo { id; name; fingerprint; withPassphrase: boolean; locked: boolean;
-                       addressCount: number; error?: string }
+                       canView?: boolean; hasStoredSeed?: boolean; addressCount: number; error?: string }
 interface Contact { id: string; name: string; address: string; note?: string }
 interface AppState { activeWallet?: WalletId;
   labels: Record<WalletId, Record<number, string>>;  contacts: Contact[];
@@ -389,7 +391,7 @@ Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
 - Settings: wallet (name, fingerprint, address count 1–100 with warning when hiding
   addresses that hold funds, show recovery phrase — a passphrase wallet asks for its
   passphrase first, on both platforms; remove wallet); security (auto-lock
-  5/15/30 min, 1/6/24 h (default) or Never; Lock now = Lock everywhere on web); network
+  5 (default)/15/30 min, 1/6/24 h or Never; Lock now = Lock everywhere on web); network
   (desktop: server URL — Connect checks the server (`/node/info` synced, network
   matches) before anything is saved; a failure keeps the typed URL with the error
   and the old server; reset to default); appearance (System/Light/Dark); about
@@ -406,8 +408,10 @@ error; scientific notation rejected; more fractional digits than `decimals` → 
 
 ### 6.6 Web wallet: password manager vault
 - Credential: username = `<wallet name> (<fingerprint>)`, password = the 24 words
-  (lowercase, single spaces). Never stored anywhere else; never in localStorage,
-  sessionStorage, IndexedDB, URLs, logs or error messages.
+  (lowercase, single spaces). Regular web wallets keep the words only in the
+  password manager and the unlocked WASM Vault. Passphrase wallets also keep
+  the base words in localStorage, so re-unlocking needs only the passphrase.
+  Passphrases never go into persistence; no secrets go into URLs, logs or errors.
 - Save: a real `<form>` with `autocomplete="username"` + `autocomplete="new-password"`
   fields; on submit: `preventDefault`, call `navigator.credentials.store(new
   PasswordCredential(...))` when available (Chromium), then route away and remove the
@@ -436,15 +440,20 @@ error; scientific notation rejected; more fractional digits than `decimals` → 
   persistence. These HTML hints discourage autosave/autofill; a website cannot
   prevent a user or a privileged extension from saving entered text manually.
   Keep the passphrase separate from the saved recovery phrase.
-- After unlock the password input value is cleared; the seed is held only inside the
-  WASM `Vault` of that tab. Lock / auto-lock (default 24 h idle, unless Never; always on `pagehide`)
-  frees every Vault of the tab and clears unlocked UI state.
+- After unlock the credential input is cleared. The WASM Vault holds the signing
+  session until manual lock, auto-lock (default 5 min idle, unless Never), or
+  `pagehide`. Spending resets the timeout. Lock frees the seed, passphrase and
+  signing keys inside every Vault, discards prepared transfers and clears
+  credential/recovery-phrase dialogs. Cached public addresses keep balances,
+  history and Receive available while locked. A regular web wallet needs the
+  password manager's recovery words again before signing; a passphrase wallet
+  needs its passphrase. Deriving uncached addresses also needs authorization.
 - Cross-tab lock (decision 4): explicit Lock (shell button, Settings "Lock now") calls
   `lockAll({everywhere: true})`, which also writes `mmx-wallet/lock` (a unique value
   per write). Other tabs free their Vaults on the `storage` event and run the local
   lock cleanup without signalling again. Idle and `pagehide` locks stay local.
 - localStorage key `mmx-wallet/v1`: `{ wallets: { [fp]: { name, withPassphrase,
-  addressCount, verified? } }, activeWallet, labels, contacts, settings }`; sync across
+  addressCount, addresses, seedWords?, verified? } }, activeWallet, labels, contacts, settings }`; sync across
   tabs via the `storage` event.
 - Hosting: relative base (`./`), CSP via headers and `<meta>` (`deploy/security.ts`
   is the source; `_headers`, Caddyfile and nginx config are checked against it):
@@ -477,9 +486,18 @@ outside text fields). Binary `mmx-wallet-gui`, identifier `network.mmx.wallet`,
 product name "MMX Wallet", min window 900×620.
 
 ### 6.8 Security invariants (review checklist)
-- No secret (words, passphrase, seed, key) in logs, errors, panics, URLs, or storage
-  other than the key file (desktop) / password manager (web). A new wallet is stored
-  only after its backup was confirmed.
+- No secret (words, passphrase, seed, key) in logs, errors, panics or URLs.
+  Base seeds stay in the existing plaintext key files (desktop/CLI/node); the web
+  also persists base recovery words for passphrase wallets, while regular web
+  wallets use only the password manager. No extra seed encryption or new key-file
+  type is used. Passphrases and signing keys are never persisted. A new wallet
+  is stored only after its backup was confirmed.
+- Desktop passphrase sessions cache derived signing keys, purged by manual/idle
+  lock; regular disk wallets remain usable because their seed file is accessible.
+  The CLI observes cached public addresses and derives keys only for signing,
+  dropping them before remote validation/broadcast. Node passphrase wallets use
+  the same five-minute signing-session timeout and retain their independent
+  farmer identity when locked. Existing C++ wallet behavior is unchanged.
 - Clipboard (decision 5): a copied recovery phrase is cleared after 60 s on desktop
   ("Copied. The clipboard clears in 1 minute."). Browsers allow clipboard writes
   only around user actions, so the web clears best effort: 60 s timer, then retried

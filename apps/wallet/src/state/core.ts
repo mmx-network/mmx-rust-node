@@ -22,6 +22,8 @@ export const initialized = signal(false);
 /** Set when the app could not start; a user-facing message. */
 export const initError = signal<string | null>(null);
 
+/** Changes on any lock, so mounted dialogs discard credentials and recovery words. */
+export const lockVersion = signal(0);
 export const wallets = signal<readonly WalletInfo[]>([]);
 export const appState = signal<AppState>(defaultAppState());
 export const activeWalletId = signal<WalletId | undefined>(undefined);
@@ -44,7 +46,7 @@ export const phase = computed<AppPhase>(() => {
   if (!initialized.value) return 'loading';
   if (usableWallets.value.length === 0) return 'onboarding';
   const active = activeWallet.value;
-  if (!active || active.error || active.locked || sessionWalletId.value !== active.id) return 'unlock';
+  if (!active || active.error || (active.locked && !active.canView) || sessionWalletId.value !== active.id) return 'unlock';
   return 'ready';
 });
 

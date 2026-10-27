@@ -15,7 +15,7 @@ export const WALLET_NAME_MAX = 64;
 export const CONTACT_NAME_MAX = 64;
 export const CONTACT_NOTE_MAX = 200;
 export const MAX_CONTACTS = 1000;
-export const DEFAULT_AUTO_LOCK_MINUTES = 24 * 60;
+export const DEFAULT_AUTO_LOCK_MINUTES = 5;
 const AUTO_LOCK_OPTIONS = [5, 15, 30, 60, 6 * 60, 24 * 60, 0] as const;
 export const AUTO_LOCK_CHOICES: Record<Platform, readonly number[]> = {
   desktop: AUTO_LOCK_OPTIONS,

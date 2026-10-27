@@ -48,11 +48,12 @@ for (const event of ['input', 'change', 'silent'] as const) {
 
     // The selected-wallet form has a readonly username, but the same fill path.
     await page.reload();
-    await expect(page).toHaveURL(/#\/unlock$/u);
+    await expectOverview(page, 'Autofilled');
+    await page.getByRole('button', { name: 'Unlock', exact: true }).first().click();
     await autofillCredential(page, words, event);
     await page.getByRole('button', { name: 'Show', exact: true }).click();
     await expect(page.locator('input[name=password]')).toHaveValue(words);
-    await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Unlock for spending' }).getByRole('button', { name: 'Unlock', exact: true }).click();
     await expectOverview(page, 'Autofilled');
     expectNoWords(await storedText(page), words);
   });
@@ -98,7 +99,8 @@ test('creates a wallet, saves it and confirms it by opening it once', async ({ p
 
   // A new page load asks for the words again.
   await page.reload();
-  await expect(page).toHaveURL(/#\/unlock$/u);
+  await expectOverview(page, 'Daily');
+  await page.getByRole('button', { name: 'Unlock', exact: true }).first().click();
   await expect(page.locator('input[name=username]')).toHaveValue(`Daily (${id})`);
   await capture(page, 'unlock');
   await unlockWithWords(page, newMnemonic());
@@ -135,7 +137,7 @@ test('creates a wallet with a passphrase', async ({ page }) => {
   await expect(page.locator('input[name=wallet-passphrase]')).toBeFocused();
   await capture(page, 'unlock-wrong-passphrase');
   await page.locator('input[name=wallet-passphrase]').fill(passphrase);
-  await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Unlock for spending' }).getByRole('button', { name: 'Unlock', exact: true }).click();
   await expectOverview(page, 'Vault');
   await goTo(page, 'Settings');
   await page.getByRole('button', { name: 'Show', exact: true }).click();
@@ -145,6 +147,20 @@ test('creates a wallet with a passphrase', async ({ page }) => {
   await expect(page.getByRole('dialog', { name: 'Recovery phrase', exact: true })).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { __testStoredPasswords: string[] }).__testStoredPasswords)).toEqual([words]);
   expect(await storedText(page)).not.toContain(passphrase);
+  await page.getByRole('dialog', { name: 'Recovery phrase', exact: true }).getByRole('button', { name: 'Done' }).click();
+  await lockWallet(page);
+  // This created wallet cached ten addresses. More addresses need fresh authorization,
+  // and deriving them alone must not open a spending session.
+  await page.getByRole('spinbutton', { name: 'Number of addresses' }).fill('12');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  const derive = page.getByRole('dialog', { name: 'Unlock for spending' });
+  await expect(derive).toBeVisible();
+  await expectPassphrasePrivacy(page);
+  await unlockWithWords(page, words, passphrase);
+  await expect(derive).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Unlock', exact: true }).first()).toBeVisible();
+  await goTo(page, 'Receive');
+  await expect(page.getByRole('list', { name: 'Your addresses' }).getByRole('listitem')).toHaveCount(12);
 });
 
 /** Starts creating a wallet and stops on the password manager step; returns the new words and their wallet ID. */
@@ -273,8 +289,8 @@ test('imports a wallet with a passphrase and finds its used addresses', async ({
   await unlockWithWords(page, words, 'correct house');
   await expect(page.getByText('Wrong passphrase. Try again.')).toBeVisible();
   await page.locator('input[name=wallet-passphrase]').fill(passphrase);
-  await page.getByRole('button', { name: 'Unlock', exact: true }).click();
-  await expect(page).toHaveURL(/#\/overview$/u);
+  await page.getByRole('dialog', { name: 'Unlock for spending' }).getByRole('button', { name: 'Unlock', exact: true }).click();
+  await expect(page).toHaveURL(/#\/receive$/u);
   await expectActiveWallet(page, 'Imported');
 });
 

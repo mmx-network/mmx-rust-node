@@ -83,7 +83,7 @@ pub struct WalletArgs {
     account: u32,
     #[arg(long, default_value_t = 100)]
     num_addresses: u32,
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = 300)]
     lock_timeout: u64,
 }
 pub fn wallet_main() -> Result<()> {
@@ -134,6 +134,12 @@ pub fn wallet_main() -> Result<()> {
                 .to_string_lossy()
                 .into_owned(),
         )?;
+        let cache = path.with_file_name(format!(
+            "{}.account-{}.addresses",
+            account.key_file.fingerprint(),
+            args.account
+        ));
+        account.set_cache_path(cache)?;
         account.timeout = Duration::from_secs(args.lock_timeout);
         accounts.insert(u32::try_from(index)?, account);
     }

@@ -142,7 +142,54 @@ impl Args {
         };
         Ok(key.unlock(&pass, self.account, count)?)
     }
+    /// Observing a cached wallet never derives or keeps private keys.
+    fn view_wallet(
+        &self,
+        path: &std::path::Path,
+        key: &KeyFile,
+        secrets: &Secrets,
+        count: u32,
+    ) -> Result<mmx_wallet::Wallet> {
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let id = path
+            .file_name()
+            .ok_or_else(|| invalid("invalid wallet file"))?
+            .to_string_lossy();
+        let fp = key.fingerprint();
+        let config = config::read_lenient(dir);
+        if let Some(addresses) = config::cached_addresses_for(&config, &id, &fp, self.account)
+            .filter(|a| a.len() >= count as usize)
+        {
+            return Ok(mmx_wallet::Wallet::watch_only(
+                addresses.into_iter().take(count as usize).collect(),
+            )?);
+        }
+        let wallet = self.unlock(key, secrets, count)?;
+        let addresses = wallet.addresses.clone();
+        drop(wallet);
+        let mut config = config::read(dir)?;
+        config::set_cached_addresses_for(&mut config, &id, &fp, self.account, &addresses);
+        config::save(dir, config)?;
+        Ok(mmx_wallet::Wallet::watch_only(addresses)?)
+    }
+
     fn list_address(&self, entry: &storage::Entry, secrets: &Secrets) -> Result<Option<Address>> {
+        let dir = entry
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        if let Some(id) = entry.path.file_name().and_then(|s| s.to_str()) {
+            if let Some(addresses) = config::cached_addresses_for(
+                &config::read_lenient(dir),
+                id,
+                &entry.fingerprint,
+                self.account,
+            ) {
+                if let Some(address) = addresses.first() {
+                    return Ok(Some(*address));
+                }
+            }
+        }
         let passphrase = if entry.with_passphrase {
             match secrets.passphrase.as_deref() {
                 Some(passphrase) => passphrase,
@@ -176,7 +223,7 @@ fn run(a: &Args) -> Result<()> {
         println!();
         return Ok(());
     }
-    let secrets = if a.input_stdin {
+    let mut secrets = if a.input_stdin {
         Secrets::read()?
     } else {
         Secrets::default()
@@ -251,8 +298,21 @@ fn run(a: &Args) -> Result<()> {
                     return Err(Error::new("wallet_exists", "wallet already exists"));
                 }
             }
-            let wallet = key.unlock(pass_ref.unwrap_or(""), a.account, 1)?;
+            let wallet = key.unlock(pass_ref.unwrap_or(""), a.account, a.address_count(None))?;
             storage::save_key(&path, &key)?;
+            if let (Some(parent), Some(id)) =
+                (path.parent(), path.file_name().and_then(|s| s.to_str()))
+            {
+                let mut config = config::read(parent)?;
+                config::set_cached_addresses_for(
+                    &mut config,
+                    id,
+                    &fingerprint,
+                    a.account,
+                    &wallet.addresses,
+                );
+                config::save(parent, config)?;
+            }
             if let Some(dir) = dir {
                 storage::set_active(&dir, &path)?;
             }
@@ -398,6 +458,9 @@ fn run(a: &Args) -> Result<()> {
                     .ok()
                     .and_then(|n| validate::num_addresses(n).ok())
                     .ok_or_else(|| invalid("number of addresses must be between 1 and 100"))?;
+                let key = storage::read_key(&path)?;
+                a.view_wallet(&path, &key, &secrets, count)?;
+                config = config::read(&dir)?;
                 config::set_num_addresses(&mut config, &file, count);
                 config::save(&dir, config)?;
                 if !a.json {
@@ -475,6 +538,12 @@ fn run(a: &Args) -> Result<()> {
             let (path, file) = a.key_path()?;
             let count = a.address_count(file.as_deref());
             let key = storage::read_key(&path)?;
+            // One prompt covers first-time public derivation and this send. The
+            // process drops this zeroizing input and all signing keys on exit.
+            if a.command == "send" && key.requires_passphrase() && secrets.passphrase.is_none() {
+                let mut passphrase = secrets.value("passphrase", a.non_interactive())?;
+                secrets.passphrase = Some(std::mem::take(&mut *passphrase));
+            }
             match a.command.as_str() {
                 "mnemonic" | "get" => {
                     let words = Zeroizing::new(seed_to_words(&key.seed_value));
@@ -491,7 +560,7 @@ fn run(a: &Args) -> Result<()> {
                     }
                 }
                 "address" | "addresses" => {
-                    let w = a.unlock(&key, &secrets, count)?;
+                    let w = a.view_wallet(&path, &key, &secrets, count)?;
                     if a.command == "address" {
                         let addr = w
                             .addresses
@@ -519,7 +588,7 @@ fn run(a: &Args) -> Result<()> {
                 _ => {
                     let rpc = a.rpc()?;
                     let params = rpc.params()?;
-                    let w = a.unlock(&key, &secrets, count)?;
+                    let w = a.view_wallet(&path, &key, &secrets, count)?;
                     if a.command == "history" {
                         if !(1..=1000).contains(&a.limit) {
                             return Err(invalid("limit must be between 1 and 1000"));
@@ -582,7 +651,7 @@ fn run(a: &Args) -> Result<()> {
                                 }
                             }
                         } else {
-                            send(a, &rpc, &params, &w, &state)?;
+                            send(a, &rpc, &params, &key, &mut secrets, count, &state)?;
                         }
                     }
                 }
@@ -652,7 +721,9 @@ fn send(
     a: &Args,
     rpc: &Rpc,
     params: &mmx_wallet::ChainParams,
-    w: &mmx_wallet::Wallet,
+    key: &KeyFile,
+    secrets: &mut Secrets,
+    count: u32,
     state: &remote::State,
 ) -> Result<()> {
     let target: Address = a
@@ -684,18 +755,22 @@ fn send(
         expire_delta: a.expire_delta,
         ..Default::default()
     };
-    let tx = w.transfer(
-        &state.balances,
-        params,
-        state.height,
-        Output {
-            address: target,
-            contract: currency,
-            amount,
-            memo: a.memo.clone(),
-        },
-        &options,
-    )?;
+    let tx = {
+        let w = a.unlock(key, secrets, count)?;
+        w.transfer(
+            &state.balances,
+            params,
+            state.height,
+            Output {
+                address: target,
+                contract: currency,
+                amount,
+                memo: a.memo.clone(),
+            },
+            &options,
+        )?
+    };
+    drop(secrets.passphrase.take().map(Zeroizing::new));
     // Checked here so that nothing is sent before the transfer is confirmed.
     if !tx.fee_payer_covered(&state.balances) {
         return Err(if currency == Address::default() {

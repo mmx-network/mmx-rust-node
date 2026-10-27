@@ -73,6 +73,8 @@ pub struct Rename {
 pub struct AddressCount {
     pub id: String,
     pub count: u32,
+    #[serde(default)]
+    pub passphrase: Option<Zeroizing<String>>,
 }
 
 #[derive(Deserialize)]

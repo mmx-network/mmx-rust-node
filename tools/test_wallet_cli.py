@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Linux CLI contract tests. Uses disposable wallets and local mock RPC only.
 
-Run: python3 test/test_mmxwallet_cli.py --binary /absolute/path/to/mmxwallet
+Run: python3 tools/test_wallet_cli.py --binary /absolute/path/to/mmxwallet
 """
 import argparse
 import http.server
@@ -191,15 +191,19 @@ class WalletCLI(unittest.TestCase):
     def test_passphrase_input_never_prompts(self):
         created = self.run_cli('create', '--with-passphrase', secret={'passphrase': 'temporary test secret 世界 🔑 \\u1234'})
         self.assertTrue(created['with_passphrase'])
-        self.assertIsNone(self.run_cli('list')['wallets'][0]['address'])
-        self.assertIn('[passphrase required]', self.run_cli('list', json_mode=False))
-        self.assertIsNone(self.run_cli('list', secret={'passphrase': 'wrong'})['wallets'][0]['address'])
+        self.assertEqual(self.run_cli('list')['wallets'][0]['address'], created['address'])
+        self.assertIn(created['address'], self.run_cli('list', json_mode=False))
+        self.assertEqual(self.run_cli('list', secret={'passphrase': 'wrong'})['wallets'][0]['address'], created['address'])
         self.assertEqual(self.run_cli('list', secret={'passphrase': 'temporary test secret 世界 🔑 \\u1234'})['wallets'][0]['address'], created['address'])
         empty = self.run_cli('create', '--with-passphrase', '--file', str(self.root / 'empty-passphrase.dat'), secret={'passphrase': ''})
         self.assertTrue(empty['with_passphrase'])
         self.assertEqual(self.run_cli('address', '--file', empty['wallet_file'], secret={'passphrase': ''})['address'], empty['address'])
-        self.run_cli('address', error='passphrase_required')
-        self.run_cli('address', secret={'passphrase': 'wrong'}, error='invalid_passphrase')
+        self.assertEqual(self.run_cli('address')['address'], created['address'])
+        self.assertEqual(self.run_cli('address', secret={'passphrase': 'wrong'})['address'], created['address'])
+        self.run_cli('set-addresses', '11', error='passphrase_required')
+        self.run_cli('set-addresses', '11', secret={'passphrase': 'wrong'}, error='invalid_passphrase')
+        self.run_cli('set-addresses', '11', secret={'passphrase': 'temporary test secret 世界 🔑 \\u1234'})
+        self.assertEqual(len(self.run_cli('addresses')['addresses']), 11)
         self.assertEqual(self.run_cli('address', secret={'passphrase': 'temporary test secret 世界 🔑 \\u1234'})['address'], created['address'])
 
     def test_import_and_secret_input_errors_are_redacted(self):

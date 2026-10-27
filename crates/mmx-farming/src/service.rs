@@ -74,6 +74,8 @@ pub const WALLET_METHODS: &[&str] = &[
     "is_locked",
     "lock",
     "unlock",
+    "set_address_count",
+    "set_address_count_ex",
     "sign_msg",
     "get_farmer_keys",
     "get_all_farmer_keys",
@@ -100,6 +102,8 @@ pub fn wallet_methods_with_node(
                 | "get_mnemonic_seed"
                 | "export_wallet"
                 | "unlock"
+                | "set_address_count"
+                | "set_address_count_ex"
         );
         methods.add(
             format!("mmx.Wallet.{method}"),
@@ -188,6 +192,7 @@ pub fn wallet_methods_with_node(
                                 Address(bytes(&args["address"])?),
                                 &bytes(&args["msg"])?,
                             )?;
+                            a.touch_spending();
                             generated(&mmx::solution::PubKey {
                                 version: sol.version,
                                 pubkey: sol.pubkey.into(),
@@ -197,6 +202,16 @@ pub fn wallet_methods_with_node(
                         "get_farmer_keys" => {
                             let k = a.farmer_key()?;
                             json!([k.secret_bytes().as_slice(), k.public_key().as_slice()])
+                        }
+                        "set_address_count" | "set_address_count_ex" => {
+                            let passphrase = args["passphrase"]
+                                .as_str()
+                                .map(|p| zeroize::Zeroizing::new(p.to_owned()));
+                            a.set_count(
+                                number(&args, "count")?,
+                                passphrase.as_deref().map(String::as_str),
+                            )?;
+                            Value::Null
                         }
                         "get_master_seed" => json!(a.key_file.seed_value),
                         "get_mnemonic_seed" => {
@@ -210,11 +225,16 @@ pub fn wallet_methods_with_node(
                         })?,
                         _ => return Err(error("unsupported wallet method")),
                     };
-                    Ok(if matches!(method, "lock" | "unlock") {
-                        json!({})
-                    } else {
-                        result(value)
-                    })
+                    Ok(
+                        if matches!(
+                            method,
+                            "lock" | "unlock" | "set_address_count" | "set_address_count_ex"
+                        ) {
+                            json!({})
+                        } else {
+                            result(value)
+                        },
+                    )
                 })()
                 .map_err(remote)
             },

@@ -67,7 +67,7 @@ function SecuritySettings() {
         </OptionRow>
       ) : null}
       {lockable ? (
-        <OptionRow title="Lock now" description={web ? 'Closes all wallets on this device' : 'Asks for the passphrase again'}>
+        <OptionRow title="Lock now" description={web ? 'Requires an unlock before spending again' : 'Asks for the passphrase again'}>
           <Button size="sm" icon="lock" loading={locking} onClick={() => void lockNow()}>
             Lock
           </Button>

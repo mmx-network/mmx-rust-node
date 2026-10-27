@@ -38,7 +38,8 @@ fn generated_type_identities_match_the_native_cpp_snapshot() {
         count += 1;
     }
     assert_eq!(count, 638);
-    assert_eq!(registry.len(), 644);
+    // Two descriptors for the additive Rust wallet address-derivation RPC.
+    assert_eq!(registry.len(), 646);
     assert_eq!(mmx::error_code_e::TXFEE_OVERRUN.value, 3169221647);
 }
 

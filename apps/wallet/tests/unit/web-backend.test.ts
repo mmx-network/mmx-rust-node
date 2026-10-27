@@ -9,7 +9,7 @@ import { EXPIRE_DELTA, PREPARED_TTL_MS, WebBackend } from '../../src/backend/web
 import type { FetchLike } from '../../src/backend/web/http';
 import { memoryStorage } from '../../src/backend/web/memory-storage';
 import { DAMAGED_KEY, LOCK_SIGNAL_KEY, STORAGE_KEY } from '../../src/backend/web/store';
-import type { WasmApi } from '../../src/backend/web/wasm';
+import type { VaultHandle, WasmApi } from '../../src/backend/web/wasm';
 import { MockRpc, NATIVE, testAddress } from '../e2e/mock-rpc';
 
 interface TestWasm extends WasmApi {
@@ -177,6 +177,7 @@ describe('creating and opening wallets', () => {
     const mnemonic = await b.newRecoveryPhrase();
     const wallet = await b.createWallet({ name: ' Main ', mnemonic, addressCount: 10 });
     expect(wallet).toEqual({
+      canView: true,
       id: wasm.fingerprint(mnemonic),
       name: 'Main',
       fingerprint: wasm.fingerprint(mnemonic),
@@ -211,7 +212,7 @@ describe('creating and opening wallets', () => {
     expect(await code(b.walletFingerprint({ mnemonic: 'not words' }))).toBe('invalid_mnemonic');
     const created = await b.createWallet({ name: 'A', mnemonic, passphrase: 'pw', addressCount: 10 });
     expect(created.id).toBe(await b.walletFingerprint({ mnemonic, passphrase: 'pw' }));
-    expect(storage.dump()[STORAGE_KEY]).not.toContain('pw');
+    expect(storedStrings(storage.dump())).not.toContain('pw');
   });
 
   it('opens a created wallet again with its words', async () => {
@@ -311,9 +312,56 @@ describe('creating and opening wallets', () => {
     const prepared = await b.prepareSend(send(info.id, MMX));
     await b.lockAll();
     expect((await b.listWallets())[0]!.locked).toBe(true);
-    expect(await code(b.getAddresses(info.id))).toBe('locked');
+    expect(await b.getAddresses(info.id)).toHaveLength(10);
     expect(await code(b.broadcast(info.id, prepared.txid))).toBe('prepared_not_found');
     expect(await code(b.unlockWallet(info.id, {}))).toBe('locked');
+    expect(rpc.broadcasts).toHaveLength(0);
+  });
+
+  it('releases every WASM vault on lock while cached wallets remain observable after restart', async () => {
+    const opened: Array<{ vault: VaultHandle; free: ReturnType<typeof vi.spyOn> }> = [];
+    const tracked: WasmApi = { ...wasm, Vault: { open: (...args) => {
+      const vault = wasm.Vault.open(...args);
+      opened.push({ vault, free: vi.spyOn(vault, 'free') });
+      return vault;
+    } } };
+    const b = new WebBackend({ loadWasm: async () => tracked, fetch: fetchFn, storage, rpcUrl: 'https://rpc.test' });
+    const plain = await openWallet(b, [10n * MMX]);
+    const protectedWallet = await openWallet(b, [10n * MMX], 'a private passphrase');
+    const first = await b.prepareSend(send(protectedWallet.info.id, MMX));
+    await b.discardPrepared(first.txid);
+    await b.prepareSend(send(protectedWallet.info.id, 2n * MMX));
+    expect(opened).toHaveLength(2); // Both transfers reused the same signing session.
+    await b.lockAll();
+    for (const { free } of opened) expect(free).toHaveBeenCalledTimes(1);
+    const plainRecord = JSON.parse(storage.getItem(STORAGE_KEY)!).wallets[plain.info.id];
+    expectNoWordsStored({ plain: JSON.stringify(plainRecord) }, plain.words, ['Main']);
+    expect(storedStrings(storage.dump())).toContain(protectedWallet.words);
+    expect(storedStrings(storage.dump())).not.toContain('a private passphrase');
+    const restarted = backend();
+    expect((await restarted.listWallets()).every((w) => w.locked && w.canView)).toBe(true);
+    expect(await restarted.getAddresses(plain.info.id)).toEqual(plain.addresses);
+    expect(await restarted.getAddresses(protectedWallet.info.id)).toEqual(protectedWallet.addresses);
+    expect(await code(restarted.prepareSend(send(protectedWallet.info.id, MMX)))).toBe('locked');
+    expect(await code(restarted.prepareSend(send(plain.info.id, MMX)))).toBe('locked');
+    expect(await code(restarted.setAddressCount(protectedWallet.info.id, 11))).toBe('passphrase_required');
+    expect(await code(restarted.setAddressCount(protectedWallet.info.id, 11, 'wrong'))).toBe('invalid_passphrase');
+    expect(await restarted.setAddressCount(protectedWallet.info.id, 11, 'a private passphrase')).toHaveLength(11);
+    expect((await restarted.listWallets()).every((w) => w.locked)).toBe(true);
+    await restarted.setAddressCount(protectedWallet.info.id, 5);
+    await restarted.setAddressCount(protectedWallet.info.id, 11);
+    await restarted.unlockWallet(protectedWallet.info.id, { passphrase: 'a private passphrase' });
+    expect(await code(restarted.prepareSend(send(protectedWallet.info.id, MMX)))).toBe('ok');
+    await restarted.lockAll();
+  });
+
+  it('refuses an in-flight prepare overtaken by a lock before its first WASM read', async () => {
+    const b = backend();
+    const { info } = await openWallet(b, [10n * MMX]);
+    const pending = code(b.prepareSend(send(info.id, MMX)));
+    await b.lockAll();
+    expect(await pending).toBe('locked');
+    expect(await b.getAddresses(info.id)).toHaveLength(10);
     expect(rpc.broadcasts).toHaveLength(0);
   });
 
@@ -418,6 +466,7 @@ describe('creating and opening wallets', () => {
 describe('wallet core failures', () => {
   it('locks everything and stops using the core after it crashes', async () => {
     const crashing: WasmApi = {
+      watch_max_amount: () => { throw new WebAssembly.RuntimeError("test crash"); },
       generate_mnemonic: () => wasm.generate_mnemonic(),
       normalize_mnemonic: (w) => wasm.normalize_mnemonic(w),
       fingerprint: (w, p) => wasm.fingerprint(w, p),
@@ -768,7 +817,7 @@ describe('sending', () => {
     const { info } = await openWallet(b, [10n * MMX]);
     await b.lockWallet(info.id);
     expect(await code(b.prepareSend(send(info.id, MMX)))).toBe('locked');
-    expect(await code(b.maxSendable({ walletId: info.id, to: '', contract: NATIVE, feeLevel: 1 }))).toBe('locked');
+    expect(await code(b.maxSendable({ walletId: info.id, to: '', contract: NATIVE, feeLevel: 1 }))).toBe('ok');
   });
 
   it('drops a transfer prepared while the wallet was locked', async () => {

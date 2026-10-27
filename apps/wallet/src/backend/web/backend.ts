@@ -1,8 +1,9 @@
 /**
  * Web wallet backend (docs/wallet-app.md §6.2, §6.3, §6.6). Recovery words come
  * from the user's password manager and are opened into a WASM `Vault` per
- * unlocked wallet; nothing secret is stored or sent anywhere. Metadata lives
- * in localStorage, chain data comes from the public chain server.
+ * unlocked wallet. Public addresses are cached in localStorage; passphrase
+ * wallets also keep their base recovery words there, never the passphrase or
+ * signing keys. Chain data comes from the public chain server.
  *
  * Transfers are built, signed and checked locally; the only request carrying
  * a signed transfer is the broadcast after the user confirmed it. Funds of
@@ -277,8 +278,10 @@ export class WebBackend implements Backend {
       fingerprint: id,
       withPassphrase: record.withPassphrase,
       locked: !this.vaults.has(id),
+      canView: !!record.addresses && record.addresses.length >= record.addressCount,
       addressCount: record.addressCount,
       verified: record.verified,
+      ...(record.seedWords ? { hasStoredSeed: true } : {}),
     };
   }
 
@@ -387,6 +390,11 @@ export class WebBackend implements Backend {
         verified: true,
         added: this.now(),
       };
+      record.addresses = this.call(() => vault.addresses());
+      if (record.withPassphrase) {
+        record.seedWords = this.call(() => vault.mnemonic());
+        if (epoch !== this.lockEpoch) fail('locked');
+      }
       this.store.putWallet(id, record, { active });
       this.setVault(id, vault);
       kept = true;
@@ -404,9 +412,37 @@ export class WebBackend implements Backend {
     }
   }
 
+  /** The caller owns this vault and must free it in finally, within one operation. */
+  private async openStored(id: WalletId, record: WalletRecord, passphrase: string | null, count: number): Promise<VaultHandle> {
+    if (!passphrase) fail('passphrase_required');
+    if (!record.seedWords) fail('locked');
+    const words = record.seedWords;
+    const epoch = this.lockEpoch;
+    const wasm = await this.wasm();
+    if (epoch !== this.lockEpoch) fail('locked');
+    const vault = this.call(() => wasm.Vault.open(words, passphrase, id, count));
+    try {
+      const addresses = this.call(() => vault.addresses());
+      if (record.addresses?.slice(0, count).some((address, i) => addresses[i] !== address)) fail('wallet_mismatch');
+      return vault;
+    } catch (e) {
+      this.freeVault(vault);
+      throw e;
+    }
+  }
+
   async unlockWallet(id: WalletId, r: UnlockRequest): Promise<WalletInfo> {
     const record = this.record(id);
     const passphrase = passphraseOf(r.passphrase);
+    if (record.withPassphrase && record.seedWords && r.mnemonic === undefined) {
+      const epoch = this.lockEpoch;
+      const vault = await this.openStored(id, record, passphrase, record.addressCount);
+      try {
+        if (epoch !== this.lockEpoch) fail('locked');
+        this.setVault(id, vault);
+        return this.info(id, record);
+      } catch (e) { this.freeVault(vault); throw e; }
+    }
     if (r.mnemonic === undefined) {
       const vault = this.vaults.get(id);
       if (!vault) fail('locked');
@@ -433,10 +469,23 @@ export class WebBackend implements Backend {
       fail('internal');
     }
     const withPassphrase = this.call(() => vault.with_passphrase());
+    if (withPassphrase) {
+      try {
+        const addresses = this.call(() => vault.addresses());
+        const seedWords = this.call(() => vault.mnemonic());
+        if (epoch !== this.lockEpoch) fail('locked');
+        const updated = this.store.patchWallet(id, { withPassphrase, verified: true, addresses, seedWords });
+        const old = this.vaults.get(id);
+        this.vaults.delete(id);
+        if (old) this.freeVault(old);
+        this.setVault(id, vault);
+        return this.info(id, updated);
+      } catch (e) { this.freeVault(vault); throw e; }
+    }
     this.setVault(id, vault);
     let updated: WalletRecord = { ...record, withPassphrase, verified: true };
     try {
-      updated = this.store.patchWallet(id, { withPassphrase, verified: true });
+      updated = this.store.patchWallet(id, { withPassphrase, verified: true, addresses: this.call(() => vault.addresses()) });
     } catch (e) {
       if (e instanceof BackendError && e.code === 'wallet_not_found') {
         this.vaults.delete(id);
@@ -457,6 +506,7 @@ export class WebBackend implements Backend {
   }
 
   async lockWallet(id: WalletId): Promise<void> {
+    this.lockEpoch++;
     if (typeof id !== 'string') fail('wallet_not_found');
     const vault = this.vaults.get(id);
     this.vaults.delete(id);
@@ -499,12 +549,22 @@ export class WebBackend implements Backend {
     this.store.patchWallet(id, { name: checkName(name) });
   }
 
-  async setAddressCount(id: WalletId, n: number): Promise<string[]> {
+  async setAddressCount(id: WalletId, n: number, passphrase?: string): Promise<string[]> {
     const count = checkCount(n);
-    const vault = this.vault(id);
-    this.call(() => vault.set_count(count));
-    this.store.patchWallet(id, { addressCount: count });
-    return this.call(() => vault.addresses());
+    const record = this.record(id);
+    const epoch = this.lockEpoch;
+    let addresses = record.addresses ?? [];
+    if (count > addresses.length) {
+      const temporary = record.withPassphrase && !!record.seedWords;
+      const vault = temporary ? await this.openStored(id, record, passphrase ?? null, count) : this.vault(id);
+      try {
+        if (!temporary) this.call(() => vault.set_count(count));
+        addresses = this.call(() => vault.addresses());
+      } finally { if (temporary) this.freeVault(vault); }
+    }
+    if (epoch !== this.lockEpoch) fail('locked');
+    this.store.patchWallet(id, { addressCount: count, addresses });
+    return addresses.slice(0, count);
   }
 
   async removeWallet(id: WalletId): Promise<void> {
@@ -517,14 +577,27 @@ export class WebBackend implements Backend {
     this.store.removeWallet(id);
   }
 
-  async revealMnemonic(id: WalletId): Promise<string> {
+  async revealMnemonic(id: WalletId, passphrase?: string): Promise<string> {
+    const record = this.record(id);
+    if (record.withPassphrase && record.seedWords) {
+      const epoch = this.lockEpoch;
+      const vault = await this.openStored(id, record, passphrase ?? null, record.addressCount);
+      try {
+        if (epoch !== this.lockEpoch) fail('locked');
+        return this.call(() => vault.mnemonic());
+      } finally { this.freeVault(vault); }
+    }
     const vault = this.vault(id);
     return this.call(() => vault.mnemonic());
   }
 
   async getAddresses(id: WalletId): Promise<string[]> {
+    const record = this.record(id);
+    if (record.addresses && record.addresses.length >= record.addressCount) return record.addresses.slice(0, record.addressCount);
     const vault = this.vault(id);
-    return this.call(() => vault.addresses());
+    const addresses = this.call(() => vault.addresses());
+    this.store.patchWallet(id, { addresses });
+    return addresses;
   }
 
   async setActiveWallet(id: WalletId): Promise<void> {
@@ -685,20 +758,20 @@ export class WebBackend implements Backend {
   }
 
   async maxSendable(r: Omit<SendRequest, 'amount'>): Promise<string> {
-    const vault = this.vault(r.walletId);
+    const addresses = await this.getAddresses(r.walletId);
     const memo = memoOf(r.memo);
     const feeLevel = feeLevelOf(r.feeLevel);
     const wasm = await this.wasm();
     const contract = this.contractOf(r.contract, wasm);
-    const chain = await this.snapshot(r.walletId, this.call(() => vault.addresses()));
-    this.stillOpen(r.walletId, vault);
-    return this.call(() => vault.max_amount(chain.balancesJson, chain.paramsJson, contract, memo ?? null, feeLevel));
+    const chain = await this.snapshot(r.walletId, addresses);
+    return this.call(() => wasm.watch_max_amount(JSON.stringify(addresses), chain.balancesJson, chain.paramsJson, contract, memo ?? null, feeLevel));
   }
 
   async prepareSend(r: SendRequest): Promise<PreparedSend> {
     const walletId = r.walletId;
     const vault = this.vault(walletId);
     const wasm = await this.wasm();
+    this.stillOpen(walletId, vault);
     const to = typeof r.to === 'string' ? normalizeAddress(r.to) : null;
     if (to === null || to === NATIVE_CONTRACT || !this.call(() => wasm.validate_address(to))) fail('invalid_address');
     const contract = this.contractOf(r.contract, wasm);
@@ -706,7 +779,10 @@ export class WebBackend implements Backend {
     const memo = memoOf(r.memo);
     const feeLevel = feeLevelOf(r.feeLevel);
 
-    const addresses = this.call(() => vault.addresses());
+    const addresses = await this.getAddresses(walletId);
+    this.stillOpen(walletId, vault);
+    const derived = this.call(() => vault.addresses());
+    if (derived.length !== addresses.length || derived.some((address, i) => addresses[i] !== address)) fail('wallet_mismatch');
     const chain = await this.snapshot(walletId, addresses);
     this.stillOpen(walletId, vault);
     const currency = chain.currencies.get(contract);
@@ -782,7 +858,7 @@ export class WebBackend implements Backend {
     const key = typeof txid === 'string' ? txid.toUpperCase() : '';
     this.prunePrepared();
     const p = this.prepared.get(key);
-    if (!p || p.walletId !== walletId || !this.vaults.has(walletId)) fail('prepared_not_found');
+    if (!p || p.walletId !== walletId || !this.store.has(walletId)) fail('prepared_not_found');
     // Removed before sending: a transfer is submitted at most once.
     this.prepared.delete(key);
     // Nothing is sent unless these checks pass (as on desktop), so a failure
@@ -924,4 +1000,3 @@ function fundsKey(address: string, contract: string): string {
 function isLockSignal(e: StorageEvent): boolean {
   return e.key === LOCK_SIGNAL_KEY && e.newValue !== null;
 }
-

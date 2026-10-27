@@ -124,6 +124,80 @@ pub fn set_rpc(config: &mut Config, url: Option<&str>) {
     }
 }
 
+/// Public address cache, bound to the key file's fingerprint. Never contains keys.
+pub fn cached_addresses(
+    config: &Config,
+    id: &str,
+    fingerprint: &str,
+) -> Option<Vec<mmx_wallet::Address>> {
+    cached_addresses_for(config, id, fingerprint, 0)
+}
+
+pub fn cached_addresses_for(
+    config: &Config,
+    id: &str,
+    fingerprint: &str,
+    account: u32,
+) -> Option<Vec<mmx_wallet::Address>> {
+    let field = if account == 0 {
+        "public_addresses".to_owned()
+    } else {
+        format!("public_addresses_{account}")
+    };
+    let cache = wallet(config, id)?.get(&field)?.as_object()?;
+    if cache.get("fingerprint")?.as_str()? != fingerprint {
+        return None;
+    }
+    let values = cache.get("addresses")?.as_array()?;
+    if values.is_empty() || values.len() > validate::MAX_NUM_ADDRESSES as usize {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .map(|v| {
+            let address = validate::canonical_address(v.as_str()?)?;
+            seen.insert(address).then_some(address)
+        })
+        .collect()
+}
+
+pub fn set_cached_addresses(
+    config: &mut Config,
+    id: &str,
+    fingerprint: &str,
+    addresses: &[mmx_wallet::Address],
+) {
+    set_cached_addresses_for(config, id, fingerprint, 0, addresses);
+}
+
+pub fn set_cached_addresses_for(
+    config: &mut Config,
+    id: &str,
+    fingerprint: &str,
+    account: u32,
+    addresses: &[mmx_wallet::Address],
+) {
+    // Retain already derived addresses when an unlock uses a smaller visible count.
+    if cached_addresses_for(config, id, fingerprint, account).is_some_and(|old| {
+        old.len() > addresses.len() && old.iter().zip(addresses).all(|(a, b)| a == b)
+    }) {
+        return;
+    }
+    let field = if account == 0 {
+        "public_addresses".to_owned()
+    } else {
+        format!("public_addresses_{account}")
+    };
+    wallet_mut(config, id).insert(
+        field,
+        serde_json::json!({
+            "fingerprint": fingerprint,
+            "addresses": addresses.iter().map(ToString::to_string).collect::<Vec<_>>()
+        }),
+    );
+}
+
 fn wallet<'a>(config: &'a Config, id: &str) -> Option<&'a Config> {
     config.get("wallets")?.as_object()?.get(id)?.as_object()
 }

@@ -324,7 +324,11 @@ fn create_list_rename_resize_and_remove() {
     assert!(key.finger_print.is_none());
     let addresses = svc.addresses(&info.id).unwrap();
     assert_eq!(addresses, derive(&key.seed_value, "", 10));
-    assert_eq!(*svc.mnemonic(&info.id).unwrap(), *words);
+    assert_eq!(
+        *svc.mnemonic_authorized(&info.id, Some(secret("correct horse")))
+            .unwrap(),
+        *words
+    );
 
     svc.rename(&info.id, " Daily ").unwrap();
     assert_eq!(svc.wallets().unwrap()[0].name, "Daily");
@@ -453,20 +457,36 @@ fn passphrase_detection_and_locking() {
     );
     let expected = derive(&key.seed_value, "correct horse", 10);
     assert_eq!(svc.addresses(&info.id).unwrap(), expected);
+    let spending_keys = Arc::downgrade(guard(&svc.unlocked).get(&info.id).unwrap());
 
     svc.lock(&info.id).unwrap();
+    assert!(
+        spending_keys.upgrade().is_none(),
+        "locking must release the last spending-key owner"
+    );
     assert!(svc.wallets().unwrap()[0].locked);
-    for code in [
-        svc.addresses(&info.id).unwrap_err().code,
+    // Public addresses remain usable, but the signing-key cache is gone.
+    assert_eq!(svc.addresses(&info.id).unwrap(), expected);
+    assert_eq!(
         svc.mnemonic(&info.id).unwrap_err().code,
-        svc.set_address_count(&info.id, 5).unwrap_err().code,
-        svc.max_send(&info.id, NATIVE, None, 1).unwrap_err().code,
+        "passphrase_required"
+    );
+    assert_eq!(
         svc.prepare_send(&send_request(&info.id, &expected[1], "1"))
             .unwrap_err()
             .code,
-    ] {
-        assert_eq!(code, "locked");
-    }
+        "locked"
+    );
+    assert_eq!(svc.set_address_count(&info.id, 5).unwrap().len(), 5);
+    assert_eq!(svc.set_address_count(&info.id, 10).unwrap(), expected);
+    assert_eq!(
+        svc.set_address_count(&info.id, 11).unwrap_err().code,
+        "passphrase_required"
+    );
+    let restarted = Service::open(Some(svc.directory().to_owned())).unwrap();
+    assert!(restarted.wallets().unwrap()[0].locked);
+    assert!(restarted.wallets().unwrap()[0].can_view);
+    assert_eq!(restarted.addresses(&info.id).unwrap(), expected);
     // Locked wallets can still be renamed; nothing else changed.
     svc.rename(&info.id, "Cold").unwrap();
     assert_eq!(svc.wallets().unwrap()[0].address_count, 10);
@@ -485,9 +505,13 @@ fn passphrase_detection_and_locking() {
     assert!(!unlocked.locked && unlocked.with_passphrase);
     assert_eq!(unlocked.name, "Cold");
     assert_eq!(svc.addresses(&info.id).unwrap(), expected);
-    assert_eq!(*svc.mnemonic(&info.id).unwrap(), *words);
+    assert_eq!(
+        *svc.mnemonic_authorized(&info.id, Some(secret("correct horse")))
+            .unwrap(),
+        *words
+    );
     svc.lock_all();
-    assert_eq!(svc.addresses(&info.id).unwrap_err().code, "locked");
+    assert_eq!(svc.addresses(&info.id).unwrap(), expected);
 
     // Importing the same words with the passphrase finds the same wallet;
     // without it, they are a different wallet.
@@ -534,10 +558,9 @@ fn empty_and_absent_passphrases_never_prompt() {
         svc.addresses("wallet.dat").unwrap(),
         derive(&seed(), "", 10)
     );
-    assert_eq!(
-        svc.unlock("wallet.dat", secret("ignored")).unwrap(),
-        list[0]
-    );
+    let mut cached = list[0].clone();
+    cached.can_view = true;
+    assert_eq!(svc.unlock("wallet.dat", secret("ignored")).unwrap(), cached);
     svc.lock("wallet.dat").unwrap();
     assert!(!svc.wallets().unwrap()[0].locked);
     assert_eq!(
@@ -688,7 +711,7 @@ fn app_state_round_trip_preserves_unknown_keys() {
     // Defaults with no configuration at all.
     let defaults = svc.app_state().unwrap();
     assert_eq!(defaults, AppState::default());
-    assert_eq!(defaults.settings.auto_lock_minutes, 24 * 60);
+    assert_eq!(defaults.settings.auto_lock_minutes, 5);
     assert_eq!(defaults.settings.fee_level, 1);
 
     let (info, _) = create(&svc, "A", None, 10);
@@ -1800,6 +1823,7 @@ fn unsynced_or_foreign_servers_are_refused() {
 #[test]
 fn serialized_shapes_match_the_ui_contract() {
     let info = WalletInfo {
+        can_view: true,
         id: "wallet.dat".into(),
         name: "W".into(),
         fingerprint: "1".into(),
@@ -1811,7 +1835,7 @@ fn serialized_shapes_match_the_ui_contract() {
     assert_eq!(
         serde_json::to_value(&info).unwrap(),
         json!({"id": "wallet.dat", "name": "W", "fingerprint": "1", "withPassphrase": true,
-               "locked": false, "addressCount": 10})
+               "locked": false, "canView": true, "addressCount": 10})
     );
     let request: SendRequest = serde_json::from_value(json!({
         "walletId": "wallet.dat", "to": "mmx1", "contract": NATIVE, "amount": "5", "feeLevel": 2
@@ -1867,7 +1891,11 @@ fn new_wallets_are_saved_only_from_confirmed_words() {
     );
     let key = storage::read_key(&svc.directory().join(&info.id)).unwrap();
     assert_eq!(seed_to_words(&key.seed_value), *words);
-    assert_eq!(*svc.mnemonic(&info.id).unwrap(), *words);
+    assert_eq!(
+        *svc.mnemonic_authorized(&info.id, Some(secret("correct horse")))
+            .unwrap(),
+        *words
+    );
     // The same words again are the same wallet.
     assert_eq!(
         svc.create("Again", words.clone(), None, 10)

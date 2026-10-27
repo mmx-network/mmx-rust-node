@@ -1,5 +1,5 @@
 // Several wallets, locking and settings of the web wallet.
-import { capture, expectActiveWallet, expectOverview, goTo, importWallet, lockWallet, openApp, openFundedWallet, unlockWithWords, walletSwitcher } from './app';
+import { capture, expectPassphrasePrivacy, expectActiveWallet, expectOverview, goTo, importWallet, lockWallet, openApp, openFundedWallet, unlockWithWords, walletSwitcher } from './app';
 import { expect, test } from './fixtures';
 import { newMnemonic, walletAddresses } from './wallet';
 
@@ -27,15 +27,15 @@ test('switches between wallets and keeps each one apart', async ({ page, rpc }) 
   await expect(page).toHaveURL(/#\/receive$/u);
   await expect(page.locator('.receive-card__address')).toHaveText(walletAddresses(words)[0]!);
 
-  // Locking closes every wallet; the last one used is offered first.
+  // Locking purges signing sessions and preserves the current public view.
   await lockWallet(page);
-  await expect(page.locator('input[name=username]')).toHaveValue(/^Savings \(/u);
-  await page.getByRole('button', { name: 'Change' }).click();
-  await expect(page.getByRole('heading', { name: 'Choose a wallet' })).toBeVisible();
-  await capture(page, 'unlock-choose');
-  await page.getByRole('button', { name: /Spending/u }).click();
+  await expect(page).toHaveURL(/#\/receive$/u);
+  await expectActiveWallet(page, 'Savings');
+  await walletSwitcher(page).click();
+  await page.getByRole('menuitemradio', { name: /Spending/u }).click();
   await unlockWithWords(page, first.words);
-  await expectOverview(page, 'Spending');
+  await expect(page).toHaveURL(/#\/receive$/u);
+  await expectActiveWallet(page, 'Spending');
 });
 
 test('Lock in one tab locks the wallet in every tab', async ({ page, rpc }) => {
@@ -48,13 +48,14 @@ test('Lock in one tab locks the wallet in every tab', async ({ page, rpc }) => {
   await goTo(other, 'Send');
 
   await lockWallet(page);
-  await expect(other).toHaveURL(/#\/unlock$/u);
-  await expect(other.getByRole('heading', { name: 'Unlock your wallet' })).toBeVisible();
+  await expect(other).toHaveURL(/#\/send$/u);
+  await expect(other.getByRole('button', { name: 'Unlock', exact: true }).first()).toBeVisible();
   // The other tab dropped its keys too: it needs the words again.
   await unlockWithWords(other, wallet.words);
-  await expectOverview(other, 'Shared');
+  await expect(other).toHaveURL(/#\/send$/u);
+  await expectActiveWallet(other, 'Shared');
   // Unlocking there leaves this tab locked.
-  await expect(page).toHaveURL(/#\/unlock$/u);
+  await expect(page.getByRole('button', { name: 'Unlock', exact: true }).first()).toBeVisible();
   await other.close();
 });
 
@@ -68,8 +69,8 @@ test('locks after the chosen time without activity', async ({ page, rpc }) => {
   await page.clock.fastForward('04:00');
   await expect(page).toHaveURL(/#\/settings$/u);
   await page.clock.fastForward('01:30');
-  await expect(page).toHaveURL(/#\/unlock$/u);
-  await expect(page.getByRole('heading', { name: 'Unlock your wallet' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Unlock', exact: true }).first()).toBeVisible();
+  await expect(page).toHaveURL(/#\/settings$/u);
 
   // The setting is kept for the next visit.
   await page.reload();
@@ -105,6 +106,8 @@ test('renames a wallet, changes its address count and shows its recovery phrase'
   await hide.getByRole('button', { name: 'Cancel' }).click();
   await count.fill('12');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
+  // Import already cached all 100 scanned addresses: these need no derivation.
+  await expect(page.getByRole('dialog', { name: 'Unlock for spending' })).toBeHidden();
   await expect(count).toHaveValue('12');
   await goTo(page, 'Receive');
   await expect(page.getByRole('list', { name: 'Your addresses' }).getByRole('listitem')).toHaveCount(12);
@@ -130,7 +133,8 @@ test('renames a wallet, changes its address count and shows its recovery phrase'
   // Reopening keeps the name and the address count.
   await lockWallet(page);
   await unlockWithWords(page, wallet.words, passphrase);
-  await expectOverview(page, 'Farm');
+  await expect(page).toHaveURL(/#\/settings$/u);
+  await expectActiveWallet(page, 'Farm');
   await goTo(page, 'Receive');
   await expect(page.getByRole('list', { name: 'Your addresses' }).getByRole('listitem')).toHaveCount(12);
 });
@@ -149,4 +153,63 @@ test('forgets a wallet on this device', async ({ page, rpc }) => {
   await page.reload();
   await expect(page).toHaveURL(/#\/welcome$/u);
   await openApp(page);
+});
+
+test('keeps a passphrase signing session for multiple transfers, then locks without hiding funds', async ({ page, rpc }) => {
+  await page.clock.install();
+  const passphrase = 'private session phrase';
+  const wallet = await openFundedWallet(page, (address) => rpc.fund({ address, amount: '10000000' }), { passphrase });
+  await page.reload();
+  await expectOverview(page);
+  await expect(page.locator('.overview-hero')).toContainText('10');
+  for (const amount of ['1', '2']) {
+    await goTo(page, 'Send');
+    await page.getByLabel('To').fill(wallet.addresses[1]!);
+    await page.getByLabel('Amount').fill(amount);
+    await page.getByRole('button', { name: 'Review', exact: true }).click();
+    if (amount === '1') {
+      const authorize = page.getByRole('dialog', { name: 'Unlock for spending' });
+      await expect(authorize).toBeVisible();
+      await expectPassphrasePrivacy(page);
+      await unlockWithWords(page, wallet.words, passphrase);
+    }
+    await expect(page.getByRole('region', { name: 'Transfer details' })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Unlock for spending' })).toBeHidden();
+    await page.getByRole('button', { name: 'Send now' }).click();
+    await expect(page.getByRole('region', { name: 'Transfer sent' })).toBeVisible();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    await expectOverview(page);
+    await page.clock.runFor(1000);
+    await page.clock.fastForward('04:00');
+    await expect(page.getByRole('button', { name: 'Lock', exact: true }).first()).toBeVisible();
+  }
+  expect(await rpc.broadcasts()).toHaveLength(2);
+  await page.clock.fastForward('01:30');
+  await expect(page.getByRole('button', { name: 'Unlock', exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Total balance')).toBeVisible();
+  await goTo(page, 'Receive');
+  await expect(page.locator('.receive-card__address')).toHaveText(wallet.addresses[0]!);
+});
+
+test('locking closes a displayed recovery phrase and preserves the public wallet screen', async ({ page, rpc }) => {
+  const wallet = await openFundedWallet(page, (address) => rpc.fund({ address, amount: '1000000' }));
+  await goTo(page, 'Settings');
+  await page.getByRole('button', { name: 'Show', exact: true }).click();
+  await page.getByRole('button', { name: 'Show phrase', exact: true }).click();
+  const phrase = page.getByRole('dialog', { name: 'Recovery phrase', exact: true });
+  await expect(phrase).toBeVisible();
+  // A second tab's explicit lock must clear this dialog even though Settings stays mounted.
+  const other = await page.context().newPage();
+  await openApp(other);
+  await unlockWithWords(other, wallet.words);
+  await lockWallet(other);
+  await expect(phrase).toBeHidden();
+  await expect(page.locator('.word-grid')).toHaveCount(0);
+  await expect(page).toHaveURL(/#\/settings$/u);
+  await other.close();
+  // A regular web wallet needs its recovery credential again to reveal the words.
+  await page.getByRole('button', { name: 'Show', exact: true }).click();
+  await unlockWithWords(page, wallet.words);
+  await expect(phrase).toBeVisible();
+  await phrase.getByRole('button', { name: 'Done', exact: true }).click();
 });

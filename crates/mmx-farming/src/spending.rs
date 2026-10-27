@@ -236,21 +236,23 @@ pub fn register(
                             | "sign_off"
                             | "send_off"
                     );
-                    let options: mmx::spend_options_t = serde_json::from_value(
+                    let mut options: mmx::spend_options_t = serde_json::from_value(
                         args.get("options").cloned().unwrap_or_else(|| json!({})),
                     )?;
-                    let temporary = spending && a.is_locked() && options.passphrase.is_some();
-                    if temporary {
-                        a.unlock(options.passphrase.as_deref().unwrap())?;
+                    let secret = options.passphrase.take().map(zeroize::Zeroizing::new);
+                    let needs_unlock = spending && a.is_locked() && secret.is_some();
+                    if needs_unlock {
+                        a.unlock(secret.as_deref().unwrap())?;
                     }
                     let out = (|| {
                         if spending {
                             a.wallet()?;
+                            a.touch_spending();
                         }
                         dispatch(a, node.as_deref(), method, &args, &options)
                     })();
-                    if temporary {
-                        a.lock();
+                    if spending && out.is_ok() {
+                        a.touch_spending();
                     }
                     out
                 })()

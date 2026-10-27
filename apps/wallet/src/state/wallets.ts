@@ -16,6 +16,7 @@ import { validateName } from '../lib/text';
 import {
   activeWallet,
   activeWalletId,
+  lockVersion,
   appState,
   backend,
   opening,
@@ -42,6 +43,7 @@ import {
 } from './session';
 import { cancelSetup, setupNotice } from './setup';
 import { clearToasts, notify } from './toasts';
+import { markActivity } from './idle';
 
 function invalidName(name: string): void {
   if (validateName(name, WALLET_NAME_MAX)) throw new BackendError('invalid_argument', 'invalid wallet name');
@@ -70,7 +72,7 @@ export async function activateWallet(id: WalletId, options: { navigateTo?: Route
   const target = wallets.value.find((w) => w.id === id);
   if (!target || target.error) throw new BackendError('wallet_not_found');
   await discardSend();
-  if (target.locked) {
+  if (target.locked && !target.canView) {
     closeSession();
     batch(() => {
       activeWalletId.value = id;
@@ -95,7 +97,7 @@ export async function activateWallet(id: WalletId, options: { navigateTo?: Route
 
 /** Switches to another wallet (shell wallet switcher, unlock screen list). Stays on the current page when possible. */
 export async function selectWallet(id: WalletId): Promise<void> {
-  if (id === activeWalletId.value && activeWallet.value && !activeWallet.value.locked) return;
+  if (id === activeWalletId.value && activeWallet.value && (!activeWallet.value.locked || activeWallet.value.canView)) return;
   const current = route.value.name;
   const navigateTo: RouteId = isShellRoute(current) ? current : 'overview';
   try {
@@ -124,6 +126,7 @@ export async function unlockWallet(
   if (request.passphrase !== undefined && request.passphrase !== '') req.passphrase = request.passphrase;
   if (request.mnemonic !== undefined) req.mnemonic = joinWords(splitWords(request.mnemonic));
   const info = await backend().unlockWallet(id, req);
+  markActivity();
   upsertWallet(info);
   await activateWallet(info.id, options);
   return info;
@@ -146,12 +149,12 @@ export interface LockRequest {
 }
 
 /**
- * Locks: web frees every wallet's keys; desktop forgets the passphrases of
- * passphrase-protected wallets. If the active wallet is now locked the app
- * shows the unlock screen. A wallet setup in progress is cancelled: its
+ * Locks: web frees every wallet's keys; desktop drops the signing keys of
+ * passphrase-protected wallets. Cached public addresses keep the wallet view open. A wallet setup in progress is cancelled: its
  * recovery words are dropped and the welcome screen says why.
  */
 export async function lock(options: LockRequest = {}): Promise<void> {
+  lockVersion.value++;
   const setup = cancelSetup();
   await discardSend();
   try {
@@ -166,6 +169,7 @@ export async function lock(options: LockRequest = {}): Promise<void> {
  * without locking again, so the signal is not sent back.
  */
 export async function lockedElsewhere(): Promise<void> {
+  lockVersion.value++;
   const setup = cancelSetup();
   await discardSend();
   await afterLock(setup ? SETUP_CANCELLED : null, false);
@@ -184,7 +188,7 @@ async function afterLock(setupMessage: string | null, local: boolean): Promise<v
   const list = await refreshWallets().catch(() => wallets.value);
   const nowLocked = new Set([...before].filter((id) => list.find((w) => w.id === id)?.locked !== false));
   const active = list.find((w) => w.id === activeWalletId.value);
-  if (hadOpen && (!active || active.locked)) {
+  if (hadOpen && (!active || (active.locked && !active.canView))) {
     closeSession();
     forgetWalletData(platform.value === 'web' ? 'all' : nowLocked);
     clearToasts();
@@ -369,7 +373,7 @@ export function fundedAddressesFrom(count: number): number[] {
 export async function reconcileAddresses(): Promise<void> {
   const id = sessionWalletId.value;
   const w = id ? wallets.value.find((x) => x.id === id) : undefined;
-  if (!id || !w || w.locked || w.error || w.addressCount === addresses.value.length) return;
+  if (!id || !w || (w.locked && !w.canView) || w.error || w.addressCount === addresses.value.length) return;
   const list = await backend().getAddresses(id);
   if (sessionWalletId.value === id) await applyAddresses(list);
 }
@@ -398,11 +402,11 @@ export async function checkHiddenFunds(count: number): Promise<HiddenFundsCheck>
 }
 
 /** Changes the active wallet's number of addresses (1–100). */
-export async function setAddressCount(count: number): Promise<void> {
+export async function setAddressCount(count: number, passphrase?: string): Promise<void> {
   const id = activeWalletId.value;
   if (!id) throw new BackendError('wallet_not_found');
   if (!Number.isInteger(count) || count < 1 || count > MAX_ADDRESSES) throw new BackendError('invalid_argument');
-  const list = await backend().setAddressCount(id, count);
+  const list = await backend().setAddressCount(id, count, passphrase);
   await refreshWallets().catch(() => undefined);
   // Another wallet may have been opened meanwhile: the list belongs to `id` only.
   if (sessionWalletId.value === id) await applyAddresses(list);
@@ -436,6 +440,6 @@ export async function removeWallet(id: WalletId): Promise<void> {
 }
 
 /** The wallet's recovery words. Callers keep them only while shown. */
-export async function revealMnemonic(id: WalletId): Promise<string> {
-  return backend().revealMnemonic(id);
+export async function revealMnemonic(id: WalletId, passphrase?: string): Promise<string> {
+  return backend().revealMnemonic(id, passphrase);
 }

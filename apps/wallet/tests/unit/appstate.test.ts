@@ -52,11 +52,11 @@ describe('sanitizeAppState', () => {
     expect(sanitizeSettings({ rpcUrl: 'https://x.example/ a' }, 'desktop').rpcUrl).toBeUndefined();
     expect(sanitizeSettings({ autoLockMinutes: -5, feeLevel: 4, theme: 'blue' }, 'desktop')).toEqual({
       theme: 'system',
-      autoLockMinutes: 24 * 60,
+      autoLockMinutes: 5,
       feeLevel: 1,
     });
-    expect(sanitizeSettings({ autoLockMinutes: 1.5 }, 'desktop').autoLockMinutes).toBe(24 * 60);
-    expect(sanitizeSettings({ autoLockMinutes: 100000 }, 'desktop').autoLockMinutes).toBe(24 * 60);
+    expect(sanitizeSettings({ autoLockMinutes: 1.5 }, 'desktop').autoLockMinutes).toBe(5);
+    expect(sanitizeSettings({ autoLockMinutes: 100000 }, 'desktop').autoLockMinutes).toBe(5);
   });
 
   it('cleans labels', () => {

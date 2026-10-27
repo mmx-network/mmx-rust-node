@@ -32,14 +32,12 @@ import {
   Button,
   Card,
   Combobox,
-  Dialog,
   Field,
   Icon,
   IconButton,
   Identicon,
   Page,
   PageHeader,
-  PasswordInput,
   Select,
   shortenAddress,
   Skeleton,
@@ -48,7 +46,7 @@ import {
   type ComboboxOption,
   type SelectOption,
 } from '../../components';
-import { PASSPHRASE_FIELD, PASSWORD_MANAGER_IGNORE } from '../welcome/flow';
+import { AuthorizationDialog } from '../unlock/AuthorizationDialog';
 
 /** Contacts offered in the To field. */
 const SUGGESTIONS = 8;
@@ -60,63 +58,20 @@ function assetLabel(a: AssetBalance): string {
 
 type Touched = Partial<Record<'to' | 'amount', boolean>>;
 
-/** Desktop: asks for the passphrase when the wallet was locked in the background. */
+/** Unlocking opens a timed signing session; no secret is kept in UI state. */
 function PassphraseDialog() {
-  const open = sendNeedsPassphrase.value;
-  const flow = sendFlow.value;
   const wallet = activeWallet.value;
-  const [passphrase, setPassphrase] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const busy = flow.busy === 'unlocking' || flow.busy === 'preparing';
-  const error = flow.error?.field === 'passphrase' ? flow.error.message : undefined;
-  const other = flow.error && flow.error.field !== 'passphrase' ? flow.error.message : undefined;
-
-  const close = (): void => {
-    setPassphrase('');
-    void backToEdit();
-  };
-  const submit = async (event: Event): Promise<void> => {
-    event.preventDefault();
-    if (busy || !passphrase) return;
-    const ok = await unlockForSend(passphrase);
-    if (ok) setPassphrase('');
-    else inputRef.current?.select();
-  };
-
-  if (!open) return null;
+  const flow = sendFlow.value;
+  if (!wallet || !sendNeedsPassphrase.value) return null;
   return (
-    <Dialog
+    <AuthorizationDialog
       open
-      onClose={close}
-      dismissible={!busy}
-      size="sm"
-      title="Enter passphrase"
-      description={wallet ? `Unlock ${wallet.name} to send.` : undefined}
-      footer={
-        <>
-          <Button variant="secondary" disabled={busy} onClick={close}>
-            Cancel
-          </Button>
-          <Button variant="primary" type="submit" form="send-passphrase" loading={busy} disabled={!passphrase}>
-            Unlock
-          </Button>
-        </>
-      }
-    >
-      <form id="send-passphrase" class="send-passphrase" {...PASSWORD_MANAGER_IGNORE} onSubmit={submit} noValidate>
-        {other ? <Banner tone="danger">{other}</Banner> : null}
-        <Field label="Passphrase" error={error}>
-          <PasswordInput
-            name="wallet-passphrase"
-            {...PASSPHRASE_FIELD}
-            value={passphrase}
-            onValue={setPassphrase}
-            inputRef={inputRef}
-            data-autofocus=""
-          />
-        </Field>
-      </form>
-    </Dialog>
+      wallet={wallet}
+      busy={!!flow.busy}
+      error={flow.error?.message}
+      onClose={() => void backToEdit()}
+      onAuthorize={(request) => void unlockForSend(request)}
+    />
   );
 }
 

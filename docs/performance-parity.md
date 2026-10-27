@@ -661,6 +661,30 @@ The desktop and web wallet (`apps/wallet`, `mmxwallet::service`,
 the C++ GUI; their request patterns were chosen for a remote, load-balanced
 server rather than measured against C++.
 
+- Public addresses persist after the first unlock: bounded caches in web
+  localStorage and desktop/CLI `mmxwallet.json`, and an existing `mmx.WalletFile`
+  beside the node seed (fingerprint/account-specific filename, at most 10,000
+  addresses and a 1 MiB read limit). Locked wallets continue observing without
+  deriving spending keys. Import discovery retains the addresses it already
+  derived; changing the visible count within that cache needs no passphrase.
+  Missing addresses require a new passphrase entry even during an open session.
+- Passphrase wallets cache derived signing keys until manual lock or the existing
+  inactivity timer (default five minutes, refreshed on spending). Desktop clears
+  its last key owner on lock; WASM frees and zeroizes its Vault. In-flight work is
+  invalidated by a lock generation. Native GUI timing remains owned by its
+  existing frontend idle timer; the node has its existing 100 ms expiry poll.
+  Regular disk wallets stay usable, while regular web wallets drop their seed
+  and keys and need the password manager again. CLI commands observe the public
+  cache and derive keys in the local signing block, dropping them before network
+  validation/broadcast. No change is made to the C++ wallet.
+- Plaintext base seed compatibility is retained; there is no extra encryption
+  or encrypted VNI type. Protected web wallets persist their base recovery words
+  so unlocking requires only the passphrase, which is never persisted. The node
+  farmer key remains independent of that passphrase. The additive Rust-only
+  `Wallet.set_address_count_ex` RPC carries derivation authorization. Existing VNI
+  type/code identities are preserved (including the historical schema timeout
+  default); the Rust runtime's actual default is 300 seconds.
+
 - Balances are fetched 4 addresses at a time (CLI, service, web), with in-flight
   de-duplication of identical GETs in the UI and a 20 s deadline per request.
   The CLI used to fetch them one by one.

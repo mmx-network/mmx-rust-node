@@ -88,6 +88,26 @@ pub fn verify_transaction(tx_json: &str, params_json: &str) -> Result<(), JsErro
     Ok(api::verify_transaction(tx_json, params_json)?)
 }
 
+/// Sendable amount from public addresses alone; no seed or keys are opened.
+#[wasm_bindgen]
+pub fn watch_max_amount(
+    addresses_json: &str,
+    balances_json: &str,
+    params_json: &str,
+    currency: &str,
+    memo: Option<String>,
+    fee_level: u32,
+) -> Result<String, JsError> {
+    Ok(api::watch_max_amount(
+        addresses_json,
+        balances_json,
+        params_json,
+        currency,
+        memo,
+        fee_level,
+    )?)
+}
+
 /// Addresses of any account (parity tests only).
 #[cfg(feature = "test-nonce")]
 #[wasm_bindgen]

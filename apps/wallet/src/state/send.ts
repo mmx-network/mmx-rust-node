@@ -4,7 +4,7 @@
  * in flight is ignored; a broadcast is never retried automatically.
  */
 import { batch, computed, signal } from '@preact/signals';
-import { toBackendError, type Contact, type ErrorCode, type FeeLevel, type PreparedSend, type SendRequest } from '../backend/types';
+import { toBackendError, type Contact, type ErrorCode, type FeeLevel, type PreparedSend, type SendRequest, type UnlockRequest } from '../backend/types';
 import type { AssetBalance } from '../chain/balances';
 import { NATIVE_CONTRACT, normalizeAddress } from '../lib/address';
 import { formatAmount, parseAmount, parseAtomic, toInputString, type AmountError } from '../lib/amount';
@@ -17,6 +17,7 @@ import { activeWallet, activeWalletId, backend, contacts, sessionWalletId, setti
 import { navigate } from './router';
 import { assets, ownAddressSet, params, pendingReservedTotals, refreshNow, trackPending } from './session';
 import { notify } from './toasts';
+import { markActivity } from './idle';
 
 export interface SendDraft {
   /** Recipient address (or text being searched in contacts). */
@@ -238,6 +239,7 @@ async function prepare(request: SendRequest): Promise<void> {
   sendFlow.value = { ...flow, busy: 'preparing', feeLevel: request.feeLevel, needsPassphrase: false };
   try {
     const prepared = await backend().prepareSend(request);
+    markActivity();
     if (started !== epoch || activeWalletId.value !== request.walletId) {
       void backend().discardPrepared(prepared.txid).catch(() => undefined);
       return;
@@ -312,6 +314,7 @@ export async function setSendFeeLevel(level: FeeLevel): Promise<void> {
   let prepared: PreparedSend;
   try {
     prepared = await backend().prepareSend(request);
+    markActivity();
   } catch (e) {
     if (started !== epoch) return;
     const err = toBackendError(e);
@@ -352,14 +355,16 @@ export async function setSendFeeLevel(level: FeeLevel): Promise<void> {
 }
 
 /** Unlocks the wallet with its passphrase, then continues to review. */
-export async function unlockForSend(passphrase: string): Promise<boolean> {
+export async function unlockForSend(secret: string | UnlockRequest): Promise<boolean> {
+  const request = typeof secret === 'string' ? { passphrase: secret } : secret;
   const flow = sendFlow.value;
   const id = activeWalletId.value;
-  if (flow.busy || !id || !passphrase) return false;
+  if (flow.busy || !id) return false;
   const started = epoch;
   sendFlow.value = { ...flow, busy: 'unlocking' };
   try {
-    upsertWallet(await backend().unlockWallet(id, { passphrase }));
+    upsertWallet(await backend().unlockWallet(id, request));
+    markActivity();
   } catch (e) {
     if (started === epoch) sendFlow.value = { ...flow, busy: false, needsPassphrase: true, error: errorState(e) };
     return false;
@@ -424,6 +429,7 @@ export async function confirmSend(): Promise<void> {
   };
   try {
     await backend().broadcast(request.walletId, prepared.txid);
+    markActivity();
   } catch (e) {
     if (isTransportError(e)) {
       // Tracked for its wallet even when another one is open now.

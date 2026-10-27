@@ -221,6 +221,33 @@ fn derive(seed: &[u8; 32], passphrase: &str, account: u32, count: u32) -> Res<Wa
     Wallet::derive(seed, passphrase, account, count).map_err(wallet_error)
 }
 
+pub fn watch_max_amount(
+    addresses_json: &str,
+    balances_json: &str,
+    params_json: &str,
+    currency: &str,
+    memo: Option<String>,
+    fee_level: u32,
+) -> Res<String> {
+    let texts: Vec<String> = serde_json::from_str(addresses_json).map_err(|_| INVALID_ARGUMENT)?;
+    check_count(texts.len().try_into().map_err(|_| INVALID_ARGUMENT)?)?;
+    let addresses = texts
+        .iter()
+        .map(|s| parse_address(s))
+        .collect::<Res<Vec<_>>>()?;
+    let wallet = Wallet::watch_only(addresses).map_err(wallet_error)?;
+    wallet
+        .max_transfer_amount(
+            &parse_balances(balances_json)?,
+            &parse_params(params_json)?,
+            parse_address(currency)?,
+            parse_memo(memo)?.as_deref(),
+            fee_ratio(fee_level)?,
+        )
+        .map(|n| n.to_string())
+        .map_err(wallet_error)
+}
+
 /// Addresses of any account, for parity tests against the C++ reference.
 #[cfg(feature = "test-nonce")]
 pub fn derive_addresses(

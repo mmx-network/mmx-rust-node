@@ -459,3 +459,36 @@ fn completion_accounts_for_deposits_shared_user_signatures_and_existing_inputs()
         .complete_native(&existing, &balances, &params, 1, &Default::default())
         .is_err());
 }
+
+#[test]
+fn public_wallet_can_estimate_fees_but_cannot_sign() {
+    let signing = Wallet::derive(&seed(), "secret", 0, 2).unwrap();
+    let public = Wallet::watch_only(signing.addresses.clone()).unwrap();
+    let params = ChainParams::default();
+    let native = Address::default();
+    let balances = BTreeMap::from([((public.addresses[0], native), 1_000_000)]);
+    assert_eq!(
+        public
+            .max_transfer_amount(&balances, &params, native, None, 1024)
+            .unwrap(),
+        signing
+            .max_transfer_amount(&balances, &params, native, None, 1024)
+            .unwrap()
+    );
+    assert!(public.sign_message(public.addresses[0], &[1; 32]).is_err());
+    assert!(public.public_key(0).is_err());
+    assert!(public
+        .transfer(
+            &balances,
+            &params,
+            100,
+            Output {
+                address: public.addresses[1],
+                contract: native,
+                amount: 1,
+                memo: None
+            },
+            &TransferOptions::default()
+        )
+        .is_err());
+}

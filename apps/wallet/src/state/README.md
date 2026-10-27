@@ -31,11 +31,11 @@ unverified token can be called "MMX".
 | `initialized` | `Signal<boolean>` | |
 | `initError` | `Signal<string \| null>` | Start-up failure message (App shows it). |
 | `platform` | `Signal<'desktop' \| 'web'>` | Use for platform-specific UI. |
-| `phase` | `Computed<'loading' \| 'onboarding' \| 'unlock' \| 'ready'>` | onboarding = no wallets; unlock = active wallet locked. |
+| `phase` | `Computed<'loading' \| 'onboarding' \| 'unlock' \| 'ready'>` | onboarding = no wallets; unlock = public addresses are not cached and the wallet needs authorization. |
 | `route` | `Signal<Route>` | `{ name: RouteName; param?: string }`. `param` is the activity item key for `#/activity/<key>`. |
 | `navigate(name, param?, { replace? })` | `void` | Hash navigation. |
 | `RouteId`, `FlowRouteId`, `RouteName`, `Route`, `AppPhase` | types | `RouteId` = shell routes. |
-| `SHELL_ROUTES`, `FLOW_ROUTES`, `isShellRoute`, `isFlowRoute`, `parseHash`, `formatHash`, `homeRoute`, `routeAllowed` | helpers | The route guard redirects routes not allowed in the current phase (e.g. shell routes while locked go to `#/unlock`). Flow routes (`welcome`, `create`, `import`) stay reachable when ready ("Add wallet"); show a back/cancel action there when `phase.value === 'ready'` or wallets exist. |
+| `SHELL_ROUTES`, `FLOW_ROUTES`, `isShellRoute`, `isFlowRoute`, `parseHash`, `formatHash`, `homeRoute`, `routeAllowed` | helpers | The route guard redirects routes not allowed in the current phase (e.g. wallets without cached public addresses go to `#/unlock`). Flow routes (`welcome`, `create`, `import`) stay reachable when ready ("Add wallet"); show a back/cancel action there when `phase.value === 'ready'` or wallets exist. |
 
 ## Wallets
 
@@ -48,13 +48,13 @@ unverified token can be called "MMX".
 | `sessionWalletId` | `Signal<string \| null>` | Wallet whose data is loaded. |
 | `opening` | `Signal<boolean>` | A wallet switch is opening a wallet. |
 | `canLock` | `Computed<boolean>` | Web: always when open; desktop: passphrase wallets only. |
-| `selectWallet(id)` | `Promise<void>` | Switches wallet and stays on the current page; a locked target leads to `#/unlock`. |
-| `unlockWallet(id, { passphrase?, mnemonic? }, { navigateTo? })` | `Promise<WalletInfo>` | Desktop: passphrase. Web: `mnemonic` = words from the password manager (+ passphrase when needed). Opens the wallet and goes to Overview (`navigateTo: null` to stay). Errors: `invalid_passphrase`, `passphrase_required`, `wallet_mismatch`, `invalid_mnemonic`. Web: a successful unlock also marks the wallet verified. |
+| `selectWallet(id)` | `Promise<void>` | Switches wallet and stays on the current page; a locked target remains observable when its addresses are cached. |
+| `unlockWallet(id, { passphrase?, mnemonic? }, { navigateTo? })` | `Promise<WalletInfo>` | Desktop: passphrase. Web: recovery words from the password manager, or just the passphrase for a protected wallet with its base seed cached. Opens the wallet and goes to Overview (`navigateTo: null` to stay). Errors: `invalid_passphrase`, `passphrase_required`, `wallet_mismatch`, `invalid_mnemonic`. Web: a successful unlock also marks the wallet verified. |
 | `openSavedWallet({ username, words, passphrase? })` | `Promise<WalletInfo>` | Web "Open another wallet" / onboarding "Open a wallet saved in your password manager". Handles known wallets, new devices (fingerprint from the username = expected fingerprint) and usernames without one. On `passphrase_required` show the passphrase step (optional if the username had no fingerprint) and call again. |
 | `credentialUsername(name, fingerprint)` | `string` | `"<name> (<fingerprint>)"` for the save/unlock forms. |
 | `parseCredentialUsername(username)` | `{ name, fingerprint? }` | |
 | `verifyPassphrase(id, passphrase)` | `Promise<void>` | Desktop re-check (e.g. before showing the recovery phrase). |
-| `lock({ everywhere?, inactivity? })` | `Promise<void>` | Web: frees all keys, goes to `#/unlock`. Desktop: forgets passphrases; goes to `#/unlock` if the active wallet is now locked. `everywhere: true` only for explicit Lock buttons (web: other tabs lock too); idle and `pagehide` locks stay local. A wallet setup in progress is cancelled and the welcome screen shows `setupNotice`. |
+| `lock({ everywhere?, inactivity? })` | `Promise<void>` | Drops signing keys and clears sensitive dialogs; cached public addresses keep the current page open. Desktop regular wallets stay usable. `everywhere: true` only for explicit Lock buttons (web: other tabs lock too); idle and `pagehide` locks stay local. A wallet setup in progress is cancelled and the welcome screen shows `setupNotice`. |
 | `lockedElsewhere()` | `Promise<void>` | Another tab locked every wallet: the same cleanup as `lock()` without signalling again (wired up by `init`). |
 | `newRecoveryPhrase()` | `Promise<string>` | 24 new words for the create flow; nothing is stored. Keep them in component state only while the flow is shown and call `beginSetup()` while holding them. |
 | `newWalletFingerprint(mnemonic, passphrase?)` | `Promise<string>` | Web: the wallet ID of new words with this passphrase, for the password manager username. Stores nothing. |
@@ -156,8 +156,8 @@ moved amount. Labels: `REWARD_LABELS`; `moved` →
 | `backToEdit()` | `Promise<void>` | Leave review without sending. |
 | `finishSend()` | `void` | "Done": clears the form. |
 | `discardSend()` | `Promise<void>` | Reset everything. |
-| `sendNeedsPassphrase` | `Computed<boolean>` | Desktop: show a passphrase field, then `unlockForSend(passphrase)`. |
-| `unlockForSend(passphrase)` | `Promise<boolean>` | Continues to review on success; `error.field === 'passphrase'` on failure. |
+| `sendNeedsPassphrase` | `Computed<boolean>` | Show AuthorizationDialog: passphrase, or recovery phrase for a regular web wallet. |
+| `unlockForSend(UnlockRequest)` | `Promise<boolean>` | Continues to review on success; `error.field === 'passphrase'` on failure. |
 | `amountErrorMessage`, `checkDraft`, `matchesRequest`, `formatPrepared`, `PREPARED_TTL_MS` | helpers | |
 
 A review that stays open past `PREPARED_TTL_MS` returns to `edit` with an
@@ -202,7 +202,7 @@ address in groups of 4).
 | `copyToClipboard(text, { sensitive?, message? })` | `Promise<boolean>` | Shows "Copied"; `sensitive` (recovery words) clears the clipboard after 60 s on the desktop and as soon as the browser allows on the web (`sensitiveCopyMessage()`). |
 | `copyAddress(address)` | `Promise<void>` | "Address copied"; throws when copying failed (for `CopyButton`). |
 | `openTransaction(txid)` / `openAddress(address)` | `Promise<void>` | Explorer links. |
-| `markActivity()` | `void` | Idle tracking is automatic; only needed for activity outside DOM events. |
+| `markActivity()` | `void` | Idle tracking is automatic; spending explicitly resets the default five-minute timeout too. |
 
 ## Onboarding (`actions/onboarding.ts`)
 

@@ -32,6 +32,19 @@ pub struct Wallet {
     pub addresses: Vec<Address>,
 }
 impl Wallet {
+    /// Public-address wallet for balance/fee calculation. It has no signing keys.
+    pub fn watch_only(addresses: Vec<Address>) -> Result<Self> {
+        if addresses.is_empty() || addresses.len() > 10000 {
+            return Err(Error::InvalidArgument(
+                "invalid watch-only address count".into(),
+            ));
+        }
+        Ok(Self {
+            keys: Vec::new(),
+            addresses,
+        })
+    }
+
     pub fn derive(seed: &[u8; 32], passphrase: &str, account: u32, count: u32) -> Result<Self> {
         if *seed == [0; 32] || !(1..=10000).contains(&count) {
             return Err(Error::InvalidArgument(
@@ -124,7 +137,11 @@ impl Wallet {
             .iter()
             .position(|a| *a == address)
             .ok_or_else(|| Error::InvalidArgument("address not owned by wallet".into()))?;
-        let sig: Signature = self.keys[index]
+        let key = self
+            .keys
+            .get(index)
+            .ok_or_else(|| Error::InvalidArgument("watch-only wallet cannot sign".into()))?;
+        let sig: Signature = key
             .sign_prehash(hash)
             .map_err(|_| Error::InvalidArgument("signing failed".into()))?;
         Ok(crate::Solution {

@@ -35,7 +35,7 @@ test('creates a wallet and moves through every screen', async ({ page }) => {
   await page.setViewportSize(MOBILE);
 
   await page.getByRole('button', { name: 'Lock', exact: true }).click();
-  await expect(page).toHaveURL(/#\/unlock$/u);
+  await expect(page.getByRole('button', { name: 'Unlock', exact: true }).first()).toBeVisible();
   await expectNoSideScroll(page);
   await unlockWithWords(page, words);
   await expectOverview(page, 'Phone');

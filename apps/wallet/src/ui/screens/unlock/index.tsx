@@ -261,6 +261,24 @@ function PassphraseView({ open }: { open: OpenWallet }) {
 }
 
 function WebWalletUnlock({ wallet, onChange, onOther }: { wallet: WalletInfo; onChange?: () => void; onOther: () => void }) {
+  return wallet.hasStoredSeed ? <StoredWalletOpen wallet={wallet} onChange={onChange} />
+    : <LegacyWebWalletUnlock wallet={wallet} onChange={onChange} onOther={onOther} />;
+}
+
+function StoredWalletOpen({ wallet, onChange }: { wallet: WalletInfo; onChange?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  return <FocusLayout onBack={onChange}>
+    <FlowHeader title="Unlock your wallet" subtitle="Unlock to spend from this wallet." />
+    <DesktopPassphraseForm busy={busy} error={error} onSubmit={(passphrase) => {
+      setBusy(true);
+      setError(undefined);
+      unlockWallet(wallet.id, { passphrase }).catch((e) => setError(errorMessage(e))).finally(() => setBusy(false));
+    }} />
+  </FocusLayout>;
+}
+
+function LegacyWebWalletUnlock({ wallet, onChange, onOther }: { wallet: WalletInfo; onChange?: () => void; onOther: () => void }) {
   const unverified = wallet.verified === false;
   const open = useOpenWallet(
     { kind: 'known', wallet },

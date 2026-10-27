@@ -437,6 +437,11 @@ impl Wallet {
         output: Output,
         options: &TransferOptions,
     ) -> Result<Transaction> {
+        if self.keys.len() != self.addresses.len() {
+            return Err(Error::InvalidArgument(
+                "watch-only wallet cannot sign".into(),
+            ));
+        }
         if output.amount == 0
             || output.address == Address::default()
             || output.memo.as_ref().is_some_and(|m| m.len() > 64)

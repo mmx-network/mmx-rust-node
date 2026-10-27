@@ -137,16 +137,16 @@ class DesktopBackend implements Backend {
     return call('rename_wallet', { id, name });
   }
 
-  setAddressCount(id: WalletId, n: number): Promise<string[]> {
-    return call('set_address_count', { id, count: n });
+  setAddressCount(id: WalletId, n: number, passphrase?: string): Promise<string[]> {
+    return call('set_address_count', { id, count: n, ...(passphrase !== undefined ? { passphrase } : {}) });
   }
 
   removeWallet(id: WalletId): Promise<void> {
     return call('remove_wallet', { id });
   }
 
-  revealMnemonic(id: WalletId): Promise<string> {
-    return call('reveal_mnemonic', { id });
+  revealMnemonic(id: WalletId, passphrase?: string): Promise<string> {
+    return call('reveal_mnemonic', { id, ...(passphrase !== undefined ? { passphrase } : {}) });
   }
 
   getAddresses(id: WalletId): Promise<string[]> {

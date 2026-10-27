@@ -139,7 +139,7 @@ describe('desktop backend', () => {
     expect(await backend.loadAppState()).toEqual({
       labels: {},
       contacts: [],
-      settings: { theme: 'system', autoLockMinutes: 24 * 60, feeLevel: 1 },
+      settings: { theme: 'system', autoLockMinutes: 5, feeLevel: 1 },
     });
   });
 

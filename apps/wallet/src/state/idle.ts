@@ -1,11 +1,11 @@
 /**
- * Auto-lock after inactivity (§6.6) when autoLockMinutes > 0 (default 24 h).
+ * Auto-lock after inactivity (§6.6) when autoLockMinutes > 0 (default 5 min).
  * Web: any open wallet, and always on `pagehide`; desktop: only passphrase
  * wallets. Recovery words held by the create or import flow
  * count as an open wallet: auto-lock cancels the setup.
  */
 import { platform, settings, wallets } from './core';
-import { setupActive } from './setup';
+import { sensitiveActive, setupActive } from './setup';
 import { lock } from './wallets';
 
 const ACTIVITY_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus'] as const;
@@ -21,7 +21,7 @@ export function markActivity(now = Date.now()): void {
 /** Minutes until auto-lock for the current state, or null when auto-lock does not apply. */
 export function autoLockDelayMinutes(): number | null {
   const minutes = settings.value.autoLockMinutes;
-  const setup = setupActive.value;
+  const setup = setupActive.value || sensitiveActive.value;
   if (minutes <= 0) return null;
   if (platform.value === 'web') return setup || wallets.value.some((w) => !w.locked) ? minutes : null;
   return setup || wallets.value.some((w) => w.withPassphrase && !w.locked) ? minutes : null;
