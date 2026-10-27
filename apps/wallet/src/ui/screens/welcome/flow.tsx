@@ -73,6 +73,7 @@ export const PASSWORD_MANAGER_IGNORE = {
   'data-1p-ignore': 'true',
   'data-lpignore': 'true',
   'data-bwignore': 'true',
+  'data-protonpass-ignore': 'true',
   'data-form-type': 'other',
 } as const;
 
@@ -80,13 +81,11 @@ export const PASSWORD_MANAGER_IGNORE = {
  * Attributes for passphrase fields (always a PasswordInput, so the value stays
  * masked). Browsers' own password managers ignore autocomplete="off" on
  * password fields; "one-time-code" marks the field as not a password, so a
- * passphrase is never offered for saving and never replaces the saved
- * recovery words. The data-* hints do the same for extensions.
+ * passphrase should not be offered for saving or replace the saved recovery
+ * words. The data-* hints ask extensions to do the same. These are hints,
+ * not a security boundary against an extension that can read the page.
  */
 export const PASSPHRASE_FIELD = {
+  ...PASSWORD_MANAGER_IGNORE,
   autocomplete: 'one-time-code',
-  'data-1p-ignore': 'true',
-  'data-lpignore': 'true',
-  'data-bwignore': 'true',
-  'data-form-type': 'other',
 } as const;

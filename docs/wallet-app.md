@@ -429,6 +429,13 @@ error; scientific notation rejected; more fractional digits than `decimals` → 
   `data-bwignore`) only when §6.3 says locked; on a new device the fingerprint from
   the username is the expected fingerprint; if the username has none, the passphrase
   step is shown as optional.
+- Passphrase inputs and their enclosing forms carry password-manager ignore
+  hints (including Proton Pass). The credential-storage API accepts only a
+  canonical 24-word recovery phrase, rejecting a passphrase or an appended
+  passphrase. Passphrases are never passed to credential storage or browser
+  persistence. These HTML hints discourage autosave/autofill; a website cannot
+  prevent a user or a privileged extension from saving entered text manually.
+  Keep the passphrase separate from the saved recovery phrase.
 - After unlock the password input value is cleared; the seed is held only inside the
   WASM `Vault` of that tab. Lock / auto-lock (default 24 h idle, unless Never; always on `pagehide`)
   frees every Vault of the tab and clears unlocked UI state.

@@ -103,6 +103,14 @@ describe('Credential Management API', () => {
     expect(await storeCredential('Main (1)', WORDS)).toBe(false);
   });
 
+  it('refuses passphrases and combined recovery phrase/passphrase values', async () => {
+    const { credentials } = install(async () => null);
+    for (const secret of ['extra wallet secret', `${WORDS} extra wallet secret`, `${WORDS}\nextra wallet secret`, 'invalid '.repeat(24).trim()]) {
+      expect(await storeCredential('Main (1)', secret)).toBe(false);
+    }
+    expect(credentials.store).not.toHaveBeenCalled();
+  });
+
   it('gets a password credential with optional mediation', async () => {
     const { credentials } = install(async () => ({ type: 'password', id: 'Main (1)', password: WORDS }));
     expect(await getCredential()).toEqual({ username: 'Main (1)', words: WORDS });

@@ -6,6 +6,8 @@ import {
   expectNoWords,
   expectActiveWallet,
   expectOverview,
+  expectPassphrasePrivacy,
+  goTo,
   importWallet,
   lockWallet,
   openApp,
@@ -107,19 +109,42 @@ test('creates a wallet, saves it and confirms it by opening it once', async ({ p
 });
 
 test('creates a wallet with a passphrase', async ({ page }) => {
+  // Observe what the wallet actually offers to the native password manager.
+  // This is isolated test memory, not browser storage or a real saved credential.
+  await page.addInitScript(() => {
+    const passwords: string[] = [];
+    Object.defineProperty(window, '__testStoredPasswords', { value: passwords });
+    Object.defineProperty(navigator.credentials, 'store', {
+      value: async (credential: Credential & { password: string }) => {
+        passwords.push(credential.password);
+        return credential;
+      },
+    });
+  });
   await openApp(page);
   const passphrase = 'blue harbor 42';
   const { words, id } = await createWallet(page, { name: 'Vault', passphrase });
   expect(id).toBe(walletId(words, passphrase));
+  expect(await page.evaluate(() => (window as unknown as { __testStoredPasswords: string[] }).__testStoredPasswords)).toEqual([words]);
+  expect(await storedText(page)).not.toContain(passphrase);
   await lockWallet(page);
 
   await unlockWithWords(page, words, 'wrong');
   await expect(page.getByText('Wrong passphrase. Try again.')).toBeVisible();
+  await expectPassphrasePrivacy(page);
   await expect(page.locator('input[name=wallet-passphrase]')).toBeFocused();
   await capture(page, 'unlock-wrong-passphrase');
   await page.locator('input[name=wallet-passphrase]').fill(passphrase);
   await page.getByRole('button', { name: 'Unlock', exact: true }).click();
   await expectOverview(page, 'Vault');
+  await goTo(page, 'Settings');
+  await page.getByRole('button', { name: 'Show', exact: true }).click();
+  await expectPassphrasePrivacy(page);
+  await page.locator('input[name=wallet-passphrase]').fill(passphrase);
+  await page.getByRole('button', { name: 'Show phrase', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Recovery phrase', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __testStoredPasswords: string[] }).__testStoredPasswords)).toEqual([words]);
+  expect(await storedText(page)).not.toContain(passphrase);
 });
 
 /** Starts creating a wallet and stops on the password manager step; returns the new words and their wallet ID. */

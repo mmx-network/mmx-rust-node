@@ -64,6 +64,21 @@ export interface CreatedWallet {
   id: string;
 }
 
+/** Passphrases stay separate from the credential forms offered for saving. */
+export async function expectPassphrasePrivacy(page: Page): Promise<void> {
+  const fields = page.locator('input[name^="wallet-passphrase"]');
+  expect(await fields.count()).toBeGreaterThan(0);
+  for (const field of await fields.all()) {
+    await expect(field).toHaveAttribute('autocomplete', 'one-time-code');
+    for (const attribute of ['data-1p-ignore', 'data-lpignore', 'data-bwignore', 'data-protonpass-ignore']) {
+      await expect(field).toHaveAttribute(attribute, 'true');
+      await expect(field.locator('xpath=ancestor::form')).toHaveAttribute(attribute, 'true');
+    }
+    await expect(field.locator('xpath=ancestor::form')).toHaveAttribute('autocomplete', 'off');
+  }
+  await expect(page.locator('input[autocomplete=username], input[autocomplete=current-password], input[autocomplete=new-password]')).toHaveCount(0);
+}
+
 /**
  * Web: creates a wallet, saves it (the save form is submitted; headless
  * Chromium has no password manager) and opens it once with the words, as a
@@ -74,6 +89,7 @@ export async function createWallet(page: Page, options: { name: string; passphra
   await page.getByLabel('Wallet name').fill(options.name);
   if (options.passphrase) {
     await page.getByRole('switch', { name: 'Add a passphrase' }).click();
+    await expectPassphrasePrivacy(page);
     await page.locator('input[name=wallet-passphrase]').fill(options.passphrase);
     await page.locator('input[name=wallet-passphrase-repeat]').fill(options.passphrase);
   }
@@ -106,6 +122,7 @@ export async function importWallet(
   await page.getByLabel('Wallet name').fill(options.name);
   if (options.passphrase) {
     await page.getByRole('switch', { name: 'This wallet has a passphrase' }).click();
+    await expectPassphrasePrivacy(page);
     await page.locator('input[name=wallet-passphrase]').fill(options.passphrase);
     await page.locator('input[name=wallet-passphrase-repeat]').fill(options.passphrase);
   }

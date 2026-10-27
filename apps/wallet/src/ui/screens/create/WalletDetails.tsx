@@ -59,7 +59,7 @@ export function WalletDetails({
   };
 
   return (
-    <form class="onboarding-form create-details" autocomplete="off" noValidate onSubmit={submit}>
+    <form class="onboarding-form create-details" {...PASSWORD_MANAGER_IGNORE} noValidate onSubmit={submit}>
       <Field label="Wallet name" error={shown.name ?? nameError}>
         <TextInput
           name="wallet-name"
@@ -114,7 +114,7 @@ export function WalletDetails({
             {create ? (
               <p class="create-details__warning">
                 <Icon name="warning" size="sm" class="create-details__warning-icon" />
-                <span>A forgotten passphrase can’t be recovered.</span>
+                <span>Keep your passphrase separate from your saved recovery phrase. A forgotten passphrase can’t be recovered.</span>
               </p>
             ) : null}
           </div>

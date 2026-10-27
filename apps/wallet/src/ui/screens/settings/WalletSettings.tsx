@@ -31,7 +31,7 @@ import {
   TextInput,
   WordGrid,
 } from '../../components';
-import { PASSPHRASE_FIELD, useMounted } from '../welcome/flow';
+import { PASSPHRASE_FIELD, PASSWORD_MANAGER_IGNORE, useMounted } from '../welcome/flow';
 import { fundedMessage } from './text';
 
 function nameError(name: string): string | undefined {
@@ -266,7 +266,7 @@ function RecoveryPhrase({ wallet }: { wallet: WalletInfo }) {
         {ask ? (
           <form
             class="settings-reveal"
-            autocomplete="off"
+            {...PASSWORD_MANAGER_IGNORE}
             noValidate
             onSubmit={(event) => {
               event.preventDefault();

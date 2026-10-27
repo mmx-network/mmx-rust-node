@@ -7,6 +7,7 @@
  * never throws) in browsers without the Credential Management API.
  */
 import { WALLET_NAME_MAX } from '../../lib/appstate';
+import { allWordsValid, joinWords } from '../../lib/mnemonic';
 import { sanitizeText } from '../../lib/text';
 
 /** Chromium-only Credential Management types (not in the standard DOM typings). */
@@ -93,6 +94,10 @@ export async function storeCredential(username: string, words: string): Promise<
   if (!Ctor || !container || typeof username !== 'string' || !username || typeof words !== 'string' || !words) {
     return false;
   }
+  // Only canonical recovery phrases belong in this vault entry. Reject an
+  // accidentally supplied passphrase or words with a passphrase appended.
+  const list = words.split(' ');
+  if (!allWordsValid(list) || joinWords(list) !== words) return false;
   try {
     const credential = new Ctor({ id: username, password: words, name: username });
     await container.store(credential);

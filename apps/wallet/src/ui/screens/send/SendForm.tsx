@@ -48,7 +48,7 @@ import {
   type ComboboxOption,
   type SelectOption,
 } from '../../components';
-import { PASSPHRASE_FIELD } from '../welcome/flow';
+import { PASSPHRASE_FIELD, PASSWORD_MANAGER_IGNORE } from '../welcome/flow';
 
 /** Contacts offered in the To field. */
 const SUGGESTIONS = 8;
@@ -103,7 +103,7 @@ function PassphraseDialog() {
         </>
       }
     >
-      <form id="send-passphrase" class="send-passphrase" onSubmit={submit} noValidate>
+      <form id="send-passphrase" class="send-passphrase" {...PASSWORD_MANAGER_IGNORE} onSubmit={submit} noValidate>
         {other ? <Banner tone="danger">{other}</Banner> : null}
         <Field label="Passphrase" error={error}>
           <PasswordInput

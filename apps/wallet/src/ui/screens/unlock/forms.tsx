@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { WalletInfo } from '../../../backend/types';
 import { credentialUsername } from '../../../state';
 import { Banner, Button, Field, Identicon, PasswordInput, TextInput } from '../../components';
-import { PASSPHRASE_FIELD, useInitialFocus } from '../welcome/flow';
+import { PASSPHRASE_FIELD, PASSWORD_MANAGER_IGNORE, useInitialFocus } from '../welcome/flow';
 import type { OpenWallet } from './useOpenWallet';
 import './unlock.css';
 
@@ -137,7 +137,7 @@ export function PassphraseForm({ open }: PassphraseFormProps) {
   };
 
   return (
-    <form class="onboarding-form" autocomplete="off" noValidate onSubmit={onSubmit} data-1p-ignore="true" data-lpignore="true">
+    <form class="onboarding-form" {...PASSWORD_MANAGER_IGNORE} noValidate onSubmit={onSubmit}>
       <Field
         label="Passphrase"
         optional={optional}
@@ -190,7 +190,7 @@ export function DesktopPassphraseForm({ busy, error, generalError, onSubmit }: D
   };
 
   return (
-    <form class="onboarding-form" autocomplete="off" noValidate onSubmit={submit}>
+    <form class="onboarding-form" {...PASSWORD_MANAGER_IGNORE} noValidate onSubmit={submit}>
       <Field label="Passphrase" error={error}>
         <PasswordInput
           name="wallet-passphrase"
