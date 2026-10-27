@@ -120,6 +120,16 @@ describe('RPC traffic', () => {
     for (const address of addrs) expect(historyCalls(paths, address)).toBe(1);
   });
 
+  it('advances since with the chain even when the address remains empty', async () => {
+    const { paths, addrs } = await emptyWallet();
+    await settle(90_000);
+    const queries = paths.filter((path) => path.startsWith(`/address/history?id=${addrs[0]}&`))
+      .map((path) => Number(new URL(path, 'https://test.invalid').searchParams.get('since')));
+    expect(queries[0]).toBe(0);
+    expect(queries.at(-1)).toBeGreaterThan(0);
+    expect(queries.at(-1)).toBeGreaterThan(queries[1]!);
+  });
+
   it('detects funds sent to an unused address and then refreshes it frequently', async () => {
     const { S, backend, paths, addrs } = await emptyWallet();
     receive(backend, addrs[2]!, 2_000_000n, txid('2'));

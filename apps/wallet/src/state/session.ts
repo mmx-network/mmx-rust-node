@@ -614,7 +614,7 @@ async function runSync(s: Session, force = false): Promise<void> {
           }
           let result: { history: AddressHistory; changed: boolean };
           try {
-            result = await refreshAddress(rpc(), a, h, p);
+            result = await refreshAddress(rpc(), a, h, p, head);
           } catch (e) {
             // Too many new rows to page through: start this address over.
             if (!(e instanceof RangeError)) throw e;

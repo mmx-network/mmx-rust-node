@@ -323,9 +323,14 @@ passphrase, otherwise `fingerprint(seed, None)`.
   "page-full" boundary are complete. First page 25 rows per address, "load more" and
   balance-history coverage extend downward (1000 per request, cap 20 000 rows per
   wallet). A page is full when the node returned `limit` entries (NFT rows
-  included). Refresh re-reads the last 6 blocks: `since` = newest height the history
-  server returned − 5 (not the `/node/info` head); rows outside the requested
-  since/until are rejected. The public RPC does not return
+  included). Refresh re-reads from the greater of the newest history height − 5
+  and the previous successful refresh's node head − 999, bounded by the covered
+  range. Thus `since` advances even for empty/inactive addresses, retaining a
+  1,000-block allowance for head/history server skew. The current node head can
+  lower this cursor on rollback; it only advances the checkpoint after the entire
+  refresh succeeds, preserving the unchecked gap after a pause. Older cached rows
+  stay in the history, and paging older rows retains the checkpoint. Rows outside
+  the requested since/until are rejected. The public RPC does not return
   pending entries; broadcast transactions are tracked locally as pending via
   `/transaction?id=` until included (confirmed / failed) or `expires + 6 < height`
   (a lagging lookup must not mark an included send expired). Lookups run before

@@ -14,9 +14,10 @@
  *
  * Refresh re-reads from a few blocks below `top`, the newest height the
  * history server has actually returned, and replaces those rows, so a short
- * reorg cannot leave stale rows. `top` never comes from `/node/info`: when a
- * lagging server behind a load balancer leaves out recent rows, `top` drops
- * with them and the next refresh reads that range again.
+ * reorg cannot leave stale rows. For inactive addresses, the last successful
+ * refresh's node head also advances `since`, with a 1,000-block overlap for
+ * lagging history servers. This uses the previous check, so a long pause never
+ * skips the unchecked gap. Older cached rows are retained.
  */
 import { BackendError } from '../backend/types';
 import type { RpcClient } from './rpc';
@@ -26,16 +27,19 @@ export const FIRST_PAGE_LIMIT = 25;
 export const PAGE_LIMIT = 1000;
 export const WALLET_ROW_CAP = 20_000;
 export const REFRESH_OVERLAP = 6;
+/** Head/history skew allowed when advancing past an address's last activity. */
+export const REFRESH_HEAD_OVERLAP = 1000;
 
 export interface AddressHistory {
   /** Newest first. */
   rows: HistoryRow[];
   /**
    * Newest height the history server returned for this address (NFT rows
-   * included), as of the last first page or refresh; −1 when none. Refresh
-   * starts a few blocks below it.
+   * included), as of the last first page or refresh; −1 when none.
    */
   top: number;
+  /** Node head sampled before the last complete successful refresh, if known. */
+  checkedHead?: number;
   /** Lowest height known complete (inclusive). */
   bottom: number;
   /** True when no rows exist below `bottom` (bottom is 0). */
@@ -86,12 +90,16 @@ export function olderPageQuery(h: AddressHistory, limit = PAGE_LIMIT): { until: 
 export function applyOlderPage(h: AddressHistory, page: HistoryPage, limit: number): AddressHistory {
   const until = h.bottom - 1;
   const older = page.rows.filter((r) => r.height <= until).sort(compareRows);
-  return { rows: h.rows.concat(older), top: h.top, ...pageBottom(page, limit) };
+  return { ...h, rows: h.rows.concat(older), ...pageBottom(page, limit) };
 }
 
-/** Height to refresh from: a few blocks below the top, never below the covered range. */
-export function refreshSince(h: AddressHistory, overlap = REFRESH_OVERLAP): number {
-  return Math.max(h.bottom, h.top - overlap + 1, 0);
+/** Retain recent activity or 1,000 blocks behind the previous successful check. */
+export function refreshSince(h: AddressHistory, overlap = REFRESH_OVERLAP, head?: number): number {
+  // A rollback must reopen the range below the new head and remove cached
+  // rows above it. The current head can lower the cursor, never advance it.
+  const top = Math.min(h.top, head ?? h.top);
+  const checkedHead = Math.min(h.checkedHead ?? -1, head ?? Infinity);
+  return Math.max(h.bottom, top - overlap + 1, checkedHead - REFRESH_HEAD_OVERLAP + 1, 0);
 }
 
 /** Everything a refresh read: the rows at or above `since` and the newest height returned. */
@@ -116,6 +124,7 @@ export function applyRefresh(
   const changed = !sameRows(replaced, incoming);
   return {
     history: {
+      ...h,
       rows: incoming.concat(kept),
       top: Math.max(maxHeight(kept), fresh.maxHeight),
       bottom: Math.min(h.bottom, since),
@@ -256,7 +265,17 @@ export async function refreshAddress(
   address: string,
   h: AddressHistory,
   params: ChainParams,
+  head?: number,
 ): Promise<{ history: AddressHistory; changed: boolean }> {
-  const since = refreshSince(h);
-  return applyRefresh(h, since, await fetchRange(rpc, address, since, params));
+  if (head !== undefined && head < h.bottom) {
+    // The loaded range is now above the chain: rebuild its first page rather
+    // than retaining rows that a rollback may have removed.
+    return { history: await loadFirstPage(rpc, address, params), changed: true };
+  }
+  const since = refreshSince(h, REFRESH_OVERLAP, head);
+  const result = applyRefresh(h, since, await fetchRange(rpc, address, since, params));
+  // Only a fully fetched range can advance the checkpoint. Capture the head
+  // supplied before the request; blocks arriving during it remain unchecked.
+  if (head !== undefined) result.history.checkedHead = head;
+  return result;
 }

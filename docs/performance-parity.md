@@ -695,8 +695,19 @@ server rather than measured against C++.
   The CLI used to fetch them one by one.
 - History refresh re-reads the newest 6 blocks of every address instead of
   `since = top + 1`, replacing those rows, so a short reorg or a lagging server
-  behind the load balancer cannot leave stale or missing rows. History is cached
-  in memory per open wallet only (capped at 20,000 rows); nothing is persisted.
+  behind the load balancer can recover omitted recent rows. Empty/inactive
+  addresses also advance `since` from the node head sampled before their previous
+  successful refresh, retaining 1,000 blocks for head/history skew. The current
+  head never advances the lower bound before the unchecked gap has been read,
+  including every page after a long pause; a failed page leaves the checkpoint
+  unchanged. Older cached rows remain, and older-page loading retains the
+  checkpoint. The public history response has no server-head metadata, so skew
+  beyond this allowance is not guaranteed to recover without reopening the wallet.
+  Regressions cover empty and inactive addresses, a 190,000-block catch-up across
+  multiple pages, partial failure/retry, older paging, lag and rollback. History
+  is cached in memory per open wallet only (capped at 20,000 rows); nothing is
+  persisted. This bounds repeated historical queries; comparative production
+  server CPU/I/O measurements remain open.
 - Pending transfers are checked with `/transaction?id=` only while pending; a
   sync runs at most every 20 s, polling `/node/info` every 10 s while visible.
   Automatic UI polling and chart-history extension pause while hidden and resume

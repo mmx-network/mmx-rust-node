@@ -9,10 +9,16 @@ test('refreshes unused addresses less often and reuses the public view on unlock
   await page.waitForLoadState('networkidle');
   const before = (await rpc.requests()).length;
   for (let i = 0; i < 6; i++) {
-    await rpc.advance(2);
+    // Pass the 1,000-block horizon while preserving the same polling cadence.
+    await rpc.advance(200);
     const poll = page.waitForResponse((response) => new URL(response.url()).pathname === '/node/info');
+    const due = i % 3 === 2 ? wallet.addresses.slice(0, 3) : wallet.addresses.slice(0, 1);
+    const histories = due.map((address) => page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/address/history' && url.searchParams.get('id') === address;
+    }));
     await page.clock.fastForward(21_000);
-    await poll;
+    await Promise.all([poll, ...histories]);
     await page.waitForLoadState('networkidle');
   }
   const paths = (await rpc.requests()).slice(before).map((request) => request.path);
@@ -27,6 +33,11 @@ test('refreshes unused addresses less often and reuses the public view on unlock
     expect(count).toBeLessThanOrEqual(2);
   }
   expect(counts.reduce((sum, count) => sum + count, 0)).toBeLessThanOrEqual(10);
+  for (const address of wallet.addresses.slice(0, 3)) {
+    const since = paths.filter((path) => path.startsWith(`/address/history?id=${address}&`))
+      .map((path) => Number(new URL(path, 'https://test.invalid').searchParams.get('since')));
+    expect(since.at(-1)).toBeGreaterThan(since[0]!);
+  }
 
   await lockWallet(page);
   const lockedAt = (await rpc.requests()).length;

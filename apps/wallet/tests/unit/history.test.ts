@@ -318,6 +318,138 @@ describe('paging against a node', () => {
   });
 });
 
+describe('advancing refresh checkpoints', () => {
+  const lastSince = (node: FakeNode) => Number(new URL(node.calls.at(-1)!, 'https://test.invalid').searchParams.get('since'));
+
+  it.each([[999, 0], [1000, 1], [1001, 2], [50_000, 49_001]])('advances an empty address checked at head %i to since=%i', async (head, since) => {
+    const node = new FakeNode();
+    node.height = head;
+    const rpc = new RpcClient(node.transport);
+    const h = await loadFirstPage(rpc, A, PARAMS);
+    const result = await refreshAddress(rpc, A, h, PARAMS, head);
+    expect(result.changed).toBe(false);
+    expect(result.history.top).toBe(-1);
+    expect(refreshSince(result.history)).toBe(since);
+  });
+
+  it('moves since forward without discarding old transactions', async () => {
+    const node = new FakeNode();
+    node.add(A, { height: 10 });
+    node.height = 10_000;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS);
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    node.height = 10_100;
+    const result = await refreshAddress(rpc, A, h, PARAMS, node.height);
+    expect(lastSince(node)).toBe(9_001);
+    expect(result.changed).toBe(false);
+    expect(result.history).toMatchObject({ top: 10, checkedHead: 10_100, bottom: 0, exhausted: true });
+    expect(keys(result.history.rows)).toEqual(storedKeys(node, A));
+    expect(refreshSince(result.history)).toBe(9_101);
+  });
+
+  it('pages the entire unchecked gap after a long pause before advancing', async () => {
+    const node = new FakeNode();
+    node.height = 10_000;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS);
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    for (let i = 0; i < 1005; i++) node.add(A, { height: 15_000 + i });
+    node.height = 200_000;
+    const before = node.calls.length;
+    const result = await refreshAddress(rpc, A, h, PARAMS, node.height);
+    const queries = node.calls.slice(before).map((path) => new URL(path, 'https://test.invalid'));
+    expect(queries).toHaveLength(2);
+    expect(queries.every((query) => query.searchParams.get('since') === '9001')).toBe(true);
+    expect(keys(result.history.rows)).toEqual(storedKeys(node, A));
+    expect(refreshSince(result.history)).toBe(199_001);
+  });
+
+  it('does not advance the checkpoint when a later page fails', async () => {
+    const node = new FakeNode();
+    node.height = 10_000;
+    let fail = false;
+    const rpc = new RpcClient(async (path) => {
+      if (fail && path.includes('&until=')) throw new Error('page unavailable');
+      return node.transport(path);
+    });
+    let h = await loadFirstPage(rpc, A, PARAMS);
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    for (let i = 0; i < 1005; i++) node.add(A, { height: 15_000 + i });
+    node.height = 200_000;
+    fail = true;
+    await expect(refreshAddress(rpc, A, h, PARAMS, node.height)).rejects.toThrow();
+    expect(h.checkedHead).toBe(10_000);
+    expect(h.rows).toEqual([]);
+    expect(refreshSince(h)).toBe(9_001);
+    fail = false;
+    const retry = await refreshAddress(rpc, A, h, PARAMS, node.height);
+    expect(keys(retry.history.rows)).toEqual(storedKeys(node, A));
+    expect(retry.history.checkedHead).toBe(200_000);
+  });
+
+  it('preserves the checkpoint when paging older history', async () => {
+    const node = new FakeNode();
+    for (let i = 0; i < 30; i++) node.add(A, { height: 10 + i });
+    node.height = 10_000;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS);
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    h = await loadOlderPage(rpc, A, h, PARAMS);
+    expect(h.checkedHead).toBe(10_000);
+    expect(refreshSince(h)).toBe(9_001);
+    expect(keys(h.rows)).toEqual(storedKeys(node, A));
+  });
+
+  it('recovers incoming funds omitted by a lagging history server inside the overlap', async () => {
+    const node = new FakeNode();
+    node.height = 10_000;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS);
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    node.add(A, { height: 10_020 });
+    node.height = 10_030;
+    node.historyHeight = 9_950;
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    expect(h.rows).toEqual([]);
+    expect(refreshSince(h)).toBe(9_031);
+    node.historyHeight = null;
+    const result = await refreshAddress(rpc, A, h, PARAMS, node.height);
+    expect(result.changed).toBe(true);
+    expect(keys(result.history.rows)).toEqual(storedKeys(node, A));
+  });
+
+  it('lowers the checkpoint range when the node head rolls back', async () => {
+    const node = new FakeNode();
+    node.height = 50_000;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS);
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    node.height = 49_000;
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    expect(lastSince(node)).toBe(48_001);
+    expect(h.checkedHead).toBe(49_000);
+  });
+
+  it('rebuilds the loaded range when a rollback moves below its bottom', async () => {
+    const node = new FakeNode();
+    for (let i = 0; i < 30; i++) node.add(A, { height: 49_970 + i });
+    node.height = 50_000;
+    const rpc = new RpcClient(node.transport);
+    let h = await loadFirstPage(rpc, A, PARAMS);
+    h = (await refreshAddress(rpc, A, h, PARAMS, node.height)).history;
+    expect(h.bottom).toBeGreaterThan(49_000);
+    node.height = 49_000;
+    node.historyHeight = 49_000;
+    node.add(A, { height: 48_999 });
+    const result = await refreshAddress(rpc, A, h, PARAMS, node.height);
+    expect(result.changed).toBe(true);
+    expect(result.history.rows.map((entry) => entry.height)).toEqual([48_999]);
+    expect(result.history).toMatchObject({ top: 48_999, bottom: 0, exhausted: true });
+    expect(result.history.checkedHead).toBeUndefined();
+  });
+});
+
 describe('NFT rows and lagging servers', () => {
   const currencyKeys = (node: FakeNode, address: string, minHeight = 0) =>
     node
