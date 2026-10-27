@@ -212,7 +212,8 @@ fn actual_wallet_daemon_and_mmx_utility_share_the_native_wallet_protocol() {
         client
             .call_value("mmx.Wallet.is_locked", json!({"index":0}))
             .unwrap()["_ret_0"],
-        true
+        false,
+        "a regular disk wallet is usable without an unlock"
     );
     client
         .call_value("mmx.Wallet.unlock", json!({"index":0,"passphrase":""}))
@@ -242,7 +243,99 @@ fn actual_wallet_daemon_and_mmx_utility_share_the_native_wallet_protocol() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         address
     );
+    client
+        .call_value("mmx.Wallet.lock", json!({"index":0}))
+        .unwrap();
+    assert_eq!(
+        client
+            .call_value("mmx.Wallet.is_locked", json!({"index":0}))
+            .unwrap()["_ret_0"],
+        false,
+        "locking a regular disk wallet does not protect its accessible seed"
+    );
     client.close();
+}
+
+#[test]
+fn actual_passphrase_wallet_keeps_public_addresses_when_locked_and_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyFile::new([5; 32], Some("protected"));
+    let path = dir.path().join("wallet.dat");
+    fs::write(&path, key.encode()).unwrap();
+    let args = [
+        "--key-file".into(),
+        path.clone().into_os_string(),
+        "--num-addresses".into(),
+        "2".into(),
+        "--listen".into(),
+        "127.0.0.1:0".into(),
+    ];
+    let (daemon, endpoint) = Daemon::start(env!("CARGO_BIN_EXE_mmx-wallet"), &args, dir.path());
+    let wallet = client(&endpoint, "Wallet");
+    assert_eq!(
+        wallet
+            .call_value("mmx.Wallet.is_locked", json!({"index":0}))
+            .unwrap()["_ret_0"],
+        true
+    );
+    wallet
+        .call_value(
+            "mmx.Wallet.unlock",
+            json!({"index":0,"passphrase":"protected"}),
+        )
+        .unwrap();
+    let addresses = wallet
+        .call_value("mmx.Wallet.get_all_addresses", json!({"index":0}))
+        .unwrap()["_ret_0"]
+        .clone();
+    assert_eq!(addresses.as_array().unwrap().len(), 2);
+    let sign = json!({"index":0,"address":addresses[0],"msg":([7u8;32])});
+    wallet
+        .call_value("mmx.Wallet.sign_msg", sign.clone())
+        .unwrap();
+    wallet
+        .call_value("mmx.Wallet.lock", json!({"index":0}))
+        .unwrap();
+    assert_eq!(
+        wallet
+            .call_value("mmx.Wallet.is_locked", json!({"index":0}))
+            .unwrap()["_ret_0"],
+        true
+    );
+    assert_eq!(
+        wallet
+            .call_value("mmx.Wallet.get_all_addresses", json!({"index":0}))
+            .unwrap()["_ret_0"],
+        addresses
+    );
+    assert!(wallet
+        .call_value("mmx.Wallet.sign_msg", sign.clone())
+        .is_err());
+    wallet.close();
+    daemon.shutdown_successfully();
+
+    let (daemon, endpoint) = Daemon::start(env!("CARGO_BIN_EXE_mmx-wallet"), &args, dir.path());
+    let wallet = client(&endpoint, "Wallet");
+    assert_eq!(
+        wallet
+            .call_value("mmx.Wallet.is_locked", json!({"index":0}))
+            .unwrap()["_ret_0"],
+        true
+    );
+    assert_eq!(
+        wallet
+            .call_value("mmx.Wallet.get_all_addresses", json!({"index":0}))
+            .unwrap()["_ret_0"],
+        addresses
+    );
+    assert!(wallet.call_value("mmx.Wallet.sign_msg", sign).is_err());
+    assert_eq!(
+        fs::read(path).unwrap(),
+        key.encode(),
+        "the plaintext seed file stays compatible"
+    );
+    wallet.close();
+    daemon.shutdown_successfully();
 }
 #[test]
 fn actual_farmer_and_harvester_deliver_a_consensus_valid_signed_cpp_plot_proof() {
@@ -542,8 +635,8 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
     let sent = service::from_json(&call("send", args.clone()).unwrap()).unwrap();
     assert_eq!(
         call("is_locked", json!({"index":0})).unwrap(),
-        true,
-        "temporary passphrase must re-lock"
+        false,
+        "a valid passphrase starts a reusable spending session"
     );
     assert_eq!(node.lock().unwrap().pending_transactions(), 1);
     assert_eq!(
@@ -580,12 +673,6 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
         .unwrap()["_ret_0"]
         .is_null());
     // Explicit repeat submission is idempotent in node and wallet reservations.
-    wallet
-        .call_value(
-            "mmx.Wallet.unlock",
-            json!({"index":0,"passphrase":"protected"}),
-        )
-        .unwrap();
     call(
         "send_off",
         json!({"index":0,"tx":service::to_json(&sent).unwrap()}),
@@ -596,6 +683,10 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
         balance
     );
     let mut preview = args.clone();
+    preview["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("passphrase");
     preview["options"]["auto_send"] = json!(false);
     preview["options"]["nonce"] = json!(501);
     let preview = service::from_json(&call("send", preview).unwrap()).unwrap();
@@ -628,14 +719,25 @@ fn actual_wallet_spends_through_native_node_and_reserves_pending_balances() {
     let too_much = json!({"index":0,"amount":30_000_000_u128.to_le_bytes(),"src_addr":sender,"dst_addr":recipient,"currency":([0u8;32]),"options":options});
     assert!(call("send_from", too_much).is_err());
     call("lock", json!({"index":0})).unwrap();
+    assert_eq!(call("is_locked", json!({"index":0})).unwrap(), true);
+    let mut locked_send = args.clone();
+    locked_send["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("passphrase");
+    assert!(
+        call("send", locked_send).is_err(),
+        "manual lock must prevent spending without reauthorization"
+    );
     let mut invalid = args.clone();
     invalid["amount"] = json!(30_000_000_u128.to_le_bytes());
     assert!(call("send", invalid).is_err());
     assert_eq!(
         call("is_locked", json!({"index":0})).unwrap(),
-        true,
-        "failed temporary spend must also relock"
+        false,
+        "valid authorization starts a session even when the transfer fails"
     );
+    call("lock", json!({"index":0})).unwrap();
     let mut bad = args;
     bad["options"]["passphrase"] = json!("wrong");
     assert!(call("send", bad).is_err());

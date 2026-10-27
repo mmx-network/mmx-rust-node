@@ -684,6 +684,11 @@ server rather than measured against C++.
   `Wallet.set_address_count_ex` RPC carries derivation authorization. Existing VNI
   type/code identities are preserved (including the historical schema timeout
   default); the Rust runtime's actual default is 300 seconds.
+- Real-daemon regressions cover regular disk wallets remaining usable, reuse of
+  a passphrase spending session across RPC calls, manual lock refusing further
+  signing, and cached public addresses surviving lock and daemon restart while
+  the seed file stays byte-compatible. These use disposable wallets and a
+  synthetic node, without reading live wallet or ledger data.
 
 - Balances are fetched 4 addresses at a time (CLI, service, web), with in-flight
   de-duplication of identical GETs in the UI and a 20 s deadline per request.
