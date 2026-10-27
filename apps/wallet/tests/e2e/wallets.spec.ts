@@ -77,6 +77,50 @@ test('locks after the chosen time without activity', async ({ page, rpc }) => {
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('mmx-wallet/v1') ?? '{}').settings?.autoLockMinutes)).toBe(5);
 });
 
+test('keeps address-count controls in place while editing, cancelling and saving', async ({ page, rpc }) => {
+  await openFundedWallet(page, (address) => rpc.fund({ address, amount: '1000000' }));
+  await goTo(page, 'Settings');
+  await page.evaluate(() => document.fonts.ready);
+  const row = page.getByRole('group', { name: 'Addresses', exact: true });
+  const count = row.getByRole('spinbutton', { name: 'Number of addresses' });
+  const increase = row.getByRole('button', { name: 'Increase' });
+  const cancel = row.getByRole('button', { name: 'Cancel', exact: true });
+  const save = row.getByRole('button', { name: 'Save', exact: true });
+  const position = () => row.evaluate((element) => {
+    const stepper = element.querySelector('.stepper')!.getBoundingClientRect();
+    return { x: stepper.x, y: stepper.y, width: stepper.width, height: element.getBoundingClientRect().height };
+  });
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    await row.scrollIntoViewIfNeeded();
+    await expect(cancel).toBeDisabled();
+    await expect(save).toBeDisabled();
+    const before = await position();
+    const plus = (await increase.boundingBox())!;
+    await increase.click();
+    await expect(count).toHaveValue('4');
+    await expect(cancel).toBeEnabled();
+    await expect(save).toBeEnabled();
+    expect(await position()).toEqual(before);
+    // A second click at the same coordinates still hits Increase.
+    await page.mouse.click(plus.x + plus.width / 2, plus.y + plus.height / 2);
+    await expect(count).toHaveValue('5');
+    await capture(page, `settings-count-edit-${width}`);
+    await cancel.click();
+    await expect(count).toHaveValue('3');
+    await expect(save).toBeDisabled();
+    expect(await position()).toEqual(before);
+    await capture(page, `settings-count-idle-${width}`);
+  }
+  await increase.click();
+  const beforeSave = await position();
+  await save.click();
+  await expect(save).toBeDisabled();
+  await expect(cancel).toBeDisabled();
+  await expect(count).toHaveValue('4');
+  expect(await position()).toEqual(beforeSave);
+});
+
 test('renames a wallet, changes its address count and shows its recovery phrase', async ({ page, rpc }) => {
   const passphrase = 'river stone';
   const wallet = await openFundedWallet(

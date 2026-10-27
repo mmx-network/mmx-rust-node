@@ -403,6 +403,8 @@ Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
   matches) before anything is saved; a failure keeps the typed URL with the error
   and the old server; reset to default); appearance (System/Light/Dark); about
   (version).
+  Address-count Cancel and Save remain visible and are disabled until the count
+  changes, keeping the stepper in place during editing, cancellation and saving.
 
 Copy rules: short, task-focused, second person. No implementation details, no
 "WASM", "Tauri", "RPC" (say "network"), no "fingerprint" jargon outside wallet

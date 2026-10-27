@@ -173,16 +173,14 @@ function AddressCount({ wallet }: { wallet: WalletInfo }) {
     <>
       <div class="settings-count">
         <NumberStepper value={count} onChange={setCount} min={1} max={MAX_ADDRESSES} label="Number of addresses" disabled={busy} />
-        {changed ? (
-          <div class="settings-count__actions">
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setCount(wallet.addressCount)}>
-              Cancel
-            </Button>
-            <Button size="sm" variant="primary" loading={busy} onClick={() => void save()}>
-              Save
-            </Button>
-          </div>
-        ) : null}
+        <div class="settings-count__actions">
+          <Button size="sm" variant="ghost" disabled={busy || !changed} onClick={() => setCount(wallet.addressCount)}>
+            Cancel
+          </Button>
+          <Button size="sm" variant="primary" disabled={!changed} loading={busy} onClick={() => void save()}>
+            Save
+          </Button>
+        </div>
       </div>
       <ConfirmDialog
         open={check !== null}
