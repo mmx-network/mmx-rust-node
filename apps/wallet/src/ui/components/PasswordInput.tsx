@@ -52,6 +52,9 @@ export function PasswordInput({ revealable = true, inputRef, mono = false, ...re
             aria-pressed={revealed ? 'true' : 'false'}
             disabled={rest.disabled}
             onClick={() => {
+              // Autofill may have changed the DOM without an input event. Sync
+              // it before changing type triggers a render of this controlled field.
+              if (local.current) rest.onValue?.(local.current.value);
               setRevealed((v) => !v);
               local.current?.focus();
             }}

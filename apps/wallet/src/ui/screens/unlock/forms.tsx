@@ -38,6 +38,13 @@ export function CredentialForm({ open, wallet, submitLabel, onChangeWallet, auto
     if (wordsError) wordsRef.current?.focus();
   }, [wordsError]);
 
+  const syncInputs = (): void => {
+    // Either field can notify first after autofill. Capture both before a
+    // render can replace a silently filled value with the previous state.
+    if (!wallet && usernameRef.current) open.setUsername(usernameRef.current.value);
+    if (wordsRef.current) open.setWords(wordsRef.current.value);
+  };
+
   const onSubmit = (event: Event): void => {
     event.preventDefault();
     if (open.busy) return;
@@ -76,7 +83,7 @@ export function CredentialForm({ open, wallet, submitLabel, onChangeWallet, auto
             name="username"
             autocomplete="username"
             value={open.username}
-            onValue={open.setUsername}
+            onValue={syncInputs}
             inputRef={usernameRef}
             spellcheck={false}
             autocapitalize="off"
@@ -89,7 +96,7 @@ export function CredentialForm({ open, wallet, submitLabel, onChangeWallet, auto
           name="password"
           autocomplete="current-password"
           value={open.words}
-          onValue={open.setWords}
+          onValue={syncInputs}
           inputRef={wordsRef}
           disabled={open.busy}
         />

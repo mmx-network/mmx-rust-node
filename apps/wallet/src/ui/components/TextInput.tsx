@@ -8,7 +8,7 @@ export interface TextInputProps
   id?: string;
   'aria-describedby'?: string;
   value: string;
-  /** Called with the new text on every input event. */
+  /** Called on input and change (including password manager autofill). */
   onValue?: (value: string) => void;
   /** Content before the text (icon, prefix). */
   leading?: ComponentChildren;
@@ -30,6 +30,7 @@ export function TextInput({
   value,
   onValue,
   onInput,
+  onChange,
   leading,
   trailing,
   mono = false,
@@ -90,6 +91,10 @@ export function TextInput({
         aria-describedby={field.describedBy}
         onInput={(event) => {
           onInput?.(event);
+          onValue?.(event.currentTarget.value);
+        }}
+        onChange={(event) => {
+          onChange?.(event);
           onValue?.(event.currentTarget.value);
         }}
       />

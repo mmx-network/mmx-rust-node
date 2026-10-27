@@ -417,6 +417,10 @@ error; scientific notation rejected; more fractional digits than `decimals` → 
   `createWallet` stores the metadata and opens the Vault. Nothing is stored before.
   The `verified` flag is only read from metadata written by older versions (missing =
   verified; `false` returns the user to a "Finish setting up" step).
+- Autofill accepts both `input` and `change` events. Revealing a phrase captures
+  the current input values first, including a silently filled username, so a
+  controlled-field render cannot erase them. Submission also reads the DOM
+  directly for extensions that emit neither event.
 - Unlock: wallets known on this device are listed; selecting one shows a form with
   the username prefilled (readonly) and `autocomplete="current-password"`; Chromium
   also tries `navigator.credentials.get({password: true, mediation: 'optional'})`.

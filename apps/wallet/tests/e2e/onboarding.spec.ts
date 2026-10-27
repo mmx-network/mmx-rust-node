@@ -16,6 +16,69 @@ import {
 import { expect, test } from './fixtures';
 import { newMnemonic, walletAddresses, walletId } from './wallet';
 
+type AutofillEvent = 'input' | 'change' | 'silent';
+
+async function autofillCredential(page: Page, words: string, event: AutofillEvent, username?: string): Promise<void> {
+  await page.locator('form.unlock-credentials').evaluate((form: HTMLFormElement, fill) => {
+    const user = form.querySelector<HTMLInputElement>('input[name=username]')!;
+    const password = form.querySelector<HTMLInputElement>('input[name=password]')!;
+    if (fill.username !== undefined) user.value = fill.username;
+    password.value = fill.words;
+    // Some extensions fill both fields, then notify only one of them.
+    if (fill.event !== 'silent') password.dispatchEvent(new Event(fill.event, { bubbles: true }));
+  }, { words, event, username });
+}
+
+for (const event of ['input', 'change', 'silent'] as const) {
+  test(`opens a saved wallet after ${event} autofill and revealing its phrase`, async ({ page }) => {
+    await openApp(page);
+    await page.getByRole('button', { name: /Open a saved wallet/u }).click();
+    const words = newMnemonic();
+    const username = `Autofilled (${walletId(words)})`;
+    await autofillCredential(page, words, event, username);
+    await page.getByRole('button', { name: 'Show', exact: true }).click();
+    await expect(page.locator('input[name=username]')).toHaveValue(username);
+    await expect(page.locator('input[name=password]')).toHaveValue(words);
+    await page.getByRole('button', { name: 'Hide', exact: true }).click();
+    await page.getByRole('button', { name: 'Open wallet', exact: true }).click();
+    await expectOverview(page, 'Autofilled');
+    expectNoWords(await storedText(page), words);
+
+    // The selected-wallet form has a readonly username, but the same fill path.
+    await page.reload();
+    await expect(page).toHaveURL(/#\/unlock$/u);
+    await autofillCredential(page, words, event);
+    await page.getByRole('button', { name: 'Show', exact: true }).click();
+    await expect(page.locator('input[name=password]')).toHaveValue(words);
+    await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+    await expectOverview(page, 'Autofilled');
+    expectNoWords(await storedText(page), words);
+  });
+
+  test(`confirms a new wallet after ${event} autofill and revealing its phrase`, async ({ page }) => {
+    await openApp(page);
+    const { words } = await startCreate(page, 'Autofilled');
+    await page.getByRole('button', { name: 'Save to password manager' }).click();
+    await expect(page.getByRole('heading', { name: 'Open your new wallet' })).toBeVisible();
+    await autofillCredential(page, words, event);
+    await page.getByRole('button', { name: 'Show', exact: true }).click();
+    await expect(page.locator('input[name=password]')).toHaveValue(words);
+    await page.getByRole('button', { name: 'Open wallet', exact: true }).click();
+    await expectOverview(page, 'Autofilled');
+    expectNoWords(await storedText(page), words);
+  });
+}
+
+test('keeps the generated recovery phrase when a password manager changes the save field', async ({ page }) => {
+  await openApp(page);
+  const { words } = await startCreate(page, 'Generated');
+  await page.locator('form.create-save input[name=password]').evaluate((input: HTMLInputElement) => {
+    input.value = 'extension-generated-password';
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect(page.locator('form.create-save input[name=password]')).toHaveValue(words);
+});
+
 test('creates a wallet, saves it and confirms it by opening it once', async ({ page }) => {
   await openApp(page);
   await expect(page).toHaveURL(/#\/welcome$/u);
