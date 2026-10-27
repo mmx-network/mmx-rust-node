@@ -205,7 +205,7 @@ try:
     print("      first screen: " + " | ".join(rendered.split("\n")[:6])[:160])
     check("no wallets", ok("list wallets", "list_wallets") == [])
     state = ok("load app state", "load_app_state")
-    check("default settings", state["settings"] == {"theme": "system", "autoLockMinutes": 24 * 60, "feeLevel": 1})
+    check("default settings", state["settings"] == {"theme": "system", "autoLockMinutes": 5, "feeLevel": 1})
     check("nothing written before a change", not os.path.exists(HOME))
 
     # Wallets: new words first, the wallet is saved once they are confirmed.
@@ -243,13 +243,30 @@ try:
 
     addresses = ok("addresses", "get_addresses", {"id": main["id"]})
     check("10 addresses", len(addresses) == 10 and all(re.fullmatch(r"mmx1[0-9a-z]{58}", a) for a in addresses))
+    secured_addresses = ok("passphrase wallet addresses", "get_addresses", {"id": secured["id"]})
     check("recovery words", ok("reveal words", "reveal_mnemonic", {"id": main["id"]}) == mnemonic)
 
     ok("lock all", "lock_all", {"everywhere": True})
     listed = {w["id"]: w for w in ok("list after lock", "list_wallets")}
-    check("passphrase wallet locked, other open", listed[secured["id"]]["locked"] and not listed[main["id"]]["locked"])
-    fails("locked addresses", "get_addresses", {"id": secured["id"]}, "locked")
-    fails("locked words", "reveal_mnemonic", {"id": secured["id"]}, "locked")
+    check("passphrase wallet locked and observable, other open",
+          listed[secured["id"]]["locked"] and listed[secured["id"]]["canView"] and not listed[main["id"]]["locked"])
+    check("locked public addresses retained", ok("locked addresses", "get_addresses", {"id": secured["id"]}) == secured_addresses)
+    check("regular wallet remains usable", ok("regular words after lock", "reveal_mnemonic", {"id": main["id"]}) == mnemonic)
+    fails("locked words need authorization", "reveal_mnemonic", {"id": secured["id"]}, "passphrase_required")
+    fails("locked spending refused", "prepare_send",
+          {"walletId": secured["id"], "to": addresses[0], "contract": ZERO, "amount": "1000000", "feeLevel": 1}, "locked")
+    fails("missing addresses need authorization", "set_address_count", {"id": secured["id"], "count": 4}, "passphrase_required")
+    fails("wrong derivation passphrase", "set_address_count",
+          {"id": secured["id"], "count": 4, "passphrase": "wrong"}, "invalid_passphrase")
+    derived = ok("derive missing addresses", "set_address_count", {"id": secured["id"], "count": 4, "passphrase": PASSPHRASE})
+    check("derived addresses extend the public cache", len(derived) == 4 and derived[:3] == secured_addresses)
+    check("restore cached address count", ok("cached addresses need no authorization", "set_address_count",
+                                            {"id": secured["id"], "count": 3}) == secured_addresses)
+    check("authorized recovery words", ok("reveal authorized words", "reveal_mnemonic",
+                                         {"id": secured["id"], "passphrase": PASSPHRASE}) == other)
+    listed = {w["id"]: w for w in ok("list after derivation and reveal", "list_wallets")}
+    check("derivation and reveal leave spending locked", listed[secured["id"]]["locked"])
+    fails("temporary authorization not retained", "reveal_mnemonic", {"id": secured["id"]}, "passphrase_required")
     fails("passphrase required", "unlock_wallet", {"id": secured["id"]}, "passphrase_required")
     fails("wrong passphrase", "unlock_wallet", {"id": secured["id"], "passphrase": "wrong"}, "invalid_passphrase")
     fails("words not accepted on desktop", "unlock_wallet", {"id": secured["id"], "mnemonic": FIXTURE}, "invalid_argument")

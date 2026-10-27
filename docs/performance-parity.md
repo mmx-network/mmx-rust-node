@@ -689,6 +689,11 @@ server rather than measured against C++.
   signing, and cached public addresses surviving lock and daemon restart while
   the seed file stays byte-compatible. These use disposable wallets and a
   synthetic node, without reading live wallet or ledger data.
+- Packaged Linux WebView command checks use the five-minute lock default and
+  verify that locked wallets retain cached public addresses while refusing
+  signing. Missing addresses and recovery words require fresh authorization;
+  deriving or revealing them leaves spending locked and retains no passphrase
+  authorization. Regular disk wallets remain usable after locking.
 
 - Balances are fetched 4 addresses at a time (CLI, service, web), with in-flight
   de-duplication of identical GETs in the UI and a 20 s deadline per request.
