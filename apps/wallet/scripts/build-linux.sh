@@ -21,7 +21,8 @@ done
 wallet=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 repository=$(cd -- "$wallet/../.." && pwd)
 artifacts=$wallet/artifacts
-stage=$artifacts/stage/wallet
+stage_root=$artifacts/stage
+stage=$stage_root/apps/wallet
 target_dir=$artifacts/build/desktop
 packages=$artifacts/packages
 shots=$artifacts/launch-check
@@ -34,9 +35,10 @@ export CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_BUILD_JOBS=${CARG
     printf 'The web wallet core is missing (needed to check the shared interface): run npm run build:wasm\n' >&2
     exit 1
 }
-# The interface is built from a clean copy with the locked npm dependencies,
-# so the working tree's node_modules and dist are left alone.
-mkdir -p "$stage" "$packages"
+# Keep the repository layout so Vite's shared build helpers resolve from the
+# staged wallet too. The locked dependencies and outputs stay in this copy.
+mkdir -p "$stage" "$stage_root/deploy/apps" "$packages"
+rsync -a --delete "$repository/deploy/apps/" "$stage_root/deploy/apps/"
 # Of the desktop crate only the shared test fixtures are needed (typecheck).
 rsync -a --delete \
     --exclude /node_modules --exclude /dist --exclude /artifacts \

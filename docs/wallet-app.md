@@ -580,3 +580,7 @@ for screenshots. Token contract: `--font-ui, --font-display, --font-mono,
   activity/detail/save contact, contacts CRUD, settings (address count, rename,
   remove), auto-lock, explicit Lock in one tab locks another, mobile viewport.
 - Desktop: container build of deb + AppImage; launch smoke test under Xvfb.
+  Linux stages the interface at `artifacts/stage/apps/wallet` and the shared
+  build helpers at `artifacts/stage/deploy/apps`, preserving repository-relative
+  imports. The staged locked install, typecheck and desktop Vite build have been
+  checked in the Ubuntu 22.04 packaging container.
