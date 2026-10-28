@@ -158,15 +158,9 @@ impl Builder<'_> {
                             && c.field("binary").ok().and_then(|v| bytes::<32>(v).ok())
                                 == Some(self.chain.params.offer_binary.0)
                     }) {
-                        let log = value(
-                            "mmx.public_trade",
-                            [
-                                ("address", Value::Bytes(address.to_vec())),
-                                ("entry", Value::Record(entry)),
-                            ],
-                        );
-                        self.writes
-                            .push(Write::put(TRADES, op_id, log.encode_compact()?));
+                        let mut log = address.to_vec();
+                        log.extend(entry.encode_compact()?);
+                        self.writes.push(Write::put(TRADES, op_id, log));
                     }
                 }
             }
@@ -174,6 +168,19 @@ impl Builder<'_> {
         Ok(())
     }
 }
+/// Compact trade rows use a fixed address prefix and the declared native
+/// exec_entry_t schema, without inventing a VNX type in the consensus registry.
+pub fn decode_trade(bytes: &[u8]) -> ChainResult<([u8; 32], Record)> {
+    let (address, entry) = bytes
+        .split_at_checked(32)
+        .ok_or_else(|| invalid("trade index row"))?;
+    let entry = Record::decode_compact(entry)?;
+    if entry.name != "mmx.exec_entry_t" {
+        return Err(invalid("trade index entry type"));
+    }
+    Ok((address.try_into().unwrap(), entry))
+}
+
 pub(super) fn writes(
     chain: &ChainState,
     block: &Record,
@@ -389,6 +396,75 @@ fn address_count(
 mod tests {
     use super::*;
     use mmx_vm::storage::{AtomicStorage, BalanceWrite, TransactionBatch};
+    #[test]
+    fn successful_offer_trade_index_round_trips_and_rewinds_with_ledger() {
+        let mut chain = ChainState::memory(Default::default());
+        let id = [1; 32];
+        let deploy = value(
+            "mmx.contract.Executable",
+            [("binary", Value::Bytes(chain.params.offer_binary.0.to_vec()))],
+        );
+        let op = value(
+            "mmx.operation.Deposit",
+            [
+                ("address", Value::Bytes([0; 32].to_vec())),
+                ("method", Value::String(b"trade".to_vec())),
+                ("args", Value::Sequence(vec![])),
+                ("user", Value::Optional(None)),
+                ("currency", Value::Bytes([0; 32].to_vec())),
+                ("amount", Value::Bytes(2u128.to_le_bytes().to_vec())),
+            ],
+        );
+        let tx = value(
+            "mmx.Transaction",
+            [
+                ("id", Value::Bytes(id.to_vec())),
+                ("exec_result", Value::Optional(None)),
+                (
+                    "deploy",
+                    Value::Optional(Some(Box::new(Value::Record(deploy)))),
+                ),
+                (
+                    "execute",
+                    Value::Sequence(vec![Value::Optional(Some(Box::new(Value::Record(op))))]),
+                ),
+            ],
+        );
+        let block = value(
+            "mmx.Block",
+            [
+                ("height", Value::Uint(0)),
+                ("hash", Value::Bytes([9; 32].to_vec())),
+                ("time_stamp", Value::Int(42)),
+                ("tx_list", Value::Sequence(vec![Value::Record(tx)])),
+            ],
+        );
+        let writes = writes(&chain, &block, &TransactionBatch::default()).unwrap();
+        let row = writes.iter().find(|v| v.table == TRADES).unwrap();
+        let (owner, entry) = decode_trade(row.value.as_ref().unwrap()).unwrap();
+        assert_eq!(owner, id);
+        assert_eq!(entry.field("method").unwrap().text().unwrap(), b"trade");
+        assert!(decode_trade(&[0; 31]).is_err());
+        let key = row.key.clone();
+        chain
+            .storage
+            .database_mut()
+            .commit_batch(1, writes)
+            .unwrap();
+        assert!(chain
+            .storage
+            .database()
+            .get(TRADES, &key, None)
+            .unwrap()
+            .is_some());
+        chain.storage.database_mut().revert(0).unwrap();
+        assert!(chain
+            .storage
+            .database()
+            .get(TRADES, &key, None)
+            .unwrap()
+            .is_none());
+    }
     #[test]
     fn address_migration_is_bounded_tracks_changes_and_rewinds_atomically() {
         let mut chain = ChainState::memory(Default::default());

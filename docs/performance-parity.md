@@ -31,7 +31,8 @@ snapshot with normal gas limits and return traversal bounds, without publishing
 VM writes. Storage traversal shares key/row/byte and deadline budgets.
 
 Public auxiliary indexes publish atomically with ledger changes and revert with
-forks. On upgrades, old selected bodies are processed in bounded batches: at most
+forks. Trade rows retain an address prefix plus the declared `exec_entry_t`
+encoding; a regression exercises successful offer deposits and index rollback. On upgrades, old selected bodies are processed in bounded batches: at most
 256 bodies, a 4 MiB decoded-input stopping target and 20 ms stopping target per
 publication. One body may exceed a stopping target. Address counting migrates
 at most 256 balance rows per publication, with updates in the already-counted
@@ -48,7 +49,7 @@ Regressions cover typed JSON round trips, LFU/RAM accounting, database-free
 public hits, accepted-block history/block/transaction warming, rollback, final
 batch-tip confirmations, real binary field layouts/fixed-point offer math,
 contract-call result/isolation, VM return budgets and incremental address-count
-migration. The node/execution/VM suite passes (322 tests,
+migration. The node/execution/VM suite passes (323 tests,
 three benchmarks ignored); all-target Clippy is
 run with warnings denied. These checks do not establish sustained public-RPC
 throughput or mainnet RSS parity. Nonempty swap/market traffic and large existing

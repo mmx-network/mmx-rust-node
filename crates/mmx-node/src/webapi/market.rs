@@ -639,9 +639,8 @@ impl Request<'_> {
                     if height < since {
                         break;
                     }
-                    let record = mmx_consensus::Record::decode_compact(&row.value)?;
-                    let id = crate::node::hash(&record, "address")?;
-                    let entry = crate::rpc::to_json_record(record.field("entry")?.record()?)?;
+                    let (id, entry) = index::decode_trade(&row.value)?;
+                    let entry = crate::rpc::to_json_record(&entry)?;
                     let offer = self.offer(id, &mut view)?;
                     if bid.is_some_and(|v| v != offer.bid) || ask.is_some_and(|v| v != offer.ask) {
                         continue;
