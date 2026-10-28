@@ -154,13 +154,17 @@ is a different interface. The apps also accept loopback HTTP for local testing.
 
 ## CDN caching
 
-All sites emit content-hashed JavaScript, CSS and font filenames. The wallet's
-WASM file is content-hashed too. nginx sends:
+All sites emit content-hashed JavaScript, CSS, font, favicon and touch-icon
+filenames. Manifest icons and the website's synchronous theme bootstrap are
+content-hashed too. The shared build plugin rewrites the HTML and manifest
+references to these immutable `/assets/` URLs. Manifests keep their original
+URLs so relative app start URLs, scopes and installed app identities stay stable.
+The wallet's WASM file is content-hashed too. nginx sends:
 
 | Response | `Cache-Control` |
 | --- | --- |
 | Successful `/assets/*`, including 206/304 | `public, max-age=31536000, immutable` |
-| HTML, favicon, web manifest and other unversioned files | `no-cache` |
+| HTML, web manifest and unversioned fallback files | `no-cache` |
 | Errors, unknown hosts and health checks | `no-store` |
 
 `no-cache` allows storage but requires revalidation before reuse. nginx supports
@@ -168,6 +172,10 @@ ETag/Last-Modified conditional requests. HTML and compressible assets are
 precompressed during the image build; gzip clients receive `Content-Encoding:
 gzip` and `Vary: Accept-Encoding`. Other clients receive the original files.
 WASM is served as `application/wasm`.
+
+Original icon and theme-script URLs remain available for older pages and
+automatic icon discovery, with revalidation. New pages use the fingerprinted
+URLs; changing the source bytes changes the URL without requiring a CDN purge.
 
 Configure the CDN to honor these cache headers, with the hostname in its cache
 key. Do not override HTML with a long edge/browser TTL, apply a blanket cache

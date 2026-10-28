@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from urllib.robotparser import RobotFileParser
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from xml.etree import ElementTree
 
 
@@ -107,6 +107,7 @@ class SearchMetadata(HTMLParser):
         self.canonicals = []
         self.site_urls = []
         self.website_scopes = 0
+        self.links = {}
         self.feed(html)
 
     def handle_starttag(self, tag, attributes):
@@ -118,6 +119,7 @@ class SearchMetadata(HTMLParser):
                 if key in attrs:
                     self.meta[(key, attrs[key])] = attrs.get("content", "")
         if tag == "link":
+            self.links[attrs.get("rel")] = attrs.get("href")
             if attrs.get("rel") == "canonical":
                 self.canonicals.append(attrs.get("href"))
             if attrs.get("itemprop") == "url":
@@ -174,17 +176,57 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
     title = b"<title>MMX" if website else b"<title>MMX Wallet</title>" if wallet else b"<title>MMX Explorer"
     assert title in html
     check_search(port, host, html, rpc_origin, wallet, website)
+    links = SearchMetadata(html.decode()).links
+    for relation, name, content_type in [
+        ("icon", "favicon", "image/svg+xml"),
+        ("apple-touch-icon", "apple-touch-icon", "image/png"),
+    ]:
+        path = urljoin("/", links[relation])
+        assert re.fullmatch(rf"/assets/{name}-[a-f0-9]{{16}}\.(svg|png)", path), path
+        status, icon_headers, icon = request(port, host, path)
+        assert status == 200 and icon
+        assert content_type in icon_headers["content-type"]
+        assert icon_headers["cache-control"] == "public, max-age=31536000, immutable"
+        security(icon_headers, rpc_origin, wallet, website)
+        # Versioned and legacy URLs serve the same bytes; only immutable URLs
+        # get a long TTL, so a new branding release can still replace aliases.
+        legacy = f"/{name}.{'svg' if relation == 'icon' else 'png'}"
+        status, fallback_headers, fallback = request(port, host, legacy)
+        assert status == 200 and fallback == icon
+        assert fallback_headers["cache-control"] == "no-cache"
+        status, cached_headers, body = request(port, host, path, headers={"If-None-Match": icon_headers["etag"]})
+        assert status == 304 and not body
+        assert cached_headers["cache-control"] == "public, max-age=31536000, immutable"
+        security(cached_headers, rpc_origin, wallet, website)
+    if "manifest" in links:
+        status, manifest_headers, body = request(port, host, urljoin("/", links["manifest"]))
+        assert status == 200 and "application/manifest+json" in manifest_headers["content-type"]
+        assert manifest_headers["cache-control"] == "no-cache"
+        manifest = json.loads(body)
+        assert manifest["start_url"] == ("./" if wallet else "/")
+        if wallet:
+            assert manifest["scope"] == "./"
+        for icon in manifest["icons"]:
+            path = urljoin("/", icon["src"])
+            assert re.fullmatch(r"/assets/icon-(192|512|maskable-512)-[a-f0-9]{16}\.png", path), path
+            status, icon_headers, body = request(port, host, path)
+            assert status == 200 and body.startswith(b"\x89PNG")
+            assert icon_headers["cache-control"] == "public, max-age=31536000, immutable"
+            security(icon_headers, rpc_origin, wallet, website)
     if website:
-        bootstrap = b'<script src="/theme-init.js"></script>'
-        assert bootstrap in html
+        bootstrap_match = re.search(rb'<script src="(/assets/theme-init-[a-f0-9]{16}\.js)"></script>', html)
+        assert bootstrap_match
+        bootstrap = bootstrap_match[0]
         assert html.index(bootstrap) < html.index(b'<script type="module"')
         assert html.index(bootstrap) < html.index(b'<link rel="stylesheet"')
         assert html.index(bootstrap) < html.index(b'<body>')
-        status, theme_headers, theme_script = request(port, host, '/theme-init.js')
+        status, theme_headers, theme_script = request(port, host, bootstrap_match[1].decode())
         assert status == 200 and 'javascript' in theme_headers['content-type']
-        assert theme_headers['cache-control'] == 'no-cache'
+        assert theme_headers['cache-control'] == 'public, max-age=31536000, immutable'
         assert b'mmx-website-scheme' in theme_script
         security(theme_headers, rpc_origin, wallet, website)
+        status, _, legacy_script = request(port, host, '/theme-init.js')
+        assert status == 200 and legacy_script == theme_script
         # The real build must contain independent SVGs at every logo placement,
         # with local paint references even when all four are in one document.
         logos = re.findall(rb'<svg\b[^>]*\bdata-mmx-logo[^>]*>[\s\S]*?</svg>', html)

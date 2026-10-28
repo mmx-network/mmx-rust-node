@@ -52,7 +52,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - run: node --test deploy/apps/prepare.test.mjs
+      - run: node --test deploy/apps/prepare.test.mjs deploy/apps/fingerprint.test.ts
       - run: node --test apps/website/branding/inline-logo.test.mjs apps/website/tests/theme-init.test.mjs
       - run: docker compose config --quiet
       - run: nice -n 19 ionice -c 3 docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag mmx-apps .

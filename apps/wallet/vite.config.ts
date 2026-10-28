@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { webSecurityPlugin } from './deploy/security';
+import { fingerprintPublicAssets } from '../../deploy/apps/fingerprint';
 
 export const PLATFORMS = ['web', 'desktop', 'mock'] as const;
 export type Platform = (typeof PLATFORMS)[number];
@@ -85,7 +86,7 @@ export default defineConfig(({ mode }) => {
     },
     esbuild: { jsx: 'automatic', jsxImportSource: 'preact' },
     // Web: Content-Security-Policy <meta>, inline-code check, _headers, preview headers.
-    plugins: [buildScope(style, platform), ...(platform === 'web' ? [webSecurityPlugin()] : [])],
+    plugins: [buildScope(style, platform), ...(platform === 'web' ? [fingerprintPublicAssets(), webSecurityPlugin()] : [])],
     build: {
       target: 'es2022',
       sourcemap: false,

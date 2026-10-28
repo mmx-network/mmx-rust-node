@@ -24,10 +24,12 @@ npm run preview
 
 Vite emits `dist/` with content-hashed CSS, application JavaScript, and fonts.
 The small external `public/theme-init.js` loads synchronously in the head to
-apply the stored or system theme before the page can paint. It is revalidated
-like other unversioned files and works with the existing CSP without inline
-code. The page's content and navigation work without JavaScript; the main
-module enables the theme switch and follows system changes until a choice is
+apply the stored or system theme before the page can paint. The shared build
+plugin in `deploy/apps/fingerprint.ts` emits it and the icons under
+content-hashed `/assets/` URLs for immutable caching, preserving its synchronous
+execution and the existing CSP without inline code. The page's content and
+navigation work without JavaScript; the main module enables the theme switch
+and follows system changes until a choice is
 made. The wallet preview is an
 illustration of the welcome screen, not an embedded wallet.
 

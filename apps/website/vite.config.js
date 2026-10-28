@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vite';
 import { inlineLogos } from './branding/inline-logo.mjs';
+import { fingerprintPublicAssets } from '../../deploy/apps/fingerprint.ts';
 
 // Keep the standalone preview's policy aligned with the nginx response policy.
 // frame-ancestors is enforced by the HTTP header, not by the meta element.
@@ -11,7 +12,7 @@ const policy = headers.match(/Content-Security-Policy: (.+)/)[1]
 export default defineConfig({
   base: '/',
   clearScreen: false,
-  plugins: [{
+  plugins: [fingerprintPublicAssets(), {
     name: 'website:logos',
     transformIndexHtml: { order: 'pre', handler: inlineLogos },
   }, {

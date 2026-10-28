@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite';
 import { fileURLToPath } from 'node:url';
 import { rpcOrigin } from './src/lib/config';
+import { fingerprintPublicAssets } from '../../deploy/apps/fingerprint';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_');
@@ -23,6 +24,7 @@ export default defineConfig(({ mode }) => {
     },
     esbuild: { jsx: 'automatic', jsxImportSource: 'preact' },
     plugins: [
+      fingerprintPublicAssets(),
       {
         name: 'explorer:security',
         transformIndexHtml: {

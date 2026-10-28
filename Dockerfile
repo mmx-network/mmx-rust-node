@@ -32,6 +32,7 @@ COPY apps/wallet/package.json apps/wallet/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     nice -n 19 ionice -c 3 npm ci --no-audit --no-fund
 COPY apps/wallet/ ./
+COPY deploy/apps/fingerprint.ts /build/deploy/apps/fingerprint.ts
 ARG VITE_RPC_URL=https://rpc.mmx.network
 ENV VITE_RPC_URL=${VITE_RPC_URL}
 RUN nice -n 19 ionice -c 3 npm run build:web

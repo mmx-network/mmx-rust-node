@@ -80,7 +80,7 @@ describe('vite config', () => {
 
     const web = resolve({ command: 'build', mode: 'web' });
     expect(web.define?.__PLATFORM__).toBe('"web"');
-    expect(pluginNames(web)).toEqual(['mmx-wallet:build-scope', 'mmx-wallet:web-security']);
+    expect(pluginNames(web)).toEqual(['mmx-wallet:build-scope', 'mmx:fingerprint-public-assets', 'mmx-wallet:web-security']);
 
     expect(resolve({ command: 'serve', mode: 'mock' }).define?.__PLATFORM__).toBe('"mock"');
   });

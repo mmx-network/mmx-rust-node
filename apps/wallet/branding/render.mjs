@@ -63,6 +63,8 @@ export async function brandJobs() {
     for (const size of [192, 512]) {
       jobs.push({ svg: appIcon, size, out: join(owner, 'public', `icon-${size}.png`) });
     }
+  }
+  for (const owner of [app, website, explorer]) {
     jobs.push({ svg: touch, size: 180, out: join(owner, 'public/apple-touch-icon.png') });
   }
   jobs.push({ svg: maskable, size: 512, out: join(app, 'public/icon-maskable-512.png') });
