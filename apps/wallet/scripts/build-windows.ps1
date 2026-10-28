@@ -66,6 +66,8 @@ try {
 
 $installer = Join-Path $targetDir "$target/release/bundle/nsis/${product}_${version}_x64-setup.exe"
 if (-not (Test-Path $installer)) { throw "Missing installer: $installer" }
+$cli = Join-Path $targetDir "$target/release/mmxwallet.exe"
+Invoke-Native { python (Join-Path $PSScriptRoot 'check-packaged-cli.py') $cli }
 if ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
     $signature = Get-AuthenticodeSignature $installer
     if ($signature.Status -ne 'Valid') { throw "The installer signature is not valid: $($signature.Status)" }

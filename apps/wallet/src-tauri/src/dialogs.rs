@@ -1,4 +1,4 @@
-//! Save and open dialogs for files chosen by the user (contact lists).
+//! Save and open dialogs for files chosen by the user (contacts and seed files).
 //!
 //! Each dialog belongs to the wallet window: it stays above the window and
 //! the window takes no input while it is open, so it cannot get lost behind
@@ -25,6 +25,7 @@ enum Choose {
     Save(String),
     /// An existing file to read.
     Open,
+    Seed,
 }
 
 #[derive(Default)]
@@ -41,6 +42,10 @@ impl Dialogs {
     /// Asks for a file to read. Blocks until the dialog closes.
     pub fn open(&self, window: &Window) -> Result<Option<PathBuf>> {
         self.show(window, Choose::Open)
+    }
+
+    pub fn seed(&self, window: &Window) -> Result<Option<PathBuf>> {
+        self.show(window, Choose::Seed)
     }
 
     fn show(&self, window: &Window, choose: Choose) -> Result<Option<PathBuf>> {
@@ -76,15 +81,22 @@ mod platform {
                 let (title, action) = match choose {
                     Choose::Save(_) => ("Save File", gtk::FileChooserAction::Save),
                     Choose::Open => ("Open File", gtk::FileChooserAction::Open),
+                    Choose::Seed => ("Import seed file", gtk::FileChooserAction::Open),
                 };
                 let dialog =
                     gtk::FileChooserNative::new(Some(title), Some(&parent), action, None, None);
                 dialog.set_modal(true);
                 let filter = gtk::FileFilter::new();
-                filter.set_name(Some(FILTER_NAME));
-                filter.add_pattern(&format!("*.{EXTENSION}"));
-                filter.add_pattern(&format!("*.{}", EXTENSION.to_uppercase()));
-                filter.add_mime_type("application/json");
+                let seed = matches!(choose, Choose::Seed);
+                filter.set_name(Some(if seed { "MMX seed files" } else { FILTER_NAME }));
+                let extensions: &[&str] = if seed { &["dat", "json"] } else { &[EXTENSION] };
+                for extension in extensions {
+                    filter.add_pattern(&format!("*.{extension}"));
+                    filter.add_pattern(&format!("*.{}", extension.to_uppercase()));
+                }
+                if !seed {
+                    filter.add_mime_type("application/json");
+                }
                 dialog.add_filter(filter);
                 match &choose {
                     Choose::Save(name) => {
@@ -94,7 +106,7 @@ mod platform {
                     // GTK does not add the extension to a saved name, so a
                     // file saved as "contacts backup" must still be found:
                     // any file can be picked (reading checks its contents).
-                    Choose::Open => {
+                    Choose::Open | Choose::Seed => {
                         let all = gtk::FileFilter::new();
                         all.set_name(Some(ALL_FILES));
                         all.add_pattern("*");
@@ -129,14 +141,16 @@ mod platform {
     use tauri_plugin_dialog::DialogExt;
 
     pub(super) fn show(window: &Window, choose: Choose) -> Result<Option<PathBuf>> {
-        let dialog = window
-            .dialog()
-            .file()
-            .add_filter(FILTER_NAME, &[EXTENSION])
-            .set_parent(window);
+        let dialog = window.dialog().file().set_parent(window);
+        let dialog = if matches!(choose, Choose::Seed) {
+            dialog.add_filter("MMX seed files", &["dat", "json"])
+        } else {
+            dialog.add_filter(FILTER_NAME, &[EXTENSION])
+        };
         let chosen = match choose {
             Choose::Save(name) => dialog.set_file_name(name).blocking_save_file(),
             Choose::Open => dialog.blocking_pick_file(),
+            Choose::Seed => dialog.set_title("Import seed file").blocking_pick_file(),
         };
         let Some(chosen) = chosen else {
             return Ok(None);

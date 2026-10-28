@@ -255,6 +255,19 @@ export async function createWallet(request: { name: string; mnemonic: string; pa
 /** Progress of the used-address scan after an import; null when idle. */
 export const discovery = signal<{ checked: number; total: number } | null>(null);
 
+/** Native file import preserves the file's existing passphrase protection. */
+export async function importSeedFile(name: string, addressCount: number): Promise<WalletInfo | null> {
+  invalidName(name);
+  const b = backend();
+  if (b.platform !== 'desktop' || !b.importSeedFile) throw new BackendError('invalid_argument');
+  const info = await b.importSeedFile({ name: name.trim(), addressCount });
+  if (!info) return null;
+  upsertWallet(info);
+  await refreshWallets();
+  await activateWallet(info.id);
+  return info;
+}
+
 /**
  * Imports a wallet from 24 words, finds used addresses (up to 100) and sets
  * the address count to max(10, last used + 1), then opens it.

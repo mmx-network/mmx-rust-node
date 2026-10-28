@@ -1414,3 +1414,31 @@ compatibility fix makes no new performance-parity claim.
 The workspace all-target Clippy failure was reproduced and cleared with Rust
 1.99.1 and warnings denied. The exact counter source and its three admission
 regressions also compile and pass independently with Rust 1.89.0.
+
+## Standalone desktop wallet packaging and seed import (2026-10-28)
+
+The desktop now always opens the user's `.mmx` directory, ignoring the node's
+`MMX_HOME`; the standalone CLI retains that override. This intentionally differs
+from the node-integrated C++ GUI. Existing key files remain compatible and can
+be explicitly imported through a native file picker without scanning node
+directories. Binary and JSON seed imports use the existing 64 KiB bounded,
+zeroizing reader, preserve absent/empty/protected passphrase fingerprints, reject
+duplicates, and leave the source untouched. Protected imports start locked and
+derive addresses only after authorization. The references are
+`src/Wallet.cpp::{import_wallet,add_account}` and the import branch of `src/mmx.cpp`.
+
+Desktop bundles include the standalone `mmxwallet` CLI; AppImages also dispatch
+`--cli` before creating a GUI session. Creating/importing through the CLI now
+persists the chosen address count alongside its existing public address cache,
+so reopening in the desktop preserves that setting. The AppImage window gets a
+compact 512-pixel master scaled to 64/128/192-pixel window icons, avoiding GTK's
+oversized X11 property limit; installed launcher artwork is unchanged.
+
+Regression coverage includes all three passphrase modes in both seed-file
+formats, unchanged originals, duplicate/malformed input, restart behavior,
+desktop independence from node storage, and packaged CLI interoperability.
+Wallet service tests (52), platform-independent desktop tests (26), frontend
+tests (517), release publisher tests (8), typechecking and Clippy pass. Packaging
+checks use disposable homes, including an unused node home; no live wallet,
+ledger or plot data is rewritten. These are functionality and packaging checks,
+not new performance-parity claims.

@@ -44,7 +44,13 @@ fi
 cd "$wallet"
 npm ci --no-audit --no-fund
 CARGO_TARGET_DIR=$target_dir npm run tauri build -- \
-    --target "$target" --bundles app,dmg ${signing[@]+"${signing[@]}"} -- --locked
+    --target "$target" --no-bundle ${signing[@]+"${signing[@]}"} -- --locked
+# Tauri creates a universal main executable; combine the additional CLI too.
+lipo -create "$target_dir/aarch64-apple-darwin/release/mmxwallet" \
+    "$target_dir/x86_64-apple-darwin/release/mmxwallet" \
+    -output "$target_dir/$target/release/mmxwallet"
+CARGO_TARGET_DIR=$target_dir npm run tauri bundle -- \
+    --target "$target" --bundles app,dmg ${signing[@]+"${signing[@]}"}
 
 bundle=$target_dir/$target/release/bundle
 app=$bundle/macos/$product.app
@@ -56,6 +62,10 @@ archs=$(lipo -archs "$binary")
 minimum=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
 [[ $minimum == 11.0 ]] || { printf 'Unexpected minimum macOS version: %s\n' "$minimum" >&2; exit 1; }
 codesign --verify --deep --strict "$app"
+cli=$app/Contents/MacOS/mmxwallet
+cli_archs=$(lipo -archs "$cli")
+[[ $cli_archs == *x86_64* && $cli_archs == *arm64* ]] || { printf 'CLI is not universal.\n' >&2; exit 1; }
+python3 "$wallet/scripts/check-packaged-cli.py" "$cli"
 hdiutil verify "$dmg"
 
 name=mmx-wallet_${version}_macos_universal.dmg

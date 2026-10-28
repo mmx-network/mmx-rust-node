@@ -49,6 +49,7 @@ const calls: Record<Command, (b: Backend) => Promise<unknown>> = {
   new_recovery_phrase: (b) => b.newRecoveryPhrase(),
   create_wallet: (b) => b.createWallet({ name: 'Main', mnemonic: WORDS, passphrase: 'correct horse', addressCount: 10 }),
   import_wallet: (b) => b.importWallet({ name: 'Main', mnemonic: WORDS, passphrase: 'correct horse', addressCount: 100 }),
+  import_seed_file: (b) => b.importSeedFile!({ name: 'Main', addressCount: 3 }),
   unlock_wallet: (b) => b.unlockWallet(W, { passphrase: 'correct horse' }),
   lock_wallet: (b) => b.lockWallet(W),
   lock_all: (b) => b.lockAll(),

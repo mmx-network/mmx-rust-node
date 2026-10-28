@@ -216,6 +216,81 @@ fn secret(s: &str) -> Zeroizing<String> {
     Zeroizing::new(s.to_owned())
 }
 
+#[test]
+fn seed_file_import_preserves_keys_protection_and_the_original_file() {
+    for passphrase in [None, Some(""), Some(PASS)] {
+        for json in [false, true] {
+            let (_dir, svc) = service(None);
+            let original = tempfile::tempdir().unwrap();
+            let path = original
+                .path()
+                .join(if json { "backup.json" } else { "wallet.dat" });
+            let key = KeyFile::new(words_to_seed(PHRASE).unwrap(), passphrase);
+            let bytes = if json {
+                serde_json::to_vec(&key).unwrap()
+            } else {
+                key.encode()
+            };
+            fs::write(&path, &bytes).unwrap();
+            let info = svc.import_key_file(&path, "Imported", 12).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes, "source must be untouched");
+            let copied = storage::read_key(&svc.directory().join(&info.id)).unwrap();
+            assert_eq!(copied.seed_value, key.seed_value);
+            assert_eq!(copied.finger_print, key.finger_print);
+            assert_eq!(info.address_count, 12);
+            assert_eq!(info.name, "Imported");
+            assert_eq!(info.locked, passphrase == Some(PASS));
+            if info.locked {
+                assert!(!info.can_view);
+                assert_eq!(
+                    svc.unlock(&info.id, secret("wrong")).unwrap_err().code,
+                    "invalid_passphrase"
+                );
+                svc.unlock(&info.id, secret(PASS)).unwrap();
+            }
+            let expected: Vec<String> = key
+                .unlock(passphrase.unwrap_or(""), 0, 12)
+                .unwrap()
+                .addresses
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(svc.addresses(&info.id).unwrap(), expected);
+            assert_eq!(
+                svc.import_key_file(&path, "Duplicate", 3).unwrap_err().code,
+                "wallet_exists"
+            );
+            let restarted = Service::open(Some(svc.directory().into())).unwrap();
+            assert_eq!(
+                restarted.wallets().unwrap()[0].locked,
+                passphrase == Some(PASS)
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_seed_files_do_not_create_wallets() {
+    let (_dir, svc) = service(None);
+    let original = tempfile::tempdir().unwrap();
+    let path = original.path().join("invalid.dat");
+    for bytes in [b"not a wallet".to_vec(), vec![0; 65537]] {
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            svc.import_key_file(&path, "Invalid", 3).unwrap_err().code,
+            "invalid_key_file"
+        );
+        assert!(svc.wallets().unwrap().is_empty());
+        assert!(!svc.directory().exists());
+    }
+    assert_eq!(
+        svc.import_key_file(&path, "Bad count", 101)
+            .unwrap_err()
+            .code,
+        "invalid_argument"
+    );
+}
+
 fn read_config(service: &Service) -> Value {
     serde_json::from_slice(&fs::read(service.directory().join(config::FILE)).unwrap()).unwrap()
 }
@@ -635,7 +710,7 @@ fn unreadable_key_files_are_listed_with_an_error() {
     );
     assert_eq!(
         svc.addresses("wallet_odd.dat").unwrap_err().code,
-        "internal"
+        "invalid_key_file"
     );
     assert_eq!(
         svc.addresses("wallet_link.dat").unwrap_err().code,

@@ -8,13 +8,16 @@ is shown in the product UI.
 
 - Finished end-user product: send/receive with optional memo, multiple wallets
   (switching), multiple addresses per wallet (default 3, configurable 1–100),
-  public RPC for chain data, import/export via 24 recovery words, transaction
+  public RPC for chain data, import/export via 24 recovery words, desktop seed-file import, transaction
   history, balance history, address book with labels (send again, identify
   senders), wallet creation, passphrase support with fingerprint-based detection
   of "locked" and "wrong passphrase".
 - Desktop: Windows (NSIS installer), Linux (AppImage + deb), macOS (dmg,
-  universal). Built on the `mmxwallet` crate (same wallet directory, key file
-  format and `mmxwallet.json` as the CLI and the C++ node GUI).
+  universal). Built on the `mmxwallet` crate (compatible key file format and
+  `mmxwallet.json`). Desktop storage is always the user's `~/.mmx` (Windows:
+  `%USERPROFILE%\.mmx`), independent of the node's `MMX_HOME`. The CLI retains
+  its environment override. Desktop packages include the `mmxwallet` executable;
+  the portable AppImage runs it with `--cli`.
 - Web: static site; regular wallets use the password manager, passphrase wallets
   also keep their base recovery words locally. Seeds and keys never leave the
   browser; same features and look.
@@ -141,12 +144,14 @@ plain file name, no separators, matches the wallet patterns, exists in the listi
 
 ```
 Service::open(dir: Option<PathBuf>) -> Result<Service>        // default storage::directory()
+Service::open_desktop() -> Result<Service>  // storage::user_directory(); ignores MMX_HOME
 wallets() -> Vec<WalletInfo>        // unreadable files are listed with `error` instead of failing the list
 new_mnemonic() -> Zeroizing<String>  // 24 words (OsRng via KeyFile::generate); stores nothing
 create(name, mnemonic: Zeroizing<String>, passphrase, count) -> WalletInfo
                                     // after the backup check; writes the key file, unlocks it,
                                     // makes it active; wallet_exists if the fingerprint exists
 import(name, mnemonic: Zeroizing<String>, passphrase, count) -> WalletInfo
+import_key_file(path, name, count) -> WalletInfo // native picker only; copies binary/JSON seed, preserves protection
 unlock(id, passphrase: Zeroizing<String>) -> WalletInfo      // invalid_passphrase on fingerprint mismatch
 lock(id) / lock_all()
 rename(id, name)                    // 1..=64 chars after trim, no control chars

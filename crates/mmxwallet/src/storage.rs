@@ -13,19 +13,25 @@ use std::{
 use zeroize::Zeroizing;
 
 pub fn directory() -> Result<PathBuf> {
-    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os("MMX_HOME")
+    match std::env::var_os("MMX_HOME")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os(home_var)
-                .filter(|s| !s.is_empty())
-                .map(|p| PathBuf::from(p).join(".mmx"))
-        })
+    {
+        Some(dir) => Ok(dir),
+        None => user_directory(),
+    }
+}
+
+/// The standalone desktop wallet never inherits the node's MMX_HOME.
+pub fn user_directory() -> Result<PathBuf> {
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(home_var)
+        .filter(|s| !s.is_empty())
+        .map(|p| PathBuf::from(p).join(".mmx"))
         .ok_or_else(|| {
             Error::new(
                 "wallet_directory_unavailable",
-                format!("set MMX_HOME or {home_var}, or select a wallet with --file"),
+                format!("set {home_var}, or select a wallet with --file"),
             )
         })
 }

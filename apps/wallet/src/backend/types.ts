@@ -128,6 +128,8 @@ export interface Backend {
   saveAppState(s: AppState): Promise<void>;
 
   listWallets(): Promise<WalletInfo[]>;
+  /** Desktop: choose and copy a seed file locally. No key material crosses IPC. */
+  importSeedFile?(r: { name: string; addressCount: number }): Promise<WalletInfo | null>;
   /** 24 new recovery words (lowercase, single spaces). Stores nothing. */
   newRecoveryPhrase(): Promise<string>;
   /**
@@ -193,6 +195,7 @@ export const ERROR_CODES = [
   'invalid_passphrase',
   'passphrase_required',
   'invalid_mnemonic',
+  'invalid_key_file',
   'wallet_mismatch',
   'wallet_exists',
   'wallet_not_found',

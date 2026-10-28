@@ -2,7 +2,7 @@
 """Checks the command interface of the built desktop app.
 
 Starts the app through tauri-driver (WebDriver) on the X display in DISPLAY,
-with the empty wallet directory in MMX_HOME, and calls the commands the way
+with the empty wallet directory in ~/.mmx, and calls the commands the way
 the wallet UI does: valid requests, rejected requests, the file dialogs
 (answered with xdotool), commands the window must not reach and navigation
 away from the app. Chain requests need network access: when neither the app
@@ -29,7 +29,7 @@ from webdriver_client import WebDriverClient
 APP, DRIVER = sys.argv[1], sys.argv[2]
 PRODUCT = "MMX Wallet"
 CHAIN_SERVER = "https://rpc.mmx.network"
-HOME = os.environ["MMX_HOME"]
+HOME = os.path.join(os.environ["HOME"], ".mmx")
 PORT = 4444
 ZERO = "mmx1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdgytev"
 PASSPHRASE = "correct horse"
@@ -40,7 +40,7 @@ FIXTURE_FINGERPRINT = "2138401816"
 FIXTURE_PASSPHRASE = "test 世界 🔑"
 ZERO_SEED = " ".join(["abandon"] * 23 + ["art"])
 ERROR_CODES = {
-    "invalid_passphrase", "passphrase_required", "invalid_mnemonic", "wallet_mismatch",
+    "invalid_passphrase", "passphrase_required", "invalid_mnemonic", "invalid_key_file", "wallet_mismatch",
     "wallet_exists", "wallet_not_found", "locked", "invalid_address", "invalid_amount",
     "invalid_memo", "insufficient_funds", "insufficient_fee", "invalid_argument",
     "rpc_unreachable", "rpc_timeout", "rpc_not_synced", "rpc_network_mismatch",
@@ -207,6 +207,7 @@ try:
     state = ok("load app state", "load_app_state")
     check("default settings", state["settings"] == {"theme": "system", "autoLockMinutes": 5, "feeLevel": 1})
     check("nothing written before a change", not os.path.exists(HOME))
+    check("seed-file import offered", "Import from seed file" in rendered)
 
     # Wallets: new words first, the wallet is saved once they are confirmed.
     phrases = [ok(f"new recovery words {i + 1}", "new_recovery_phrase") for i in range(3)]
@@ -283,7 +284,8 @@ try:
     secrets.append(FIXTURE_PASSPHRASE)
     check("imported with passphrase", imported["withPassphrase"] and not imported["locked"]
           and imported["fingerprint"] == FIXTURE_FINGERPRINT)
-    check("100 addresses after import", len(ok("imported addresses", "get_addresses", {"id": imported["id"]})) == 100)
+    imported_addresses = ok("imported addresses", "get_addresses", {"id": imported["id"]})
+    check("100 addresses after import", len(imported_addresses) == 100)
 
     ok("rename", "rename_wallet", {"id": main["id"], "name": "Daily"})
     more = ok("more addresses", "set_address_count", {"id": main["id"], "count": 12})
@@ -484,6 +486,53 @@ try:
     removed = os.listdir(os.path.join(HOME, "removed"))
     check("key file kept aside", len(removed) == 1 and removed[0].startswith(imported["id"] + "."))
     check("two wallets left", len(ok("list after remove", "list_wallets")) == 2)
+
+    # Import only files explicitly selected in the native picker. A protected
+    # seed stays protected, and the selected original is never moved or changed.
+    request = {"name": "From seed file", "addressCount": 3}
+    fails("seed path cannot bypass the picker", "import_seed_file",
+          dict(request, path=key), "invalid_argument")
+    start("import_seed_file", request)
+    dialog = wait_for_window("Import seed file")
+    check("seed picker belongs to the window", dialog is not None and belongs_to_window(dialog))
+    if dialog:
+        cancel(dialog)
+    check("seed import cancelled", finish() == {"ok": True, "value": None})
+    check("cancel did not add a wallet", len(ok("list after seed cancel", "list_wallets")) == 2)
+
+    def pick_seed(path):
+        start("import_seed_file", request)
+        dialog = wait_for_window("Import seed file")
+        check("seed picker opened", dialog is not None)
+        if dialog:
+            xdotool("windowfocus", "--sync", dialog)
+            xdotool("key", "ctrl+l")
+            xdotool("type", "--delay", "15", path)
+            for _ in range(3):
+                time.sleep(0.5)
+                if dialog not in xdotool("search", "--onlyvisible", "--name", "Import seed file").split():
+                    break
+                xdotool("windowfocus", "--sync", dialog)
+                xdotool("key", "Return")
+        return finish()
+
+    result = pick_seed(target)  # contacts JSON is not a seed file
+    check("non-seed file refused", not result["ok"] and result["error"]["code"] == "invalid_key_file")
+    source = os.path.join(HOME, "removed", removed[0])
+    original = open(source, "rb").read()
+    result = pick_seed(source)
+    check("seed file imported", result["ok"], json.dumps(result.get("error")))
+    restored = result.get("value") or {}
+    check("seed protection and fingerprint preserved", restored.get("withPassphrase") and restored.get("locked")
+          and restored.get("fingerprint") == FIXTURE_FINGERPRINT)
+    check("original seed file unchanged", open(source, "rb").read() == original)
+    check("seed copy saved privately", stat.S_IMODE(os.stat(os.path.join(HOME, restored["id"])).st_mode) == 0o600)
+    ok("unlock seed import", "unlock_wallet", {"id": restored["id"], "passphrase": FIXTURE_PASSPHRASE})
+    check("seed import derives original addresses", ok("seed addresses", "get_addresses", {"id": restored["id"]})
+          == imported_addresses[:3] and restored["addressCount"] == 3)
+    result = pick_seed(source)
+    check("duplicate seed file refused", not result["ok"] and result["error"]["code"] == "wallet_exists")
+    check("desktop ignored node home", not os.path.exists(os.environ["MMX_HOME"]))
 except Exception as e:
     check("checks completed", False, repr(e)[:300])
 finally:

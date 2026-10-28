@@ -9,6 +9,7 @@ pub const COMMANDS: &[&str] = &[
     "new_recovery_phrase",
     "create_wallet",
     "import_wallet",
+    "import_seed_file",
     "unlock_wallet",
     "lock_wallet",
     "lock_all",

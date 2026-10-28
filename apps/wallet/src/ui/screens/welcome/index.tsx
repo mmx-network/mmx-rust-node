@@ -3,6 +3,7 @@ import { clearSetupNotice, leaveOnboarding, navigate, platform, setupNotice, usa
 import { Banner, BrandMark, Icon, IconTile, type IconName } from '../../components';
 import { FocusLayout } from '../../shell';
 import { OpenSavedView } from '../unlock';
+import { SeedFileImport } from '../import/SeedFileImport';
 import { FlowHeader } from './flow';
 import './welcome.css';
 
@@ -30,6 +31,7 @@ function Choice({ icon, title, detail, onClick }: ChoiceProps) {
 
 export default function WelcomeScreen() {
   const [openSaved, setOpenSaved] = useState(false);
+  const [seedFile, setSeedFile] = useState(false);
   const web = platform.value === 'web';
   const adding = usableWallets.value.length > 0;
   // Why a wallet setup ended (e.g. auto-lock); shown until the user leaves this screen.
@@ -37,6 +39,7 @@ export default function WelcomeScreen() {
   useEffect(() => clearSetupNotice, []);
 
   if (openSaved) return <OpenSavedView onBack={() => setOpenSaved(false)} />;
+  if (seedFile && !web) return <SeedFileImport onBack={() => setSeedFile(false)} />;
 
   return (
     <FocusLayout onBack={adding ? leaveOnboarding : undefined} class={adding ? 'welcome' : 'welcome welcome--start'}>
@@ -55,6 +58,7 @@ export default function WelcomeScreen() {
       <ul class="welcome-choices" aria-label="Get started">
         <Choice icon="plus" title="Create a new wallet" detail="Get a new recovery phrase" onClick={() => navigate('create')} />
         <Choice icon="key" title="Import with recovery phrase" detail="Use your 24 words" onClick={() => navigate('import')} />
+        {!web ? <Choice icon="download" title="Import from seed file" detail="Use an existing wallet.dat or JSON key file" onClick={() => setSeedFile(true)} /> : null}
         {web ? (
           <Choice icon="shield" title="Open a saved wallet" detail="From your password manager" onClick={() => setOpenSaved(true)} />
         ) : null}

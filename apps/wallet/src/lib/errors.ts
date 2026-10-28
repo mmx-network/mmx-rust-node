@@ -5,6 +5,7 @@ const MESSAGES: Record<ErrorCode, string> = {
   invalid_passphrase: 'Wrong passphrase. Try again.',
   passphrase_required: 'Enter the passphrase for this wallet.',
   invalid_mnemonic: 'These recovery words are not valid. Check each word and the order.',
+  invalid_key_file: 'This is not a valid MMX seed file.',
   wallet_mismatch: 'These recovery words belong to a different wallet.',
   wallet_exists: 'This wallet is already added.',
   wallet_not_found: 'This wallet is no longer available.',

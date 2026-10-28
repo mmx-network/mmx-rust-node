@@ -29,6 +29,7 @@ type Command =
   | 'new_recovery_phrase'
   | 'create_wallet'
   | 'import_wallet'
+  | 'import_seed_file'
   | 'unlock_wallet'
   | 'lock_wallet'
   | 'lock_all'
@@ -95,6 +96,10 @@ class DesktopBackend implements Backend {
 
   listWallets(): Promise<WalletInfo[]> {
     return call('list_wallets');
+  }
+
+  importSeedFile(r: { name: string; addressCount: number }): Promise<WalletInfo | null> {
+    return call('import_seed_file', { name: r.name, addressCount: r.addressCount });
   }
 
   async newRecoveryPhrase(): Promise<string> {

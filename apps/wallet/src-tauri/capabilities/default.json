@@ -12,6 +12,7 @@
     "allow-new-recovery-phrase",
     "allow-create-wallet",
     "allow-import-wallet",
+    "allow-import-seed-file",
     "allow-unlock-wallet",
     "allow-lock-wallet",
     "allow-lock-all",

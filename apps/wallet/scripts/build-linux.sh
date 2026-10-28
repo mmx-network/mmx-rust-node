@@ -86,9 +86,17 @@ start_display() {
         DISPLAY=$1 xdotool getdisplaygeometry >/dev/null 2>&1 && break
         sleep 0.1
     done
+    DISPLAY=$1 openbox --sm-disable >/dev/null 2>&1 &
+    wm_pid=$!
+    for _ in $(seq 50); do
+        if DISPLAY=$1 xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id'; then break; fi
+        sleep 0.1
+    done
 }
 
 stop_display() {
+    [[ $(cat "/proc/$2/comm" 2>/dev/null) == openbox ]] && kill -TERM "$2"
+    wait "$2" 2>/dev/null || true
     [[ $(cat "/proc/$1/comm" 2>/dev/null) == Xvfb ]] && kill -TERM "$1"
     wait "$1" 2>/dev/null || true
 }
@@ -135,13 +143,14 @@ PY
 # its window, takes a screenshot and stops exactly the processes it started.
 check_launch() {
     local label=$1; shift
-    local home display xvfb app owner="" bus="" windows=0 window="" colors=0 status=0
+    local home display xvfb wm app owner="" bus="" windows=0 window="" colors=0 status=0
     home=$(app_home)
     display=$(free_display)
     start_display "$display"
     xvfb=$xvfb_pid
+    wm=$wm_pid
 
-    env HOME="$home" MMX_HOME="$home/mmx" XDG_CONFIG_HOME="$home/config" \
+    env HOME="$home" MMX_HOME="$home/node" XDG_CONFIG_HOME="$home/config" \
         XDG_DATA_HOME="$home/data" XDG_CACHE_HOME="$home/cache" XDG_RUNTIME_DIR="$home/run" \
         DISPLAY="$display" setsid dbus-run-session -- "$@" >"$home/app.log" 2>&1 &
     app=$!
@@ -159,12 +168,18 @@ check_launch() {
         if [[ -z $owner || $(ps -o pgid= -p "$owner" 2>/dev/null | tr -d ' ') != "$app" ]]; then
             printf '%s: the app is not running\n' "$label" >&2; status=1
         fi
+        if [[ $label == appimage ]]; then
+            DISPLAY=$display xprop -id "$window" _NET_WM_ICON >"$home/icon.txt"
+            if ! grep -q 'Icon (128 x 128)' "$home/icon.txt" || ! grep -q 'Icon (192 x 192)' "$home/icon.txt"; then
+                printf 'appimage: the window does not expose its high-resolution icon\n' >&2; status=1
+            fi
+        fi
     fi
     # A second start hands over to the running app (session bus) and exits.
     bus=""
     [[ -n $owner ]] && bus=$(tr '\0' '\n' <"/proc/$owner/environ" 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
     if [[ -n $bus ]]; then
-        if env HOME="$home" MMX_HOME="$home/mmx" XDG_CONFIG_HOME="$home/config" \
+        if env HOME="$home" MMX_HOME="$home/node" XDG_CONFIG_HOME="$home/config" \
             XDG_DATA_HOME="$home/data" XDG_CACHE_HOME="$home/cache" XDG_RUNTIME_DIR="$home/run" \
             DISPLAY="$display" DBUS_SESSION_BUS_ADDRESS="$bus" timeout 30 "$@" >"$home/second.log" 2>&1; then
             windows=$(DISPLAY=$display xdotool search --onlyvisible --name "^${product}\$" 2>/dev/null | wc -l)
@@ -178,7 +193,7 @@ check_launch() {
     if grep -qiE 'panicked|could not start' "$home/app.log"; then
         printf '%s: error output\n' "$label" >&2; status=1
     fi
-    if [[ -e $home/mmx ]]; then
+    if [[ -e $home/.mmx || -e $home/node ]]; then
         printf '%s: the wallet directory was created without a change\n' "$label" >&2; status=1
     fi
     mkdir -p "$shots"
@@ -193,7 +208,7 @@ check_launch() {
         kill -KILL -- "-$app" 2>/dev/null || true
     fi
     wait "$app" 2>/dev/null || true
-    stop_display "$xvfb"
+    stop_display "$xvfb" "$wm"
 
     if (( status != 0 )); then
         printf -- '--- %s output ---\n' "$label" >&2
@@ -230,17 +245,18 @@ menu_program() {
 
 # Calls every command of the app at $1 through WebDriver (see ipc_check.py).
 check_commands() {
-    local home display xvfb status=0
+    local home display xvfb wm status=0
     home=$(app_home)
     display=$(free_display)
     start_display "$display"
     xvfb=$xvfb_pid
-    env HOME="$home" MMX_HOME="$home/mmx" XDG_CONFIG_HOME="$home/config" \
+    wm=$wm_pid
+    env HOME="$home" MMX_HOME="$home/node" XDG_CONFIG_HOME="$home/config" \
         XDG_DATA_HOME="$home/data" XDG_CACHE_HOME="$home/cache" XDG_RUNTIME_DIR="$home/run" \
         DISPLAY="$display" timeout 600 dbus-run-session -- \
         python3 -B "$wallet/src-tauri/tests/ipc_check.py" "$1" "$(command -v tauri-driver)" \
         >"$home/check.log" 2>&1 || status=1
-    stop_display "$xvfb"
+    stop_display "$xvfb" "$wm"
     if (( status != 0 )); then
         printf -- '--- command check ---\n' >&2
         grep -vE 'Gtk-CRITICAL|dbus-daemon|^$' "$home/check.log" | grep -v '^ok ' | tail -n 60 >&2 || true
@@ -255,6 +271,8 @@ check_commands() {
 if (( launch_check )); then
     extract=$(mktemp -d)
     dpkg-deb -x "$packages/$deb_name" "$extract"
+    python3 "$wallet/scripts/check-packaged-cli.py" "$extract/usr/bin/mmxwallet"
+    python3 "$wallet/scripts/check-packaged-cli.py" "$packages/$appimage_name" --cli
     result=0
     if program=$(menu_program "$extract"); then
         printf 'deb: the menu entry starts %s\n' "$program"

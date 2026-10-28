@@ -92,6 +92,7 @@ export {
   discovery,
   fundedAddressesFrom,
   importWallet,
+  importSeedFile,
   lock,
   lockedElsewhere,
   newRecoveryPhrase,

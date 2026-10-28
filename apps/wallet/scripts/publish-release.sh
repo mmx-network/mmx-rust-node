@@ -51,6 +51,11 @@ MMX Wallet ${version}, build ${GITHUB_RUN_NUMBER}.
 
 SHA-256 checksum files are included for each platform.
 
+The desktop packages also include the mmxwallet command-line tool. On Linux deb
+installations, run mmxwallet directly; AppImage users can run the AppImage with
+--cli followed by the wallet command. On Windows it is beside the wallet app;
+on macOS it is in MMX Wallet.app/Contents/MacOS/mmxwallet.
+
 Source: [${GITHUB_SHA}](https://github.com/${repo}/commit/${GITHUB_SHA}).
 Built and tested by [Wallet #${GITHUB_RUN_NUMBER}](https://github.com/${repo}/actions/runs/${GITHUB_RUN_ID}).
 EOF

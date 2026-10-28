@@ -108,5 +108,9 @@
     "suggestedName": "mmx-contacts.json",
     "contents": "{\"contacts\":[]}\n"
   },
-  "import_file": {}
+  "import_file": {},
+  "import_seed_file": {
+    "name": "Main",
+    "addressCount": 3
+  }
 }

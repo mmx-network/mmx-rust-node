@@ -17,9 +17,12 @@ ENV APPIMAGE_EXTRACT_AND_RUN=1
 # Checks of the built app under Xvfb: screenshots, window automation, WebDriver
 # for its webview (tauri-driver + WebKitWebDriver); rsync for staging copies.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    x11-apps xdotool rsync webkit2gtk-driver && rm -rf /var/lib/apt/lists/*
+    x11-apps x11-utils xdotool rsync webkit2gtk-driver && rm -rf /var/lib/apt/lists/*
 RUN CARGO_INCREMENTAL=0 nice -n 19 ionice -c 3 cargo install tauri-driver --version 2.0.6 --locked --jobs 2 --root /usr/local \
     && rm -rf /opt/cargo/registry /opt/cargo/git
 # Lints for the desktop crate, which only builds here.
 RUN rustup component add clippy
+# Exercise window icon hints under an EWMH window manager.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    openbox && rm -rf /var/lib/apt/lists/*
 WORKDIR /tmp

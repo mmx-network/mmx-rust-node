@@ -304,6 +304,7 @@ fn run(a: &Args) -> Result<()> {
                 (path.parent(), path.file_name().and_then(|s| s.to_str()))
             {
                 let mut config = config::read(parent)?;
+                config::set_num_addresses(&mut config, id, a.address_count(None));
                 config::set_cached_addresses_for(
                     &mut config,
                     id,

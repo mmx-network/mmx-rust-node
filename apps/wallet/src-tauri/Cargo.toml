@@ -1,6 +1,6 @@
 [package]
 name = "mmx-wallet-desktop"
-version = "1.0.0"
+version = "1.0.1"
 description = "MMX Wallet"
 edition = "2021"
 rust-version = "1.90"
@@ -24,6 +24,10 @@ path = "src/lib.rs"
 name = "mmx-wallet-gui"
 path = "src/main.rs"
 required-features = ["app"]
+
+[[bin]]
+name = "mmxwallet"
+path = "src/cli.rs"
 
 [features]
 default = ["app"]

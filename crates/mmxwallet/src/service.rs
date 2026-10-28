@@ -52,10 +52,11 @@ const SYMBOL_MAX_CHARS: usize = 24;
 const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 /// The error codes of the wallet UI.
-pub const ERROR_CODES: [&str; 25] = [
+pub const ERROR_CODES: [&str; 26] = [
     "invalid_passphrase",
     "passphrase_required",
     "invalid_mnemonic",
+    "invalid_key_file",
     "wallet_mismatch",
     "wallet_exists",
     "wallet_not_found",
@@ -456,6 +457,12 @@ fn validate_contacts(input: &[Contact]) -> Result<Vec<Contact>> {
 }
 
 impl Service {
+    /// User-owned desktop storage, independent of the node's MMX_HOME.
+    pub fn open_desktop() -> Result<Self> {
+        let dir = run(storage::user_directory)?;
+        Self::open(Some(dir))
+    }
+
     /// Opens the wallet directory (default: `$MMX_HOME` or `~/.mmx`). Nothing
     /// is created until the first change.
     pub fn open(dir: Option<PathBuf>) -> Result<Self> {
@@ -530,6 +537,57 @@ impl Service {
         count: u32,
     ) -> Result<WalletInfo> {
         run(|| self.add_words(name, mnemonic, passphrase, count, false))
+    }
+
+    /// Copies an explicitly chosen seed file into desktop storage. Its seed
+    /// and passphrase fingerprint are preserved; the original is untouched.
+    /// Protected wallets remain locked until their existing passphrase is given.
+    pub fn import_key_file(&self, path: &Path, name: &str, count: u32) -> Result<WalletInfo> {
+        run(|| {
+            let name = validate::name(name)?;
+            let count = validate::num_addresses(count)?;
+            let key = storage::read_key(path).map_err(|e| {
+                if e.code == "io_error" {
+                    e
+                } else {
+                    Error::new("invalid_key_file", "invalid wallet seed file")
+                }
+            })?;
+            if key.seed_value == [0; 32] {
+                return Err(Error::new("invalid_key_file", "invalid wallet seed"));
+            }
+            let (fingerprint, protection) = detect(&key)?;
+            let _files = guard(&self.files);
+            for (_, existing) in storage::wallet_files(&self.dir)? {
+                let Ok(existing) = storage::read_key(&existing) else {
+                    continue;
+                };
+                if existing.seed_value == key.seed_value
+                    && match protection {
+                        Protection::Passphrase => {
+                            existing.finger_print.as_deref() == Some(&fingerprint)
+                        }
+                        _ => matches!(
+                            detect(&existing),
+                            Ok((_, Protection::None | Protection::Empty))
+                        ),
+                    }
+                {
+                    return Err(Error::new("wallet_exists", "wallet already exists"));
+                }
+            }
+            if protection != Protection::Passphrase {
+                return self.add(name, count, &key, fingerprint, protection, None);
+            }
+            let id = format!("wallet_{fingerprint}.dat");
+            let mut config = self.config_for_write()?;
+            storage::save_key(&self.dir.join(&id), &key)?;
+            config::set_wallet_name(&mut config, &id, &name);
+            config::set_num_addresses(&mut config, &id, count);
+            config::set_active(&mut config, Some(&id));
+            config::save(&self.dir, config.clone())?;
+            Ok(describe(&config, id, Ok((fingerprint, protection)), false))
+        })
     }
 
     /// Saves a wallet from recovery words, unless the same wallet exists.

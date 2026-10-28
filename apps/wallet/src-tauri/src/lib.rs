@@ -1,6 +1,6 @@
 //! MMX Wallet desktop application: the shared wallet UI in a native window,
-//! backed by [`mmxwallet::service::Service`] (the same wallet directory, key
-//! files and `mmxwallet.json` as the command line wallet and the node).
+//! backed by [`mmxwallet::service::Service`] (compatible key files and
+//! `mmxwallet.json`, stored in the user's .mmx independently of the node).
 //!
 //! The UI calls one command per backend operation. Each command takes one
 //! JSON object, decoded strictly (see [`args`]), and runs on a blocking
@@ -10,6 +10,8 @@
 //! other system services.
 #![cfg_attr(not(feature = "app"), allow(dead_code))]
 
+#[cfg(any(target_os = "linux", test))]
+mod appimage;
 mod args;
 mod clipboard;
 mod commands;
@@ -146,6 +148,29 @@ mod desktop {
         } = decode(&request)?;
         let service = session.service()?;
         blocking(move || service.import(&name, mnemonic, passphrase, address_count)).await
+    }
+
+    #[tauri::command]
+    async fn import_seed_file(
+        window: Window,
+        session: State<'_, Session>,
+        request: Request<'_>,
+    ) -> Result<Option<WalletInfo>> {
+        let args::ImportSeedFile {
+            name,
+            address_count,
+        } = decode(&request)?;
+        let service = session.service()?;
+        let dialogs = Arc::clone(&session.dialogs);
+        blocking(move || {
+            let Some(path) = dialogs.seed(&window)? else {
+                return Ok(None);
+            };
+            service
+                .import_key_file(&path, &name, address_count)
+                .map(Some)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -458,7 +483,7 @@ mod desktop {
         prefer_compatible_rendering();
 
         let session = Session {
-            service: Service::open(None).map(Arc::new),
+            service: Service::open_desktop().map(Arc::new),
             clipboard: Arc::default(),
             dialogs: Arc::default(),
         };
@@ -496,10 +521,30 @@ mod desktop {
                     .find(|w| w.label == MAIN_WINDOW)
                     .cloned()
                     .ok_or("the main window is not configured")?;
-                tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
                     .enable_clipboard_access()
                     .initialization_script(crate::page_guard(cfg!(target_os = "macos")))
                     .build()?;
+                #[cfg(target_os = "linux")]
+                if std::env::var_os("APPIMAGE").is_some() {
+                    use gtk::prelude::GtkWindowExt;
+                    let master = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(
+                        crate::appimage::ICON,
+                    ))?;
+                    // GTK silently drops oversized X11 icon properties. Supply
+                    // small sizes first so every dock gets a usable fallback.
+                    let icons = [64, 128, 192]
+                        .into_iter()
+                        .map(|size| {
+                            master
+                                .scale_simple(size, size, gtk::gdk_pixbuf::InterpType::Hyper)
+                                .ok_or("could not scale the window icon")
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    window.gtk_window()?.set_icon_list(&icons);
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = window;
                 let handle = app.handle().clone();
                 thread::spawn(move || {
                     thread::sleep(SHOW_AT_THE_LATEST);
@@ -518,6 +563,7 @@ mod desktop {
                 new_recovery_phrase,
                 create_wallet,
                 import_wallet,
+                import_seed_file,
                 unlock_wallet,
                 lock_wallet,
                 lock_all,
@@ -641,6 +687,7 @@ mod tests {
                 "import_wallet" => {
                     parse::<args::Import>(body).is_ok_and(|i| i.passphrase.is_some())
                 }
+                "import_seed_file" => parse::<args::ImportSeedFile>(body).is_ok(),
                 "unlock_wallet" => {
                     parse::<args::Unlock>(body).is_ok_and(|u| u.passphrase.is_some())
                 }

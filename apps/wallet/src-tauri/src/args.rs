@@ -55,6 +55,13 @@ pub struct Import {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportSeedFile {
+    pub name: String,
+    pub address_count: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Unlock {
     pub id: String,
     #[serde(default)]

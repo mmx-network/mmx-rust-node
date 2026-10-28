@@ -124,9 +124,12 @@ given with `--wallet <FINGERPRINT>`. These settings and an optional chain server
 (`"rpc"`, used when `--rpc` is not given) are kept in `mmxwallet.json` in the
 same directory.
 
-The desktop wallet (Windows, macOS, Linux deb and AppImage) uses the same wallet
-directory, key files and `mmxwallet.json`; the web wallet keeps the recovery
-words in the browser's password manager. Download desktop installers from
+The desktop wallet (Windows, macOS, Linux deb and AppImage) stores compatible key
+files and `mmxwallet.json` in `~/.mmx` (Windows: `%USERPROFILE%\.mmx`), ignoring
+`MMX_HOME` so node configuration cannot redirect it. Import an existing binary
+or JSON seed file from the welcome screen; the original file and its passphrase
+are preserved. The web wallet keeps recovery words in the browser's password
+manager. Download desktop installers from
 [GitHub Releases](https://github.com/mmx-network/mmx-rust-node/releases).
 The Wallet workflow publishes successful `main` builds after all wallet tests
 and platform builds pass, with platform checksums and the exact source commit.
@@ -137,6 +140,12 @@ without replacing published downloads. Both wallets are built from
 [`apps/wallet/deploy`](apps/wallet/deploy/README.md)), or
 `scripts/build-linux-container.sh`, `scripts/build-macos.sh` or
 `scripts/build-windows.ps1` for the desktop packages.
+
+Desktop packages also include `mmxwallet`: `/usr/bin/mmxwallet` in the deb,
+beside the Windows app, and inside `MMX Wallet.app/Contents/MacOS` on macOS.
+The portable AppImage exposes the same tool with `./mmx-wallet.AppImage --cli`.
+The CLI continues to honor `MMX_HOME`; unset it to use the desktop's default
+wallet folder, or select a specific key with `--file`.
 
 The block explorer in [`apps/explorer`](apps/explorer/README.md) shares the new
 wallet's design and preserves existing explorer links. Run `npm ci && npm run

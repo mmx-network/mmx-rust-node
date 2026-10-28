@@ -57,6 +57,8 @@ export async function brandJobs() {
   await writeFile(join(website, 'branding/share.svg'), share);
 
   const jobs = [{ svg: appIcon, size: 1024, out: join(here, 'app-icon.png') }];
+  // Window managers scale this down; use the compact, almost full-canvas logo.
+  jobs.push({ svg: compact, size: 512, out: join(app, 'src-tauri/icons/window-icon.png') });
   for (const owner of [app, website]) {
     for (const size of [192, 512]) {
       jobs.push({ svg: appIcon, size, out: join(owner, 'public', `icon-${size}.png`) });
