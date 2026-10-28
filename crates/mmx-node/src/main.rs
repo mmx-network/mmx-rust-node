@@ -18,6 +18,7 @@ const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir 
   [--no-services] [--farmer ENDPOINT] [--reward-vote -1|0|1] [-c CONFIG]...
   [--opencl-device INDEX|-1] [--opencl-platform NAME]
   [--p2p-listen HOST:PORT] [--rpc-listen HOST:PORT] [--http-listen HOST:PORT]
+  [--rpc-cache-mb MIB]
 
 Defaults: --mmx-root ../mmx-node; network from $MMX_HOME/NETWORK or mainnet.
   MMX_HOME defaults to the working directory; local config is MMX_HOME/config/local.
@@ -29,6 +30,7 @@ Defaults: --mmx-root ../mmx-node; network from $MMX_HOME/NETWORK or mainnet.
 OpenCL GPU 0 is used when available, with CPU fallback; --opencl-device -1 disables it.
 Historical sync uses configured native seed peers unless --peer is supplied.
 --offline serves the stored ledger without contacting peers.
+The in-process RPC cache defaults to 64 MiB; --rpc-cache-mb or Node.rpc_cache_size_mb sets its budget.
 --sync-once exits after coordinated sync. Router.min_sync_peers / num_peers_out control peer counts.
 --p2p-listen overrides Router.host / port. --rollback-to keeps that height.
 History is retained by default. --purge-before reclaims older history before serving,
@@ -49,6 +51,7 @@ struct Options {
     p2p: Option<String>,
     rpc: String,
     http: String,
+    rpc_cache_mb: Option<usize>,
     opencl_device: Option<i32>,
     opencl_platform: Option<String>,
 }
@@ -69,6 +72,7 @@ fn options() -> Result<Option<Options>> {
         p2p: None,
         rpc: "127.0.0.1:11331".into(),
         http: "127.0.0.1:11380".into(),
+        rpc_cache_mb: None,
         opencl_device: None,
         opencl_platform: None,
     };
@@ -104,6 +108,7 @@ fn options() -> Result<Option<Options>> {
                     "--p2p-listen" => o.p2p = Some(value),
                     "--rpc-listen" => o.rpc = value,
                     "--http-listen" => o.http = value,
+                    "--rpc-cache-mb" => o.rpc_cache_mb = Some(value.parse()?),
                     "--opencl-device" => o.opencl_device = Some(value.parse()?),
                     "--opencl-platform" => o.opencl_platform = Some(value),
                     _ => {
@@ -195,6 +200,15 @@ fn main() -> Result<()> {
         ),
     };
     let mut state = Node::open(&data, &network)?;
+    let cache_mb = options
+        .rpc_cache_mb
+        .or(config.read("Node.rpc_cache_size_mb")?)
+        .unwrap_or(64);
+    state.set_rpc_cache_limit(
+        cache_mb
+            .checked_mul(1024 * 1024)
+            .ok_or("RPC cache size overflow")?,
+    );
     state.configure_router(&config)?;
     if !options.offline
         && peers.is_empty()

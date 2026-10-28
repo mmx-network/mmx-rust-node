@@ -1,6 +1,9 @@
 //! Native VNX ledger RPCs, transaction admission and bounded farming topics,
 //! plus a JSON-RPC 2.0 HTTP presentation. Peer block transport retains lossless records.
 use crate::{error, Node, Result};
+pub(crate) mod cache;
+pub(crate) mod history;
+pub use cache::Stats as CacheStats;
 use mmx_consensus::Record;
 use std::{
     io::Cursor,
@@ -45,6 +48,8 @@ pub const METHODS: &[&str] = &[
     "get_transactions",
     "get_tx_height",
     "get_tx_ids_at",
+    "get_history",
+    "get_history_memo",
     "get_contract",
     "get_contract_for",
     "get_balance",
@@ -183,25 +188,38 @@ fn dispatch_until(
         }
         return Ok(Value::Null);
     }
-    let mut task = if method == "validate" || crate::transactions::is_balance_method(&request.name)
-    {
+    let (response, fill) = {
         let n = lock_node_until(node, end)?;
-        Some(ReadTask::capture(&n)?)
-    } else {
-        None
+        let (cached, fill) = cache::probe(&n, &request)?;
+        if let Some(response) = cached {
+            drop(n);
+            (response, None)
+        } else {
+            let response = if history::is_method(&request.name) {
+                let task = history::Task::capture(&n, &request)?;
+                drop(n);
+                task.call(&request, end)?
+            } else if method == "validate" || crate::transactions::is_balance_method(&request.name)
+            {
+                let mut task = ReadTask::capture(&n)?;
+                drop(n);
+                task.call(&request)?
+            } else {
+                let response = n.call(&request)?;
+                drop(n);
+                response
+            };
+            if response.memory_size() > MAX_RESPONSE_BYTES {
+                return Err(error("RPC response exceeds byte budget"));
+            }
+            (response.encode()?, fill)
+        }
     };
-    let response = if let Some(task) = &mut task {
-        task.call(&request)?
-    } else {
-        let n = lock_node_until(node, end)?;
-        n.call(&request)?
-    };
-    if response.memory_size() > MAX_RESPONSE_BYTES {
-        return Err(error("RPC response exceeds byte budget"));
-    }
-    let response = response.encode()?;
     if response.len() > MAX_RESPONSE_BYTES {
         return Err(error("RPC response exceeds byte budget"));
+    }
+    if let Some(fill) = fill {
+        fill.finish_wire(&response);
     }
     let mut response = Reader::new(Cursor::new(response), registry)
         .with_limits(vnx::binary::Limits {
@@ -425,13 +443,16 @@ fn request(node: &Arc<Mutex<Node>>, r: Value, end: Instant) -> Option<Value> {
                 .tip()?
                 .ok_or_else(|| error("missing node tip"))?;
             let inbox = n.inbox().stats()?;
+            let cache = n.rpc_cache_stats();
             Ok(
                 json!({"height":tip.height,"vdf_height":tip.vdf_height,"root_height":n.root,"earliest_height":n.earliest_height(),
                 "pending_transactions":n.pending_transactions(),"synced":n.synced,"sync_peers":n.sync_peers,"network":n.chain.selected().params().network,
                 "sync_body_requests":n.sync_body_requests,"sync_body_retries":n.sync_body_retries,
                 "sync_backpressure_retries":n.sync_backpressure_retries,
                 "hash":vnx::util::to_hex_string(&tip.hash.0,false,false),
-                "queued_messages":inbox.messages,"queued_bytes":inbox.bytes,"dropped_messages":inbox.dropped}),
+                "queued_messages":inbox.messages,"queued_bytes":inbox.bytes,"dropped_messages":inbox.dropped,
+                "rpc_cache":{"limit_bytes":cache.limit_bytes,"used_bytes":cache.used_bytes,"entries":cache.entries,
+                    "hits":cache.hits,"misses":cache.misses,"evictions":cache.evictions}}),
             )
         })()
     } else {
@@ -576,7 +597,7 @@ pub(crate) mod tests {
     pub(crate) fn fixture() -> (Arc<Mutex<Node>>, Record, Record) {
         fixture_at(None)
     }
-    fn fixture_at(path: Option<&std::path::Path>) -> (Arc<Mutex<Node>>, Record, Record) {
+    pub(crate) fn fixture_at(path: Option<&std::path::Path>) -> (Arc<Mutex<Node>>, Record, Record) {
         let rows: Vec<Value> = include_str!("../../mmx-execution/tests/fixtures/chain.jsonl")
             .lines()
             .map(|s| serde_json::from_str(s).unwrap())

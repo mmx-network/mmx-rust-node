@@ -351,10 +351,38 @@ curl -sS http://127.0.0.1:11380/rpc \
   -d '{"jsonrpc":"2.0","id":2,"method":"get_block_hash","params":{"height":100}}'
 ```
 
-The API includes blocks, headers, transactions, contracts, balances, transaction
-validation, and submission. Parameters are named objects using native VNX JSON
+The API includes blocks, headers, transactions, contracts, balances, address
+history (`get_history` / `get_history_memo`), transaction validation, and
+submission. Parameters are named objects using native VNX JSON
 representations, including byte arrays. This HTTP endpoint implements a subset
 of node methods; C++ WebGUI and REST/WebAPI parity are still in progress.
+
+Every node defaults to a **64 MiB in-process RPC cache**, shared by HTTP and
+native VNX RPC. Dedicated RPC servers can use `--rpc-cache-mb 2048` or
+`--rpc-cache-mb 4096` (2 / 4 GiB). The equivalent configuration setting is
+`Node.rpc_cache_size_mb`; the command-line option takes precedence. Zero disables
+the cache. The budget includes retained payloads, keys and conservative index
+overhead; it does not cap total process RSS or temporary request/response memory.
+`get_status.rpc_cache` reports its byte charge, entries, hits, misses and evictions.
+
+Cache hits make no chain/database queries. Successful chain publications push
+recent blocks, headers, transactions and transaction heights from already-loaded
+bodies. Cached address-history pages advance from the same events; address
+balances and contracts refill on demand after a state change. Eviction removes
+the least frequently used response, breaking ties by oldest access. Forks discard
+replaced suffixes and affected history; rollback and purge reset the cache.
+Generation checks prevent older in-flight reads from refilling it. Pending
+transactions/history, validation and submission use the live handlers.
+
+History uses the existing native `query_filter_t` fields, including inclusive
+`since` / `until`, currencies, type, memo, `max_search`, and pending transactions.
+A positive `limit` retains every entry at its cutoff height, matching C++.
+New blocks atomically maintain address and memo indexes with the ledger, so
+rollback/reorganization also rolls back their activity. Existing ledgers are
+read without migration: their unindexed prefix uses a bounded fallback (at most
+1,000 blocks / 10,000 searched rows / 32 MiB per request). Narrow `since` / `until`
+when that budget is exceeded. Indexed queries also have row, byte and execution
+budgets; a server budget failure returns an error instead of an incomplete total.
 
 To serve stored data without contacting peers, restart with `--offline`:
 

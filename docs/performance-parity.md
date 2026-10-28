@@ -1,5 +1,73 @@
 # C++ performance parity
 
+## In-process RPC cache and native address history (2026-10-29)
+
+References inspected: C++ `Node_api.cpp::{get_block_at,get_transaction,
+get_history,get_history_memo,get_balance,get_contract_ex}`, `Node.cpp::{apply,
+fork_to,revert}`, and `Block.cpp::{get_inputs,get_outputs}` /
+`Transaction.cpp::{get_inputs,get_outputs}`. The cache is a Rust addition at the
+public RPC dispatch boundary, shared by HTTP and native VNX without changing
+native method/return schemas. Every node defaults to 64 MiB; dedicated RPC
+servers can select 2/4 GiB with `--rpc-cache-mb` or `Node.rpc_cache_size_mb`.
+Zero explicitly disables it. The C++ reference has no equivalent unified
+byte-budgeted RPC response cache.
+
+LFU eviction uses oldest access for ties. Boxed wire payloads and keys have
+known lengths; conservative per-entry/index charges bound retained cache
+memory. Responses retain their serialized native wire representation, so a hit
+also avoids repeating record serialization. This is not a whole-process RSS
+limit: allocator high-water marks, ordinary RPC encoding/decoding and pinned
+read snapshots are separate. Hits
+perform no chain reads, and decoding happens after releasing the ledger mutex.
+Hits still acquire that mutex briefly to serialize against publication events.
+Accepted chain updates push already-loaded block/header/transaction records,
+including during historical synchronization; warming never rereads disk.
+Deep ancestors outside an update's loaded body window remain demand-filled.
+Speculative, staged and rejected bodies never seed public cache entries.
+
+A height dependency index removes only responses above the common ancestor.
+State responses invalidate on publication, while complete cached history pages
+advance using new native activity and their original filters. Branch switches
+discard those pages. Purge/explicit rollback clear all entries, and generation
+checks reject stale asynchronous fills even if a rewind restores the same tip
+hash. Pending data and validation/submission bypass caching. Native schemas,
+response byte limits, two shared snapshot workers and HTTP batch/deadline limits
+remain in force. Cache statistics are included in the JSON status response.
+
+History index writes share the atomic selected-ledger transaction. They include
+failed-transaction fees, successful explicit/execution transfers and native
+reward types. Descending-height keys and a memo hash index support bounded
+recent/paginated reads, currency/type/memo filters and full cutoff heights.
+Native length-first database ordering requires fixed-width successor cursors.
+Existing ledgers do not undergo automatic scans or rewrites: a bounded pinned
+snapshot fallback handles their older unindexed prefix. This deliberate
+difference can require narrower query ranges (1,000 legacy blocks, 10,000
+searched rows, 32 MiB and the request deadline). Search-budget truncation
+requested through native `max_search` retains its explicit semantics; server
+budget exhaustion fails the request. No live ledger/plot scans are used in
+validation.
+
+Validation: **259 node/execution tests pass**, with the two pre-existing CPU
+benchmarks and the new timing test excluded from the ordinary suite. Node and
+execution all-target Clippy passes with warnings denied; formatting and diff
+whitespace checks pass. Builds use two jobs, no incremental/debug symbols and
+low CPU/I/O priority. The explicit timing test uses a disposable native ledger:
+1,000 repeated 9,858-byte block responses took 132.1 ms through native reads and
+encoding versus 1.28 ms through the cached wire lookup (unoptimized test build,
+warm OS caches, ledger mutex already held). This measures that lookup/encoding
+stage only; it excludes HTTP/native presentation and network latency, sustained
+load, contention and mainnet-sized datasets.
+
+Regression coverage includes pushed responses with the ledger deliberately
+unavailable, LFU/byte bounds and all index cleanup, incremental native history,
+fork replacement, memory/native rewind and same-hash generation changes,
+detached readers, length-first pagination beyond 100 rows, legacy fallback,
+pending history, and real native-protocol sharing. Existing node/execution
+consensus, crash, sync, socket and purge regressions are also run. These are
+correctness/isolation checks; mainnet RPC throughput, resident memory and added
+history-index write amplification still require representative measurements
+before claiming performance parity.
+
 The [2026-10-25 review](cpp-port-audit.md#codebase-review-2026-10-25) found six
 admission/storage gaps. The [fix checkpoint](#review-fixes-2026-10-25) records
 their resolutions, new bounds and deliberate differences. Earlier fixture

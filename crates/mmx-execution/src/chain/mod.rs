@@ -8,6 +8,7 @@ pub mod choice;
 mod codec;
 pub mod forks;
 pub mod genesis;
+pub mod history;
 pub mod network;
 pub mod sync;
 pub mod voting;
@@ -482,6 +483,19 @@ impl ChainState {
             Write::put("chain_height", height.to_be_bytes(), hash),
             Write::put("chain_meta", b"tip", hash),
         ];
+        if self
+            .storage
+            .database()
+            .get("chain_meta", history::START_KEY, None)?
+            .is_none()
+        {
+            writes.push(Write::put(
+                "chain_meta",
+                history::START_KEY,
+                height.to_be_bytes(),
+            ));
+        }
+        writes.extend(history::writes(block, &self.params)?);
         if self.bodies.is_some() {
             writes.push(Write::put("chain_blocks", hash, bodies::EXTERNAL));
         } else {

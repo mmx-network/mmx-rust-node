@@ -49,6 +49,7 @@ pub struct Node {
     vote_ids: BTreeSet<Hash>,
     vote_order: VecDeque<Hash>,
     pub(crate) rpc_workers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) rpc_cache: Option<crate::rpc::cache::Shared>,
 }
 pub fn record(name: &str, fields: impl IntoIterator<Item = (String, Value)>) -> Record {
     Record {
@@ -136,7 +137,7 @@ impl Node {
         tx_pool
             .relay
             .configure_upload(chain.selected().params(), 2., 0.1)?;
-        Ok(Self {
+        let mut node = Self {
             chain,
             production: Default::default(),
             root,
@@ -167,7 +168,10 @@ impl Node {
             vote_ids: BTreeSet::new(),
             vote_order: VecDeque::new(),
             rpc_workers: Default::default(),
-        })
+            rpc_cache: None,
+        };
+        node.set_rpc_cache_limit(crate::rpc::cache::DEFAULT_BYTES);
+        Ok(node)
     }
     pub fn chain(&self) -> &ForkChain {
         &self.chain
@@ -894,6 +898,9 @@ impl Node {
         }
         if crate::transactions::is_balance_method(&request.name) {
             return crate::transactions::balance_response(self.chain.selected().storage(), request);
+        }
+        if crate::rpc::history::is_method(&request.name) {
+            return crate::rpc::history::response(self, request);
         }
         let selected = self.chain.selected();
         let optional = |v: Option<Value>| Value::Optional(v.map(Box::new));

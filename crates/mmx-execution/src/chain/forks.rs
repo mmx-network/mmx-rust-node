@@ -67,6 +67,13 @@ pub struct BlockSnapshot {
     archive: Database,
     staged: BTreeMap<Hash, Arc<Record>>,
 }
+/// In-process consumers receive only successfully selected blocks, after the
+/// atomic ledger publication. Notifications must not perform database I/O.
+pub trait Observer: Send + Sync {
+    fn reset(&self);
+    fn selected(&self, common_height: u32, tip_height: u32);
+    fn applied(&self, block: &Record);
+}
 impl BlockSnapshot {
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
         if let Some(block) = self.staged.get(hash) {
@@ -76,6 +83,7 @@ impl BlockSnapshot {
     }
 }
 pub struct ForkChain {
+    observer: Option<Arc<dyn Observer>>,
     chain: ChainState,
     archive: Database,
     voting: voting::Voting,
@@ -98,6 +106,7 @@ pub struct ForkChain {
 impl ForkChain {
     pub fn memory(params: mmx::ChainParams) -> Self {
         Self {
+            observer: None,
             chain: ChainState::memory(params),
             archive: Database::memory(),
             voting: voting::Voting::default(),
@@ -131,6 +140,7 @@ impl ForkChain {
     fn with_storage(selected: ChainState, archive: Database) -> ChainResult<Self> {
         let arrival = archive.version();
         let chain = Self {
+            observer: None,
             chain: selected,
             archive,
             voting: voting::Voting::default(),
@@ -169,6 +179,9 @@ impl ForkChain {
     pub fn selected(&self) -> &ChainState {
         &self.chain
     }
+    pub fn set_observer(&mut self, observer: Option<Arc<dyn Observer>>) {
+        self.observer = observer;
+    }
     /// Earliest public block height and lowest permitted rollback target.
     pub fn earliest_height(&self) -> u32 {
         self.chain
@@ -181,6 +194,10 @@ impl ForkChain {
     /// its consensus ancestry. The ancestry is private; RPC applies the public
     /// boundary independently, including after an interrupted collection.
     pub fn purge_before_height(&mut self, height: u32) -> ChainResult<()> {
+        // Purge may publish its floor before later collection fails.
+        if let Some(observer) = &self.observer {
+            observer.reset();
+        }
         let tip = self
             .chain
             .tip()?
@@ -270,6 +287,13 @@ impl ForkChain {
                             h == 0 || h >= context
                         }
                         "chain_transactions" => transactions.contains(key),
+                        "chain_history" | "chain_history_memo" => {
+                            let offset = if table == "chain_history" { 32 } else { 64 };
+                            let raw = key
+                                .get(offset..offset + 4)
+                                .ok_or(mmx_db::Error::Corrupt("history key length"))?;
+                            !u32::from_be_bytes(raw.try_into().unwrap()) >= height
+                        }
                         "chain_body_transactions" => {
                             key.len() == 36 && selected_hashes.contains(&key[..32])
                         }
@@ -312,6 +336,9 @@ impl ForkChain {
     /// Keep the selected block at `height` and rewind every later ledger/index
     /// version. Orphans and original genesis stay archived at every height.
     pub fn rollback_to(&mut self, height: u32) -> ChainResult<()> {
+        if let Some(observer) = &self.observer {
+            observer.reset();
+        }
         let tip = self
             .chain
             .tip()?
@@ -1190,6 +1217,23 @@ impl ForkChain {
             out.replay_time += replay_started.elapsed();
             match replay {
                 Ok(_) => {
+                    if let Some(observer) = &self.observer {
+                        if line.iter().any(|hash| !bodies.contains_key(hash)) {
+                            observer.reset();
+                        }
+                        observer.selected(
+                            common.height,
+                            self.chain.storage.database().version().saturating_sub(1),
+                        );
+                        for hash in &line {
+                            if let Some(block) = bodies.get(hash) {
+                                observer.applied(block);
+                            }
+                            // Deep ancestry outside this update's loaded body
+                            // window stays demand-filled; never reread disk to
+                            // warm a cache or publish speculative execution.
+                        }
+                    }
                     self.prepared = None;
                     out.reused_execution = reuse;
                     out.common_ancestor = Some(common.hash.0);
