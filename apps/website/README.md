@@ -22,10 +22,13 @@ nice -n 19 ionice -c 3 npm run build
 npm run preview
 ```
 
-Vite emits `dist/` with content-hashed CSS, JavaScript, and fonts. The page's
-content and navigation work without JavaScript; the small script enables the
-theme switch, follows the system scheme until a choice is made, and remembers
-that choice when browser storage is available. The wallet preview is an
+Vite emits `dist/` with content-hashed CSS, application JavaScript, and fonts.
+The small external `public/theme-init.js` loads synchronously in the head to
+apply the stored or system theme before the page can paint. It is revalidated
+like other unversioned files and works with the existing CSP without inline
+code. The page's content and navigation work without JavaScript; the main
+module enables the theme switch and follows system changes until a choice is
+made. The wallet preview is an
 illustration of the welcome screen, not an embedded wallet.
 
 For the SVG icon experiments, open `/branding/` on the dev server. The

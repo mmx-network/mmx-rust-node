@@ -175,6 +175,16 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
     assert title in html
     check_search(port, host, html, rpc_origin, wallet, website)
     if website:
+        bootstrap = b'<script src="/theme-init.js"></script>'
+        assert bootstrap in html
+        assert html.index(bootstrap) < html.index(b'<script type="module"')
+        assert html.index(bootstrap) < html.index(b'<link rel="stylesheet"')
+        assert html.index(bootstrap) < html.index(b'<body>')
+        status, theme_headers, theme_script = request(port, host, '/theme-init.js')
+        assert status == 200 and 'javascript' in theme_headers['content-type']
+        assert theme_headers['cache-control'] == 'no-cache'
+        assert b'mmx-website-scheme' in theme_script
+        security(theme_headers, rpc_origin, wallet, website)
         # The real build must contain independent SVGs at every logo placement,
         # with local paint references even when all four are in one document.
         logos = re.findall(rb'<svg\b[^>]*\bdata-mmx-logo[^>]*>[\s\S]*?</svg>', html)
