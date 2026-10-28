@@ -231,7 +231,9 @@ Update `tools/test_wallet_cli.py` and the help text.
 Preact 10 + @preact/signals, TypeScript strict, Vite 7, vitest, Playwright 1.63
 (chromium-1243 is cached locally; do not download browsers). Runtime deps are
 limited to: preact, @preact/signals, @tauri-apps/api + the tauri plugins used,
-`uqr` (QR), @fontsource/* font packages. Exact versions, `package-lock.json`, `npm ci`.
+`uqr` (QR generation), `jsqr` (QR decoding in a local worker), @fontsource/* font
+packages. Exact versions, `package-lock.json`, `npm ci`. The jsQR license is shipped
+in `public/licenses/jsqr.txt`.
 No CDN, no analytics, no telemetry, no remote fonts, no service worker.
 
 ### 6.2 Backend contract (`src/backend/types.ts`)
@@ -392,6 +394,12 @@ Mobile (<720 px, web): bottom tab bar Overview/Send/Receive/Activity/More.
   recipient to contacts" when not a contact, Done). Transport failure after send →
   "We couldn't confirm the transfer. Check Activity before sending again." (no
   automatic retry).
+  Web: Scan beside To opens the rear camera when available, with a photo/screenshot
+  picker as a fallback. Decode locally with jsQR in a worker and accept a valid MMX
+  address or `mmx:` URI. Fill only To; amount and memo stay unchanged and Review
+  is still required. Reject invalid checksums, other links and payloads over
+  2,048 characters. Stop the camera and worker on success, close, hidden page,
+  navigation, wallet switch or lock; late permission results are stopped too.
 - Receive: QR + address + copy, address picker (label, index, balance), label edit,
   table of all addresses.
 - Activity: date-grouped list, filter All/Received/Sent/Rewards and asset, load more;
@@ -471,18 +479,22 @@ error; scientific notation rejected; more fractional digits than `decimals` → 
   tabs via the `storage` event.
 - Hosting: relative base (`./`), CSP via headers and `<meta>` (`deploy/security.ts`
   is the source; `_headers`, Caddyfile and nginx config are checked against it):
-  `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self';
+  `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self';
   font-src 'self'; img-src 'self' data:; connect-src 'self' <rpc origin>;
   manifest-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none';
-  require-trusted-types-for 'script'; trusted-types 'none'; frame-ancestors 'none'`
+  require-trusted-types-for 'script'; trusted-types mmx-qr-worker; frame-ancestors 'none'`
   (`connect-src 'self'` fetches the .wasm; the `<meta>` omits `frame-ancestors`)
   plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
-  `Permissions-Policy` (all off except `clipboard-read=(self)`,
+  `Permissions-Policy` (all off except `camera=(self)`, `clipboard-read=(self)`,
   `clipboard-write=(self)`), `Cross-Origin-Opener-Policy: same-origin`,
   `Cross-Origin-Resource-Policy: same-origin`, `X-Frame-Options: DENY`, HSTS
   (2 years, includeSubDomains). The build fails on inline script/style. RPC URL is
   fixed at build time (`VITE_RPC_URL`, default `https://rpc.mmx.network`; web builds
   use Vite mode `web`, so `.env.web` is read).
+  The `mmx-qr-worker` Trusted Types policy accepts only the bundled decoder's
+  exact URL; there is no default policy. Camera use needs HTTPS and browser
+  permission. Existing deployments must update their response headers as well
+  as the static files to allow camera access.
 
 ### 6.7 Desktop specifics
 Tauri 2 (2.12.x). Plugins: clipboard-manager, opener (explorer URLs only:

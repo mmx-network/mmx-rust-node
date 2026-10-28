@@ -19,6 +19,7 @@ describe('Content-Security-Policy', () => {
     expect(csp.split('; ')).toEqual([
       "default-src 'none'",
       "script-src 'self' 'wasm-unsafe-eval'",
+      "worker-src 'self'",
       "style-src 'self'",
       "font-src 'self'",
       "img-src 'self' data:",
@@ -28,7 +29,7 @@ describe('Content-Security-Policy', () => {
       "base-uri 'none'",
       "object-src 'none'",
       "require-trusted-types-for 'script'",
-      "trusted-types 'none'",
+      'trusted-types mmx-qr-worker',
       "frame-ancestors 'none'",
     ]);
   });
@@ -52,11 +53,11 @@ describe('Content-Security-Policy', () => {
       'Strict-Transport-Security',
     ]);
     const permissions = new Map(securityHeaders(ORIGIN)).get('Permissions-Policy')!;
-    expect(permissions).toContain('camera=()');
+    expect(permissions).toContain('camera=(self)');
     expect(permissions).toContain('clipboard-write=(self)');
     // The Paste buttons read the clipboard; a policy of () makes them fail silently in Chromium.
     expect(permissions).toContain('clipboard-read=(self)');
-    for (const feature of ['camera', 'microphone', 'geolocation', 'payment', 'usb']) expect(permissions).toContain(`${feature}=()`);
+    for (const feature of ['microphone', 'geolocation', 'payment', 'usb']) expect(permissions).toContain(`${feature}=()`);
   });
 });
 

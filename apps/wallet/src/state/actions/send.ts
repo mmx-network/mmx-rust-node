@@ -43,3 +43,11 @@ export function recipientFromText(text: string): string {
   if (found.size === 1) return [...found][0]!;
   return Array.from(trimmed).slice(0, PASTE_MAX).join('');
 }
+
+/** QR scans accept an address or MMX URI; never open a scanned link. */
+export function recipientFromQr(text: string): string | null {
+  if (text.length > 2048) return null;
+  const value = text.trim();
+  const uri = /^mmx:(?:\/\/)?([^?#]+)(?:\?[^#]*)?$/i.exec(value);
+  return normalizeAddress(uri ? uri[1]! : value);
+}

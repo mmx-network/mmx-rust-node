@@ -13,6 +13,7 @@ import {
   chainError,
   draftCheck,
   fillMaxAmount,
+  lockVersion,
   ownAddressIndex,
   pendingReservedTotals,
   reviewSend,
@@ -47,6 +48,7 @@ import {
   type SelectOption,
 } from '../../components';
 import { AuthorizationDialog } from '../unlock/AuthorizationDialog';
+import { ScanDialog } from './ScanDialog';
 
 /** Contacts offered in the To field. */
 const SUGGESTIONS = 8;
@@ -83,6 +85,7 @@ export function SendForm() {
   const offline = chainError.value;
   const [touched, setTouched] = useState<Touched>({});
   const [submitted, setSubmitted] = useState(false);
+  const [scanVersion, setScanVersion] = useState<number | null>(null);
   /** Review was pressed while the balance was still loading: continue once it is in. */
   const [waiting, setWaiting] = useState(false);
   const toRef = useRef<HTMLInputElement>(null);
@@ -215,7 +218,10 @@ export function SendForm() {
       <Card padding="lg" class="send-card">
         <form class="send-form" onSubmit={submit} noValidate>
           <Stack gap={6}>
-            <Field label="To" error={toError} hint={toHint}>
+            <Field label="To" error={toError} hint={toHint} labelAction={__PLATFORM__ === 'web' ? (
+              <Button size="sm" variant="ghost" icon="qr" aria-label="Scan QR code" disabled={busy}
+                onClick={() => setScanVersion(lockVersion.peek())}>Scan</Button>
+            ) : undefined}>
               <Combobox
                 value={toText}
                 onValue={(v) => updateDraft({ to: v })}
@@ -333,6 +339,15 @@ export function SendForm() {
         </form>
       </Card>
       <PassphraseDialog />
+      {scanVersion !== null && scanVersion === lockVersion.value ? <ScanDialog
+        onClose={() => setScanVersion(null)}
+        onRecipient={(address) => {
+          setScanVersion(null);
+          updateDraft({ to: address });
+          setTouched((t) => ({ ...t, to: true }));
+          queueMicrotask(() => amountRef.current?.focus());
+        }}
+      /> : null}
     </Page>
   );
 }

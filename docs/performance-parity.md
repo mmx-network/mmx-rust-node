@@ -694,6 +694,16 @@ server rather than measured against C++.
   signing. Missing addresses and recovery words require fresh authorization;
   deriving or revealing them leaves spending locked and retains no passphrase
   authorization. Regular disk wallets remain usable after locking.
+- Web QR scanning uses a local jsQR worker, loaded only when a scan starts.
+  Camera frames are scaled to at most 640 pixels on the longest side and decoded
+  one at a time, with a 300 ms wait between frames. Photos are limited to 10 MiB
+  and scaled to at most 1,600 pixels before worker decoding. Close, backgrounding,
+  navigation, wallet switch and lock stop the stream and terminate decoding;
+  delayed camera permission results cannot retain a stream or change the draft.
+  Browser regressions use simulated camera frames and real QR images under the
+  deployment CSP, covering local decoding, denial/photo fallback, invalid payloads,
+  cancellation and lock. Physical mobile-camera quality and latency remain to be
+  checked on devices. Native desktop camera integration is outside this change.
 
 - Balances are fetched 4 addresses at a time (CLI, service, web), with in-flight
   de-duplication of identical GETs in the UI and a 20 s deadline per request.

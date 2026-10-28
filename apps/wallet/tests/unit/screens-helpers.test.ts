@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { encodeAddress } from '../../src/lib/address';
 import { contactErrorMessages, importSummary } from '../../src/state/actions/contacts';
-import { recipientFromText } from '../../src/state/actions/send';
+import { recipientFromQr, recipientFromText } from '../../src/state/actions/send';
 import { autoLockLabel, fundedMessage, isUnencryptedRemote } from '../../src/ui/screens/settings/text';
 
 const A = encodeAddress(new Uint8Array(32).fill(7));
@@ -31,6 +31,21 @@ describe('recipientFromText', () => {
   it('ignores invalid address-like strings', () => {
     const broken = A.slice(0, -1) + (A.endsWith('q') ? 'p' : 'q');
     expect(recipientFromText(`to ${broken}`)).toBe(`to ${broken}`);
+  });
+});
+
+describe('recipientFromQr', () => {
+  it('accepts canonical addresses and MMX address URIs', () => {
+    for (const text of [A, ` ${A}\n`, A.toUpperCase(), `mmx:${A}`, `mmx://${A}`, `mmx:${A}?amount=1&memo=test`]) {
+      expect(recipientFromQr(text)).toBe(A);
+    }
+  });
+
+  it('rejects invalid checksums, other links, multiple addresses and oversized text', () => {
+    const broken = A.slice(0, -1) + (A.endsWith('q') ? 'p' : 'q');
+    for (const text of ['', broken, `https://example.com/${A}`, `bitcoin:${A}`, `${A} ${B}`, `mmx:${A}#other`, `mmx:${A}?memo=${'x'.repeat(2048)}`]) {
+      expect(recipientFromQr(text)).toBeNull();
+    }
   });
 });
 

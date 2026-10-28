@@ -20,14 +20,15 @@ export { DEFAULT_RPC_URL };
 /**
  * Features the wallet does not use are disabled. Copying to and pasting from
  * the clipboard stay available to the wallet itself (Paste buttons for
- * addresses; the browser still asks before the first read). Only features
+ * addresses; the browser still asks before the first read). The camera is
+ * available to the wallet for QR scanning after the user's permission. Only features
  * every Chromium platform knows are listed (unknown names are reported as
  * errors in the browser console).
  */
 const PERMISSIONS_POLICY = [
   'accelerometer=()',
   'autoplay=()',
-  'camera=()',
+  'camera=(self)',
   'clipboard-read=(self)',
   'clipboard-write=(self)',
   'display-capture=()',
@@ -56,6 +57,7 @@ export function contentSecurityPolicy(rpcOrigin: string, forMeta = false): strin
   const directives = [
     "default-src 'none'",
     "script-src 'self' 'wasm-unsafe-eval'",
+    "worker-src 'self'",
     "style-src 'self'",
     "font-src 'self'",
     "img-src 'self' data:",
@@ -65,7 +67,7 @@ export function contentSecurityPolicy(rpcOrigin: string, forMeta = false): strin
     "base-uri 'none'",
     "object-src 'none'",
     "require-trusted-types-for 'script'",
-    "trusted-types 'none'",
+    'trusted-types mmx-qr-worker',
   ];
   if (!forMeta) directives.push("frame-ancestors 'none'");
   return directives.join('; ');
