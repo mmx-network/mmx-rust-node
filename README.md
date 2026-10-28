@@ -357,15 +357,18 @@ submission. Parameters are named objects using native VNX JSON
 representations, including byte arrays. This HTTP endpoint implements a subset
 of node methods; C++ WebGUI and REST/WebAPI parity are still in progress.
 
-Every node defaults to a **64 MiB in-process RPC cache**, shared by HTTP and
-native VNX RPC. Dedicated RPC servers can use `--rpc-cache-mb 2048` or
+Every node defaults to a **64 MiB in-process public HTTP RPC cache**.
+It stores serialized JSON results; local VNX RPC bypasses it.
+Dedicated RPC servers can use `--rpc-cache-mb 2048` or
 `--rpc-cache-mb 4096` (2 / 4 GiB). The equivalent configuration setting is
 `Node.rpc_cache_size_mb`; the command-line option takes precedence. Zero disables
 the cache. The budget includes retained payloads, keys and conservative index
 overhead; it does not cap total process RSS or temporary request/response memory.
 `get_status.rpc_cache` reports its byte charge, entries, hits, misses and evictions.
 
-Cache hits make no chain/database queries. Successful chain publications push
+Cache hits make no chain/database queries and copy cached JSON directly into
+the HTTP response envelope without parsing or re-encoding the result.
+Successful chain publications push
 recent blocks, headers, transactions and transaction heights from already-loaded
 bodies. Cached address-history pages advance from the same events; address
 balances and contracts refill on demand after a state change. Eviction removes

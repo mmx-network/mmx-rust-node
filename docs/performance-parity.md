@@ -6,20 +6,28 @@ References inspected: C++ `Node_api.cpp::{get_block_at,get_transaction,
 get_history,get_history_memo,get_balance,get_contract_ex}`, `Node.cpp::{apply,
 fork_to,revert}`, and `Block.cpp::{get_inputs,get_outputs}` /
 `Transaction.cpp::{get_inputs,get_outputs}`. The cache is a Rust addition at the
-public RPC dispatch boundary, shared by HTTP and native VNX without changing
-native method/return schemas. Every node defaults to 64 MiB; dedicated RPC
-servers can select 2/4 GiB with `--rpc-cache-mb` or `Node.rpc_cache_size_mb`.
+public HTTP RPC dispatch boundary, storing serialized JSON results. Local VNX
+RPC bypasses it; existing native method/return schemas remain unchanged.
+Every node defaults to 64 MiB; dedicated RPC servers can select 2/4 GiB with
+`--rpc-cache-mb` or `Node.rpc_cache_size_mb`.
 Zero explicitly disables it. The C++ reference has no equivalent unified
 byte-budgeted RPC response cache.
 
 LFU eviction uses oldest access for ties. Boxed wire payloads and keys have
 known lengths; conservative per-entry/index charges bound retained cache
-memory. Responses retain their serialized native wire representation, so a hit
-also avoids repeating record serialization. This is not a whole-process RSS
+memory. Responses retain their serialized JSON representation. HTTP copies the
+result directly into a fresh request envelope without database reads, VNX
+response conversion, JSON parsing or result serialization on a hit. IDs,
+batches, notifications, errors and response budgets are handled separately.
+This is not a whole-process RSS
 limit: allocator high-water marks, ordinary RPC encoding/decoding and pinned
 read snapshots are separate. Hits
-perform no chain reads, and decoding happens after releasing the ledger mutex.
-Hits still acquire that mutex briefly to serialize against publication events.
+perform no chain reads, and miss conversion happens outside the ledger mutex.
+HTTP listeners retain a stable cache handle, so hits also bypass the ledger
+mutex during chain replay. Cache budget changes preserve that handle and bump
+its generation; in-flight fills cannot restore entries after reconfiguration.
+An in-progress publication hides cache results until all selected blocks have
+updated the cache, preventing a partially advanced history page from escaping.
 Accepted chain updates push already-loaded block/header/transaction records,
 including during historical synchronization; warming never rereads disk.
 Deep ancestors outside an update's loaded body window remain demand-filled.
@@ -47,22 +55,27 @@ requested through native `max_search` retains its explicit semantics; server
 budget exhaustion fails the request. No live ledger/plot scans are used in
 validation.
 
-Validation: **259 node/execution tests pass**, with the two pre-existing CPU
+Validation: **260 node/execution tests pass**, with the two pre-existing CPU
 benchmarks and the new timing test excluded from the ordinary suite. Node and
 execution all-target Clippy passes with warnings denied; formatting and diff
 whitespace checks pass. Builds use two jobs, no incremental/debug symbols and
-low CPU/I/O priority. The explicit timing test uses a disposable native ledger:
-1,000 repeated 9,858-byte block responses took 132.1 ms through native reads and
-encoding versus 1.28 ms through the cached wire lookup (unoptimized test build,
-warm OS caches, ledger mutex already held). This measures that lookup/encoding
-stage only; it excludes HTTP/native presentation and network latency, sustained
+low CPU/I/O priority. The final suite uses two test threads: an existing sync
+regression with a 5 ms timeout failed under full parallel load and passed both
+in isolation and in the final run. No synchronization policy was changed.
+In the explicit timing test, 1,000 repeated 5,528-byte
+public JSON block results from a disposable ledger took 1.389 seconds through
+uncached reads/conversion versus 1.15 ms through cached JSON lookup (unoptimized
+test build, warm OS caches, ledger mutex already held). This measures result
+production only; it excludes HTTP envelopes and network latency, sustained
 load, contention and mainnet-sized datasets.
 
 Regression coverage includes pushed responses with the ledger deliberately
 unavailable, LFU/byte bounds and all index cleanup, incremental native history,
 fork replacement, memory/native rewind and same-hash generation changes,
 detached readers, length-first pagination beyond 100 rows, legacy fallback,
-pending history, and real native-protocol sharing. Existing node/execution
+pending history, local VNX bypass, and real HTTP responses containing cached
+JSON while the ledger is unavailable and locked, with escaped IDs, batches,
+notifications and runtime budget changes. Existing node/execution
 consensus, crash, sync, socket and purge regressions are also run. These are
 correctness/isolation checks; mainnet RPC throughput, resident memory and added
 history-index write amplification still require representative measurements

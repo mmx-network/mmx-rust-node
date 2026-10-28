@@ -11,13 +11,13 @@ fn request(method: &str, mut args: Json) -> Record {
     args["__type"] = json!(format!("mmx.Node.{method}"));
     from_json_record(&args).unwrap()
 }
-fn cached(node: &Node, method: &str, args: Json) -> Record {
+fn cached(node: &Node, method: &str, args: Json) -> Json {
     let request = request(method, args);
     let wire = probe(node, &request)
         .unwrap()
         .0
         .expect("expected cache hit");
-    Record::decode(&wire).unwrap()
+    vnx::serde_json::from_slice(&wire).unwrap()
 }
 fn apply(node: &mut Node, block: &Record, vdf: &Record) {
     node.chain.admit(block, std::slice::from_ref(vdf)).unwrap();
@@ -91,7 +91,7 @@ fn byte_bound_lfu_oldest_ties_oversized_entries_and_index_cleanup() {
 }
 
 #[test]
-fn publications_push_native_blocks_transactions_and_headers_without_database_reads_on_hits() {
+fn publications_push_public_json_blocks_transactions_and_headers_without_database_reads_on_hits() {
     let (node, block, vdf) = fixture();
     let mut node = node.lock().unwrap();
     assert_eq!(node.rpc_cache_stats().limit_bytes, DEFAULT_BYTES);
@@ -115,7 +115,9 @@ fn publications_push_native_blocks_transactions_and_headers_without_database_rea
     ];
     let expected: Vec<_> = methods
         .iter()
-        .map(|(m, a)| node.call(&request(m, a.clone())).unwrap())
+        .map(|(m, a)| {
+            crate::rpc::response_json(&node.call(&request(m, a.clone())).unwrap()).unwrap()
+        })
         .collect();
     // Deliberately replace the entire ledger with an uninitialized chain. A
     // hit must still succeed: even tip/index lookups would fail this check.
@@ -142,14 +144,87 @@ fn batched_transactions_are_assembled_from_pushed_entries_without_ledger_reads()
     )
     .unwrap();
     let query = request("get_transactions", json!({"ids":[id,id]}));
-    let expected = n.call(&query).unwrap();
+    let expected = crate::rpc::response_json(&n.call(&query).unwrap()).unwrap();
     let empty = mmx_execution::chain::forks::ForkChain::memory(n.chain.selected().params().clone());
     let chain = std::mem::replace(&mut n.chain, empty);
     assert_eq!(
-        Record::decode(&probe(&n, &query).unwrap().0.unwrap()).unwrap(),
+        vnx::serde_json::from_slice::<Json>(&probe(&n, &query).unwrap().0.unwrap()).unwrap(),
         expected
     );
     n.chain = chain;
+}
+
+#[test]
+fn public_http_writes_cached_json_directly_with_fresh_ids_batches_and_notifications() {
+    use std::io::{Read, Write};
+    let (node, block, vdf) = fixture();
+    let (chain, payload) = {
+        let mut n = node.lock().unwrap();
+        apply(&mut n, &block, &vdf);
+        let payload = probe(&n, &request("get_block_at", json!({"height":1})))
+            .unwrap()
+            .0
+            .unwrap();
+        assert!(vnx::serde_json::from_slice::<Json>(&payload)
+            .unwrap()
+            .is_object());
+        let empty =
+            mmx_execution::chain::forks::ForkChain::memory(n.chain.selected().params().clone());
+        (std::mem::replace(&mut n.chain, empty), payload)
+    };
+    let mut server = crate::rpc::HttpServer::bind("127.0.0.1:0", node.clone()).unwrap();
+    let send = |value: Json| {
+        let body = vnx::serde_json::to_vec(&value).unwrap();
+        let mut stream = std::net::TcpStream::connect(server.address()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(stream,"POST /rpc HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
+        stream.write_all(&body).unwrap();
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).unwrap();
+        assert!(reply.starts_with(b"HTTP/1.1 200"));
+        let split = reply.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let header = std::str::from_utf8(&reply[..split]).unwrap();
+        assert!(header.contains(&format!("Content-Length: {}\r\n", reply.len() - split)));
+        let body = &reply[split..];
+        assert!(body.windows(payload.len()).any(|w| w == payload));
+        vnx::serde_json::from_slice::<Json>(body).unwrap()
+    };
+    let escaped_id = "quoted\" id\n";
+    // Real HTTP hits must continue even while the node is replaying a chain
+    // update under its ledger mutex. The selected ledger is also unavailable.
+    let mut guard = node.lock().unwrap();
+    let call =
+        json!({"jsonrpc":"2.0","id":escaped_id,"method":"get_block_at","params":{"height":1}});
+    let first = send(call.clone());
+    assert_eq!(first["id"], escaped_id);
+    assert_eq!(
+        first["result"],
+        vnx::serde_json::from_slice::<Json>(&payload).unwrap()
+    );
+    let mut notification = call.clone();
+    notification.as_object_mut().unwrap().remove("id");
+    let second = json!({"jsonrpc":"2.0","id":2,"method":"get_block_at","params":{"height":1}});
+    let batch = send(json!([call, notification, second]));
+    assert_eq!(batch.as_array().unwrap().len(), 2);
+    assert_eq!(batch[1]["id"], 2);
+    guard.chain = chain;
+    guard.set_rpc_cache_limit(0);
+    drop(guard);
+    // Listener handles stay valid when the cache budget changes at runtime.
+    assert_eq!(
+        send(json!({"jsonrpc":"2.0","id":3,"method":"get_block_at","params":{"height":1}}))["id"],
+        3
+    );
+    assert_eq!(node.lock().unwrap().rpc_cache_stats().entries, 0);
+    node.lock().unwrap().set_rpc_cache_limit(DEFAULT_BYTES);
+    assert_eq!(
+        send(json!({"jsonrpc":"2.0","id":4,"method":"get_block_at","params":{"height":1}}))["id"],
+        4
+    );
+    assert!(node.lock().unwrap().rpc_cache_stats().entries > 0);
+    server.shutdown();
 }
 
 #[test]
@@ -196,7 +271,10 @@ fn actual_fork_discards_old_history_and_transaction_locations() {
     // Native branches can contain the same transaction. A pushed location
     // must agree with its newly selected occurrence, not its old branch.
     if let Some(wire) = probe(&n, &location).unwrap().0 {
-        assert_eq!(Record::decode(&wire).unwrap(), n.call(&location).unwrap());
+        assert_eq!(
+            vnx::serde_json::from_slice::<Json>(&wire).unwrap(),
+            crate::rpc::response_json(&n.call(&location).unwrap()).unwrap()
+        );
     }
     assert!(probe(
         &n,
@@ -206,17 +284,13 @@ fn actual_fork_discards_old_history_and_transaction_locations() {
     .0
     .is_none());
     assert_eq!(
-        cached(&n, "get_block_at", json!({"height":1}))
-            .field("_ret_0")
-            .unwrap()
-            .record()
-            .unwrap(),
-        &raw(&steps[0]["block"])
+        cached(&n, "get_block_at", json!({"height":1})),
+        crate::rpc::to_json_record(&raw(&steps[0]["block"])).unwrap()
     );
 }
 
 #[test]
-fn native_server_history_and_json_dispatch_share_cache_and_pending_history_stays_current() {
+fn public_json_cache_bypasses_local_vnx_and_pending_history_stays_current() {
     let (node, block, _) = fixture();
     let tx = block.field("tx_list").unwrap().seq().unwrap()[0]
         .record()
@@ -246,6 +320,15 @@ fn native_server_history_and_json_dispatch_share_cache_and_pending_history_stays
         client
             .call_value("mmx.Node.get_history", args.clone())
             .unwrap()["_ret_0"],
+        expected
+    );
+    assert_eq!(
+        node.lock().unwrap().rpc_cache_stats().hits,
+        before,
+        "local VNX does not use the public HTTP cache"
+    );
+    assert_eq!(
+        dispatch(&node, "get_history", args.clone()).unwrap(),
         expected
     );
     assert!(node.lock().unwrap().rpc_cache_stats().hits > before);
@@ -293,7 +376,7 @@ fn history_pushes_forward_and_rewind_rejects_inflight_fills_including_same_hash_
         let expected = n.call(&history_request).unwrap();
         assert_eq!(
             cached(&n, "get_history", args.clone()),
-            expected,
+            crate::rpc::response_json(&expected).unwrap(),
             "address history must advance through push events"
         );
         old_fill.unwrap().finish(&old_response).unwrap();
@@ -467,17 +550,22 @@ fn history_index_and_public_retention_floor_survive_native_reopen() {
 }
 
 #[test]
-#[ignore = "bounded temporary-native-ledger lookup timing; run with --ignored --nocapture"]
-fn benchmark_cached_and_native_block_reads() {
+#[ignore = "bounded public HTTP JSON result timing; run with --ignored --nocapture"]
+fn benchmark_cached_and_uncached_public_json() {
     let dir = tempfile::tempdir().unwrap();
     let (node, block, vdf) = fixture_at(Some(dir.path()));
     let mut n = node.lock().unwrap();
     apply(&mut n, &block, &vdf);
     let query = request("get_block_at", json!({"height":1}));
-    let expected = n.call(&query).unwrap().encode().unwrap();
+    let expected =
+        vnx::serde_json::to_vec(&crate::rpc::response_json(&n.call(&query).unwrap()).unwrap())
+            .unwrap();
     let start = Instant::now();
     for _ in 0..1000 {
-        std::hint::black_box(n.call(&query).unwrap().encode().unwrap());
+        std::hint::black_box(
+            vnx::serde_json::to_vec(&crate::rpc::response_json(&n.call(&query).unwrap()).unwrap())
+                .unwrap(),
+        );
     }
     let native = start.elapsed();
     let start = Instant::now();
@@ -487,5 +575,5 @@ fn benchmark_cached_and_native_block_reads() {
         std::hint::black_box(wire);
     }
     let cached = start.elapsed();
-    eprintln!("1000 temporary native block reads: native={native:?}, cached={cached:?}, payload={} bytes, charged={} bytes",expected.len(),n.rpc_cache_stats().used_bytes);
+    eprintln!("1000 public JSON block results from a temporary ledger: uncached={native:?}, cached={cached:?}, payload={} bytes, charged={} bytes",expected.len(),n.rpc_cache_stats().used_bytes);
 }

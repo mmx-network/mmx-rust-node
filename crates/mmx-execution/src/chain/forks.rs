@@ -73,6 +73,7 @@ pub trait Observer: Send + Sync {
     fn reset(&self);
     fn selected(&self, common_height: u32, tip_height: u32);
     fn applied(&self, block: &Record);
+    fn finished(&self);
 }
 impl BlockSnapshot {
     pub fn block(&self, hash: &Hash) -> ChainResult<Option<Record>> {
@@ -1233,6 +1234,7 @@ impl ForkChain {
                             // window stays demand-filled; never reread disk to
                             // warm a cache or publish speculative execution.
                         }
+                        observer.finished();
                     }
                     self.prepared = None;
                     out.reused_execution = reuse;

@@ -172,20 +172,26 @@ fn request(input: &mut BufReader<Deadline>) -> HttpResult<Vec<u8>> {
     .map_err(|_| (408, "HTTP body deadline or disconnect"))?;
     Ok(body)
 }
-fn serve(stream: TcpStream, node: &Arc<Mutex<Node>>, timeout: Duration) -> Result<()> {
+fn serve(
+    stream: TcpStream,
+    node: &Arc<Mutex<Node>>,
+    timeout: Duration,
+    cache: Option<&rpc::cache::Shared>,
+) -> Result<()> {
     let end = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| error("HTTP timeout overflow"))?;
     let mut input = BufReader::new(Deadline { stream, end });
     let (status, body) = match request(&mut input) {
-        Ok(bytes) => match rpc::json_request_until(node, &bytes, end) {
-            Some(v) => (200, v.to_string()),
-            None => (204, String::new()),
+        Ok(bytes) => match rpc::json_response_until(node, &bytes, end, cache) {
+            Some(v) => (200, v),
+            None => (204, Vec::new()),
         },
         Err((status, message)) => (
             status,
             json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":message}})
-                .to_string(),
+                .to_string()
+                .into_bytes(),
         ),
     };
     let reason = match status {
@@ -201,7 +207,7 @@ fn serve(stream: TcpStream, node: &Arc<Mutex<Node>>, timeout: Duration) -> Resul
     };
     let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len());
     input.get_mut().write_all(response.as_bytes())?;
-    input.get_mut().write_all(body.as_bytes())?;
+    input.get_mut().write_all(&body)?;
     Ok(())
 }
 type Streams = Arc<Mutex<BTreeMap<u64, TcpStream>>>;
@@ -238,6 +244,11 @@ impl HttpServer {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?.to_string();
         listener.set_nonblocking(true)?;
+        let cache = node
+            .lock()
+            .map_err(|_| error("node lock poisoned"))?
+            .rpc_cache
+            .clone();
         let streams: Streams = Arc::new(Mutex::new(BTreeMap::new()));
         let active = streams.clone();
         let stop = Arc::new(AtomicBool::new(false));
@@ -272,9 +283,10 @@ impl HttpServer {
                                 break;
                             }
                             let node = node.clone();
+                            let cache = cache.clone();
                             workers.push(thread::spawn(move || {
                                 let _lease = lease;
-                                let _ = serve(stream, &node, timeout);
+                                let _ = serve(stream, &node, timeout, cache.as_ref());
                             }));
                         }
                         Ok(_) => (),

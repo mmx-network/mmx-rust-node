@@ -1,5 +1,5 @@
-//! Response cache shared by public HTTP and VNX dispatch. Selected-chain events
-//! push already-loaded blocks; hits never query the ledger or retain a DB view.
+//! Serialized public HTTP JSON results. Selected-chain events push already-
+//! loaded blocks; hits never query the ledger, retain DB views or convert VNX.
 use crate::{
     node::{hash, number},
     Node, Result,
@@ -44,6 +44,14 @@ struct Entry {
     advance_history: bool,
 }
 type Rank = (u64, u64, Box<[u8]>);
+// Only incremental page maintenance and batch misses need typed records.
+// Public HTTP hits copy the stored JSON directly into their response envelope.
+fn decode_json_response(method: &str, bytes: &[u8]) -> Result<Record> {
+    let value: vnx::serde_json::Value = vnx::serde_json::from_slice(bytes)?;
+    super::from_json_record(
+        &vnx::serde_json::json!({"__type":format!("{method}.return"),"_ret_0":value}),
+    )
+}
 pub(crate) struct Cache {
     entries: BTreeMap<Box<[u8]>, Entry>,
     order: BTreeSet<Rank>,
@@ -52,6 +60,7 @@ pub(crate) struct Cache {
     clock: u64,
     generation: u64,
     tip_height: Option<u32>,
+    publishing: bool,
 }
 impl Cache {
     pub(super) fn new(limit_bytes: usize, tip_height: u32) -> Self {
@@ -66,6 +75,7 @@ impl Cache {
             clock: 0,
             generation: 0,
             tip_height: Some(tip_height),
+            publishing: false,
         }
     }
     pub(super) fn stats(&self) -> Stats {
@@ -96,8 +106,10 @@ impl Cache {
         self.stats.entries = 0;
         self.generation = self.generation.wrapping_add(1);
         self.tip_height = None;
+        self.publishing = false;
     }
     fn selected(&mut self, common: u32, tip: u32) {
+        self.publishing = true;
         self.generation = self.generation.wrapping_add(1);
         let extension = self.tip_height == Some(common);
         self.tip_height = Some(tip);
@@ -260,10 +272,7 @@ pub(super) struct Fill {
     generation: u64,
     advance_history: bool,
 }
-pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, Option<Fill>)> {
-    let Some(cache) = &node.rpc_cache else {
-        return Ok((None, None));
-    };
+fn key(request: &Record) -> Result<Option<Box<[u8]>>> {
     // Cheaply reject validation, submission, status and pending requests before
     // encoding potentially large transaction arguments.
     if !matches!(
@@ -289,12 +298,41 @@ pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, O
             | "mmx.Node.get_history_memo"
     ) || request.memory_size() > MAX_KEY_BYTES
     {
-        return Ok((None, None));
+        return Ok(None);
     }
     let key = request.encode_compact()?.into_boxed_slice();
     if key.len() > MAX_KEY_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(key))
+}
+pub(crate) fn lookup(cache: &Shared, request: &Record) -> Result<Option<Vec<u8>>> {
+    let Some(key) = key(request)? else {
+        return Ok(None);
+    };
+    let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
+    // Count a miss only when the fallback actually captures a node snapshot.
+    if cache.publishing || !cache.entries.contains_key(key.as_ref()) {
+        return Ok(None);
+    }
+    Ok(cache.get(&key))
+}
+pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, Option<Fill>)> {
+    let Some(cache) = &node.rpc_cache else {
+        return Ok((None, None));
+    };
+    if cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .stats
+        .limit_bytes
+        < BASE_BYTES + ENTRY_BYTES
+    {
         return Ok((None, None));
     }
+    let Some(key) = key(request)? else {
+        return Ok((None, None));
+    };
     let (value, generation) = {
         let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
         (cache.get(&key), cache.generation)
@@ -324,7 +362,7 @@ pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, O
                 complete = false;
                 break;
             };
-            let response = Record::decode(&wire)?;
+            let response = decode_json_response("mmx.Node.get_transaction", &wire)?;
             let tx = response.field("_ret_0")?.record()?;
             size = size.saturating_add(tx.memory_size());
             if size > super::MAX_RESPONSE_BYTES {
@@ -340,7 +378,7 @@ pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, O
             if response.memory_size() > super::MAX_RESPONSE_BYTES {
                 return Err(crate::error("RPC response exceeds byte budget"));
             }
-            let response = response.encode()?;
+            let response = vnx::serde_json::to_vec(&super::response_json(&response)?)?;
             cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
                 key,
                 response.clone().into_boxed_slice(),
@@ -363,10 +401,10 @@ pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, O
 impl Fill {
     #[cfg(test)]
     pub(super) fn finish(self, response: &Record) -> Result<()> {
-        self.finish_wire(&response.encode()?);
+        self.finish_json(&vnx::serde_json::to_vec(&super::response_json(response)?)?);
         Ok(())
     }
-    pub(super) fn finish_wire(self, value: &[u8]) {
+    pub(super) fn finish_json(self, value: &[u8]) {
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         if cache.stats.limit_bytes < BASE_BYTES + ENTRY_BYTES {
             return;
@@ -383,20 +421,24 @@ impl Fill {
 }
 
 impl Node {
-    /// Public RPC cache budget; defaults to 64 MiB. Zero releases cached data.
-    /// Embedded and peer calls through `Node::call` always bypass this layer.
+    /// Public HTTP cache budget; defaults to 64 MiB. Zero releases cached data.
+    /// Local VNX, embedded and peer calls always bypass this layer.
     pub fn set_rpc_cache_limit(&mut self, bytes: usize) {
-        self.rpc_cache = (bytes > 0).then(|| {
-            Arc::new(Mutex::new(Cache::new(
-                bytes,
-                self.chain
-                    .selected()
-                    .storage()
-                    .database()
-                    .version()
-                    .saturating_sub(1),
-            )))
-        });
+        let tip = self
+            .chain
+            .selected()
+            .storage()
+            .database()
+            .version()
+            .saturating_sub(1);
+        if let Some(shared) = &self.rpc_cache {
+            let mut cache = shared.lock().unwrap_or_else(|p| p.into_inner());
+            let generation = cache.generation.wrapping_add(1);
+            *cache = Cache::new(bytes, tip);
+            cache.generation = generation;
+        } else {
+            self.rpc_cache = Some(Arc::new(Mutex::new(Cache::new(bytes, tip))));
+        }
         self.chain
             .set_observer(self.rpc_cache.as_ref().map(|cache| {
                 Arc::new(Observer {
@@ -432,7 +474,17 @@ impl mmx_execution::chain::forks::Observer for Observer {
         // Cache failure must never affect chain publication.
         if self.push(block).is_err() {
             self.reset();
+            self.cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .publishing = true;
         }
+    }
+    fn finished(&self) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .publishing = false;
     }
 }
 impl Observer {
@@ -465,7 +517,7 @@ impl Observer {
                     if !super::history::affected(&request, &rows)? {
                         return Ok(None);
                     }
-                    let response = Record::decode(&entry.value)?;
+                    let response = decode_json_response(&request.name, &entry.value)?;
                     super::history::advance(&request, response, &rows)
                 })();
                 match result {
@@ -473,7 +525,8 @@ impl Observer {
                         cache.remove(&key);
                         cache.insert(
                             key.clone(),
-                            response.encode()?.into_boxed_slice(),
+                            vnx::serde_json::to_vec(&super::response_json(&response)?)?
+                                .into_boxed_slice(),
                             None,
                             true,
                         );
@@ -504,7 +557,7 @@ impl Observer {
             }
             cache.insert(
                 request.encode_compact()?.into_boxed_slice(),
-                response.encode()?.into_boxed_slice(),
+                vnx::serde_json::to_vec(&super::response_json(&response)?)?.into_boxed_slice(),
                 Some(height),
                 false,
             );
