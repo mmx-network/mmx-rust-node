@@ -10,6 +10,7 @@ pub mod forks;
 pub mod genesis;
 pub mod history;
 pub mod network;
+pub mod public;
 pub mod sync;
 pub mod voting;
 mod work;
@@ -496,6 +497,7 @@ impl ChainState {
             ));
         }
         writes.extend(history::writes(block, &self.params)?);
+        writes.extend(public::writes(self, block, batch)?);
         if self.bodies.is_some() {
             writes.push(Write::put("chain_blocks", hash, bodies::EXTERNAL));
         } else {

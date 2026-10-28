@@ -1,5 +1,64 @@
 # C++ performance parity
 
+## Public HTTP REST compatibility (2026-10-29)
+
+The in-process listener now serves the C++ public `/wapi` protocol directly,
+including bare paths used behind `www/rpc-server/index.js`. JSON-RPC `/rpc`
+remains available. References inspected: `WebAPI.cpp` route dispatch, rendering,
+VM storage/result resolution and transaction parsing; `Node_api.cpp` network
+info, balances, contract calls, offers, swaps, farmer and execution histories.
+
+Declared VNI aliases retained at build time distinguish Bech32 addresses from
+hexadecimal hashes and signatures. Public amounts, wide integers, enums,
+token metadata and economic fields follow WebAPI presentation. The cache stores
+final REST JSON and serves it without the ledger mutex or a DB lookup. Selected
+bodies seed header/block and native-currency transaction forms; confirmation
+counts use the final tip of a multi-block update. Token-bearing forms read
+bounded metadata on their first miss. Incremental native-currency address pages
+retain their query context and are located through an address-to-page index;
+branch replacement discards them. Cache accounting includes these owners and
+presentation contexts. Composite misses check the publication epoch and retry
+up to three times, preventing a response assembled from different forks.
+
+REST routes cover public chain info, blocks/headers/transactions, addresses,
+balances/supply/history, farmers, plot NFTs, offers/swaps, contract metadata,
+execution history, bounded storage/calls, validation and broadcast. Public
+administrative/wallet/farming-control paths return 403. Readiness requires sync
+and an 18-block delay; it is checked from cache metadata, including on hits.
+GET/HEAD/POST/OPTIONS and CORS are supported; missing block/transaction responses
+use 204, missing contracts use JSON null. Contract calls execute on a pinned
+snapshot with normal gas limits and return traversal bounds, without publishing
+VM writes. Storage traversal shares key/row/byte and deadline budgets.
+
+Public auxiliary indexes publish atomically with ledger changes and revert with
+forks. On upgrades, old selected bodies are processed in bounded batches: at most
+256 bodies, a 4 MiB decoded-input stopping target and 20 ms stopping target per
+publication. One body may exceed a stopping target. Address counting migrates
+at most 256 balance rows per publication, with updates in the already-counted
+prefix applied atomically. Incomplete broad indexes report catch-up instead of
+silently returning incomplete totals. This is a deliberate operational
+limitation: catch-up time depends on publication rate, old-body size and disk
+speed. Genesis sync builds the indexes as blocks arrive. Address/memo history
+keeps the separately documented bounded legacy-prefix behavior.
+
+Validation uses disposable ledgers, real loopback HTTP requests and captured
+bounded mainnet point responses from the C++ server. Chain parameters, a header,
+a block and a complete binary-deployment transaction are compared exactly.
+Regressions cover typed JSON round trips, LFU/RAM accounting, database-free
+public hits, accepted-block history/block/transaction warming, rollback, final
+batch-tip confirmations, real binary field layouts/fixed-point offer math,
+contract-call result/isolation, VM return budgets and incremental address-count
+migration. The node/execution/VM suite passes (322 tests,
+three benchmarks ignored); all-target Clippy is
+run with warnings denied. These checks do not establish sustained public-RPC
+throughput or mainnet RSS parity. Nonempty swap/market traffic and large existing
+index catch-up still need representative operational measurements.
+
+Deployment uses Caddy `:8080` → Node.js `127.0.0.1:8081` → Rust
+`127.0.0.1:11380/wapi`, using the existing proxy with `changeOrigin: true`.
+See [deployment notes](public-rpc-deployment.md). No VNX byte cache is required
+for local node services.
+
 ## In-process RPC cache and native address history (2026-10-29)
 
 References inspected: C++ `Node_api.cpp::{get_block_at,get_transaction,

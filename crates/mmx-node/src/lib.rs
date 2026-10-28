@@ -15,6 +15,7 @@ pub mod rpc;
 pub mod sync;
 mod transactions;
 mod vdf_worker;
+mod webapi;
 
 pub use node::Node;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

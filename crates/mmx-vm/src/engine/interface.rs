@@ -374,3 +374,73 @@ fn copy_var<D: Storage, S: Storage>(
     }
     dst.check_gas()
 }
+
+impl<S: Storage> Engine<'_, S> {
+    /// Native vm::read() boundary conversion. A returned map must be in memory;
+    /// reading a stored map is a separate, explicitly bounded WebAPI operation.
+    pub fn read_result(&mut self, address: u64, max_nodes: usize) -> Result<InputValue> {
+        fn convert<S: Storage>(
+            vm: &mut Engine<'_, S>,
+            var: Option<Var>,
+            left: &mut usize,
+            depth: usize,
+        ) -> Result<InputValue> {
+            if depth >= MAX_COPY_RECURSION || *left == 0 {
+                return Err(Error::State("VM result budget exceeded"));
+            }
+            *left -= 1;
+            let Some(var) = var else {
+                return Ok(InputValue::Nil);
+            };
+            Ok(match var.value {
+                Value::Nil => InputValue::Nil,
+                Value::Bool(v) => InputValue::Bool(v),
+                Value::Uint(v) => InputValue::Uint(v),
+                Value::String(v) => InputValue::String(v),
+                Value::Binary(v) => InputValue::Binary(v),
+                Value::Ref(a) => {
+                    let value = vm.read_var(a)?;
+                    convert(vm, value, left, depth + 1)?
+                }
+                Value::Array { address, size } => {
+                    if size as usize > *left {
+                        return Err(Error::State("VM result budget exceeded"));
+                    }
+                    let mut rows = Vec::new();
+                    for i in 0..size {
+                        let value = vm.read_entry_var(address, u64::from(i))?;
+                        rows.push(convert(vm, value, left, depth + 1)?);
+                    }
+                    InputValue::Array(rows)
+                }
+                Value::Map { address } => {
+                    if var.flags & crate::value::FLAG_STORED != 0 {
+                        return Err(Error::State("cannot read map from storage"));
+                    }
+                    let entries: Vec<_> = vm
+                        .entries
+                        .range((address, 0)..=(address, u64::MAX))
+                        .filter(|(_, v)| v.flags & crate::value::FLAG_DELETED == 0)
+                        .take(*left + 1)
+                        .map(|(k, v)| (k.1, v.clone()))
+                        .collect();
+                    if entries.len().saturating_mul(2) > *left {
+                        return Err(Error::State("VM result budget exceeded"));
+                    }
+                    let mut rows = Vec::new();
+                    for (key, value) in entries {
+                        let key = vm.read_var(key)?;
+                        rows.push((
+                            convert(vm, key, left, depth + 1)?,
+                            convert(vm, Some(value), left, depth + 1)?,
+                        ));
+                    }
+                    InputValue::Map(rows)
+                }
+            })
+        }
+        let value = self.read_var(address)?;
+        let mut remaining = max_nodes;
+        convert(self, value, &mut remaining, 0)
+    }
+}

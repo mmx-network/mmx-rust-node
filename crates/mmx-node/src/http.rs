@@ -68,7 +68,12 @@ fn headers(input: &mut impl BufRead) -> HttpResult<Vec<u8>> {
         }
     }
 }
-fn request(input: &mut BufReader<Deadline>) -> HttpResult<Vec<u8>> {
+struct Request {
+    method: String,
+    target: String,
+    body: Vec<u8>,
+}
+fn request(input: &mut BufReader<Deadline>) -> HttpResult<Request> {
     let raw = headers(input)?;
     let mut fields = [httparse::EMPTY_HEADER; 64];
     let mut request = httparse::Request::new(&mut fields);
@@ -79,11 +84,10 @@ fn request(input: &mut BufReader<Deadline>) -> HttpResult<Vec<u8>> {
     {
         return Err((400, "incomplete headers"));
     }
-    if request.method != Some("POST") {
+    let method = request.method.ok_or((400, "missing method"))?.to_owned();
+    let target = request.path.ok_or((400, "missing target"))?.to_owned();
+    if matches!(target.as_str(), "/rpc" | "/") && method != "POST" {
         return Err((405, "POST JSON-RPC requests to /rpc"));
-    }
-    if !matches!(request.path, Some("/rpc" | "/")) {
-        return Err((404, "not found"));
     }
     let mut length = None;
     let mut chunked = false;
@@ -149,7 +153,11 @@ fn request(input: &mut BufReader<Deadline>) -> HttpResult<Vec<u8>> {
                 {
                     return Err((400, "incomplete trailers"));
                 }
-                return Ok(body);
+                return Ok(Request {
+                    method,
+                    target,
+                    body,
+                });
             }
             if size > MAX_BODY - body.len() {
                 return Err((413, "body exceeds 1 MiB"));
@@ -170,7 +178,11 @@ fn request(input: &mut BufReader<Deadline>) -> HttpResult<Vec<u8>> {
         input.read_exact(part)
     })
     .map_err(|_| (408, "HTTP body deadline or disconnect"))?;
-    Ok(body)
+    Ok(Request {
+        method,
+        target,
+        body,
+    })
 }
 fn serve(
     stream: TcpStream,
@@ -182,16 +194,32 @@ fn serve(
         .checked_add(timeout)
         .ok_or_else(|| error("HTTP timeout overflow"))?;
     let mut input = BufReader::new(Deadline { stream, end });
-    let (status, body) = match request(&mut input) {
-        Ok(bytes) => match rpc::json_response_until(node, &bytes, end, cache) {
-            Some(v) => (200, v),
-            None => (204, Vec::new()),
-        },
+    let mut head = false;
+    let (status, body, content_type) = match request(&mut input) {
+        Ok(request) if matches!(request.target.as_str(), "/rpc" | "/") => {
+            match rpc::json_response_until(node, &request.body, end, cache) {
+                Some(v) => (200, v, "application/json"),
+                None => (204, Vec::new(), "application/json"),
+            }
+        }
+        Ok(request) => {
+            head = request.method == "HEAD";
+            let response = crate::webapi::respond(
+                node,
+                cache,
+                &request.method,
+                &request.target,
+                &request.body,
+                end,
+            );
+            (response.status, response.body, response.content_type)
+        }
         Err((status, message)) => (
             status,
             json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":message}})
                 .to_string()
                 .into_bytes(),
+            "application/json",
         ),
     };
     let reason = match status {
@@ -203,11 +231,15 @@ fn serve(
         408 => "Request Timeout",
         413 => "Content Too Large",
         417 => "Expectation Failed",
+        403 => "Forbidden",
+        503 => "Service Unavailable",
         _ => "Error",
     };
-    let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len());
+    let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nCache-Control: no-cache, no-store\r\n\r\n",body.len());
     input.get_mut().write_all(response.as_bytes())?;
-    input.get_mut().write_all(&body)?;
+    if !head {
+        input.get_mut().write_all(&body)?;
+    }
     Ok(())
 }
 type Streams = Arc<Mutex<BTreeMap<u64, TcpStream>>>;

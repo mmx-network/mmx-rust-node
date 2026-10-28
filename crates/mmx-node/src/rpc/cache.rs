@@ -42,6 +42,8 @@ struct Entry {
     touched: u64,
     charge: usize,
     advance_history: bool,
+    owners: Box<[[u8; 32]]>,
+    web_history: Option<Box<crate::webapi::Watch>>,
 }
 type Rank = (u64, u64, Box<[u8]>);
 // Only incremental page maintenance and batch misses need typed records.
@@ -56,11 +58,14 @@ pub(crate) struct Cache {
     entries: BTreeMap<Box<[u8]>, Entry>,
     order: BTreeSet<Rank>,
     dependencies: BTreeMap<Dependency, BTreeSet<Box<[u8]>>>,
+    history_owners: BTreeMap<[u8; 32], BTreeSet<Box<[u8]>>>,
     stats: Stats,
     clock: u64,
     generation: u64,
     tip_height: Option<u32>,
     publishing: bool,
+    synced_since: Option<u32>,
+    sync_delay: u32,
 }
 impl Cache {
     pub(super) fn new(limit_bytes: usize, tip_height: u32) -> Self {
@@ -68,6 +73,7 @@ impl Cache {
             entries: BTreeMap::new(),
             order: BTreeSet::new(),
             dependencies: BTreeMap::new(),
+            history_owners: BTreeMap::new(),
             stats: Stats {
                 limit_bytes,
                 ..Default::default()
@@ -76,6 +82,8 @@ impl Cache {
             generation: 0,
             tip_height: Some(tip_height),
             publishing: false,
+            synced_since: None,
+            sync_delay: 18,
         }
     }
     pub(super) fn stats(&self) -> Stats {
@@ -91,6 +99,14 @@ impl Cache {
                     self.dependencies.remove(&entry.dependency);
                 }
             }
+            for owner in entry.owners.iter() {
+                if let Some(keys) = self.history_owners.get_mut(owner) {
+                    keys.remove(key);
+                    if keys.is_empty() {
+                        self.history_owners.remove(owner);
+                    }
+                }
+            }
             self.stats.used_bytes -= entry.charge;
             self.stats.entries -= 1;
             if self.entries.is_empty() {
@@ -102,6 +118,7 @@ impl Cache {
         self.entries.clear();
         self.order.clear();
         self.dependencies.clear();
+        self.history_owners.clear();
         self.stats.used_bytes = 0;
         self.stats.entries = 0;
         self.generation = self.generation.wrapping_add(1);
@@ -161,12 +178,46 @@ impl Cache {
         dependency: Dependency,
         advance_history: bool,
     ) {
+        self.insert_watched(key, value, dependency, advance_history, None);
+    }
+    fn insert_watched(
+        &mut self,
+        key: Box<[u8]>,
+        value: Box<[u8]>,
+        dependency: Dependency,
+        advance_history: bool,
+        web_history: Option<Box<crate::webapi::Watch>>,
+    ) {
         if value.len() > super::MAX_RESPONSE_BYTES {
             return;
         }
+        let advance_history = advance_history || web_history.is_some();
+        let owners = (|| -> Result<Vec<[u8; 32]>> {
+            if let Some(watch) = &web_history {
+                return watch.owners();
+            }
+            if advance_history {
+                return Record::decode_compact(&key)?
+                    .field("addresses")?
+                    .seq()?
+                    .iter()
+                    .map(|v| Ok(v.bytes()?.try_into()?))
+                    .collect();
+            }
+            Ok(Vec::new())
+        })();
+        let Ok(mut owners) = owners else {
+            return;
+        };
+        owners.sort_unstable();
+        owners.dedup();
+        let owner_charge = owners.len().saturating_mul(key.len().saturating_add(256));
+        let watch_charge = web_history.as_ref().map_or(0, |watch| watch.charge());
         let charge = ENTRY_BYTES
             .saturating_add(key.len().saturating_mul(3))
-            .saturating_add(value.len());
+            .saturating_add(value.len())
+            .saturating_add(owner_charge)
+            .saturating_add(watch_charge);
         if BASE_BYTES.saturating_add(charge) > self.stats.limit_bytes {
             return;
         }
@@ -191,6 +242,12 @@ impl Cache {
             .insert(key.clone());
         self.stats.used_bytes = self.stats.used_bytes.max(BASE_BYTES) + charge;
         self.stats.entries += 1;
+        for owner in &owners {
+            self.history_owners
+                .entry(*owner)
+                .or_default()
+                .insert(key.clone());
+        }
         self.entries.insert(
             key,
             Entry {
@@ -200,8 +257,18 @@ impl Cache {
                 touched,
                 charge,
                 advance_history,
+                owners: owners.into_boxed_slice(),
+                web_history,
             },
         );
+    }
+    fn preserve_frequency(&mut self, key: &[u8], frequency: u64) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            self.order
+                .remove(&(entry.frequency, entry.touched, key.into()));
+            entry.frequency = frequency;
+            self.order.insert((frequency, entry.touched, key.into()));
+        }
     }
 }
 
@@ -265,7 +332,7 @@ fn dependency(node: &Node, request: &Record) -> Result<Option<Dependency>> {
         _ => None,
     })
 }
-pub(super) struct Fill {
+pub(crate) struct Fill {
     cache: Shared,
     key: Box<[u8]>,
     dependency: Dependency,
@@ -399,12 +466,22 @@ pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, O
     Ok((None, fill))
 }
 impl Fill {
+    pub(crate) fn finish_web_history(self, value: &[u8], watch: crate::webapi::Watch) {
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        if cache.generation == self.generation {
+            cache.insert_watched(self.key, value.into(), None, true, Some(Box::new(watch)));
+        }
+    }
+    pub(crate) fn at_height(mut self, height: u32) -> Self {
+        self.dependency = Some(height);
+        self
+    }
     #[cfg(test)]
     pub(super) fn finish(self, response: &Record) -> Result<()> {
         self.finish_json(&vnx::serde_json::to_vec(&super::response_json(response)?)?);
         Ok(())
     }
-    pub(super) fn finish_json(self, value: &[u8]) {
+    pub(crate) fn finish_json(self, value: &[u8]) {
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         if cache.stats.limit_bytes < BASE_BYTES + ENTRY_BYTES {
             return;
@@ -418,6 +495,71 @@ impl Fill {
             );
         }
     }
+}
+
+/// Fully rendered public REST JSON shares the native HTTP cache's RAM budget
+/// and publication epoch. Hits never acquire the node mutex.
+pub(crate) struct WebProbe {
+    pub ready: bool,
+    pub since: u32,
+    pub value: Option<Vec<u8>>,
+    pub fill: Option<Fill>,
+    pub epoch: u64,
+}
+fn web_ready(state: &Cache) -> bool {
+    state.synced_since.is_some_and(|since| {
+        state
+            .tip_height
+            .is_some_and(|height| height.saturating_sub(since) >= state.sync_delay)
+    })
+}
+pub(crate) fn web_probe(cache: &Shared, key: Option<&[u8]>) -> WebProbe {
+    let mut state = cache.lock().unwrap_or_else(|p| p.into_inner());
+    let mut probe = WebProbe {
+        ready: web_ready(&state),
+        since: state.synced_since.unwrap_or(0),
+        value: None,
+        fill: None,
+        epoch: state.generation,
+    };
+    if !probe.ready || state.publishing || state.stats.limit_bytes < BASE_BYTES + ENTRY_BYTES {
+        return probe;
+    }
+    if let Some(key) = key {
+        probe.value = state.get(key);
+        if probe.value.is_none() {
+            probe.fill = Some(Fill {
+                cache: cache.clone(),
+                key: key.into(),
+                dependency: None,
+                generation: state.generation,
+                advance_history: false,
+            });
+        }
+    }
+    probe
+}
+pub(crate) fn web_current(cache: &Shared, epoch: u64) -> bool {
+    let state = cache.lock().unwrap_or_else(|p| p.into_inner());
+    state.generation == epoch && !state.publishing && web_ready(&state)
+}
+pub(crate) fn web_sync(node: &Node) {
+    if let Some(cache) = &node.rpc_cache {
+        let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if node.synced {
+            if cache.synced_since.is_none() {
+                cache.synced_since = cache.tip_height;
+            }
+        } else {
+            cache.synced_since = None;
+        }
+    }
+}
+#[cfg(test)]
+pub(crate) fn web_ready_for_test(cache: &Shared) {
+    let mut cache = cache.lock().unwrap();
+    cache.synced_since = Some(0);
+    cache.sync_delay = 0;
 }
 
 impl Node {
@@ -434,8 +576,12 @@ impl Node {
         if let Some(shared) = &self.rpc_cache {
             let mut cache = shared.lock().unwrap_or_else(|p| p.into_inner());
             let generation = cache.generation.wrapping_add(1);
+            let since = cache.synced_since;
+            let delay = cache.sync_delay;
             *cache = Cache::new(bytes, tip);
             cache.generation = generation;
+            cache.synced_since = since;
+            cache.sync_delay = delay;
         } else {
             self.rpc_cache = Some(Arc::new(Mutex::new(Cache::new(bytes, tip))));
         }
@@ -498,20 +644,44 @@ impl Observer {
         // Kept history pages advance from their complete prior response plus
         // this selected block's native activity. A branch replacement discards
         // them in selected(); no old-branch page can be incrementally repaired.
-        let watched: Vec<_> = cache
-            .dependencies
-            .get(&None)
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect();
-        if !watched.is_empty() {
+        if block.memory_size() > super::MAX_RESPONSE_BYTES {
+            let watched: BTreeSet<_> = cache.history_owners.values().flatten().cloned().collect();
+            for key in watched {
+                cache.remove(&key);
+            }
+        }
+        if !cache.history_owners.is_empty() {
             let rows = mmx_execution::chain::history::entries(block, &self.params)?;
+            let mut watched = BTreeSet::new();
+            for row in &rows {
+                if let Some(keys) = cache.history_owners.get(&hash(row, "address")?) {
+                    watched.extend(keys.iter().cloned());
+                }
+            }
             for key in watched {
                 let Some(entry) = cache.entries.get(&key) else {
                     continue;
                 };
                 let frequency = entry.frequency;
+                if let Some(watch) = entry.web_history.clone() {
+                    let result = watch.advance(&entry.value, &rows);
+                    match result {
+                        Ok(Some(response)) => {
+                            cache.remove(&key);
+                            cache.insert_watched(
+                                key.clone(),
+                                response.into_boxed_slice(),
+                                None,
+                                true,
+                                Some(watch),
+                            );
+                            cache.preserve_frequency(&key, frequency);
+                        }
+                        Ok(None) => (),
+                        Err(_) => cache.remove(&key),
+                    }
+                    continue;
+                }
                 let result = (|| -> Result<_> {
                     let request = Record::decode_compact(&key)?;
                     if !super::history::affected(&request, &rows)? {
@@ -530,13 +700,7 @@ impl Observer {
                             None,
                             true,
                         );
-                        if let Some(entry) = cache.entries.get_mut(&key) {
-                            let old = (entry.frequency, entry.touched, key.clone());
-                            entry.frequency = frequency;
-                            let new = (entry.frequency, entry.touched, key.clone());
-                            cache.order.remove(&old);
-                            cache.order.insert(new);
-                        }
+                        cache.preserve_frequency(&key, frequency);
                     }
                     Ok(None) => (),
                     Err(_) => cache.remove(&key),
@@ -618,6 +782,20 @@ impl Observer {
             )?;
         }
         put("get_tx_ids_at", vec![("height", h())], Value::Sequence(ids))?;
+        if block.memory_size() <= super::MAX_RESPONSE_BYTES {
+            if let Ok(entries) =
+                crate::webapi::pushed(block, &self.params, cache.tip_height.unwrap_or(height))
+            {
+                for entry in entries {
+                    cache.insert(
+                        entry.key.into_boxed_slice(),
+                        entry.value.into_boxed_slice(),
+                        entry.height,
+                        false,
+                    );
+                }
+            }
+        }
         Ok(())
     }
 }

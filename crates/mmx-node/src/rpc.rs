@@ -135,7 +135,10 @@ impl ReadTask {
     }
 }
 
-fn lock_node_until(node: &Mutex<Node>, end: Instant) -> Result<std::sync::MutexGuard<'_, Node>> {
+pub(crate) fn lock_node_until(
+    node: &Mutex<Node>,
+    end: Instant,
+) -> Result<std::sync::MutexGuard<'_, Node>> {
     loop {
         if Instant::now() >= end {
             return Err(error("RPC request deadline"));
@@ -271,6 +274,15 @@ fn dispatch_payload_until(
     } else {
         Ok(Payload::Json(value))
     }
+}
+pub(crate) fn web_query(
+    node: &Arc<Mutex<Node>>,
+    method: &str,
+    args: Value,
+    end: Instant,
+    cache: Option<&cache::Shared>,
+) -> Result<Value> {
+    dispatch_payload_until(node, method, args, end, true, cache)?.into_json()
 }
 pub(crate) fn response_json(response: &Record) -> Result<Value> {
     if response.memory_size() > MAX_RESPONSE_BYTES {

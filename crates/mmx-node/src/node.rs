@@ -342,12 +342,15 @@ impl Node {
     }
     pub fn begin_resync(&mut self) {
         self.synced = false;
+        crate::rpc::cache::web_sync(self);
         self.peer_state.begin_resync();
     }
     /// Drain peer broadcasts and coalesce work in the native periodic update.
     /// Embedded callers must drive this tick even while a peer is polling.
     pub fn tick(&mut self) -> Result<()> {
-        self.update().map(|_| ())
+        let result = self.update().map(|_| ());
+        crate::rpc::cache::web_sync(self);
+        result
     }
     pub fn root_height(&self) -> u32 {
         self.root
@@ -371,6 +374,7 @@ impl Node {
             .saturating_sub(self.chain.selected().params().commit_delay)
             .max(self.earliest_height());
         self.synced = false;
+        crate::rpc::cache::web_sync(self);
         self.peer_state.publish(height, false);
         self.sync_pos = height.saturating_add(1);
         self.sync_peers = 0;

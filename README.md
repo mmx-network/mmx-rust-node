@@ -342,7 +342,10 @@ acceleration is inactive.
 
 ## RPC and maintenance
 
-HTTP uses JSON-RPC 2.0 at `/rpc`; native VNX RPC is available on port 11331.
+HTTP serves the existing public REST/WebAPI protocol at `/wapi/...` (or bare
+paths), using Bech32 addresses, hexadecimal hashes and decimal amount strings.
+The existing Node.js load balancer forwards these paths directly. JSON-RPC 2.0
+is also available at `/rpc`; local native VNX RPC remains on port 11331.
 For example:
 
 ```sh
@@ -354,8 +357,17 @@ curl -sS http://127.0.0.1:11380/rpc \
 The API includes blocks, headers, transactions, contracts, balances, address
 history (`get_history` / `get_history_memo`), transaction validation, and
 submission. Parameters are named objects using native VNX JSON
-representations, including byte arrays. This HTTP endpoint implements a subset
-of node methods; C++ WebGUI and REST/WebAPI parity are still in progress.
+representations, including byte arrays. Public REST covers chain/node info,
+headers, blocks, transactions, addresses, balances, supply, address and contract
+history, farmers, plot NFTs, offers, swaps, bounded contract storage/calls,
+transaction validation and broadcast. Administrative, wallet and farming-control
+routes are unavailable on this public listener. REST returns 503 while syncing
+and for 18 blocks after synchronization, matching the existing public service.
+
+```sh
+curl -sS 'http://127.0.0.1:11380/wapi/header?height=100'
+curl -sS 'http://127.0.0.1:11380/wapi/address/history?id=mmx1...&limit=100'
+```
 
 Every node defaults to a **64 MiB in-process public HTTP RPC cache**.
 It stores serialized JSON results; local VNX RPC bypasses it.
@@ -367,11 +379,14 @@ overhead; it does not cap total process RSS or temporary request/response memory
 `get_status.rpc_cache` reports its byte charge, entries, hits, misses and evictions.
 
 Cache hits make no chain/database queries and copy cached JSON directly into
-the HTTP response envelope without parsing or re-encoding the result.
-Successful chain publications push
+the HTTP response without parsing or re-encoding the result. Public REST caches
+its final WebAPI JSON, including presentation fields. Successful chain publications push
 recent blocks, headers, transactions and transaction heights from already-loaded
 bodies. Cached address-history pages advance from the same events; address
-balances and contracts refill on demand after a state change. Eviction removes
+balances and contracts refill on demand after a state change. Public block and
+transaction forms with native currency only are also prepared from accepted
+bodies; token metadata is loaded on demand. Confirmation counts use the final
+selected tip of a multi-block publication. Eviction removes
 the least frequently used response, breaking ties by oldest access. Forks discard
 replaced suffixes and affected history; rollback and purge reset the cache.
 Generation checks prevent older in-flight reads from refilling it. Pending
@@ -386,6 +401,20 @@ read without migration: their unindexed prefix uses a bounded fallback (at most
 1,000 blocks / 10,000 searched rows / 32 MiB per request). Narrow `since` / `until`
 when that budget is exceeded. Indexed queries also have row, byte and execution
 budgets; a server budget failure returns an error instead of an incomplete total.
+
+Additional rollback-safe indexes serve public transaction lists, contract
+execution/trade history, deployments and farmer totals. Upgrades populate these
+incrementally with accepted blocks (at most 256 old bodies, 4 MiB of decoded
+input and a 20 ms stopping budget per publication; a single body can exceed the
+byte/time target). Address counting advances through at most 256 balance rows
+per publication, accounting for concurrent balance changes. Broad queries that
+need an unfinished index report that it is catching up. Genesis synchronization
+builds indexes as it goes; existing large ledgers can take time to catch up.
+No full-ledger scan runs on a public request.
+
+For Caddy and the Node.js load balancer, bind Rust HTTP to
+`127.0.0.1:11380`; keep the proxy on `127.0.0.1:8081` and Caddy on port 8080.
+See [public RPC deployment](docs/public-rpc-deployment.md).
 
 To serve stored data without contacting peers, restart with `--offline`:
 

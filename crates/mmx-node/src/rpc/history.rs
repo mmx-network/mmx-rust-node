@@ -377,14 +377,21 @@ fn finish(rows: Vec<Record>, filter: &Filter) -> Result<Vec<Record>> {
     }
     Ok(rows)
 }
-pub(super) fn can_advance(request: &Record) -> Result<bool> {
+pub(crate) fn can_advance(request: &Record) -> Result<bool> {
     if !is_method(&request.name) {
         return Ok(false);
     }
     let filter = Filter::parse(request)?;
-    Ok(!filter.pending && filter.max_search == 0)
+    Ok(!filter.pending
+        && (filter.max_search == 0
+            || (filter.owners.len() == 1
+                && filter.currencies.is_empty()
+                && filter.kind.is_none()
+                && filter.memo.is_none()
+                && filter.limit >= 0
+                && filter.limit as usize <= filter.max_search)))
 }
-pub(super) fn affected(request: &Record, delta: &[Record]) -> Result<bool> {
+pub(crate) fn affected(request: &Record, delta: &[Record]) -> Result<bool> {
     let filter = Filter::parse(request)?;
     if filter.limit == 0 {
         return Ok(false);
@@ -397,7 +404,7 @@ pub(super) fn affected(request: &Record, delta: &[Record]) -> Result<bool> {
     }
     Ok(false)
 }
-pub(super) fn advance(
+pub(crate) fn advance(
     request: &Record,
     mut response: Record,
     delta: &[Record],
@@ -417,7 +424,7 @@ pub(super) fn advance(
         added.push(value.record()?.clone());
     }
     let rows = finish(added, &filter)?;
-    if rows.len() > MAX_ROWS {
+    if rows.len() > MAX_ROWS || (filter.max_search > 0 && rows.len() > filter.max_search) {
         return Err(error("history cache exceeds row budget"));
     }
     response.fields.insert(

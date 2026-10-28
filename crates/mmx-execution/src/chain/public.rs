@@ -1,0 +1,456 @@
+//! Derived public-RPC indexes. Their writes share the selected ledger commit,
+//! so forks and rewinds revert indexes and backfill progress atomically.
+use super::{bytes, invalid, uint, ChainResult, ChainState};
+use mmx_consensus::{Record, Value};
+use mmx_db::Write;
+use mmx_vm::Storage;
+use std::collections::BTreeMap;
+
+pub const META: &str = "chain_public_meta";
+pub const TRANSACTIONS: &str = "chain_public_transactions";
+pub const CONTRACTS: &str = "chain_public_contracts";
+pub const EXECUTIONS: &str = "chain_public_executions";
+pub const TRADES: &str = "chain_public_trades";
+pub const FARMERS: &str = "chain_public_farmers";
+pub const FARMER_BLOCKS: &str = "chain_public_farmer_blocks";
+pub const FARMER_REWARDS: &str = "chain_public_farmer_rewards";
+pub const RANKING: &str = "chain_public_ranking";
+pub const START: &[u8] = b"start";
+pub const ADDRESS_COUNT: &[u8] = b"address_count";
+pub const CURSOR: &[u8] = b"cursor";
+
+fn value(name: &str, fields: impl IntoIterator<Item = (&'static str, Value)>) -> Record {
+    Record {
+        name: name.into(),
+        fields: fields.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+    }
+}
+fn ordinal(height: u32, counter: u32) -> Vec<u8> {
+    [(!height).to_be_bytes(), (!counter).to_be_bytes()].concat()
+}
+struct Builder<'a> {
+    chain: &'a ChainState,
+    writes: Vec<Write>,
+    farmers: BTreeMap<Vec<u8>, (u64, u128)>,
+    rewards: BTreeMap<Vec<u8>, u128>,
+}
+impl Builder<'_> {
+    fn block(&mut self, block: &Record) -> ChainResult<()> {
+        let height = uint(block, "height")? as u32;
+        let block_id = bytes::<32>(block.field("hash")?)?;
+        if height > 0 {
+            let farmer = block
+                .field("proof")?
+                .seq()?
+                .first()
+                .map(|v| v.record()?.field("farmer_key")?.bytes())
+                .transpose()?
+                .unwrap_or(&[0; 33])
+                .to_vec();
+            let reward = uint(block, "reward_amount")?;
+            let address = block
+                .field("reward_addr")?
+                .optional()?
+                .map(bytes::<32>)
+                .transpose()?
+                .unwrap_or([0; 32]);
+            let key = [farmer.as_slice(), &(!height).to_be_bytes()].concat();
+            self.writes.push(Write::put(FARMER_BLOCKS, key, block_id));
+            let stats = self.farmers.entry(farmer.clone()).or_default();
+            stats.0 += 1;
+            stats.1 += u128::from(reward);
+            *self
+                .rewards
+                .entry([farmer.as_slice(), address.as_slice()].concat())
+                .or_default() += u128::from(reward);
+        }
+        let mut counter = 0u32;
+        for (index, tx) in block.field("tx_list")?.seq()?.iter().enumerate() {
+            let tx = tx.record()?;
+            let id = bytes::<32>(tx.field("id")?)?;
+            self.writes.push(Write::put(
+                TRANSACTIONS,
+                [(!height).to_be_bytes(), (index as u32).to_be_bytes()].concat(),
+                id,
+            ));
+            if tx.field("exec_result")?.optional()?.is_some_and(|v| {
+                v.record()
+                    .and_then(|r| r.field("did_fail"))
+                    .and_then(Value::boolean)
+                    .unwrap_or(false)
+            }) {
+                continue;
+            }
+            let deployed = tx
+                .field("deploy")?
+                .optional()?
+                .map(Value::record)
+                .transpose()?;
+            if let Some(contract) = deployed {
+                if contract.name == "mmx.contract.Executable" {
+                    self.writes.push(Write::put(
+                        CONTRACTS,
+                        [
+                            bytes::<32>(contract.field("binary")?)?.as_slice(),
+                            &ordinal(height, counter),
+                        ]
+                        .concat(),
+                        id,
+                    ));
+                }
+                counter += 1;
+            }
+            for op in tx.field("execute")?.seq()? {
+                let Some(op) = op.optional()?.map(Value::record).transpose()? else {
+                    continue;
+                };
+                let op_id = ordinal(height, counter);
+                counter += 1;
+                if !matches!(
+                    op.name.as_str(),
+                    "mmx.operation.Execute" | "mmx.operation.Deposit"
+                ) {
+                    continue;
+                }
+                let mut address = bytes::<32>(op.field("address")?)?;
+                if address == [0; 32] {
+                    address = id;
+                }
+                let deposit = if op.name == "mmx.operation.Deposit" {
+                    Some(Value::Sequence(vec![
+                        op.field("currency")?.clone(),
+                        op.field("amount")?.clone(),
+                    ]))
+                } else {
+                    None
+                };
+                let entry = value(
+                    "mmx.exec_entry_t",
+                    [
+                        ("height", Value::Uint(height.into())),
+                        ("time_stamp", block.field("time_stamp")?.clone()),
+                        ("txid", Value::Bytes(id.to_vec())),
+                        ("method", op.field("method")?.clone()),
+                        ("args", op.field("args")?.clone()),
+                        ("user", op.field("user")?.clone()),
+                        ("deposit", Value::Optional(deposit.map(Box::new))),
+                    ],
+                );
+                self.writes.push(Write::put(
+                    EXECUTIONS,
+                    [address.as_slice(), &op_id].concat(),
+                    entry.encode_compact()?,
+                ));
+                if matches!(op.field("method")?.text()?, b"trade" | b"accept")
+                    && op.name == "mmx.operation.Deposit"
+                {
+                    let contract = if address == id {
+                        deployed.cloned()
+                    } else {
+                        self.chain
+                            .storage
+                            .get_contract(&address)?
+                            .map(|v| Record::decode(&v.bytes))
+                            .transpose()?
+                    };
+                    if contract.is_some_and(|c| {
+                        c.name == "mmx.contract.Executable"
+                            && c.field("binary").ok().and_then(|v| bytes::<32>(v).ok())
+                                == Some(self.chain.params.offer_binary.0)
+                    }) {
+                        let log = value(
+                            "mmx.public_trade",
+                            [
+                                ("address", Value::Bytes(address.to_vec())),
+                                ("entry", Value::Record(entry)),
+                            ],
+                        );
+                        self.writes
+                            .push(Write::put(TRADES, op_id, log.encode_compact()?));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+pub(super) fn writes(
+    chain: &ChainState,
+    block: &Record,
+    batch: &mmx_vm::storage::TransactionBatch,
+) -> ChainResult<Vec<Write>> {
+    let db = chain.storage.database();
+    let height = uint(block, "height")? as u32;
+    let start = db
+        .get(META, START, None)?
+        .map(|v| {
+            v.try_into()
+                .map(u32::from_be_bytes)
+                .map_err(|_| invalid("public index start"))
+        })
+        .transpose()?
+        .unwrap_or(height);
+    let cursor = db
+        .get(META, CURSOR, None)?
+        .map(|v| {
+            v.try_into()
+                .map(u32::from_be_bytes)
+                .map_err(|_| invalid("public index cursor"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let mut builder = Builder {
+        chain,
+        writes: vec![Write::put(META, START, start.to_be_bytes())],
+        farmers: BTreeMap::new(),
+        rewards: BTreeMap::new(),
+    };
+    // Upgrade work is bounded per publication. Cursor and derived rows share
+    // the ledger commit, including when a fork replaces that publication.
+    let cursor = cursor.max(db.retention_floor().saturating_sub(1));
+    let mut next = cursor;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    let mut bytes = 0usize;
+    while next < start && next.saturating_sub(cursor) < 256 && bytes < 4 * 1024 * 1024 {
+        let Some(id) = chain.hash_at(next)? else {
+            break;
+        };
+        let Some(old) = chain.block(&id)? else {
+            break;
+        };
+        bytes = bytes.saturating_add(old.memory_size());
+        builder.block(&old)?;
+        next += 1;
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    builder.block(block)?;
+    builder
+        .writes
+        .push(Write::put(META, CURSOR, next.to_be_bytes()));
+    for (key, (count, reward)) in builder.farmers {
+        let previous = db.get(FARMERS, &key, None)?;
+        let (old_count, old_reward) = if let Some(value) = previous {
+            if value.len() != 24 {
+                return Err(invalid("farmer counter length"));
+            }
+            (
+                u64::from_le_bytes(value[..8].try_into().unwrap()),
+                u128::from_le_bytes(value[8..].try_into().unwrap()),
+            )
+        } else {
+            (0, 0)
+        };
+        let count = old_count
+            .checked_add(count)
+            .ok_or_else(|| invalid("farmer count overflow"))?;
+        let total = old_reward
+            .checked_add(reward)
+            .ok_or_else(|| invalid("farmer reward overflow"))?;
+        if old_count > 0 {
+            builder.writes.push(Write::delete(
+                RANKING,
+                [(!old_count).to_be_bytes().as_slice(), &key].concat(),
+            ));
+        }
+        builder.writes.push(Write::put(
+            FARMERS,
+            key.as_slice(),
+            [count.to_le_bytes().as_slice(), &total.to_le_bytes()].concat(),
+        ));
+        builder.writes.push(Write::put(
+            RANKING,
+            [(!count).to_be_bytes().as_slice(), &key].concat(),
+            count.to_le_bytes(),
+        ));
+    }
+    for (key, reward) in builder.rewards {
+        let old = db
+            .get(FARMER_REWARDS, &key, None)?
+            .map(|v| {
+                v.try_into()
+                    .map(u128::from_le_bytes)
+                    .map_err(|_| invalid("farmer reward length"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        builder.writes.push(Write::put(
+            FARMER_REWARDS,
+            key,
+            old.checked_add(reward)
+                .ok_or_else(|| invalid("farmer reward overflow"))?
+                .to_le_bytes(),
+        ));
+    }
+    builder.writes.extend(address_count(chain, batch)?);
+    Ok(builder.writes)
+}
+
+const ADDRESS_CURSOR: &[u8] = b"address_cursor";
+const ADDRESS_PARTIAL: &[u8] = b"address_partial";
+fn address_count(
+    chain: &ChainState,
+    batch: &mmx_vm::storage::TransactionBatch,
+) -> ChainResult<Vec<Write>> {
+    let db = chain.storage.database();
+    let read_count = |key| -> ChainResult<Option<u64>> {
+        db.get(META, key, None)?
+            .map(|v| {
+                v.try_into()
+                    .map(u64::from_le_bytes)
+                    .map_err(|_| invalid("address counter length"))
+            })
+            .transpose()
+    };
+    let complete = read_count(ADDRESS_COUNT)?;
+    let mut count = complete.or(read_count(ADDRESS_PARTIAL)?).unwrap_or(0);
+    let mut end = None;
+    let mut done = complete.is_some() || db.version() == 0;
+    if !done {
+        let start = db
+            .get(META, ADDRESS_CURSOR, None)?
+            .unwrap_or_else(|| vec![0; 64]);
+        let mut budget = mmx_db::ReadBudget {
+            rows: 256,
+            keys: 100000,
+            bytes: 1024 * 1024,
+        };
+        let rows = match db.scan_range_bounded("balances", &start, None, None, &mut budget) {
+            Ok(rows) => rows,
+            Err(mmx_db::Error::ReadBudget) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        for row in &rows {
+            if row.key.len() != 64 || row.value.len() != 16 {
+                return Err(invalid("balance index row"));
+            }
+            if row.key[32..] == [0; 32]
+                && u128::from_le_bytes(row.value.as_slice().try_into().unwrap()) >= 1_000_000
+            {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("address count overflow"))?;
+            }
+        }
+        done = rows.len() < 256;
+        if !done {
+            let mut key = rows.last().unwrap().key.clone();
+            if let Some(i) = key.iter().rposition(|v| *v != 255) {
+                key[i] += 1;
+                key[i + 1..].fill(0);
+                end = Some(key);
+            } else {
+                done = true;
+            }
+        }
+    }
+    let balances: BTreeMap<_, _> = batch
+        .balances
+        .iter()
+        .filter(|v| v.currency == [0; 32])
+        .map(|v| (v.contract, v.amount))
+        .collect();
+    for (address, next) in balances {
+        let key = [address.as_slice(), &[0; 32]].concat();
+        if end.as_ref().is_some_and(|end| key >= *end) {
+            continue;
+        }
+        let previous = chain
+            .storage
+            .balance_at(&address, &[0; 32], None)?
+            .unwrap_or(0);
+        if previous < 1_000_000 && next >= 1_000_000 {
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| invalid("address count overflow"))?;
+        }
+        if previous >= 1_000_000 && next < 1_000_000 {
+            count = count
+                .checked_sub(1)
+                .ok_or_else(|| invalid("address count underflow"))?;
+        }
+    }
+    Ok(if done {
+        vec![
+            Write::put(META, ADDRESS_COUNT, count.to_le_bytes()),
+            Write::delete(META, ADDRESS_CURSOR),
+            Write::delete(META, ADDRESS_PARTIAL),
+        ]
+    } else {
+        vec![
+            Write::put(META, ADDRESS_PARTIAL, count.to_le_bytes()),
+            Write::put(META, ADDRESS_CURSOR, end.unwrap()),
+        ]
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mmx_vm::storage::{AtomicStorage, BalanceWrite, TransactionBatch};
+    #[test]
+    fn address_migration_is_bounded_tracks_changes_and_rewinds_atomically() {
+        let mut chain = ChainState::memory(Default::default());
+        let address = |i: u32| {
+            let mut out = [0; 32];
+            out[..4].copy_from_slice(&i.to_be_bytes());
+            out
+        };
+        let mut initial = TransactionBatch::default();
+        for i in 0..600 {
+            initial.balances.push(BalanceWrite {
+                contract: address(i),
+                currency: [0; 32],
+                amount: 1_000_000,
+            });
+        }
+        chain.storage.apply_transaction(&initial).unwrap();
+        chain.storage.database_mut().commit(1).unwrap();
+        for version in 2..=4 {
+            let mut batch = TransactionBatch::default();
+            if version == 3 {
+                // Both the scanned and unscanned portions change during catch-up.
+                for i in [1, 550] {
+                    batch.balances.push(BalanceWrite {
+                        contract: address(i),
+                        currency: [0; 32],
+                        amount: 0,
+                    });
+                }
+                batch.balances.push(BalanceWrite {
+                    contract: address(700),
+                    currency: [0; 32],
+                    amount: 1_000_000,
+                });
+            }
+            let writes = address_count(&chain, &batch).unwrap();
+            chain.storage.apply_transaction(&batch).unwrap();
+            chain
+                .storage
+                .database_mut()
+                .commit_batch(version, writes)
+                .unwrap();
+        }
+        let count = chain
+            .storage
+            .database()
+            .get(META, ADDRESS_COUNT, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(count.try_into().unwrap()), 599);
+        chain.storage.database_mut().revert(2).unwrap();
+        assert!(chain
+            .storage
+            .database()
+            .get(META, ADDRESS_COUNT, None)
+            .unwrap()
+            .is_none());
+        assert!(chain
+            .storage
+            .database()
+            .get(META, ADDRESS_CURSOR, None)
+            .unwrap()
+            .is_some());
+    }
+}

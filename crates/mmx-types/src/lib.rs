@@ -20,6 +20,10 @@ pub use generated::*;
 
 pub use ::vnx::VnxType;
 
+// Declared aliases are required to distinguish public MMX addresses from
+// hashes, even though both have the same native fixed-byte wire layout.
+include!(concat!(env!("OUT_DIR"), "/presentation.rs"));
+
 /// Parse the checked-in schema once. Each caller receives an independent
 /// registry for native per-stream type-code additions.
 pub fn vnx_registry() -> ::vnx::Result<::vnx::Registry> {
