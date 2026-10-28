@@ -175,6 +175,12 @@ check_launch() {
             if ! grep -q 'Icon (128 x 128)' "$home/icon.txt" || ! grep -q 'Icon (192 x 192)' "$home/icon.txt"; then
                 printf 'appimage: the window does not expose its high-resolution icon\n' >&2; status=1
             fi
+            for size in 48 64; do
+                if ! cmp -s "$home/data/icons/hicolor/${size}x${size}/apps/mmx-wallet-gui.png" \
+                    "$wallet/src-tauri/icons/${size}x${size}.png"; then
+                    printf 'appimage: the host theme is missing the %s-pixel dock icon\n' "$size" >&2; status=1
+                fi
+            done
         fi
     fi
     # A second start hands over to the running app (session bus) and exits.
@@ -273,6 +279,10 @@ check_commands() {
 if (( launch_check )); then
     extract=$(mktemp -d)
     dpkg-deb -x "$packages/$deb_name" "$extract"
+    for size in 48 64; do
+        cmp "$extract/usr/share/icons/hicolor/${size}x${size}/apps/mmx-wallet-gui.png" \
+            "$wallet/src-tauri/icons/${size}x${size}.png"
+    done
     python3 "$wallet/scripts/check-packaged-cli.py" "$extract/usr/bin/mmxwallet"
     python3 "$wallet/scripts/check-packaged-cli.py" "$packages/$appimage_name" --cli
     result=0

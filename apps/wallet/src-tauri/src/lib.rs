@@ -528,6 +528,11 @@ mod desktop {
                 #[cfg(target_os = "linux")]
                 if std::env::var_os("APPIMAGE").is_some() {
                     use gtk::prelude::GtkWindowExt;
+                    if let Some(data) = crate::appimage::data_directory() {
+                        if crate::appimage::install_dock_icons(&data).is_err() {
+                            eprintln!("Could not update the desktop dock icons");
+                        }
+                    }
                     let master = gtk::gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(
                         crate::appimage::ICON,
                     ))?;

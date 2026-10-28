@@ -42,6 +42,8 @@
     "longDescription": "Create wallets, send and receive MMX and tokens, and follow your balance and activity. Your recovery words and keys stay on this computer.",
     "icon": [
       "icons/32x32.png",
+      "icons/48x48.png",
+      "icons/64x64.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",

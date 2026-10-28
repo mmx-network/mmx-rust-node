@@ -1,6 +1,6 @@
 [package]
 name = "mmx-wallet-desktop"
-version = "1.0.1"
+version = "1.0.2"
 description = "MMX Wallet"
 edition = "2021"
 rust-version = "1.90"

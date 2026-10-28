@@ -22,6 +22,9 @@ const document = (size, title, body) =>
 export async function brandJobs() {
   const svg = await readFile(join(here, 'mmx-logo.svg'), 'utf8');
   const compact = compactLogo(svg);
+  // At common dock sizes, use a 44-pixel face in a 48-pixel canvas, with no
+  // glow. Larger app-menu artwork keeps its existing padding and effects.
+  const dock = compact.replace('viewBox="0 0 256 256"', 'viewBox="-7 -7 270 270"');
   const body = svg.replace(/<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
     .replace(/<title>.*?<\/title>/, '').replace(/<desc>.*?<\/desc>/, '').trim();
   const appIcon = document(1024, 'MMX Wallet',
@@ -69,9 +72,9 @@ export async function brandJobs() {
   }
   jobs.push({ svg: maskable, size: 512, out: join(app, 'public/icon-maskable-512.png') });
   for (const [name, size] of [
-    ['32x32.png', 32], ['64x64.png', 64], ['128x128.png', 128],
+    ['32x32.png', 32], ['48x48.png', 48], ['64x64.png', 64], ['128x128.png', 128],
     ['128x128@2x.png', 256], ['icon.png', 512],
-  ]) jobs.push({ svg: appIcon, size, out: join(app, 'src-tauri/icons', name) });
+  ]) jobs.push({ svg: size === 48 || size === 64 ? dock : appIcon, size, out: join(app, 'src-tauri/icons', name) });
   jobs.push({ svg: share, width: 1200, height: 630, out: join(website, 'public/share.png') });
   const logoIndex = process.argv.indexOf('--logo');
   if (logoIndex > 0 && process.argv[logoIndex + 1]) {

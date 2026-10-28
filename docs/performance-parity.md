@@ -1442,3 +1442,23 @@ tests (517), release publisher tests (8), typechecking and Clippy pass. Packagin
 checks use disposable homes, including an unused node home; no live wallet,
 ledger or plot data is rewritten. These are functionality and packaging checks,
 not new performance-parity claims.
+
+## GNOME dock artwork selection (2026-10-28)
+
+The AppImage's 64/128/192-pixel window icons were present on the real GNOME
+session, but GNOME matched the window to the installed deb launcher and used its
+padded, glowing theme icon instead. At a 48-pixel dock size the visible face was
+about 38 pixels. New 48/64-pixel theme assets render the existing compact vector
+directly without the glow, with a 44-pixel face at 48 pixels. Larger app-menu
+assets are unchanged. The C++ Qt GUI uses a 256-pixel QIcon; it has no equivalent
+size-specific theme registration.
+
+Deb packages install the new sizes. AppImages also register these two assets in
+the user's XDG icon theme, so an existing deb launcher cannot keep selecting the
+older padded asset. Registration compares bounded contents, replaces files
+atomically, and updates icon-theme directory mtimes only when an asset changes.
+It never rewrites the larger menu assets or accesses wallet data. A regression
+covers upgrades and repeat launches; packaged Linux checks verify both theme
+sizes in the deb and in the AppImage's isolated XDG data directory. Real-session
+GTK lookup now selects the user 48/64-pixel assets and still selects the existing
+system asset at 96/128 pixels.
