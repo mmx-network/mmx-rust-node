@@ -126,7 +126,12 @@ same directory.
 
 The desktop wallet (Windows, macOS, Linux deb and AppImage) uses the same wallet
 directory, key files and `mmxwallet.json`; the web wallet keeps the recovery
-words in the browser's password manager. Both are built from
+words in the browser's password manager. Download desktop installers from
+[GitHub Releases](https://github.com/mmx-network/mmx-rust-node/releases).
+The Wallet workflow publishes successful `main` builds after all wallet tests
+and platform builds pass, with platform checksums and the exact source commit.
+Release tags use `wallet-v<VERSION>-build.<RUN_NUMBER>`; reruns resume drafts
+without replacing published downloads. Both wallets are built from
 [`apps/wallet`](apps/wallet): `npm ci && npm run build:wasm`, then
 `npm run build:web` for the static site (served with the headers in
 [`apps/wallet/deploy`](apps/wallet/deploy/README.md)), or

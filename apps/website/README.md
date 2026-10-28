@@ -43,7 +43,10 @@ README and MMX documentation; the wallet description follows `docs/wallet-app.md
 The copy distinguishes consensus-driven supply from a guarantee of price
 stability and avoids presenting potential transaction capacity as measured
 throughput. The node download link continues to point to the published C++
-node releases; Rust source and the new web apps are linked separately. The
+node releases; the desktop wallet button and footer link point to the Rust
+repository's [GitHub Releases](https://github.com/mmx-network/mmx-rust-node/releases),
+where the Wallet workflow automatically publishes tested installers. Rust
+source and the new web apps are linked separately. The
 existing SafeTrade and NonKYC market links are retained from `mmx-website`.
 
 `public/` includes crawler metadata, the manifest, the selected MMX icons,

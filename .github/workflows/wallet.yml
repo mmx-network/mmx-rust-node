@@ -49,6 +49,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+      - run: python3 -m unittest discover -s scripts -p 'test_release.py' -v
       - run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
       - run: npm ci --no-audit --no-fund
       - run: npm run build:wasm
@@ -178,3 +179,37 @@ jobs:
         with:
           name: mmx-wallet-windows
           path: apps/wallet/artifacts/packages
+
+  release:
+    needs: [web, desktop-crate, linux, macos, windows]
+    if: github.repository == 'mmx-network/mmx-rust-node' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: wallet-release-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          name: mmx-wallet-linux
+          path: release-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: mmx-wallet-macos
+          path: release-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: mmx-wallet-windows
+          path: release-packages
+      - name: Publish desktop wallet installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash apps/wallet/scripts/publish-release.sh release-packages
