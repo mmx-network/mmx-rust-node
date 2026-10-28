@@ -37,6 +37,15 @@ Validate this file before loading it. NAT forwarding is configured outside the
 VM. TLS/DNS configuration and shared certificates are separate from this HTTP
 listener; no TLS secrets need copying for port 8080.
 
+Eu2's external mapping is `80.47.12.14:1161` → VM port `8080`.
+Its public RPC base URL is `http://80.47.12.14:1161`; SSH uses the separate
+external port `1160`. Caddy continues listening on port 8080 inside the VM.
+
+```sh
+curl -sS http://80.47.12.14:1161/server/status
+curl -sS http://80.47.12.14:1161/node/info
+```
+
 Verify each hop with bounded point requests:
 
 ```sh
