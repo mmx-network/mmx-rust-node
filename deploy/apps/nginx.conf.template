@@ -28,6 +28,8 @@ http {
 
     # Precompressed at build time, with no compression CPU work per request.
     gzip_static on;
+    # CDNs and reverse proxies send Via; nginx disables gzip for them by default.
+    gzip_proxied any;
     gzip_vary on;
 
     # Only successful content-addressed assets get a long cache lifetime.

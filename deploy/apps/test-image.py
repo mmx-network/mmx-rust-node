@@ -259,14 +259,25 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
     assert status == 200 and headers["cache-control"] == "no-cache"
     security(headers, rpc_origin, wallet, website)
 
-    # The same file supports conditional revalidation and precompressed delivery.
-    status, headers, body = request(port, host, headers={"Accept-Encoding": "gzip"})
-    assert status == 200 and headers["content-encoding"] == "gzip"
-    assert "accept-encoding" in headers["vary"].lower()
-    assert gzip.decompress(body) == html
-    status, headers, body = request(port, host, headers={"If-None-Match": headers["etag"], "Accept-Encoding": "gzip"})
-    assert status == 304 and body == b"" and headers["cache-control"] == "no-cache"
-    security(headers, rpc_origin, wallet, website)
+    # CDN/proxy Via headers must not disable the precompressed files. Bunny's
+    # origin request advertises multiple encodings, including gzip.
+    for via in [None, "BunnyCDN", "1.1 origin-proxy, BunnyCDN"]:
+        encoding_headers = {"Accept-Encoding": "zstd, br, gzip"}
+        if via:
+            encoding_headers["Via"] = via
+        status, headers, body = request(port, host, headers=encoding_headers)
+        assert status == 200 and headers.get("content-encoding") == "gzip", (via, headers)
+        assert "accept-encoding" in headers["vary"].lower()
+        assert gzip.decompress(body) == html
+        assert headers["cache-control"] == "no-cache"
+        security(headers, rpc_origin, wallet, website)
+        status, headers, body = request(port, host, headers={**encoding_headers, "If-None-Match": headers["etag"]})
+        assert status == 304 and body == b"" and headers["cache-control"] == "no-cache"
+        security(headers, rpc_origin, wallet, website)
+
+    for encoding in ["identity", "gzip;q=0, br, zstd"]:
+        status, headers, body = request(port, host, headers={"Via": "BunnyCDN", "Accept-Encoding": encoding})
+        assert status == 200 and "content-encoding" not in headers and body == html
 
     assets = re.findall(r'(?:src|href)="(?:\./|/)(assets/[^"?]+\.(?:js|css))"', html.decode())
     assert len(assets) >= 2, assets
@@ -278,10 +289,16 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
         assert headers["cache-control"] == "public, max-age=31536000, immutable"
         assert ("javascript" if path.endswith(".js") else "text/css") in headers["content-type"]
         security(headers, rpc_origin, wallet, website)
-        status, headers, compressed = request(port, host, path, headers={"Accept-Encoding": "gzip"})
-        assert status == 200 and headers["content-encoding"] == "gzip"
-        assert gzip.decompress(compressed) == raw
-        security(headers, rpc_origin, wallet, website)
+        for via in [None, "BunnyCDN"]:
+            encoding_headers = {"Accept-Encoding": "zstd, br, gzip"}
+            if via:
+                encoding_headers["Via"] = via
+            status, headers, compressed = request(port, host, path, headers=encoding_headers)
+            assert status == 200 and headers.get("content-encoding") == "gzip", (path, via, headers)
+            assert gzip.decompress(compressed) == raw
+            assert "accept-encoding" in headers["vary"].lower()
+            assert headers["cache-control"] == "public, max-age=31536000, immutable"
+            security(headers, rpc_origin, wallet, website)
         status, headers, body = request(port, host, path, method="HEAD")
         assert status == 200 and not body and int(headers["content-length"]) == len(raw)
         status, headers, body = request(port, host, path, headers={"If-None-Match": headers["etag"]})
@@ -330,7 +347,7 @@ def main():
         status, headers, raw = request(port, wallet, path)
         assert status == 200 and headers["content-type"] == "application/wasm" and raw[:4] == b"\x00asm"
         assert headers["cache-control"] == "public, max-age=31536000, immutable"
-        status, headers, body = request(port, wallet, path, headers={"Accept-Encoding": "gzip"})
+        status, headers, body = request(port, wallet, path, headers={"Via": "BunnyCDN", "Accept-Encoding": "zstd, br, gzip"})
         assert status == 200 and headers["content-encoding"] == "gzip" and gzip.decompress(body) == raw
         status, headers, body = request(port, wallet, path, headers={"Range": "bytes=0-15"})
         assert status == 206 and body == raw[:16]

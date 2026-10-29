@@ -169,9 +169,12 @@ The wallet's WASM file is content-hashed too. nginx sends:
 
 `no-cache` allows storage but requires revalidation before reuse. nginx supports
 ETag/Last-Modified conditional requests. HTML and compressible assets are
-precompressed during the image build; gzip clients receive `Content-Encoding:
-gzip` and `Vary: Accept-Encoding`. Other clients receive the original files.
-WASM is served as `application/wasm`.
+precompressed with gzip level 6 during the image build; gzip clients receive
+`Content-Encoding: gzip` and `Vary: Accept-Encoding`. This also applies to CDN
+and reverse-proxy requests carrying `Via`, using `gzip_proxied any`. The image
+serves the precompressed files without per-request compression work. Clients
+that do not accept gzip receive the original files. WASM is served as
+`application/wasm`.
 
 Original icon and theme-script URLs remain available for older pages and
 automatic icon discovery, with revalidation. New pages use the fingerprinted
