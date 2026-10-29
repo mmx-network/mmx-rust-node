@@ -167,9 +167,12 @@ impl Args {
         let wallet = self.unlock(key, secrets, count)?;
         let addresses = wallet.addresses.clone();
         drop(wallet);
-        let mut config = config::read(dir)?;
-        config::set_cached_addresses_for(&mut config, &id, &fp, self.account, &addresses);
-        config::save(dir, config)?;
+        // Caching is optional: an existing key remains usable when its
+        // adjacent settings cannot be read or written.
+        if let Ok(mut config) = config::read(dir) {
+            config::set_cached_addresses_for(&mut config, &id, &fp, self.account, &addresses);
+            let _ = config::save(dir, config);
+        }
         Ok(mmx_wallet::Wallet::watch_only(addresses)?)
     }
 
