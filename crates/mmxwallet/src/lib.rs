@@ -306,16 +306,18 @@ fn run(a: &Args) -> Result<()> {
             if let (Some(parent), Some(id)) =
                 (path.parent(), path.file_name().and_then(|s| s.to_str()))
             {
-                let mut config = config::read(parent)?;
-                config::set_num_addresses(&mut config, id, a.address_count(None));
-                config::set_cached_addresses_for(
-                    &mut config,
-                    id,
-                    &fingerprint,
-                    a.account,
-                    &wallet.addresses,
-                );
-                config::save(parent, config)?;
+                // Adjacent settings are optional for an explicitly selected path.
+                if let Ok(mut config) = config::read(parent) {
+                    config::set_num_addresses(&mut config, id, a.address_count(None));
+                    config::set_cached_addresses_for(
+                        &mut config,
+                        id,
+                        &fingerprint,
+                        a.account,
+                        &wallet.addresses,
+                    );
+                    let _ = config::save(parent, config);
+                }
             }
             if let Some(dir) = dir {
                 storage::set_active(&dir, &path)?;

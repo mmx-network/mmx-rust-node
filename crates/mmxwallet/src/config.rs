@@ -20,6 +20,7 @@ use std::{
     io::{ErrorKind, Read},
     path::Path,
 };
+use zeroize::Zeroizing;
 
 pub const FILE: &str = "mmxwallet.json";
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -39,13 +40,22 @@ pub fn load(dir: &Path) -> Result<Loaded> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Loaded::Missing),
         Err(e) => return Err(e.into()),
     };
-    let mut bytes = Vec::new();
+    // This path can contain a key, so do not leave its raw bytes in memory.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_BYTES as usize + 1));
     file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_BYTES {
         return Ok(Loaded::Invalid);
     }
+    if mmx_wallet::KeyFile::decode(&bytes).is_ok() {
+        return Err(invalid("wallet key cannot be used as configuration"));
+    }
     Ok(match serde_json::from_slice(&bytes) {
-        Ok(Value::Object(map)) => Loaded::Valid(map),
+        Ok(Value::Object(map)) => {
+            if map.get("__type").and_then(Value::as_str) == Some("mmx.KeyFile") {
+                return Err(invalid("wallet key cannot be used as configuration"));
+            }
+            Loaded::Valid(map)
+        }
         _ => Loaded::Invalid,
     })
 }
@@ -76,6 +86,8 @@ pub fn save(dir: &Path, config: Config) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(&Value::Object(config))
         .map_err(|_| invalid("configuration serialization failed"))?;
     bytes.push(b'\n');
+    // Recheck the current path even when the caller loaded settings earlier.
+    load(dir)?;
     storage::save(&dir.join(FILE), &bytes, None)
 }
 
@@ -84,6 +96,7 @@ pub fn save(dir: &Path, config: Config) -> Result<()> {
 pub fn set_aside(dir: &Path) -> Result<()> {
     let from = dir.join(FILE);
     let to = storage::unique_path(dir, &format!("{FILE}.invalid"))?;
+    load(dir)?;
     fs::rename(from, to)?;
     Ok(())
 }
@@ -364,6 +377,142 @@ mod tests {
         assert_eq!(label_index("99"), Some(99));
         for bad in ["", "00", "07", "100", "-1", "+1", "1.0", "abc"] {
             assert_eq!(label_index(bad), None, "{bad}");
+        }
+    }
+
+    fn assert_key_rejected(dir: &Path, bytes: &[u8]) {
+        let path = dir.join(FILE);
+        fs::write(&path, bytes).unwrap();
+        for result in [
+            load(dir).map(|_| ()),
+            read(dir).map(|_| ()),
+            save(dir, Config::new()),
+            set_aside(dir),
+        ] {
+            assert_eq!(result.unwrap_err().code, "invalid_argument");
+            assert!(fs::read(&path).unwrap() == bytes, "key changed");
+            assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_valid_json_and_binary_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        for passphrase in [None, Some("config-key-test")] {
+            let key = mmx_wallet::KeyFile::generate(passphrase);
+            assert_key_rejected(dir.path(), &key.encode());
+            assert_key_rejected(dir.path(), &serde_json::to_vec(&key).unwrap());
+            // The decoder also accepts legacy JSON without an explicit type.
+            let mut legacy = serde_json::to_value(&key).unwrap();
+            legacy.as_object_mut().unwrap().remove("__type");
+            let bytes = serde_json::to_vec(&legacy).unwrap();
+            assert!(mmx_wallet::KeyFile::decode(&bytes).is_ok());
+            assert_key_rejected(dir.path(), &bytes);
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_damaged_or_extended_tagged_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        for value in [
+            json!({"__type": "mmx.KeyFile", "seed_value": "damaged"}),
+            json!({"__type": "mmx.KeyFile", "wallets": {}, "extra": true}),
+        ] {
+            assert_key_rejected(dir.path(), &serde_json::to_vec(&value).unwrap());
+        }
+    }
+
+    #[test]
+    fn writes_recheck_keys_replacing_previously_read_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        let key = mmx_wallet::KeyFile::generate(None);
+        for bytes in [key.encode(), serde_json::to_vec(&key).unwrap()] {
+            for rename in [false, true] {
+                fs::write(&path, b"{\"extra\":true}").unwrap();
+                let config = read(dir.path()).unwrap();
+                fs::write(&path, &bytes).unwrap();
+                let result = if rename {
+                    set_aside(dir.path())
+                } else {
+                    save(dir.path(), config)
+                };
+                assert_eq!(result.unwrap_err().code, "invalid_argument");
+                assert!(fs::read(&path).unwrap() == bytes, "key changed");
+                assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_settings_keep_load_save_and_set_aside_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(load(dir.path()).unwrap(), Loaded::Missing));
+        let path = dir.path().join(FILE);
+        fs::write(&path, b"{\"extra\":[1,2],\"__type\":\"other.Settings\"}").unwrap();
+        let mut config = read(dir.path()).unwrap();
+        set_rpc(&mut config, Some("https://example.com"));
+        save(dir.path(), config).unwrap();
+        let config = read(dir.path()).unwrap();
+        assert_eq!(config["extra"], json!([1, 2]));
+        assert_eq!(config["__type"], "other.Settings");
+        for bytes in [b"{ damaged".to_vec(), vec![b' '; MAX_BYTES as usize + 1]] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(matches!(load(dir.path()).unwrap(), Loaded::Invalid));
+            set_aside(dir.path()).unwrap();
+            assert!(!path.exists());
+            let backup = fs::read_dir(dir.path()).unwrap().last().unwrap().unwrap();
+            assert!(fs::read(backup.path()).unwrap() == bytes, "backup changed");
+            fs::remove_file(backup.path()).unwrap();
+            save(dir.path(), Config::new()).unwrap();
+        }
+        fs::write(&path, b"malformed").unwrap();
+        save(dir.path(), Config::new()).unwrap();
+        assert!(matches!(load(dir.path()).unwrap(), Loaded::Valid(_)));
+    }
+
+    #[test]
+    fn writes_propagate_configuration_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(FILE)).unwrap();
+        assert!(load(dir.path()).is_err());
+        assert!(save(dir.path(), Config::new()).is_err());
+        assert!(set_aside(dir.path()).is_err());
+        assert!(dir.path().join(FILE).is_dir());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_links_to_keys_are_never_replaced_or_moved() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        for symbolic in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let key_path = dir.path().join("key.json");
+            let path = dir.path().join(FILE);
+            let bytes = serde_json::to_vec(&mmx_wallet::KeyFile::generate(None)).unwrap();
+            fs::write(&key_path, &bytes).unwrap();
+            if symbolic {
+                symlink(&key_path, &path).unwrap();
+            } else {
+                fs::hard_link(&key_path, &path).unwrap();
+            }
+            let before = fs::symlink_metadata(&path).unwrap();
+            for result in [
+                load(dir.path()).map(|_| ()),
+                save(dir.path(), Config::new()),
+                set_aside(dir.path()),
+            ] {
+                assert_eq!(result.unwrap_err().code, "invalid_argument");
+                let after = fs::symlink_metadata(&path).unwrap();
+                assert_eq!(
+                    (after.dev(), after.ino(), after.mode()),
+                    (before.dev(), before.ino(), before.mode())
+                );
+                assert!(fs::read(&path).unwrap() == bytes, "linked key changed");
+                assert!(fs::read(&key_path).unwrap() == bytes, "key changed");
+                assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+            }
         }
     }
 }
