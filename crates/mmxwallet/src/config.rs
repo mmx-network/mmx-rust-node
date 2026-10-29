@@ -87,8 +87,16 @@ pub fn save(dir: &Path, config: Config) -> Result<()> {
         .map_err(|_| invalid("configuration serialization failed"))?;
     bytes.push(b'\n');
     // Recheck the current path even when the caller loaded settings earlier.
-    load(dir)?;
-    storage::save(&dir.join(FILE), &bytes, None)
+    let loaded = load(dir)?;
+    persist(dir, &bytes, loaded)
+}
+
+fn persist(dir: &Path, bytes: &[u8], loaded: Loaded) -> Result<()> {
+    let exists_code = match loaded {
+        Loaded::Missing => Some("io_error"),
+        _ => None,
+    };
+    storage::save(&dir.join(FILE), bytes, exists_code)
 }
 
 /// Moves an unreadable configuration aside so a new one can be written
@@ -378,6 +386,92 @@ mod tests {
         for bad in ["", "00", "07", "100", "-1", "+1", "1.0", "abc"] {
             assert_eq!(label_index(bad), None, "{bad}");
         }
+    }
+
+    fn inventory(dir: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn assert_missing_save_preserves_winner(dir: &Path, loaded: Loaded, bytes: &[u8]) {
+        let path = dir.join(FILE);
+        let before = fs::symlink_metadata(&path).unwrap();
+        let entries = inventory(dir);
+        let result = persist(dir, b"{\"extra\":true}\n", loaded);
+        assert!(fs::read(&path).unwrap() == bytes, "created file changed");
+        assert_eq!(result.unwrap_err().code, "io_error");
+        assert_eq!(inventory(dir), entries);
+        let after = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            after.permissions().readonly(),
+            before.permissions().readonly()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                (after.dev(), after.ino(), after.mode(), after.nlink()),
+                (before.dev(), before.ino(), before.mode(), before.nlink())
+            );
+        }
+    }
+
+    fn assert_missing_save_preserves_key(passphrase: Option<&str>) {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = load(dir.path()).unwrap();
+        assert!(matches!(loaded, Loaded::Missing));
+        let path = dir.path().join(FILE);
+        let key = mmx_wallet::KeyFile::generate(passphrase);
+        storage::save_key(&path, &key).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(mmx_wallet::KeyFile::decode(&bytes).is_ok());
+        assert_missing_save_preserves_winner(dir.path(), loaded, &bytes);
+        assert_eq!(
+            storage::read_key(&path).unwrap().fingerprint(),
+            key.fingerprint()
+        );
+    }
+
+    #[test]
+    fn missing_save_preserves_concurrently_created_plain_key() {
+        assert_missing_save_preserves_key(None);
+    }
+
+    #[test]
+    fn missing_save_preserves_concurrently_created_protected_key() {
+        assert_missing_save_preserves_key(Some("config-key-test"));
+    }
+
+    #[test]
+    fn missing_save_preserves_concurrently_created_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = load(dir.path()).unwrap();
+        assert!(matches!(loaded, Loaded::Missing));
+        let winner = serde_json::from_value(json!({"extra": [1, 2]})).unwrap();
+        save(dir.path(), winner).unwrap();
+        let bytes = fs::read(dir.path().join(FILE)).unwrap();
+        assert_missing_save_preserves_winner(dir.path(), loaded, &bytes);
+        assert_eq!(read(dir.path()).unwrap()["extra"], json!([1, 2]));
+    }
+
+    #[test]
+    fn save_creates_missing_and_updates_existing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(load(dir.path()).unwrap(), Loaded::Missing));
+        let initial = serde_json::from_value(json!({"extra": [1, 2]})).unwrap();
+        save(dir.path(), initial).unwrap();
+        let mut config = read(dir.path()).unwrap();
+        assert_eq!(config["extra"], json!([1, 2]));
+        set_rpc(&mut config, Some("https://example.com"));
+        save(dir.path(), config).unwrap();
+        let updated = read(dir.path()).unwrap();
+        assert_eq!(updated["extra"], json!([1, 2]));
+        assert_eq!(rpc(&updated), Some("https://example.com"));
+        assert_eq!(inventory(dir.path()), vec![std::ffi::OsString::from(FILE)]);
     }
 
     fn assert_key_rejected(dir: &Path, bytes: &[u8]) {
