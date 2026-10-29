@@ -45,7 +45,6 @@ pub struct Update {
 struct Entry {
     block: Record,
     header: Arc<mmx::BlockHeader>,
-    proofs: Vec<Record>,
     invalid: bool,
 }
 
@@ -93,6 +92,7 @@ pub struct ForkChain {
     sync_verified: BTreeSet<Hash>,
     verified: BTreeMap<Hash, Vec<vdf::VerifiedPoint>>,
     verified_work: BTreeMap<Hash, vdf::VerifiedPoint>,
+    time_work: super::time_work::TimeWork,
     evidence: BTreeMap<Hash, transitions::VerifiedHeader>,
     connected: BTreeSet<Hash>,
     tip_limit: Option<u32>,
@@ -114,6 +114,7 @@ impl ForkChain {
             sync_verified: BTreeSet::new(),
             verified: BTreeMap::new(),
             verified_work: BTreeMap::new(),
+            time_work: Default::default(),
             evidence: BTreeMap::new(),
             connected: BTreeSet::new(),
             tip_limit: None,
@@ -148,6 +149,7 @@ impl ForkChain {
             sync_verified: BTreeSet::new(),
             verified: BTreeMap::new(),
             verified_work: BTreeMap::new(),
+            time_work: Default::default(),
             evidence: BTreeMap::new(),
             connected: BTreeSet::new(),
             tip_limit: None,
@@ -190,6 +192,71 @@ impl ForkChain {
             .database()
             .retention_floor()
             .saturating_sub(1)
+    }
+    /// Offline maintenance: discard obsolete persisted VDF work and replace
+    /// historical duplicate selected bodies with lossless archive references.
+    /// Every block, state version and selected-chain rollback height survives.
+    /// Archive publication precedes selected publication, so interruption leaves
+    /// either the original bodies or references to a complete durable archive.
+    pub fn compact_storage(
+        &mut self,
+    ) -> ChainResult<(mmx_db::native::PurgeReport, mmx_db::native::PurgeReport)> {
+        self.prepared = None;
+        if let Some(observer) = &self.observer {
+            observer.reset();
+        }
+        let tag = 0x4D4D_5843_0000_0001;
+        let archive =
+            self.archive
+                .purge_before_with_tag(self.archive.version(), tag, |table, _| {
+                    Ok(table != "fork_work")
+                })?;
+        self.refresh_bodies()?;
+        let retained = &self.archive;
+        let original = self
+            .chain
+            .storage
+            .database()
+            .fork(self.chain.storage.database().version())?;
+        let selected = self.chain.storage.database_mut().rewrite_values(
+            tag,
+            |table, _| {
+                Ok(!matches!(
+                    table,
+                    "chain_headers" | "chain_body_transactions"
+                ))
+            },
+            |table, key, value| {
+                if table != "chain_blocks" || value == bodies::EXTERNAL {
+                    return Ok(value);
+                }
+                let id = key
+                    .try_into()
+                    .map_err(|_| mmx_db::Error::Corrupt("canonical body key"))?;
+                let archived = retained.get(bodies::ARCHIVE.blocks, key, None)?.ok_or(
+                    mmx_db::Error::Corrupt("canonical body missing from archive"),
+                )?;
+                if archived != value || value.starts_with(b"MMXB") {
+                    let selected = if value.starts_with(b"MMXB") {
+                        bodies::block(&original, bodies::SELECTED, &id).map_err(|_| {
+                            mmx_db::Error::Corrupt("canonical body during compaction")
+                        })?
+                    } else {
+                        Some(super::codec::decode(&value).map_err(|_| {
+                            mmx_db::Error::Corrupt("canonical body during compaction")
+                        })?)
+                    };
+                    let archived = bodies::block(retained, bodies::ARCHIVE, &id)
+                        .map_err(|_| mmx_db::Error::Corrupt("archived body during compaction"))?;
+                    if selected.is_none() || selected != archived {
+                        return Err(mmx_db::Error::Corrupt("canonical/archive body mismatch"));
+                    }
+                }
+                Ok(bodies::EXTERNAL.to_vec())
+            },
+        )?;
+        self.refresh_bodies()?;
+        Ok((archive, selected))
     }
     /// Reclaim history before `height`, preserving the ledger at that height and
     /// its consensus ancestry. The ancestry is private; RPC applies the public
@@ -353,6 +420,7 @@ impl ForkChain {
         self.prepared = None;
         if height < tip.height {
             self.chain.revert(height + 1)?;
+            self.time_work = Default::default();
             self.voting.reset();
             self.sync_verified.clear();
             self.verified.clear();
@@ -487,9 +555,9 @@ impl ForkChain {
         self.chain.initialize(assets)
     }
     /// Prevalidate and retain an orphan even if its parent or work is missing.
-    /// Repeated blocks preserve the first record and merge work in arrival order.
-    /// This does not change the selected ledger. Proofs are checked again before
-    /// use, including after restart; stored bytes cannot forge VerifiedPoint.
+    /// Repeated blocks preserve the first record. Work is deduplicated in a
+    /// bounded, process-local pool and checked before use; restart requires fresh
+    /// work or coordinated historical sync, as in the C++ node.
     pub fn admit(&mut self, block: &Record, proofs: &[Record]) -> ChainResult<()> {
         if self.chain.tip()?.is_none() {
             return Err(invalid("chain is not initialized"));
@@ -708,7 +776,6 @@ impl ForkChain {
                     .concat(),
                     *hash,
                 ));
-                writes.push(Write::put("fork_work", *hash, pack(&[])?));
                 writes.extend(bodies::writes(&entry.block, bodies::ARCHIVE)?);
             }
         }
@@ -726,22 +793,11 @@ impl ForkChain {
     fn retain(&mut self, block: &Record, proofs: &[Record]) -> ChainResult<()> {
         let hash = bytes::<32>(block.field("hash")?)?;
         let exists = self.archive.get("fork_blocks", &hash, None)?.is_some();
-        let mut work = self
-            .work(&hash)?
-            .into_iter()
-            .map(|r| r.encode())
-            .collect::<mmx_consensus::Result<Vec<_>>>()?;
-        let old_len = work.len();
-        for proof in proofs {
-            let wire = proof.encode()?;
-            if !work.contains(&wire) {
-                work.push(wire)
-            }
-        }
-        if exists && old_len == work.len() {
+        self.time_work.remember(proofs)?;
+        if exists {
             return Ok(());
         }
-        let mut writes = vec![Write::put("fork_work", hash, pack(&work)?)];
+        let mut writes = Vec::new();
         let mut retained_header = None;
         if !exists {
             let height = uint(block, "height")? as u32;
@@ -794,12 +850,6 @@ impl ForkChain {
         self.chain.bodies = Some(Arc::new(self.archive.fork(self.archive.version())?));
         Ok(())
     }
-    fn work(&self, hash: &Hash) -> ChainResult<Vec<Record>> {
-        let Some(data) = self.archive.get("fork_work", hash, None)? else {
-            return Ok(vec![]);
-        };
-        unpack(&data)
-    }
     fn entries(&self, root_height: u32) -> ChainResult<Vec<Entry>> {
         let end = self
             .tip_limit
@@ -836,7 +886,6 @@ impl ForkChain {
                     Entry {
                         block,
                         header,
-                        proofs: self.work(&hash)?,
                         invalid: self.archive.get("fork_invalid", &hash, None)?.is_some(),
                     },
                 ))
@@ -857,7 +906,6 @@ impl ForkChain {
                     Entry {
                         block: entry.block.as_ref().clone(),
                         header: entry.header.clone(),
-                        proofs: vec![],
                         invalid: false,
                     },
                 ));
@@ -921,6 +969,7 @@ impl ForkChain {
             return Err(invalid("fork root was purged"));
         }
         self.voting.root(root_header.height, root_header.vdf_height);
+        self.time_work.prune(root_header.vdf_iters);
         let entries = self.entries(root_header.height)?;
         let bodies: BTreeMap<_, _> = entries
             .iter()
@@ -998,6 +1047,18 @@ impl ForkChain {
         let mut jobs = Vec::new();
         let mut pending_work = BTreeMap::new();
         let mut bad_context = BTreeSet::new();
+        let mut available_work = self.verified_work.clone();
+        if mode == ValidationMode::Live {
+            for proof in self.time_work.records() {
+                let id = bytes::<32>(proof.field("content_hash")?)?;
+                if let std::collections::btree_map::Entry::Vacant(slot) = available_work.entry(id) {
+                    if let Ok(point) = vdf::verify(proof, self.chain.params(), &history) {
+                        slot.insert(point);
+                    }
+                }
+            }
+        }
+        let available_work: Vec<_> = available_work.into_values().collect();
         // Resolve history and VDF eligibility on the owner thread. The owned
         // contexts then allow independent CPU space checks, as in native
         // Node::verify_block_proofs(), without sharing any database connection.
@@ -1015,16 +1076,7 @@ impl ForkChain {
             let work: Vec<_> = if mode == ValidationMode::HistoricalSync {
                 vec![]
             } else {
-                entry
-                    .proofs
-                    .iter()
-                    .filter_map(|p| {
-                        self.verified_work
-                            .get(&bytes::<32>(p.field("content_hash").ok()?).ok()?)
-                            .cloned()
-                            .or_else(|| vdf::verify(p, self.chain.params(), &history).ok())
-                    })
-                    .collect()
+                available_work.clone()
             };
             if mode == ValidationMode::HistoricalSync
                 || self.sync_verified.contains(&h.hash.0)
@@ -1361,48 +1413,6 @@ fn archive_header(archive: &Database, hash: &Hash) -> ChainResult<Option<mmx::Bl
 }
 fn header(block: &Record) -> ChainResult<mmx::BlockHeader> {
     super::block_header(block)
-}
-fn pack(values: &[Vec<u8>]) -> ChainResult<Vec<u8>> {
-    let mut out = u32::try_from(values.len())
-        .map_err(|_| invalid("work count limit"))?
-        .to_le_bytes()
-        .to_vec();
-    for value in values {
-        out.extend(
-            u32::try_from(value.len())
-                .map_err(|_| invalid("work size limit"))?
-                .to_le_bytes(),
-        );
-        out.extend(value);
-    }
-    Ok(out)
-}
-fn unpack(mut input: &[u8]) -> ChainResult<Vec<Record>> {
-    fn size(input: &mut &[u8]) -> ChainResult<usize> {
-        let bytes = input
-            .get(..4)
-            .ok_or_else(|| invalid("truncated work count"))?;
-        let n = u32::from_le_bytes(bytes.try_into().expect("four bytes")) as usize;
-        *input = &input[4..];
-        Ok(n)
-    }
-    let count = size(&mut input)?;
-    if count > input.len() / 4 {
-        return Err(invalid("work count limit"));
-    }
-    let mut out = Vec::new();
-    for _ in 0..count {
-        let n = size(&mut input)?;
-        let data = input
-            .get(..n)
-            .ok_or_else(|| invalid("truncated archived work"))?;
-        out.push(Record::decode(data)?);
-        input = &input[n..];
-    }
-    if !input.is_empty() {
-        return Err(invalid("trailing archived work"));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

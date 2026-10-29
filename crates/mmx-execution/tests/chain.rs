@@ -430,6 +430,127 @@ fn retain(chain: &mut mmx_execution::chain::forks::ForkChain, step: &Value) {
 }
 
 #[test]
+fn offline_compaction_reclaims_legacy_work_and_duplicate_bodies_without_losing_history() {
+    use mmx_db::{Store, Write};
+    use mmx_execution::chain::forks::ForkChain;
+    use std::collections::BTreeMap;
+    let (g, steps) = synthetic();
+    let dir = tempfile::tempdir().unwrap();
+    let mut chain = ForkChain::open_native(dir.path(), params(&g)).unwrap();
+    chain.initialize(&assets(&g)).unwrap();
+    for step in [&steps[0], &steps[1]] {
+        retain(&mut chain, step);
+        chain.update_at(block_hash(&g), None, 0).unwrap();
+    }
+    // Repeated work for an existing block must not create a durable update.
+    for _ in 0..8 {
+        retain(&mut chain, &steps[1]);
+    }
+    drop(chain);
+    let blocks: BTreeMap<Vec<u8>, Vec<u8>> = [&g, &steps[0], &steps[1]]
+        .into_iter()
+        .map(|step| {
+            (
+                block_hash(step).to_vec(),
+                record(&step["block"]).encode().unwrap(),
+            )
+        })
+        .collect();
+    let mut archive = Store::open_native(dir.path().join("archive")).unwrap();
+    assert!(archive.scan("fork_work", &[], None).unwrap().is_empty());
+    // Reproduce the legacy full-body layout and repeated multi-megabyte work
+    // versions in a tiny temporary database, never on the installed ledger.
+    archive
+        .rewrite_values(
+            0,
+            |table, _| Ok(!matches!(table, "fork_headers" | "fork_transactions")),
+            |table, key, value| {
+                Ok(if table == "fork_blocks" {
+                    blocks[key].clone()
+                } else {
+                    value
+                })
+            },
+        )
+        .unwrap();
+    for _ in 0..16 {
+        archive
+            .commit_batch(
+                archive.version() + 1,
+                [Write::put(
+                    "fork_work",
+                    block_hash(&steps[1]),
+                    vec![7; 512 * 1024],
+                )],
+            )
+            .unwrap();
+    }
+    // Simulate interruption after archive cleanup, before selected migration.
+    archive
+        .purge_before_with(archive.version(), |table, _| Ok(table != "fork_work"))
+        .unwrap();
+    drop(archive);
+    let mut selected = Store::open_native(dir.path().join("selected")).unwrap();
+    selected
+        .rewrite_values(
+            0,
+            |_, _| Ok(true),
+            |table, key, value| {
+                Ok(if table == "chain_blocks" {
+                    blocks[key].clone()
+                } else {
+                    value
+                })
+            },
+        )
+        .unwrap();
+    drop(selected);
+    let mut chain = ForkChain::open_native(dir.path(), params(&g)).unwrap();
+    let pinned = chain.selected().snapshot_at(1).unwrap();
+    let floor = chain.earliest_height();
+    let (_, report) = chain.compact_storage().unwrap();
+    assert!(report.new_value_bytes < report.old_value_bytes);
+    assert_eq!(chain.earliest_height(), floor);
+    verify_step(&pinned, &steps[0]);
+    verify_step(chain.selected(), &steps[1]);
+    for step in [&g, &steps[0], &steps[1]] {
+        assert_eq!(
+            chain.block(&block_hash(step)).unwrap(),
+            Some(record(&step["block"]))
+        );
+        assert_eq!(
+            chain
+                .selected()
+                .storage()
+                .database()
+                .get("chain_blocks", &block_hash(step), None)
+                .unwrap()
+                .unwrap(),
+            b"MMXL\x01\0\0\0"
+        );
+    }
+    drop(chain);
+    verify_step(&pinned, &steps[0]);
+    drop(pinned);
+    let archive = Store::open_native(dir.path().join("archive")).unwrap();
+    assert!(archive.scan("fork_work", &[], None).unwrap().is_empty());
+    drop(archive);
+    for height in (0..=2).rev() {
+        let mut chain = ForkChain::open_native(dir.path(), params(&g)).unwrap();
+        chain.rollback_to(height).unwrap();
+        verify_step(
+            chain.selected(),
+            if height == 0 {
+                &g
+            } else {
+                &steps[height as usize - 1]
+            },
+        );
+        assert_eq!(chain.earliest_height(), 0);
+    }
+}
+
+#[test]
 fn orphans_arrive_before_parents_reopen_and_switch_to_native_hash_winner() {
     use mmx_execution::chain::forks::ForkChain;
     let (g, steps) = synthetic();
@@ -457,6 +578,8 @@ fn orphans_arrive_before_parents_reopen_and_switch_to_native_hash_winner() {
     chain.admit(&record(&steps[0]["block"]), &[]).unwrap();
     assert!(chain.update(root, None).unwrap().best.is_none());
     retain(&mut chain, &steps[0]);
+    // Block bodies survive restart; transient VDF work must be reacquired.
+    retain(&mut chain, loser);
     let update = chain.update(root, None).unwrap();
     assert_eq!(update.applied, [block_hash(&steps[0]), block_hash(loser)]);
     verify_step(chain.selected(), loser);
@@ -531,6 +654,7 @@ fn invalid_branch_body_is_excluded_without_reverting_selected_state() {
     let update = chain.update(block_hash(&g), None).unwrap();
     assert!(update.invalid.contains(&block_hash(&bad)));
     assert!(update.applied.is_empty());
+    retain(&mut chain, &steps[0]);
     retain(&mut chain, &steps[2]);
     chain.update(block_hash(&g), None).unwrap();
     verify_step(chain.selected(), &steps[2]);
@@ -870,6 +994,9 @@ fn torn_branch_switch_keeps_orphans_and_recovers_old_or_new_ledger_together() {
         );
         assert!(recovered.block(&block_hash(loser)).unwrap().is_some());
         assert!(recovered.block(&block_hash(winner)).unwrap().is_some());
+        retain(&mut recovered, &steps[0]);
+        retain(&mut recovered, loser);
+        retain(&mut recovered, winner);
         recovered.update(root, None).unwrap();
         verify_step(recovered.selected(), winner);
     }
@@ -929,6 +1056,9 @@ fn authenticated_votes_switch_tied_branches_and_reset_after_restart() {
     let mut chain = ForkChain::open(dir.path(), params(&g)).unwrap();
     verify_step(chain.selected(), loser);
     assert_eq!(chain.vote_count(&block_hash(loser)), 0);
+    retain(&mut chain, &steps[0]);
+    retain(&mut chain, winner);
+    retain(&mut chain, loser);
     chain.update_at(root, None, 104).unwrap();
     verify_step(chain.selected(), winner);
 }
@@ -1015,6 +1145,9 @@ fn rollback_to_every_selected_height_survives_reopen_and_retains_all_orphans() {
         chain = ForkChain::open(dir.path(), params(&g)).unwrap();
         assert_eq!(chain.selected().tip().unwrap().unwrap().height, height);
     }
+    assert!(chain.update_at(root, None, 1).unwrap().applied.is_empty());
+    retain(&mut chain, &steps[0]);
+    retain(&mut chain, &steps[1]);
     chain.update_at(root, None, 1).unwrap();
     verify_step(chain.selected(), &steps[1]);
 }
@@ -1409,6 +1542,7 @@ fn verified_live_execution_is_reused_and_foreign_or_rewound_bases_cannot_publish
     // generation. An off-lock reply must not overwrite the intervening state.
     assert_eq!(chain.selected().tip().unwrap().unwrap().hash.0, root);
     assert!(!chain.admit_prepared(stale).unwrap());
+    retain(&mut chain, &steps[0]);
     let update = chain.update_at(root, None, 101).unwrap();
     assert!(!update.reused_execution);
     verify_step(chain.selected(), &steps[0]);

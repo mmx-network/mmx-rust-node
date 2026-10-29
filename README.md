@@ -58,6 +58,23 @@ Choose `--data-dir` on a fast local disk with room for the growing ledger.
 **Use a separate directory from the C++ node:** the on-disk formats differ.
 Existing wallet keys and plot files are compatible and can be reused.
 
+VDF verification proofs live in a bounded memory pool and expire when the
+committed root passes their iterations. They are not written to the ledger.
+Older Rust databases can retain proof payloads and duplicate selected-chain
+block bodies. With the node stopped and a backup available, reclaim that space:
+
+```sh
+mmx-node --mmx-root ../mmx-node --network mainnet \
+  --data-dir ./mmx-data --compact-storage
+```
+
+This maintenance command exits after compacting both stores. It preserves block
+history, ledger versions and rollback heights; it needs temporary disk space
+for replacement files. Publication uses durable manifest replacements, and
+an interrupted operation can be rerun. The archive keeps block payloads while
+the selected store keeps references and ledger effects. A restarted node obtains
+fresh VDF work from peers or uses coordinated historical synchronization.
+
 The node discovers peers from the network configuration and syncs from genesis.
 The C++ default Router config targets eight outgoing peers and requires five
 distinct authenticated sync peers; `Router.num_peers_out` and

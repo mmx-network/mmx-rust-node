@@ -820,7 +820,29 @@ impl Native {
             if version > self.state.floor {
                 self.publish(self.state.version, self.state.version, version, &[])?;
             }
-            self.collect_history(tag, &mut keep)
+            self.collect_history(tag, &mut keep, &mut |_, _, value| Ok(value))
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+    /// Reclaim and rewrite values without advancing the historical read or
+    /// rollback boundary. Publication is one durable manifest replacement;
+    /// existing snapshots continue to read the original files.
+    pub fn rewrite_values(
+        &mut self,
+        tag: u64,
+        mut keep: impl FnMut(&str, &[u8]) -> Result<bool>,
+        mut rewrite: impl FnMut(&str, &[u8], Vec<u8>) -> Result<Vec<u8>>,
+    ) -> Result<PurgeReport> {
+        self.readable()?;
+        if self.has_pending() {
+            return Err(Error::SnapshotMismatch);
+        }
+        let result = (|| {
+            self.checkpoint_inner(false)?;
+            self.collect_history(tag, &mut keep, &mut rewrite)
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -831,6 +853,7 @@ impl Native {
         &mut self,
         tag: u64,
         keep: &mut impl FnMut(&str, &[u8]) -> Result<bool>,
+        rewrite: &mut impl FnMut(&str, &[u8], Vec<u8>) -> Result<Vec<u8>>,
     ) -> Result<PurgeReport> {
         let source = self.state.clone();
         let old_value_bytes = value_bytes(&source)?;
@@ -868,8 +891,10 @@ impl Native {
                 .value
                 .as_ref()
                 .map(|encoded| {
-                    self.context
-                        .value(&source.files, ValueRef::decode(encoded)?)
+                    let value = self
+                        .context
+                        .value(&source.files, ValueRef::decode(encoded)?)?;
+                    rewrite(&entry.write.table, &entry.write.key, value)
                 })
                 .transpose()?;
             let size = entry.write.table.len()

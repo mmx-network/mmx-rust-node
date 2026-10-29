@@ -12,6 +12,7 @@ pub mod history;
 pub mod network;
 pub mod public;
 pub mod sync;
+mod time_work;
 pub mod voting;
 mod work;
 use crate::{

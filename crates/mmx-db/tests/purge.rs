@@ -79,6 +79,69 @@ fn data_files(path: &std::path::Path) -> Vec<std::path::PathBuf> {
         })
         .collect()
 }
+
+#[test]
+fn value_rewrite_preserves_every_version_tombstone_snapshot_and_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut disk, memory) = populated(directory.path());
+    let pinned = disk.fork(disk.version()).unwrap();
+    let report = disk
+        .rewrite_values(
+            71,
+            |_, _| Ok(true),
+            |_, _, mut value| {
+                value.push(42);
+                Ok(value)
+            },
+        )
+        .unwrap();
+    assert_eq!(report.floor, 0);
+    assert_eq!(disk.version(), memory.version());
+    compare(&memory, &pinned);
+    drop(disk);
+    drop(pinned);
+    let mut disk = Store::open_native_with_options(directory.path(), options()).unwrap();
+    assert_eq!(disk.retention_floor(), 0);
+    for height in (0..=memory.version()).rev() {
+        disk.revert(height).unwrap();
+        for table in ["a", "b"] {
+            let mut expected = if height == 0 {
+                vec![]
+            } else {
+                memory.scan(table, &[], Some(height - 1)).unwrap()
+            };
+            for row in &mut expected {
+                row.value.push(42);
+            }
+            assert_eq!(disk.scan(table, &[], None).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn failed_value_rewrite_never_publishes_partial_values_or_advances_history_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut disk, memory) = populated(directory.path());
+    let mut calls = 0;
+    assert!(disk
+        .rewrite_values(
+            72,
+            |_, _| Ok(true),
+            |_, _, _| {
+                calls += 1;
+                if calls == 7 {
+                    return Err(Error::Corrupt("injected rewrite failure"));
+                }
+                Ok(vec![9])
+            }
+        )
+        .is_err());
+    drop(disk);
+    let disk = Store::open_native_with_options(directory.path(), options()).unwrap();
+    assert_eq!(disk.retention_floor(), 0);
+    assert_ne!(disk.collection_tag(), Some(72));
+    compare(&memory, &disk);
+}
 fn retained(memory: &Store, disk: &Store, floor: u32) {
     assert_eq!(memory.version(), disk.version());
     assert_eq!(disk.retention_floor(), floor);

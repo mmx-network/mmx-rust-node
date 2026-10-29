@@ -358,6 +358,12 @@ impl Node {
     pub fn earliest_height(&self) -> u32 {
         self.chain.earliest_height()
     }
+    /// Run before starting workers/listeners; history remains fully retained.
+    pub fn compact_storage(
+        &mut self,
+    ) -> Result<(mmx_db::native::PurgeReport, mmx_db::native::PurgeReport)> {
+        Ok(self.chain.compact_storage()?)
+    }
     /// Optional startup maintenance. Retain `height` and every later block;
     /// the resulting rollback/RPC boundary survives restart.
     pub fn purge_before(&mut self, height: u32) -> Result<()> {

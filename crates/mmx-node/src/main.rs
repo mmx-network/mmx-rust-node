@@ -14,7 +14,7 @@ use std::{
 
 const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir PATH]
   [--peer HOST[:PORT]]... [--offline] [--sync-once] [--rollback-to HEIGHT]
-  [--purge-before HEIGHT]
+  [--purge-before HEIGHT] [--compact-storage]
   [--no-services] [--farmer ENDPOINT] [--reward-vote -1|0|1] [-c CONFIG]...
   [--opencl-device INDEX|-1] [--opencl-platform NAME]
   [--p2p-listen HOST:PORT] [--rpc-listen HOST:PORT] [--http-listen HOST:PORT]
@@ -33,6 +33,7 @@ Historical sync uses configured native seed peers unless --peer is supplied.
 The in-process RPC cache defaults to 64 MiB; --rpc-cache-mb or Node.rpc_cache_size_mb sets its budget.
 --sync-once exits after coordinated sync. Router.min_sync_peers / num_peers_out control peer counts.
 --p2p-listen overrides Router.host / port. --rollback-to keeps that height.
+--compact-storage reclaims legacy VDF data and duplicate bodies, preserves all history, and exits.
 History is retained by default. --purge-before reclaims older history before serving,
 keeps HEIGHT available, and prevents RPC reads or rollback below HEIGHT (native databases).";
 struct Options {
@@ -48,6 +49,7 @@ struct Options {
     once: bool,
     rollback: Option<u32>,
     purge: Option<u32>,
+    compact: bool,
     p2p: Option<String>,
     rpc: String,
     http: String,
@@ -69,6 +71,7 @@ fn options() -> Result<Option<Options>> {
         once: false,
         rollback: None,
         purge: None,
+        compact: false,
         p2p: None,
         rpc: "127.0.0.1:11331".into(),
         http: "127.0.0.1:11380".into(),
@@ -86,6 +89,7 @@ fn options() -> Result<Option<Options>> {
             "--offline" => o.offline = true,
             "--no-services" => o.no_services = true,
             "--sync-once" => o.once = true,
+            "--compact-storage" => o.compact = true,
             _ => {
                 let value = args
                     .next()
@@ -123,6 +127,12 @@ fn options() -> Result<Option<Options>> {
     }
     if o.offline && o.once {
         return Err(std::io::Error::other("--offline and --sync-once cannot be combined").into());
+    }
+    if o.compact && (o.rollback.is_some() || o.purge.is_some() || o.once) {
+        return Err(std::io::Error::other(
+            "--compact-storage cannot be combined with rollback, purge or sync-once",
+        )
+        .into());
     }
     Ok(Some(o))
 }
@@ -200,6 +210,19 @@ fn main() -> Result<()> {
         ),
     };
     let mut state = Node::open(&data, &network)?;
+    if options.compact {
+        let (archive, selected) = state.compact_storage()?;
+        for (name, report) in [("archive", archive), ("selected", selected)] {
+            println!(
+                "Compacted {name}: {} -> {} value bytes, {} records, history floor {}",
+                report.old_value_bytes,
+                report.new_value_bytes,
+                report.retained_records,
+                report.floor
+            );
+        }
+        return Ok(());
+    }
     let cache_mb = options
         .rpc_cache_mb
         .or(config.read("Node.rpc_cache_size_mb")?)

@@ -212,6 +212,30 @@ temporary two-transaction journal fixture wrote 132,638 bytes versus 395,819
 with the former duplicate block/transaction payload writes (66.5% fewer). This
 is a bounded write-size comparison; mainnet throughput still needs measurement.
 
+The storage-retention follow-up found that the installed Rust ledger had grown
+to roughly 196 GiB versus 32 GiB for the stopped C++ ledger. Sampled live
+`fork_work` updates retained complete VDF lists of 1.4–2.7 MB, including prior
+append-log versions. C++ `Node::commit` instead releases VDF points at the
+committed root. Rust now deduplicates proof records in a 32 MiB/1,024-record
+process-local pool, prunes at the root iteration boundary, and performs no VDF
+payload or empty-placeholder writes. Work must be reacquired after restart;
+block authenticity, live VDF linkage and historical consensus checks remain
+mandatory. Native fork/restart tests explicitly reintroduce transient work.
+
+`--compact-storage` is explicit offline maintenance. It removes legacy
+`fork_work` records and obsolete archive MVCC versions, then replaces duplicate
+selected block bodies with archive references after verifying their equality.
+The selected store retains every ledger version and its original retention
+floor; block history and rollback are not pruned. Streaming collection holds
+bounded batches and publishes each database through its existing durable
+manifest protocol. Archive publication precedes selected references, and pinned
+snapshots retain old files until released. Temporary-database regressions cover
+historical/tombstone preservation, rewrite failure and recovery, legacy layouts,
+interruption between stores, pinned reads, transaction/balance equality and
+rollback through every retained fixture height. Mainnet reclaimed size and
+write-rate measurements are recorded with the deployment rather than inferred
+from the fixture.
+
 Canonical-parent live admission and local signed production now retain one
 opaque verified execution handoff. Fork choice can publish its detached delta
 without a second body execution. The native store checks owner and publication
