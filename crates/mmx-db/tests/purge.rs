@@ -124,7 +124,7 @@ fn failed_value_rewrite_never_publishes_partial_values_or_advances_history_floor
     let (mut disk, memory) = populated(directory.path());
     let mut calls = 0;
     assert!(disk
-        .rewrite_values(
+        .rewrite_values_coalesced(
             72,
             |_, _| Ok(true),
             |_, _, _| {
@@ -133,7 +133,8 @@ fn failed_value_rewrite_never_publishes_partial_values_or_advances_history_floor
                     return Err(Error::Corrupt("injected rewrite failure"));
                 }
                 Ok(vec![9])
-            }
+            },
+            |_, _| true,
         )
         .is_err());
     drop(disk);
@@ -142,6 +143,173 @@ fn failed_value_rewrite_never_publishes_partial_values_or_advances_history_floor
     assert_ne!(disk.collection_tag(), Some(72));
     compare(&memory, &disk);
 }
+
+#[test]
+fn equal_value_collection_preserves_transitions_empty_values_detached_forks_and_rewind() {
+    fn compare_values(expected: &Store, actual: &Store) {
+        assert_eq!(expected.version(), actual.version());
+        for max in std::iter::once(None).chain((0..12).map(Some)) {
+            for table in ["a", "b"] {
+                let expected = expected.scan(table, &[], max).unwrap();
+                let actual = actual.scan(table, &[], max).unwrap();
+                if table == "b" {
+                    // An unselected table retains its exact Row.version too.
+                    assert_eq!(actual, expected);
+                } else {
+                    let values = |rows: Vec<mmx_db::Row>| {
+                        rows.into_iter()
+                            .map(|r| (r.key, r.value))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(values(actual), values(expected));
+                }
+            }
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut disk = Store::open_native_with_options(directory.path(), options()).unwrap();
+    let mut memory = Store::memory();
+    for height in 0..12 {
+        let value = match height / 2 {
+            0 | 2 => None,
+            1 => Some(Vec::new()),
+            3 | 5 => Some(vec![1; 4096]),
+            _ => Some(vec![2; 4096]),
+        };
+        let writes = [
+            ("a", b"a".as_slice()),
+            ("a", b"aa"),
+            ("b", b"a"),
+            ("b", b"zz"),
+        ]
+        .into_iter()
+        .map(|(table, key)| Write {
+            table: table.into(),
+            key: key.to_vec(),
+            value: value.clone(),
+        })
+        .collect::<Vec<_>>();
+        disk.commit_batch(height + 1, writes.clone()).unwrap();
+        memory.commit_batch(height + 1, writes).unwrap();
+    }
+    let pinned = disk.fork(12).unwrap();
+    let old_files = data_files(directory.path());
+    let report = disk
+        .rewrite_values_coalesced(
+            73,
+            |_, _| Ok(true),
+            |_, _, value| Ok(value),
+            |table, _| table == "a",
+        )
+        .unwrap();
+    assert_eq!(report.retained_records, 36);
+    assert_eq!(report.floor, 0);
+    assert!(report.new_value_bytes + 20_000 < report.old_value_bytes);
+    assert!(old_files.iter().all(|path| path.exists()));
+    compare_values(&memory, &disk);
+    compare(&memory, &pinned);
+    assert_eq!(disk.scan("a", &[], Some(3)).unwrap()[0].version, 2);
+    // A detached branch prepared before collection still shares the same
+    // publication generation and can replace its suffix after collection.
+    let mut branch = pinned.fork(6).unwrap();
+    branch
+        .commit_batch(7, [Write::put("a", b"a", b"replacement")])
+        .unwrap();
+    disk.replace_suffix(6, &branch).unwrap();
+    let mut expected = memory.fork(6).unwrap();
+    expected
+        .commit_batch(7, [Write::put("a", b"a", b"replacement")])
+        .unwrap();
+    compare_values(&expected, &disk);
+    compare(&memory, &pinned);
+    drop(branch);
+    drop(pinned);
+    assert!(old_files.iter().all(|path| !path.exists()));
+    drop(disk);
+    let mut disk = Store::open_native_with_options(directory.path(), options()).unwrap();
+    compare_values(&expected, &disk);
+    for height in (0..=7).rev() {
+        disk.revert(height).unwrap();
+        compare_values(&expected.fork(height).unwrap(), &disk);
+    }
+}
+
+#[test]
+fn repeated_rpc_metadata_collapses_without_changing_any_historical_value() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut disk = Store::open_native_with_options(directory.path(), options()).unwrap();
+    let mut memory = Store::memory();
+    for height in 0..1024u32 {
+        let writes = vec![
+            Write::put("chain_public_meta", b"start", 0u32.to_be_bytes()),
+            Write::put("chain_public_meta", b"cursor", 0u32.to_be_bytes()),
+            Write::put(
+                "chain_public_meta",
+                b"address_count",
+                (height / 256).to_le_bytes(),
+            ),
+            Write::delete("chain_public_meta", b"address_cursor"),
+            Write::delete("chain_public_meta", b"address_partial"),
+        ];
+        disk.commit_batch(height + 1, writes.clone()).unwrap();
+        memory.commit_batch(height + 1, writes).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let report = disk
+        .rewrite_values_coalesced(
+            74,
+            |_, _| Ok(true),
+            |_, _, value| Ok(value),
+            |table, _| table == "chain_public_meta",
+        )
+        .unwrap();
+    eprintln!(
+        "1024-block metadata fixture: {report:?}, {:?}",
+        started.elapsed()
+    );
+    assert_eq!(report.retained_records, 8);
+    assert!(report.new_value_bytes * 100 < report.old_value_bytes);
+    for height in 0..1024 {
+        let rows = disk.scan("chain_public_meta", &[], Some(height)).unwrap();
+        let expected = memory.scan("chain_public_meta", &[], Some(height)).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| (&r.key, &r.value)).collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|r| (&r.key, &r.value))
+                .collect::<Vec<_>>()
+        );
+        for row in rows {
+            assert_eq!(
+                row.version,
+                if row.key == b"address_count" {
+                    height / 256 * 256
+                } else {
+                    0
+                }
+            );
+        }
+    }
+    drop(disk);
+    let mut disk = Store::open_native_with_options(directory.path(), options()).unwrap();
+    let again = disk
+        .rewrite_values_coalesced(
+            74,
+            |_, _| Ok(true),
+            |_, _, value| Ok(value),
+            |table, _| table == "chain_public_meta",
+        )
+        .unwrap();
+    assert_eq!(again.retained_records, 8);
+    assert_eq!(again.new_value_bytes, report.new_value_bytes);
+    disk.revert(256).unwrap();
+    assert_eq!(
+        disk.get("chain_public_meta", b"address_count", None)
+            .unwrap(),
+        Some(0u32.to_le_bytes().to_vec())
+    );
+}
+
 fn retained(memory: &Store, disk: &Store, floor: u32) {
     assert_eq!(memory.version(), disk.version());
     assert_eq!(disk.retention_floor(), floor);

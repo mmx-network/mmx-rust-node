@@ -89,6 +89,20 @@ impl Store {
             _ => Err(Error::SnapshotMismatch),
         }
     }
+    /// Coalescing is opt-in per key; see Native::rewrite_values_coalesced for
+    /// historical-value preservation and the effect on Row.version.
+    pub fn rewrite_values_coalesced(
+        &mut self,
+        tag: u64,
+        keep: impl FnMut(&str, &[u8]) -> Result<bool>,
+        rewrite: impl FnMut(&str, &[u8], Vec<u8>) -> Result<Vec<u8>>,
+        coalesce: impl FnMut(&str, &[u8]) -> bool,
+    ) -> Result<crate::native::PurgeReport> {
+        match &mut self.0 {
+            Backend::Native(d) => d.rewrite_values_coalesced(tag, keep, rewrite, coalesce),
+            _ => Err(Error::SnapshotMismatch),
+        }
+    }
     pub fn version(&self) -> u32 {
         match &self.0 {
             Backend::Memory(d) => d.version(),

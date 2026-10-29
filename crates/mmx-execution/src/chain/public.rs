@@ -291,7 +291,17 @@ pub(super) fn writes(
         ));
     }
     builder.writes.extend(address_count(chain, batch)?);
-    Ok(builder.writes)
+    // Start/cursor/count often stay unchanged for millions of blocks, and
+    // completed address migration has no cursor/partial rows left to delete.
+    // Keep genuine transitions in the ledger transaction for historical reads
+    // and reorgs, without publishing identical metadata versions each block.
+    let mut writes = Vec::with_capacity(builder.writes.len());
+    for write in builder.writes {
+        if write.table != META || db.get(META, &write.key, None)? != write.value {
+            writes.push(write);
+        }
+    }
+    Ok(writes)
 }
 
 const ADDRESS_CURSOR: &[u8] = b"address_cursor";
@@ -396,6 +406,75 @@ fn address_count(
 mod tests {
     use super::*;
     use mmx_vm::storage::{AtomicStorage, BalanceWrite, TransactionBatch};
+    #[test]
+    fn metadata_writes_only_changes_and_rewinds_with_the_selected_ledger() {
+        let mut chain = ChainState::memory(Default::default());
+        for height in 0..16u32 {
+            let block = value(
+                "mmx.Block",
+                [
+                    ("height", Value::Uint(height.into())),
+                    ("hash", Value::Bytes([9; 32].to_vec())),
+                    ("proof", Value::Sequence(vec![])),
+                    ("reward_amount", Value::Uint(0)),
+                    ("reward_addr", Value::Optional(None)),
+                    ("tx_list", Value::Sequence(vec![])),
+                ],
+            );
+            let mut batch = TransactionBatch::default();
+            if matches!(height, 8 | 12) {
+                batch.balances.push(BalanceWrite {
+                    contract: [1; 32],
+                    currency: [0; 32],
+                    amount: if height == 8 { 1_000_000 } else { 0 },
+                });
+            }
+            let writes = writes(&chain, &block, &batch).unwrap();
+            let metadata = writes
+                .iter()
+                .filter(|w| w.table == META)
+                .collect::<Vec<_>>();
+            if height == 0 {
+                assert_eq!(metadata.len(), 3);
+                assert!(metadata.iter().all(|w| w.value.is_some()));
+            } else if matches!(height, 8 | 12) {
+                assert_eq!(metadata.len(), 1);
+                assert_eq!(metadata[0].key, ADDRESS_COUNT);
+            } else {
+                assert!(metadata.is_empty(), "unchanged metadata at {height}");
+            }
+            chain.storage.apply_transaction(&batch).unwrap();
+            chain
+                .storage
+                .database_mut()
+                .commit_batch(height + 1, writes)
+                .unwrap();
+        }
+        for height in 0..16 {
+            assert_eq!(
+                chain
+                    .storage
+                    .database()
+                    .get(META, ADDRESS_COUNT, Some(height))
+                    .unwrap(),
+                Some(u64::from((8..12).contains(&height)).to_le_bytes().to_vec())
+            );
+        }
+        chain.storage.database_mut().revert(8).unwrap();
+        assert_eq!(
+            chain
+                .storage
+                .database()
+                .get(META, ADDRESS_COUNT, None)
+                .unwrap(),
+            Some(0u64.to_le_bytes().to_vec())
+        );
+        assert_eq!(
+            chain.storage.database().get(META, START, None).unwrap(),
+            Some(0u32.to_be_bytes().to_vec())
+        );
+    }
+
     #[test]
     fn successful_offer_trade_index_round_trips_and_rewinds_with_ledger() {
         let mut chain = ChainState::memory(Default::default());

@@ -820,7 +820,9 @@ impl Native {
             if version > self.state.floor {
                 self.publish(self.state.version, self.state.version, version, &[])?;
             }
-            self.collect_history(tag, &mut keep, &mut |_, _, value| Ok(value))
+            self.collect_history(tag, &mut keep, &mut |_, _, value| Ok(value), &mut |_, _| {
+                false
+            })
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -833,8 +835,22 @@ impl Native {
     pub fn rewrite_values(
         &mut self,
         tag: u64,
+        keep: impl FnMut(&str, &[u8]) -> Result<bool>,
+        rewrite: impl FnMut(&str, &[u8], Vec<u8>) -> Result<Vec<u8>>,
+    ) -> Result<PurgeReport> {
+        self.rewrite_values_coalesced(tag, keep, rewrite, |_, _| false)
+    }
+    /// Additionally coalesce consecutive equal values for explicitly selected
+    /// keys. Their oldest equal version survives: every historical value and
+    /// rollback remains available, but Row.version reflects that older write.
+    /// Other keys retain their exact write versions. Holds one deferred value
+    /// in addition to the bounded output batch, never a full key's history.
+    pub fn rewrite_values_coalesced(
+        &mut self,
+        tag: u64,
         mut keep: impl FnMut(&str, &[u8]) -> Result<bool>,
         mut rewrite: impl FnMut(&str, &[u8], Vec<u8>) -> Result<Vec<u8>>,
+        mut coalesce: impl FnMut(&str, &[u8]) -> bool,
     ) -> Result<PurgeReport> {
         self.readable()?;
         if self.has_pending() {
@@ -842,7 +858,7 @@ impl Native {
         }
         let result = (|| {
             self.checkpoint_inner(false)?;
-            self.collect_history(tag, &mut keep, &mut rewrite)
+            self.collect_history(tag, &mut keep, &mut rewrite, &mut coalesce)
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -854,6 +870,7 @@ impl Native {
         tag: u64,
         keep: &mut impl FnMut(&str, &[u8]) -> Result<bool>,
         rewrite: &mut impl FnMut(&str, &[u8], Vec<u8>) -> Result<Vec<u8>>,
+        coalesce: &mut impl FnMut(&str, &[u8]) -> bool,
     ) -> Result<PurgeReport> {
         let source = self.state.clone();
         let old_value_bytes = value_bytes(&source)?;
@@ -875,46 +892,79 @@ impl Native {
         let limit = self.options.segment_bytes.clamp(4096, 64 * 1024 * 1024) as usize;
         let mut last_key = None;
         let mut keep_key = true;
+        let mut coalesce_key = false;
         let mut count = 0;
-        for entry in sorted::Merged::new(&views, (source.floor > 0).then_some(source.floor))? {
-            let entry = entry?;
-            let key = (entry.write.table.clone(), Key(entry.write.key.clone()));
-            if last_key.as_ref() != Some(&key) {
-                keep_key = keep(&entry.write.table, &entry.write.key)?;
-                last_key = Some(key);
+        {
+            let mut emit = |(entry, value): (Entry, Option<Vec<u8>>)| -> Result<()> {
+                let size = entry.write.table.len()
+                    + entry.write.key.len()
+                    + 32
+                    + value.as_ref().map_or(0, Vec::len);
+                if !batch.is_empty() && (batch_bytes + size > limit || batch.len() >= 65536) {
+                    write_gc_batch(
+                        &self.context,
+                        source.version,
+                        &mut next_id,
+                        &mut batch,
+                        &mut files,
+                        &mut builder,
+                    )?;
+                    batch_bytes = 0;
+                }
+                batch_bytes += size;
+                batch.push((entry, value));
+                count += 1;
+                Ok(())
+            };
+            let mut pending: Option<(Entry, Option<Vec<u8>>)> = None;
+            for entry in sorted::Merged::new(&views, (source.floor > 0).then_some(source.floor))? {
+                let entry = entry?;
+                let key = (entry.write.table.clone(), Key(entry.write.key.clone()));
+                if last_key.as_ref() != Some(&key) {
+                    keep_key = keep(&entry.write.table, &entry.write.key)?;
+                    coalesce_key = keep_key && coalesce(&entry.write.table, &entry.write.key);
+                    last_key = Some(key);
+                }
+                if !keep_key {
+                    continue;
+                }
+                let value = entry
+                    .write
+                    .value
+                    .as_ref()
+                    .map(|encoded| {
+                        let value = self
+                            .context
+                            .value(&source.files, ValueRef::decode(encoded)?)?;
+                        rewrite(&entry.write.table, &entry.write.key, value)
+                    })
+                    .transpose()?;
+                if !coalesce_key {
+                    if let Some(previous) = pending.take() {
+                        emit(previous)?;
+                    }
+                    emit((entry, value))?;
+                    continue;
+                }
+                if let Some((previous, previous_value)) = &mut pending {
+                    if previous.write.table == entry.write.table
+                        && previous.write.key == entry.write.key
+                        && *previous_value == value
+                    {
+                        // The merge visits versions newest first. Keep the
+                        // oldest equal version so a read/revert between the
+                        // duplicates still sees the value (including deletes).
+                        previous.version = entry.version;
+                        continue;
+                    }
+                }
+                if let Some(previous) = pending.replace((entry, value)) {
+                    emit(previous)?;
+                }
             }
-            if !keep_key {
-                continue;
+            if let Some(previous) = pending {
+                emit(previous)?;
             }
-            let value = entry
-                .write
-                .value
-                .as_ref()
-                .map(|encoded| {
-                    let value = self
-                        .context
-                        .value(&source.files, ValueRef::decode(encoded)?)?;
-                    rewrite(&entry.write.table, &entry.write.key, value)
-                })
-                .transpose()?;
-            let size = entry.write.table.len()
-                + entry.write.key.len()
-                + 32
-                + value.as_ref().map_or(0, Vec::len);
-            if !batch.is_empty() && (batch_bytes + size > limit || batch.len() >= 65536) {
-                write_gc_batch(
-                    &self.context,
-                    source.version,
-                    &mut next_id,
-                    &mut batch,
-                    &mut files,
-                    &mut builder,
-                )?;
-                batch_bytes = 0;
-            }
-            batch_bytes += size;
-            batch.push((entry, value));
-            count += 1;
         }
         if !batch.is_empty() {
             write_gc_batch(

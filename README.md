@@ -72,7 +72,10 @@ This maintenance command exits after compacting both stores. It preserves block
 history, ledger versions and rollback heights; it needs temporary disk space
 for replacement files. Publication uses durable manifest replacements, and
 an interrupted operation can be rerun. The archive keeps block payloads while
-the selected store keeps references and ledger effects. A restarted node obtains
+the selected store keeps references and ledger effects. Repeated identical RPC
+metadata values are coalesced at their oldest equal write, preserving the value
+at every historical height. New blocks omit unchanged metadata writes. Other
+tables retain their exact write versions. A restarted node obtains
 fresh VDF work from peers or uses coordinated historical synchronization.
 
 The node discovers peers from the network configuration and syncs from genesis.

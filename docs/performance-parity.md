@@ -236,6 +236,28 @@ rollback through every retained fixture height. Mainnet reclaimed size and
 write-rate measurements are recorded with the deployment rather than inferred
 from the fixture.
 
+The eu2 follow-up separates RPC index coverage from duplicate metadata. Its
+fully indexed address history and farmer indexes explain much of the difference
+from the older t320 ledger. Five `chain_public_meta` keys alone occupied about
+1.56 GiB of sorted records, plus append-log storage, because unchanged start,
+cursor and count values and already-absent migration markers were written on
+every block. Public indexing now compares just its bounded metadata writes
+against their current values; genuine changes still share the ledger commit.
+No broad cache or automatic live-ledger rewrite is added.
+
+Offline selected-store maintenance explicitly opts only that metadata table
+into coalescing consecutive equal values, including tombstones. Since merge
+order is newest first, it defers one entry and retains the oldest version of
+each equal run. Values at every historical boundary, the retention floor,
+rollback and pinned/prepared branches survive; metadata `Row.version` reflects
+the retained write, while every other table keeps exact write versions. The
+additional memory is bounded by one deferred value, not a key's full history.
+The 1,024-block temporary legacy fixture reduces 5,120 metadata records to 8
+and append-log bytes from 308,376 to 472. This is a storage fixture, not a
+mainnet throughput claim. Regressions cover returning to an earlier value,
+empty-versus-deleted values, failed publication, detached branch adoption,
+reopening, every fixture rollback, and changes to the address count.
+
 Canonical-parent live admission and local signed production now retain one
 opaque verified execution handoff. Fork choice can publish its detached delta
 without a second body execution. The native store checks owner and publication

@@ -205,7 +205,7 @@ impl ForkChain {
         if let Some(observer) = &self.observer {
             observer.reset();
         }
-        let tag = 0x4D4D_5843_0000_0001;
+        let tag = 0x4D4D_5843_0000_0002;
         let archive =
             self.archive
                 .purge_before_with_tag(self.archive.version(), tag, |table, _| {
@@ -218,7 +218,7 @@ impl ForkChain {
             .storage
             .database()
             .fork(self.chain.storage.database().version())?;
-        let selected = self.chain.storage.database_mut().rewrite_values(
+        let selected = self.chain.storage.database_mut().rewrite_values_coalesced(
             tag,
             |table, _| {
                 Ok(!matches!(
@@ -254,6 +254,7 @@ impl ForkChain {
                 }
                 Ok(bodies::EXTERNAL.to_vec())
             },
+            |table, _| table == super::public::META,
         )?;
         self.refresh_bodies()?;
         Ok((archive, selected))
