@@ -197,7 +197,7 @@ fn serve(
     let mut head = false;
     let (status, body, content_type) = match request(&mut input) {
         Ok(request) if matches!(request.target.as_str(), "/rpc" | "/") => {
-            match rpc::json_response_until(node, &request.body, end, cache) {
+            match rpc::json_response_until(node, &request.body, end) {
                 Some(v) => (200, v, "application/json"),
                 None => (204, Vec::new(), "application/json"),
             }

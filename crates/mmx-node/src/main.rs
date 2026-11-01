@@ -31,7 +31,7 @@ Defaults: --mmx-root ../mmx-node; network from $MMX_HOME/NETWORK or mainnet.
 OpenCL GPU 0 is used when available, with CPU fallback; --opencl-device -1 disables it.
 Historical sync uses configured native seed peers unless --peer is supplied.
 --offline serves the stored ledger without contacting peers.
-The in-process RPC cache defaults to 64 MiB; --rpc-cache-mb or Node.rpc_cache_size_mb sets its budget.
+The public REST cache defaults to 64 MiB; --rpc-cache-mb or Node.rpc_cache_size_mb sets its budget.
 --sync-once exits after coordinated sync. Router.min_sync_peers / num_peers_out control peer counts.
 --p2p-listen overrides Router.host / port. --rollback-to keeps that height.
 --compact-storage reclaims legacy VDF data and duplicate bodies, preserves all history, and exits.

@@ -82,7 +82,6 @@ fn query(target: &str) -> Result<(&str, BTreeMap<String, String>)> {
 }
 struct Request<'a> {
     node: &'a Arc<Mutex<Node>>,
-    cache: Option<&'a rpc::cache::Shared>,
     end: Instant,
     query: BTreeMap<String, String>,
     context: Context,
@@ -94,7 +93,7 @@ impl Request<'_> {
         if Instant::now() >= self.end {
             return Err(error("WebAPI request deadline"));
         }
-        let value = rpc::web_query(self.node, method, args, self.end, self.cache)?;
+        let value = rpc::web_query(self.node, method, args, self.end)?;
         let total = self.bytes.get().saturating_add(json_charge(&value));
         if total > 32 * 1024 * 1024 {
             return Err(error("WebAPI aggregate read budget exceeded"));
@@ -552,16 +551,15 @@ pub(crate) fn respond(
                 });
             }
             let response = (|| -> Result<(Response, Option<Watch>)> {
-                let params = rpc::web_query(node, "get_params", json!({}), end, Some(cache))?;
+                let params = rpc::web_query(node, "get_params", json!({}), end)?;
                 let params = mmx_types::mmx::ChainParams::decode(
                     &rpc::from_json_record(&params)?.encode()?,
                 )?;
-                let height = rpc::web_query(node, "get_height", json!({}), end, Some(cache))?
+                let height = rpc::web_query(node, "get_height", json!({}), end)?
                     .as_u64()
                     .ok_or_else(|| error("invalid height"))? as u32;
                 let mut request = Request {
                     node,
-                    cache: Some(cache),
                     end,
                     query: query.clone(),
                     context: Context::new(params, height),
@@ -591,7 +589,6 @@ pub(crate) fn respond(
                                 "get_block_hash",
                                 json!({"height":height}),
                                 end,
-                                Some(cache),
                             )?;
                             let selected = if native.is_null() {
                                 String::new()

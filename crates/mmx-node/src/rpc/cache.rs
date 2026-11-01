@@ -1,11 +1,10 @@
-//! Serialized public HTTP JSON results. Selected-chain events push already-
+//! Final public REST JSON responses. Selected-chain events push already-
 //! loaded blocks; hits never query the ledger, retain DB views or convert VNX.
 use crate::{
     node::{hash, number},
     Node, Result,
 };
-use mmx_consensus::{Record, Value};
-use mmx_vm::Storage;
+use mmx_consensus::Record;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -23,7 +22,7 @@ const MAX_KEY_BYTES: usize = 64 * 1024;
 pub const DEFAULT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) type Shared = Arc<Mutex<Cache>>;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     pub limit_bytes: usize,
     pub used_bytes: usize,
@@ -41,19 +40,10 @@ struct Entry {
     frequency: u64,
     touched: u64,
     charge: usize,
-    advance_history: bool,
     owners: Box<[[u8; 32]]>,
     web_history: Option<Box<crate::webapi::Watch>>,
 }
 type Rank = (u64, u64, Box<[u8]>);
-// Only incremental page maintenance and batch misses need typed records.
-// Public HTTP hits copy the stored JSON directly into their response envelope.
-fn decode_json_response(method: &str, bytes: &[u8]) -> Result<Record> {
-    let value: vnx::serde_json::Value = vnx::serde_json::from_slice(bytes)?;
-    super::from_json_record(
-        &vnx::serde_json::json!({"__type":format!("{method}.return"),"_ret_0":value}),
-    )
-}
 pub(crate) struct Cache {
     entries: BTreeMap<Box<[u8]>, Entry>,
     order: BTreeSet<Rank>,
@@ -137,7 +127,12 @@ impl Cache {
             self.dependencies.split_off(&Some(common + 1))
         };
         for key in state {
-            if extension && self.entries.get(&key).is_some_and(|e| e.advance_history) {
+            if extension
+                && self
+                    .entries
+                    .get(&key)
+                    .is_some_and(|e| e.web_history.is_some())
+            {
                 self.dependencies.entry(None).or_default().insert(key);
             } else {
                 self.remove(&key);
@@ -171,41 +166,23 @@ impl Cache {
             None
         }
     }
-    fn insert(
-        &mut self,
-        key: Box<[u8]>,
-        value: Box<[u8]>,
-        dependency: Dependency,
-        advance_history: bool,
-    ) {
-        self.insert_watched(key, value, dependency, advance_history, None);
+    fn insert(&mut self, key: Box<[u8]>, value: Box<[u8]>, dependency: Dependency) {
+        self.insert_watched(key, value, dependency, None);
     }
     fn insert_watched(
         &mut self,
         key: Box<[u8]>,
         value: Box<[u8]>,
         dependency: Dependency,
-        advance_history: bool,
         web_history: Option<Box<crate::webapi::Watch>>,
     ) {
         if value.len() > super::MAX_RESPONSE_BYTES {
             return;
         }
-        let advance_history = advance_history || web_history.is_some();
-        let owners = (|| -> Result<Vec<[u8; 32]>> {
-            if let Some(watch) = &web_history {
-                return watch.owners();
-            }
-            if advance_history {
-                return Record::decode_compact(&key)?
-                    .field("addresses")?
-                    .seq()?
-                    .iter()
-                    .map(|v| Ok(v.bytes()?.try_into()?))
-                    .collect();
-            }
-            Ok(Vec::new())
-        })();
+        let owners = match &web_history {
+            Some(watch) => watch.owners(),
+            None => Ok(Vec::new()),
+        };
         let Ok(mut owners) = owners else {
             return;
         };
@@ -256,7 +233,6 @@ impl Cache {
                 frequency: 1,
                 touched,
                 charge,
-                advance_history,
                 owners: owners.into_boxed_slice(),
                 web_history,
             },
@@ -272,214 +248,22 @@ impl Cache {
     }
 }
 
-fn dependency(node: &Node, request: &Record) -> Result<Option<Dependency>> {
-    let selected = node.chain.selected();
-    let at = |height| -> Result<_> {
-        Ok(if height < node.earliest_height() {
-            None
-        } else {
-            selected.hash_at(height)?.map(|_| Some(height))
-        })
-    };
-    Ok(match request.name.as_str() {
-        "mmx.Node.get_block_at"
-        | "mmx.Node.get_header_at"
-        | "mmx.Node.get_block_hash"
-        | "mmx.Node.get_block_hash_ex"
-        | "mmx.Node.get_tx_ids_at" => at(number(request, "height")?)?,
-        "mmx.Node.get_block" | "mmx.Node.get_header" => {
-            let id = hash(request, "hash")?;
-            // Orphan/staged bodies may still change as admission completes.
-            match node.chain.header(&id)? {
-                Some(header) => {
-                    let height = number(&header, "height")?;
-                    if selected.hash_at(height)? == Some(id) {
-                        at(height)?
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            }
-        }
-        "mmx.Node.get_transaction" if request.field("pending")?.boolean()? => None,
-        "mmx.Node.get_transaction" | "mmx.Node.get_tx_height" => {
-            match selected
-                .storage()
-                .get_transaction_index(&hash(request, "id")?)?
-            {
-                Some(index) => at(index.height)?,
-                None => None,
-            }
-        }
-        "mmx.Node.get_transactions"
-        | "mmx.Node.get_contract"
-        | "mmx.Node.get_contract_for"
-        | "mmx.Node.get_balance"
-        | "mmx.Node.get_balances"
-        | "mmx.Node.get_all_balances"
-        | "mmx.Node.get_total_balance"
-        | "mmx.Node.get_total_balances" => Some(None),
-        "mmx.Node.get_history" | "mmx.Node.get_history_memo"
-            if !request
-                .field("filter")?
-                .record()?
-                .field("with_pending")?
-                .boolean()? =>
-        {
-            Some(None)
-        }
-        _ => None,
-    })
-}
 pub(crate) struct Fill {
     cache: Shared,
     key: Box<[u8]>,
     dependency: Dependency,
     generation: u64,
-    advance_history: bool,
-}
-fn key(request: &Record) -> Result<Option<Box<[u8]>>> {
-    // Cheaply reject validation, submission, status and pending requests before
-    // encoding potentially large transaction arguments.
-    if !matches!(
-        request.name.as_str(),
-        "mmx.Node.get_block"
-            | "mmx.Node.get_block_at"
-            | "mmx.Node.get_header"
-            | "mmx.Node.get_header_at"
-            | "mmx.Node.get_block_hash"
-            | "mmx.Node.get_block_hash_ex"
-            | "mmx.Node.get_tx_ids_at"
-            | "mmx.Node.get_transaction"
-            | "mmx.Node.get_transactions"
-            | "mmx.Node.get_tx_height"
-            | "mmx.Node.get_contract"
-            | "mmx.Node.get_contract_for"
-            | "mmx.Node.get_balance"
-            | "mmx.Node.get_balances"
-            | "mmx.Node.get_all_balances"
-            | "mmx.Node.get_total_balance"
-            | "mmx.Node.get_total_balances"
-            | "mmx.Node.get_history"
-            | "mmx.Node.get_history_memo"
-    ) || request.memory_size() > MAX_KEY_BYTES
-    {
-        return Ok(None);
-    }
-    let key = request.encode_compact()?.into_boxed_slice();
-    if key.len() > MAX_KEY_BYTES {
-        return Ok(None);
-    }
-    Ok(Some(key))
-}
-pub(crate) fn lookup(cache: &Shared, request: &Record) -> Result<Option<Vec<u8>>> {
-    let Some(key) = key(request)? else {
-        return Ok(None);
-    };
-    let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
-    // Count a miss only when the fallback actually captures a node snapshot.
-    if cache.publishing || !cache.entries.contains_key(key.as_ref()) {
-        return Ok(None);
-    }
-    Ok(cache.get(&key))
-}
-pub(super) fn probe(node: &Node, request: &Record) -> Result<(Option<Vec<u8>>, Option<Fill>)> {
-    let Some(cache) = &node.rpc_cache else {
-        return Ok((None, None));
-    };
-    if cache
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .stats
-        .limit_bytes
-        < BASE_BYTES + ENTRY_BYTES
-    {
-        return Ok((None, None));
-    }
-    let Some(key) = key(request)? else {
-        return Ok((None, None));
-    };
-    let (value, generation) = {
-        let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
-        (cache.get(&key), cache.generation)
-    };
-    if let Some(value) = value {
-        return Ok((Some(value), None));
-    }
-    if request.name == "mmx.Node.get_transactions" {
-        let ids = request.field("ids")?.seq()?;
-        if ids.len() > 128 {
-            return Err(crate::error("transaction query exceeds 128 ids"));
-        }
-        let mut values = Vec::new();
-        let mut size = 0usize;
-        let mut complete = true;
-        for id in ids {
-            let single = crate::node::record(
-                "mmx.Node.get_transaction",
-                [
-                    ("id".into(), id.clone()),
-                    ("pending".into(), Value::Bool(false)),
-                ],
-            )
-            .encode_compact()?;
-            let wire = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&single);
-            let Some(wire) = wire else {
-                complete = false;
-                break;
-            };
-            let response = decode_json_response("mmx.Node.get_transaction", &wire)?;
-            let tx = response.field("_ret_0")?.record()?;
-            size = size.saturating_add(tx.memory_size());
-            if size > super::MAX_RESPONSE_BYTES {
-                return Err(crate::error("transaction query exceeds 32 MiB"));
-            }
-            values.push(Value::Record(tx.clone()));
-        }
-        if complete {
-            let response = crate::node::record(
-                "mmx.Node.get_transactions.return",
-                [("_ret_0".into(), Value::Sequence(values))],
-            );
-            if response.memory_size() > super::MAX_RESPONSE_BYTES {
-                return Err(crate::error("RPC response exceeds byte budget"));
-            }
-            let response = vnx::serde_json::to_vec(&super::response_json(&response)?)?;
-            cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
-                key,
-                response.clone().into_boxed_slice(),
-                None,
-                false,
-            );
-            return Ok((Some(response), None));
-        }
-    }
-    let advance_history = super::history::can_advance(request)?;
-    let fill = dependency(node, request)?.map(|dependency| Fill {
-        cache: cache.clone(),
-        key,
-        dependency,
-        generation,
-        advance_history,
-    });
-    Ok((None, fill))
 }
 impl Fill {
     pub(crate) fn finish_web_history(self, value: &[u8], watch: crate::webapi::Watch) {
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         if cache.generation == self.generation {
-            cache.insert_watched(self.key, value.into(), None, true, Some(Box::new(watch)));
+            cache.insert_watched(self.key, value.into(), None, Some(Box::new(watch)));
         }
     }
     pub(crate) fn at_height(mut self, height: u32) -> Self {
         self.dependency = Some(height);
         self
-    }
-    #[cfg(test)]
-    pub(super) fn finish(self, response: &Record) -> Result<()> {
-        self.finish_json(&vnx::serde_json::to_vec(&super::response_json(response)?)?);
-        Ok(())
     }
     pub(crate) fn finish_json(self, value: &[u8]) {
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -487,18 +271,13 @@ impl Fill {
             return;
         }
         if cache.generation == self.generation {
-            cache.insert(
-                self.key,
-                value.into(),
-                self.dependency,
-                self.advance_history,
-            );
+            cache.insert(self.key, value.into(), self.dependency);
         }
     }
 }
 
-/// Fully rendered public REST JSON shares the native HTTP cache's RAM budget
-/// and publication epoch. Hits never acquire the node mutex.
+/// Fully rendered public REST JSON uses one bounded cache and publication epoch.
+/// Hits never acquire the node mutex; internal RPC methods bypass this cache.
 pub(crate) struct WebProbe {
     pub ready: bool,
     pub since: u32,
@@ -525,7 +304,7 @@ pub(crate) fn web_probe(cache: &Shared, key: Option<&[u8]>) -> WebProbe {
     if !probe.ready || state.publishing || state.stats.limit_bytes < BASE_BYTES + ENTRY_BYTES {
         return probe;
     }
-    if let Some(key) = key {
+    if let Some(key) = key.filter(|key| key.len() <= MAX_KEY_BYTES) {
         probe.value = state.get(key);
         if probe.value.is_none() {
             probe.fill = Some(Fill {
@@ -533,7 +312,6 @@ pub(crate) fn web_probe(cache: &Shared, key: Option<&[u8]>) -> WebProbe {
                 key: key.into(),
                 dependency: None,
                 generation: state.generation,
-                advance_history: false,
             });
         }
     }
@@ -563,8 +341,8 @@ pub(crate) fn web_ready_for_test(cache: &Shared) {
 }
 
 impl Node {
-    /// Public HTTP cache budget; defaults to 64 MiB. Zero releases cached data.
-    /// Local VNX, embedded and peer calls always bypass this layer.
+    /// Public REST cache budget; defaults to 64 MiB. Zero releases cached data.
+    /// VNX, JSON-RPC, embedded and peer calls always bypass this layer.
     pub fn set_rpc_cache_limit(&mut self, bytes: usize) {
         let tip = self
             .chain
@@ -636,7 +414,6 @@ impl mmx_execution::chain::forks::Observer for Observer {
 impl Observer {
     fn push(&self, block: &Record) -> Result<()> {
         let height = number(block, "height")?;
-        let id = hash(block, "hash")?;
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         if cache.stats.limit_bytes < BASE_BYTES + ENTRY_BYTES {
             return Ok(());
@@ -672,7 +449,6 @@ impl Observer {
                                 key.clone(),
                                 response.into_boxed_slice(),
                                 None,
-                                true,
                                 Some(watch),
                             );
                             cache.preserve_frequency(&key, frequency);
@@ -680,108 +456,9 @@ impl Observer {
                         Ok(None) => (),
                         Err(_) => cache.remove(&key),
                     }
-                    continue;
-                }
-                let result = (|| -> Result<_> {
-                    let request = Record::decode_compact(&key)?;
-                    if !super::history::affected(&request, &rows)? {
-                        return Ok(None);
-                    }
-                    let response = decode_json_response(&request.name, &entry.value)?;
-                    super::history::advance(&request, response, &rows)
-                })();
-                match result {
-                    Ok(Some(response)) => {
-                        cache.remove(&key);
-                        cache.insert(
-                            key.clone(),
-                            vnx::serde_json::to_vec(&super::response_json(&response)?)?
-                                .into_boxed_slice(),
-                            None,
-                            true,
-                        );
-                        cache.preserve_frequency(&key, frequency);
-                    }
-                    Ok(None) => (),
-                    Err(_) => cache.remove(&key),
                 }
             }
         }
-        let mut put = |method: &str, args: Vec<(&str, Value)>, value: Value| -> Result<()> {
-            let request = crate::node::record(
-                &format!("mmx.Node.{method}"),
-                args.into_iter().map(|(k, v)| (k.into(), v)),
-            );
-            let response = crate::node::record(
-                &format!("mmx.Node.{method}.return"),
-                [("_ret_0".into(), value)],
-            );
-            if response.memory_size() > super::MAX_RESPONSE_BYTES {
-                return Ok(());
-            }
-            cache.insert(
-                request.encode_compact()?.into_boxed_slice(),
-                vnx::serde_json::to_vec(&super::response_json(&response)?)?.into_boxed_slice(),
-                Some(height),
-                false,
-            );
-            Ok(())
-        };
-        let h = || Value::Uint(height.into());
-        let b = |v: &[u8]| Value::Bytes(v.to_vec());
-        // The ordinary miss path still enforces the decoded response budget.
-        // Do not admit a pushed body that the RPC would otherwise reject.
-        if block.memory_size() <= super::MAX_RESPONSE_BYTES {
-            put(
-                "get_block_at",
-                vec![("height", h())],
-                Value::Record(block.clone()),
-            )?;
-            put(
-                "get_block",
-                vec![("hash", b(&id))],
-                Value::Record(block.clone()),
-            )?;
-        }
-        let mut header = block.clone();
-        header.name = "mmx.BlockHeader".into();
-        header.fields.remove("tx_list");
-        put(
-            "get_header_at",
-            vec![("height", h())],
-            Value::Record(header.clone()),
-        )?;
-        put("get_header", vec![("hash", b(&id))], Value::Record(header))?;
-        put(
-            "get_block_hash",
-            vec![("height", h())],
-            Value::Optional(Some(Box::new(b(&id)))),
-        )?;
-        put(
-            "get_block_hash_ex",
-            vec![("height", h())],
-            Value::Optional(Some(Box::new(Value::Sequence(vec![
-                b(&id),
-                b(&hash(block, "content_hash")?),
-            ])))),
-        )?;
-        let mut ids = Vec::new();
-        for tx in block.field("tx_list")?.seq()? {
-            let tx = tx.record()?;
-            let id = hash(tx, "id")?;
-            ids.push(b(&id));
-            put(
-                "get_transaction",
-                vec![("id", b(&id)), ("pending", Value::Bool(false))],
-                Value::Record(tx.clone()),
-            )?;
-            put(
-                "get_tx_height",
-                vec![("id", b(&id))],
-                Value::Optional(Some(Box::new(h()))),
-            )?;
-        }
-        put("get_tx_ids_at", vec![("height", h())], Value::Sequence(ids))?;
         if block.memory_size() <= super::MAX_RESPONSE_BYTES {
             if let Ok(entries) =
                 crate::webapi::pushed(block, &self.params, cache.tip_height.unwrap_or(height))
@@ -791,7 +468,6 @@ impl Observer {
                         entry.key.into_boxed_slice(),
                         entry.value.into_boxed_slice(),
                         entry.height,
-                        false,
                     );
                 }
             }

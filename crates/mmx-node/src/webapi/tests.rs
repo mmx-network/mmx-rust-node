@@ -299,7 +299,6 @@ fn contract_calls_use_pinned_state_preserve_results_and_never_publish_vm_writes(
     let (node, _, _) = crate::rpc::tests::fixture();
     let request = Request {
         node: &node,
-        cache: None,
         end: Instant::now() + Duration::from_secs(2),
         query: BTreeMap::new(),
         context: Context::new(params, 8),

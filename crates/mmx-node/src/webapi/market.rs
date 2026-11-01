@@ -756,7 +756,6 @@ mod tests {
         let params = node.lock().unwrap().chain.selected().params().clone();
         let mut request = Request {
             node: &node,
-            cache: None,
             end: Instant::now() + Duration::from_secs(2),
             query: BTreeMap::new(),
             context: Context::new(params, 0),

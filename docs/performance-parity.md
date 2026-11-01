@@ -1,5 +1,39 @@
 # C++ performance parity
 
+## Cache final public REST responses only (2026-11-01)
+
+The earlier cache bypassed native VNX transport but still cached internal node
+methods through HTTP JSON-RPC, and WebAPI used that same internal cache while
+rendering a REST miss. Chain publication also eagerly serialized internal block,
+header and transaction replies alongside the final public forms. That retained
+duplicate data even when no HTTP JSON-RPC clients used those methods.
+
+References inspected: C++ `WebAPI.cpp` transaction routes delegate to node
+methods and render their public response; `Node_api.cpp` implements the internal
+queries. Rust now caches only final public WebAPI JSON. Internal VNX and HTTP
+JSON-RPC calls execute directly, and REST misses cannot look up or retain their
+intermediate internal responses. Internal-method prewarming, native history
+response caching and cached transaction-batch assembly have been removed.
+The internal APIs, two-worker snapshot bound, request/response budgets and
+deadlines remain available. Public REST warming, LFU/byte bounds, incremental
+public history, fork invalidation and the synchronization gate remain in place.
+The existing `--rpc-cache-mb` / `Node.rpc_cache_size_mb` settings and cache status
+fields retain their names and units. An idle node can still fill its budget with
+final public responses from accepted blocks; this does not make warming
+demand-driven or share identical REST bodies indexed under height and hash.
+
+Regressions check that real HTTP JSON-RPC calls (including batches and
+notifications) and VNX calls leave cache entries, byte charges and counters
+unchanged with both warm and cold REST caches. REST misses retain exactly their
+final response, and accepted-block warming creates only WebAPI keys. Existing
+public history advancement and locked-ledger hits remain covered, alongside
+real fork replacement, rollback/republication and stale fills after cache
+reconfiguration. These use disposable fixture ledgers and loopback sockets;
+no live ledger scans or migrations are required.
+Validation: all 197 node tests pass with two test threads. The 142 library tests
+also pass with the system allocator, and all-target Clippy passes with warnings
+denied for both allocator configurations. Formatting and diff checks pass.
+
 ## Jemalloc node allocator (2026-11-01)
 
 Following the glibc-retention investigation below, GNU/Linux `mmx-node` now uses

@@ -389,8 +389,9 @@ curl -sS 'http://127.0.0.1:11380/wapi/header?height=100'
 curl -sS 'http://127.0.0.1:11380/wapi/address/history?id=mmx1...&limit=100'
 ```
 
-Every node defaults to a **64 MiB in-process public HTTP RPC cache**.
-It stores serialized JSON results; local VNX RPC bypasses it.
+Every node defaults to a **64 MiB in-process public REST response cache**.
+It stores final WebAPI JSON responses. Internal node methods bypass it on both
+VNX and HTTP JSON-RPC, including internal queries used to render a REST miss.
 Dedicated RPC servers can use `--rpc-cache-mb 2048` or
 `--rpc-cache-mb 4096` (2 / 4 GiB). The equivalent configuration setting is
 `Node.rpc_cache_size_mb`; the command-line option takes precedence. Zero disables
@@ -416,7 +417,7 @@ memory needed by active work, database indexes, or a larger RPC cache. See
 Cache hits make no chain/database queries and copy cached JSON directly into
 the HTTP response without parsing or re-encoding the result. Public REST caches
 its final WebAPI JSON, including presentation fields. Successful chain publications push
-recent blocks, headers, transactions and transaction heights from already-loaded
+public blocks, headers and transaction summaries from already-loaded
 bodies. Cached address-history pages advance from the same events; address
 balances and contracts refill on demand after a state change. Public block and
 transaction forms with native currency only are also prepared from accepted

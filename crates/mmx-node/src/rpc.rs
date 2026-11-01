@@ -150,44 +150,21 @@ pub(crate) fn lock_node_until(
         }
     }
 }
-enum Payload {
-    Json(Value),
-    Serialized(Vec<u8>),
-}
-impl Payload {
-    fn into_json(self) -> Result<Value> {
-        match self {
-            Self::Json(value) => Ok(value),
-            Self::Serialized(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        }
-    }
-    fn into_bytes(self) -> Result<Vec<u8>> {
-        match self {
-            Self::Serialized(bytes) => Ok(bytes),
-            Self::Json(value) => Ok(serde_json::to_vec(&value)?),
-        }
-    }
-}
 #[cfg(test)]
 fn dispatch(node: &Arc<Mutex<Node>>, method: &str, args: Value) -> Result<Value> {
-    dispatch_payload_until(
-        node,
-        method,
-        args,
-        Instant::now() + Duration::from_secs(5),
-        true,
-        None,
-    )?
-    .into_json()
+    dispatch_until(node, method, args, Instant::now() + Duration::from_secs(5))
 }
-fn dispatch_payload_until(
+// Internal methods always execute directly, including when called by WebAPI.
+// Only the fully rendered public REST response belongs in the response cache.
+fn dispatch_until(
     node: &Arc<Mutex<Node>>,
     method: &str,
     mut args: Value,
     end: Instant,
-    public_http: bool,
-    front_cache: Option<&cache::Shared>,
-) -> Result<Payload> {
+) -> Result<Value> {
+    if Instant::now() >= end {
+        return Err(error("RPC request deadline"));
+    }
     if !args.is_object() {
         return Err(error("RPC parameters must be an object"));
     }
@@ -205,16 +182,6 @@ fn dispatch_payload_until(
     let mut writer = Writer::new(Vec::new(), registry.clone());
     writer.write(&args)?;
     let request = Record::decode(&writer.into_inner())?;
-    if public_http {
-        if let Some(cache) = front_cache {
-            if Instant::now() >= end {
-                return Err(error("RPC request deadline"));
-            }
-            if let Some(bytes) = cache::lookup(cache, &request)? {
-                return Ok(Payload::Serialized(bytes));
-            }
-        }
-    }
     if method == "add_transaction" {
         let task = {
             let n = lock_node_until(node, end)?;
@@ -228,61 +195,31 @@ fn dispatch_payload_until(
             let result = task.validate()?;
             lock_node_until(node, end)?.publish_transaction(task, result)?;
         }
-        return Ok(Payload::Json(Value::Null));
+        return Ok(Value::Null);
     }
-    let (response, fill) = {
+    let response = {
         let n = lock_node_until(node, end)?;
-        let (cached, fill) = if public_http {
-            cache::probe(&n, &request)?
-        } else {
-            (None, None)
-        };
-        if let Some(response) = cached {
+        if history::is_method(&request.name) {
+            let task = history::Task::capture(&n, &request)?;
             drop(n);
-            return Ok(Payload::Serialized(response));
+            task.call(&request, end)?
+        } else if method == "validate" || crate::transactions::is_balance_method(&request.name) {
+            let mut task = ReadTask::capture(&n)?;
+            drop(n);
+            task.call(&request)?
         } else {
-            let response = if history::is_method(&request.name) {
-                let task = history::Task::capture(&n, &request)?;
-                drop(n);
-                task.call(&request, end)?
-            } else if method == "validate" || crate::transactions::is_balance_method(&request.name)
-            {
-                let mut task = ReadTask::capture(&n)?;
-                drop(n);
-                task.call(&request)?
-            } else {
-                let response = n.call(&request)?;
-                drop(n);
-                response
-            };
-            if response.memory_size() > MAX_RESPONSE_BYTES {
-                return Err(error("RPC response exceeds byte budget"));
-            }
-            (response, fill)
+            n.call(&request)?
         }
     };
-    let value = response_json(&response)?;
-    if public_http {
-        let bytes = serde_json::to_vec(&value)?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(error("RPC response exceeds byte budget"));
-        }
-        if let Some(fill) = fill {
-            fill.finish_json(&bytes);
-        }
-        Ok(Payload::Serialized(bytes))
-    } else {
-        Ok(Payload::Json(value))
-    }
+    response_json(&response)
 }
 pub(crate) fn web_query(
     node: &Arc<Mutex<Node>>,
     method: &str,
     args: Value,
     end: Instant,
-    cache: Option<&cache::Shared>,
 ) -> Result<Value> {
-    dispatch_payload_until(node, method, args, end, true, cache)?.into_json()
+    dispatch_until(node, method, args, end)
 }
 pub(crate) fn response_json(response: &Record) -> Result<Value> {
     if response.memory_size() > MAX_RESPONSE_BYTES {
@@ -342,16 +279,8 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
                 .into(),
             ),
             move |args, _| {
-                dispatch_payload_until(
-                    &node,
-                    method,
-                    args,
-                    Instant::now() + Duration::from_secs(5),
-                    false,
-                    None,
-                )
-                .and_then(Payload::into_json)
-                .map_err(|e| vnx::Error::Remote(e.to_string()))
+                dispatch_until(&node, method, args, Instant::now() + Duration::from_secs(5))
+                    .map_err(|e| vnx::Error::Remote(e.to_string()))
             },
         );
     }
@@ -497,12 +426,7 @@ pub fn vnx_server(endpoint: Endpoint, node: Arc<Mutex<Node>>) -> Result<VnxServe
     })
 }
 
-fn request_bytes(
-    node: &Arc<Mutex<Node>>,
-    r: Value,
-    end: Instant,
-    front_cache: Option<&cache::Shared>,
-) -> Option<Vec<u8>> {
+fn request_bytes(node: &Arc<Mutex<Node>>, r: Value, end: Instant) -> Option<Vec<u8>> {
     let id = r.get("id").cloned().unwrap_or(Value::Null);
     if !bounded_id(&id) {
         return Some(limit_error_bytes(Value::Null, "RPC id exceeds 128 bytes"));
@@ -545,21 +469,19 @@ fn request_bytes(
             )
         })().and_then(|value| Ok(serde_json::to_vec(&value)?))
     } else {
-        dispatch_payload_until(
+        dispatch_until(
             node,
             method,
             r.get("params").cloned().unwrap_or_else(|| json!({})),
             end,
-            true,
-            front_cache,
         )
-        .and_then(Payload::into_bytes)
+        .and_then(|value| Ok(serde_json::to_vec(&value)?))
     };
     r.get("id")?;
     Some(match result {
         Ok(value) => {
-            // The result is already serialized JSON from the cache or miss
-            // handler. Only the request-specific envelope needs encoding.
+            // The handler serialized the result; encode the request-specific
+            // envelope separately to preserve IDs and notification semantics.
             let mut reply = b"{\"jsonrpc\":\"2.0\",\"id\":".to_vec();
             serde_json::to_writer(&mut reply, &id).expect("JSON value serialization");
             reply.extend_from_slice(b",\"result\":");
@@ -613,16 +535,15 @@ pub(crate) fn json_request_until(
     body: &[u8],
     end: Instant,
 ) -> Option<Value> {
-    json_response_until(node, body, end, None)
+    json_response_until(node, body, end)
         .map(|bytes| serde_json::from_slice(&bytes).expect("generated JSON-RPC response"))
 }
 pub(crate) fn json_response_until(
     node: &Arc<Mutex<Node>>,
     body: &[u8],
     end: Instant,
-    front_cache: Option<&cache::Shared>,
 ) -> Option<Vec<u8>> {
-    json_response_budget(node, body, end, MAX_RESPONSE_BYTES, front_cache)
+    json_response_budget(node, body, end, MAX_RESPONSE_BYTES)
 }
 #[cfg(test)]
 fn json_request_budget(
@@ -631,7 +552,7 @@ fn json_request_budget(
     end: Instant,
     bytes: usize,
 ) -> Option<Value> {
-    json_response_budget(node, body, end, bytes, None)
+    json_response_budget(node, body, end, bytes)
         .map(|bytes| serde_json::from_slice(&bytes).expect("generated JSON-RPC response"))
 }
 fn json_response_budget(
@@ -639,7 +560,6 @@ fn json_response_budget(
     body: &[u8],
     end: Instant,
     bytes: usize,
-    front_cache: Option<&cache::Shared>,
 ) -> Option<Vec<u8>> {
     match serde_json::from_slice::<Value>(body) {
         Ok(Value::Array(items)) if !items.is_empty() => {
@@ -660,7 +580,7 @@ fn json_response_budget(
                     replies.push(limit_error_bytes(id, "RPC request deadline"));
                     break;
                 }
-                if let Some(reply) = request_bytes(node, r, end, front_cache) {
+                if let Some(reply) = request_bytes(node, r, end) {
                     if std::io::Write::write_all(&mut budget, &reply).is_err() {
                         replies.push(limit_error_bytes(id, "RPC response exceeds byte budget"));
                         break;
@@ -686,7 +606,7 @@ fn json_response_budget(
             if Instant::now() >= end {
                 return Some(limit_error_bytes(Value::Null, "RPC request deadline"));
             }
-            request_bytes(node, r, end, front_cache).map(|reply| {
+            request_bytes(node, r, end).map(|reply| {
                 if reply.len() > bytes {
                     limit_error_bytes(Value::Null, "RPC response exceeds byte budget")
                 } else {
