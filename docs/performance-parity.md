@@ -17,8 +17,8 @@ and its Rust dependencies use jemalloc; native libraries such as OpenCL and
 Zstd can still use the system allocator. The earlier glibc threshold policy
 continues to cover those allocations and builds using the system allocator.
 This deliberately differs from C++'s unprefixed system-library linkage. Neither
-choice changes consensus, validation concurrency, admission bounds or the 64 MiB RPC-cache
-default. Jemalloc can retain pages for reuse too; switching allocators does not
+choice changes consensus, validation concurrency, admission bounds or the
+64 MiB RPC-cache default. Jemalloc can retain pages for reuse too; switching allocators does not
 prove the absence of application leaks or impose a process RSS limit.
 
 At startup and every minute, the main loop refreshes jemalloc's statistics epoch
@@ -48,6 +48,23 @@ on full-node memory or proof of full C++ throughput parity.
 Both allocator configurations pass all 198 node tests (one existing benchmark
 ignored), with two test threads. Node all-target Clippy passes with warnings
 denied for both builds. Formatting and diff checks pass.
+
+The local release (`489b6a7`) was installed against the same ledger, retaining
+the 64 MiB RPC-cache limit. The predecessor using tuned glibc had 649.0 MiB RSS
+immediately before shutdown; an earlier 120-second baseline ranged from 625.6
+to 629.7 MiB. Across 25 jemalloc samples over 240 seconds, RSS ranged from
+609.8 to 659.9 MiB and the process high-water mark was 758.5 MiB. Every sample
+was synced, advancing from height 5,639,904 to 5,639,927. The public API reported
+the new commit and the pre-restart block hash was preserved. The latest heap
+report recorded about 670.1 MiB allocated, 680.4 MiB active and 727.0 MiB resident
+according to jemalloc; those allocator counters are not process RSS.
+
+These short windows have different cache warmth and live work, and the restart
+also discards previous allocator state. They do not establish lower memory use
+or higher throughput than the tuned system allocator. Long-duration operation,
+fresh genesis-sync peaks and sustained RPC workloads remain unmeasured with
+jemalloc. The allocator counters and retained system-allocator build option
+provide a way to investigate subsequent growth and compare representative runs.
 
 ## Node allocator retention (2026-11-01)
 
