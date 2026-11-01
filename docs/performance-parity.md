@@ -37,6 +37,13 @@ It reopened at height 5,639,657, recovered authenticated sync and stayed below
 610 MiB RSS during the initial live sample. A restart also releases prior
 allocator state, so this live observation and the isolated regression are
 reported separately. No ledger rewrite, rollback or historical resync was used.
+The built-in release (`b185bbe`) was then installed with the temporary service
+environment override removed. Its public API reported that commit and the
+pre-restart block hash was preserved. Across 25 samples over 241 seconds, height
+advanced from 5,639,715 to 5,639,739 with every sample synced; RSS ranged from
+548.8 to 621.0 MiB, with a process high-water mark of 625.1 MiB. The RPC-cache
+limit remained 64 MiB. These are observations of ongoing mainnet operation after
+restart, not a hard whole-process memory limit.
 Long-duration genesis-sync RSS and the effect of additional mmap calls on its
 throughput remain unmeasured; this is not a claim of full C++ performance parity.
 Validation: all 198 node tests pass with two test threads (one existing benchmark
