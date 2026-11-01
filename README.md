@@ -421,7 +421,11 @@ bodies. Cached address-history pages advance from the same events; address
 balances and contracts refill on demand after a state change. Public block and
 transaction forms with native currency only are also prepared from accepted
 bodies; token metadata is loaded on demand. Confirmation counts use the final
-selected tip of a multi-block publication. Eviction removes
+selected tip of a multi-block publication. This warming runs even without HTTP
+requests, including during synchronization, so an idle server's cache can grow
+to its configured budget. The budget is not reserved upfront; `used_bytes`
+includes conservative metadata charges rather than measuring process RSS.
+Eviction removes
 the least frequently used response, breaking ties by oldest access. Forks discard
 replaced suffixes and affected history; rollback and purge reset the cache.
 Generation checks prevent older in-flight reads from refilling it. Pending

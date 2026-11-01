@@ -66,6 +66,28 @@ fresh genesis-sync peaks and sustained RPC workloads remain unmeasured with
 jemalloc. The allocator counters and retained system-allocator build option
 provide a way to investigate subsequent growth and compare representative runs.
 
+The same production source (`489b6a7`) was also deployed to t320 and eu2 using
+a GNU/glibc 2.35 build whose newest required glibc symbol is 2.34. The actual
+release executable passed the three-burst allocator regression in that build
+environment without forced purging. Only the node service restarted on each
+host. T320's wallet, farmer and harvester retained their process identities,
+and its cached inventory (700 plots), five farmer identities and reward address
+matched before and after. Eu2's proxy and Caddy processes also remained running.
+Existing historical block hashes and node identity files were preserved, and
+both nodes' ready HTTP APIs reported the new commit and synchronized status.
+Eu2's check used its public proxy with `x-health-check: true` to require the local
+backend rather than accepting a response from a fallback peer.
+
+Early post-restart snapshots showed about 432 MiB RSS on t320 and 584–588 MiB
+on eu2. Their RPC-cache limits remain 64 MiB and 4 GiB respectively. Eu2's cache
+charge fell from about 2.92 GiB before restart to 3.3–3.8 MiB in those snapshots;
+the restart discarded its old entries, so this RSS comparison cannot isolate
+allocator effects. Accepted blocks proactively seed multiple serialized RPC and
+REST forms, even without incoming requests, and can refill the cache to its
+budget. Reported `used_bytes` includes conservative metadata/index charges,
+rather than being an exact payload or RSS measurement. These deployment checks
+do not establish long-duration memory behavior or RPC throughput parity.
+
 ## Node allocator retention (2026-11-01)
 
 References inspected: C++ `CMakeLists.txt` links jemalloc when available, and
