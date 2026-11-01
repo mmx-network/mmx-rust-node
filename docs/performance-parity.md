@@ -34,6 +34,17 @@ Validation: all 197 node tests pass with two test threads. The 142 library tests
 also pass with the system allocator, and all-target Clippy passes with warnings
 denied for both allocator configurations. Formatting and diff checks pass.
 
+Release `75b8bc9` was deployed locally, on t320 and on eu2 using the compatible
+GNU/glibc 2.35 build. All three ready REST APIs reported that commit and
+synchronized status; eu2 was checked through its public proxy with
+`x-health-check: true` to require its local backend. Five repeated internal HTTP
+block-hash lookups on each host left cache entries, charged bytes, hits and
+misses unchanged. Cache limits remain 64 MiB locally/on t320 and 4 GiB on eu2.
+Historical checkpoints and node identities were preserved. T320's farming
+processes, cached plot inventory, farmer identities and reward address matched
+before/after; eu2's proxy and Caddy retained their process identities. These
+checks verify the deployed cache boundary, not long-duration RSS or throughput.
+
 ## Jemalloc node allocator (2026-11-01)
 
 Following the glibc-retention investigation below, GNU/Linux `mmx-node` now uses
