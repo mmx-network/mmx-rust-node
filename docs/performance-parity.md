@@ -1,5 +1,54 @@
 # C++ performance parity
 
+## Jemalloc node allocator (2026-11-01)
+
+Following the glibc-retention investigation below, GNU/Linux `mmx-node` now uses
+`tikv-jemallocator` as its Rust global allocator by default. References inspected:
+C++ `CMakeLists.txt` links jemalloc when available, and `Node.cpp::print_stats`
+records allocator diagnostics. Rust bundles jemalloc through the TiKV bindings,
+so deployments do not need a system jemalloc package. The default `jemalloc`
+Cargo feature enables background purging and allocation statistics; building
+with `--no-default-features` selects the system allocator. Other platforms keep
+their previous allocator. The global allocator is declared only in the node
+executable, leaving library users' allocator choice intact.
+
+The bundled allocator uses prefixed symbols. Rust allocations across the node
+and its Rust dependencies use jemalloc; native libraries such as OpenCL and
+Zstd can still use the system allocator. The earlier glibc threshold policy
+continues to cover those allocations and builds using the system allocator.
+This deliberately differs from C++'s unprefixed system-library linkage. Neither
+choice changes consensus, validation concurrency, admission bounds or the 64 MiB RPC-cache
+default. Jemalloc can retain pages for reuse too; switching allocators does not
+prove the absence of application leaks or impose a process RSS limit.
+
+At startup and every minute, the main loop refreshes jemalloc's statistics epoch
+and logs `allocated_bytes`, `active_bytes`, and `resident_bytes`. Reporting runs
+outside the ledger mutex. Allocated bytes represent application allocations;
+active bytes include page slack, and resident bytes include allocator metadata
+and dirty pages. These counters do not include every native-library allocation,
+thread stack, executable mapping or GPU-driver mapping, and resident bytes can
+overestimate physical residency. Per-thread caches also make accounting
+approximate. The counters help distinguish growing live allocations
+from allocator overhead when process RSS increases. Default prefixed jemalloc
+configuration can be overridden before startup with `_RJEM_MALLOC_CONF`.
+
+A fresh-process regression uses the executable's actual global allocator. Eight
+workers perform three 64 MiB allocation bursts while keeping small allocations
+and the workers themselves alive between bursts. It verifies that Rust's
+allocations appear in jemalloc statistics, allocated bytes fall after release,
+and normal background decay returns heap residency and process RSS close to
+baseline before each subsequent burst. The test does not force a purge or flush
+worker caches. It uses only disposable RAM allocations. The existing glibc
+retention/override regression remains enabled for builds without jemalloc.
+In the local three-burst run, peak jemalloc allocation was about 65 MiB on each
+round and returned to about 1.1–1.3 MiB between rounds. After normal decay, process
+RSS was 30.0, 26.0 and 13.9 MiB respectively, with a 7.0 MiB initial baseline.
+This regression demonstrates release and decay for that workload, not a bound
+on full-node memory or proof of full C++ throughput parity.
+Both allocator configurations pass all 198 node tests (one existing benchmark
+ignored), with two test threads. Node all-target Clippy passes with warnings
+denied for both builds. Formatting and diff checks pass.
+
 ## Node allocator retention (2026-11-01)
 
 References inspected: C++ `CMakeLists.txt` links jemalloc when available, and

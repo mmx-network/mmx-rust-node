@@ -1,5 +1,42 @@
-//! Keep temporary sync/proof buffers from raising glibc's per-worker heap
-//! high-water marks. Apply only in the executable, before starting any workers.
+//! Executable-only allocator policy and heap diagnostics. GNU/Linux builds use
+//! jemalloc for Rust allocations; native libraries can still use glibc.
+
+#[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug)]
+struct Heap {
+    allocated: usize,
+    active: usize,
+    resident: usize,
+}
+
+#[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
+fn heap() -> Result<Heap, tikv_jemalloc_ctl::Error> {
+    use tikv_jemalloc_ctl::{epoch, stats};
+    epoch::advance()?;
+    Ok(Heap {
+        allocated: stats::allocated::read()?,
+        active: stats::active::read()?,
+        resident: stats::resident::read()?,
+    })
+}
+
+#[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
+pub(super) fn report() {
+    match heap() {
+        Ok(heap) => eprintln!(
+            "jemalloc heap: allocated_bytes={} active_bytes={} resident_bytes={}",
+            heap.allocated, heap.active, heap.resident
+        ),
+        Err(error) => eprintln!("Could not read jemalloc heap statistics: {error}"),
+    }
+}
+
+#[cfg(not(all(feature = "jemalloc", target_os = "linux", target_env = "gnu")))]
+pub(super) fn report() {}
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(super) fn configure() {
@@ -29,7 +66,16 @@ pub(super) fn configure() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub(super) fn configure() {}
 
-#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+#[cfg(all(test, feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
+#[path = "memory/jemalloc_tests.rs"]
+mod jemalloc_tests;
+
+#[cfg(all(
+    test,
+    not(feature = "jemalloc"),
+    target_os = "linux",
+    target_env = "gnu"
+))]
 mod tests {
     use std::{hint::black_box, process::Command, sync::Arc, sync::Barrier, thread};
 

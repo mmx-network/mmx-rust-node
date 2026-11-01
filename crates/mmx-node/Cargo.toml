@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "MMX full ledger node, native peer sync and RPC server"
 
+[features]
+default = ["jemalloc"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+
 [dependencies]
 mmx-config.workspace = true
 mmx-db.workspace = true
@@ -27,6 +31,8 @@ socket2 = "0.6"
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"
+tikv-jemallocator = { version = "0.7", optional = true, features = ["background_threads", "stats"] }
+tikv-jemalloc-ctl = { version = "0.7", optional = true, features = ["stats"] }
 
 [dev-dependencies]
 sha2.workspace = true

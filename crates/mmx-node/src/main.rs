@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const USAGE: &str = "mmx-node [--mmx-root PATH] [--network mainnet] [--data-dir PATH]
@@ -355,7 +355,13 @@ fn main() -> Result<()> {
         }));
     }
 
+    memory::report();
+    let mut last_heap_report = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if last_heap_report.elapsed() >= Duration::from_secs(60) {
+            memory::report();
+            last_heap_report = Instant::now();
+        }
         #[cfg(unix)]
         if let Some(services) = &mut services {
             if let Err(e) = services.check() {

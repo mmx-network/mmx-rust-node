@@ -398,13 +398,20 @@ the cache. The budget includes retained payloads, keys and conservative index
 overhead; it does not cap total process RSS or temporary request/response memory.
 `get_status.rpc_cache` reports its byte charge, entries, hits, misses and evictions.
 
-On GNU/Linux, the node fixes glibc's large-allocation threshold at 128 KiB on
-startup so released temporary sync/proof buffers can return to the OS instead
-of accumulating in worker heaps. An explicit `MALLOC_MMAP_THRESHOLD_` or
-`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=...` takes precedence. This reduces
-allocator retention; it does not cap memory required by active work, database
-indexes, or a larger configured RPC cache. Other platforms use their existing
-allocator defaults. See [memory measurements](docs/performance-parity.md#node-allocator-retention-2026-11-01).
+GNU/Linux node builds use bundled jemalloc for Rust allocations, with background
+page reclamation and heap statistics logged at startup and every minute.
+`allocated_bytes` tracks application allocations; `active_bytes` also includes
+unused space within active pages; `resident_bytes` includes allocator metadata
+and dirty pages. These describe the jemalloc heap, not the complete process RSS.
+Native libraries can still allocate through glibc. Build with
+`--no-default-features` to use the system allocator for Rust too.
+
+The executable also fixes glibc's large-allocation threshold at 128 KiB for
+native-library buffers and builds using the system allocator. Explicit
+`MALLOC_MMAP_THRESHOLD_` or `glibc.malloc.mmap_threshold` tunables take precedence.
+Other platforms keep their existing allocator defaults. Neither policy caps
+memory needed by active work, database indexes, or a larger RPC cache. See
+[memory measurements](docs/performance-parity.md#jemalloc-node-allocator-2026-11-01).
 
 Cache hits make no chain/database queries and copy cached JSON directly into
 the HTTP response without parsing or re-encoding the result. Public REST caches
