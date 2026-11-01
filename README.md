@@ -398,6 +398,14 @@ the cache. The budget includes retained payloads, keys and conservative index
 overhead; it does not cap total process RSS or temporary request/response memory.
 `get_status.rpc_cache` reports its byte charge, entries, hits, misses and evictions.
 
+On GNU/Linux, the node fixes glibc's large-allocation threshold at 128 KiB on
+startup so released temporary sync/proof buffers can return to the OS instead
+of accumulating in worker heaps. An explicit `MALLOC_MMAP_THRESHOLD_` or
+`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=...` takes precedence. This reduces
+allocator retention; it does not cap memory required by active work, database
+indexes, or a larger configured RPC cache. Other platforms use their existing
+allocator defaults. See [memory measurements](docs/performance-parity.md#node-allocator-retention-2026-11-01).
+
 Cache hits make no chain/database queries and copy cached JSON directly into
 the HTTP response without parsing or re-encoding the result. Public REST caches
 its final WebAPI JSON, including presentation fields. Successful chain publications push

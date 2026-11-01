@@ -1,3 +1,4 @@
+mod memory;
 #[cfg(unix)]
 mod services;
 use mmx_execution::chain::network::Network;
@@ -137,6 +138,7 @@ fn options() -> Result<Option<Options>> {
     Ok(Some(o))
 }
 fn main() -> Result<()> {
+    memory::configure();
     let Some(mut options) = options()? else {
         return Ok(());
     };

@@ -1,5 +1,48 @@
 # C++ performance parity
 
+## Node allocator retention (2026-11-01)
+
+References inspected: C++ `CMakeLists.txt` links jemalloc when available, and
+`Node.cpp::print_stats` records its allocator statistics. The local C++ process
+used about 630 MiB RSS. Rust used glibc and retained 3,977 MiB RSS after its
+genesis sync, including 3,901 MiB anonymous memory. Its public RPC cache was
+limited to 64 MiB and charged almost exactly that amount; resident database
+offset arrays accounted for approximately 347 MiB, excluding spare capacity.
+The remaining anonymous mappings included many large worker heaps. These
+observations suggested allocator retention, but did not by themselves identify
+every live allocation in that process.
+
+GNU/Linux `mmx-node` now calls `mallopt(M_MMAP_THRESHOLD, 131072)` at startup,
+before creating workers. Fixing the threshold disables glibc's dynamic increase
+and lets large temporary buffers be unmapped when released. The
+[glibc allocator documentation](https://sourceware.org/glibc/manual/latest/html_node/Malloc-Tunable-Parameters.html)
+describes this policy. An explicit legacy `MALLOC_MMAP_THRESHOLD_` or modern
+`glibc.malloc.mmap_threshold` tunable takes precedence; unrelated tunables do
+not suppress the node default. Libraries embedded in another executable and
+non-GNU/Linux targets keep their existing allocator policy. Worker counts,
+admission bounds and the default 64 MiB public RPC cache are unchanged.
+
+A subprocess regression warms the dynamic threshold with a released 16 MiB
+buffer, then interleaves a 64 MiB temporary burst with small persistent
+allocations across eight workers. It samples memory while those workers are
+still alive, so thread exit cannot conceal retention. On this host, default
+glibc retained 69.3 MiB RSS from a 4.6 MiB baseline; the node policy retained
+3.3 MiB from a 2.6 MiB baseline after a 67.8 MiB peak. Both explicit threshold
+spellings preserve the operator's policy; an unrelated tunable still permits
+the node default. Only disposable RAM allocations are used.
+
+The same original release binary was restarted against its existing local
+ledger with `MALLOC_MMAP_THRESHOLD_=131072`, keeping the 64 MiB RPC-cache limit.
+It reopened at height 5,639,657, recovered authenticated sync and stayed below
+610 MiB RSS during the initial live sample. A restart also releases prior
+allocator state, so this live observation and the isolated regression are
+reported separately. No ledger rewrite, rollback or historical resync was used.
+Long-duration genesis-sync RSS and the effect of additional mmap calls on its
+throughput remain unmeasured; this is not a claim of full C++ performance parity.
+Validation: all 198 node tests pass with two test threads (one existing benchmark
+ignored), including the five allocator subprocess policies. Node all-target
+Clippy passes with warnings denied; formatting and diff checks pass.
+
 ## Public HTTP REST compatibility (2026-10-29)
 
 The in-process listener now serves the C++ public `/wapi` protocol directly,

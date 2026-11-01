@@ -830,6 +830,7 @@ dependencies = [
  "ctrlc",
  "httparse",
  "k256",
+ "libc",
  "mmx-config",
  "mmx-consensus",
  "mmx-crypto",
