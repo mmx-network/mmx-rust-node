@@ -1,5 +1,46 @@
 # C++ performance parity
 
+## Eu2 RSS and transparent hugepages (2026-11-03)
+
+After about 51 hours on `75b8bc9`, local and t320 heap usage had plateaued,
+but eu2 had roughly 3.4–3.5 GiB process RSS against about 2.1 GiB reported
+jemalloc residency. Its public REST cache was charged about 1.12 GiB of its
+4 GiB budget. The running allocator had four background purge threads,
+10-second dirty decay, zero muzzy decay and no muzzy pages. The host's
+transparent hugepage (THP) policy was `always`; jemalloc's `thp:default`
+inherited that policy, while explicit metadata THP was disabled.
+
+Read-only inspection used symbols from the exact deployed executable and
+structure offsets from its bundled jemalloc 5.3.1 sources. The node continued
+running without debugger attachment or injected calls. Walking its retained
+extent lists and reading page-residency metadata found about 1.51–1.54 GiB of
+exclusive physical pages in unused retained extents. All those resident bytes
+were in extents marked zeroed by the allocator. The extent states/owners,
+nonoverlapping ranges and per-arena page totals were checked; list totals
+matched each arena's retained-page counter. These pages account for the RSS
+gap: allocator residency is an estimate that omits this backing of purged,
+retained address space, and may overestimate other demand-zeroed allocations.
+
+A separate process on eu2 linked the same bundled allocator and allocated
+128 MiB, then kept one 4 KiB object per 2 MiB region. After normal background
+decay, explicitly exercising the kernel's hugepage-collapse mechanism raised
+RSS to 134.8 MiB while jemalloc still reported 10.3 MiB resident. The identical
+workload with `thp:never` stayed at 13.6 MiB and all collapse attempts were
+rejected. Explicit collapse made the mechanism deterministic; this is not a
+timing measurement of the kernel's automatic hugepage scanner. The disposable
+probe peaked at 138.8 MiB and consumed about 117 ms CPU, within a separate
+256 MiB service limit, without ledger or plot access.
+
+This identifies THP backing of unused jemalloc extents as the excess-RSS
+mechanism, rather than extra live application allocations of that size. The
+node-specific mitigation is `_RJEM_MALLOC_CONF=thp:never` before startup. It
+preserves the cache budget and other allocator defaults, and does not change
+the host-wide THP policy. Applying it requires a node restart; this investigation
+left the original node running and prepared the setting without installing it.
+A warm-cache node comparison after that change remains unmeasured. See the
+[kernel THP documentation](https://docs.kernel.org/admin-guide/mm/transhuge.html)
+and [jemalloc's THP control](https://jemalloc.net/jemalloc.3.html#opt.thp).
+
 ## Cache final public REST responses only (2026-11-01)
 
 The earlier cache bypassed native VNX transport but still cached internal node
