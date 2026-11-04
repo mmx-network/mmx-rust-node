@@ -84,7 +84,7 @@ def security(headers, rpc_origin, wallet, website=False):
     policy = headers["content-security-policy"]
     if website:
         assert rpc_origin not in policy, policy
-        assert "connect-src 'none'" in policy, policy
+        assert "connect-src https://api.github.com/repos/mmx-network/mmx-rust-node/releases;" in policy, policy
     else:
         assert f"connect-src 'self' {rpc_origin}" in policy, policy
     assert "frame-ancestors 'none'" in policy

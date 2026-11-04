@@ -13,7 +13,9 @@ request's `Host` header:
 TLS terminates at the CDN. The origin does not redirect HTTP to HTTPS or need
 certificates. Visitors use HTTPS at the CDN, including for the wallet's browser
 crypto and clipboard features. Browsers contact `https://rpc.mmx.network`
-directly; the website makes no runtime API requests. This container only
+directly; the website queries the public GitHub releases API only on desktop
+wallet download intent, selecting published `wallet-v` releases independently
+of node releases. This container only
 serves static files and has no node or database. The website links to the wallet
 at `https://wallet.mmx.network`.
 
