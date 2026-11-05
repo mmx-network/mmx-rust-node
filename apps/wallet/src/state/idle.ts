@@ -47,11 +47,14 @@ async function lockNow(reason: 'inactivity' | 'pagehide'): Promise<void> {
 }
 
 /** Starts idle tracking; returns a stop function. */
-export function startIdleLock(): () => void {
+export function startIdleLock({ trackFocus = true }: { trackFocus?: boolean } = {}): () => void {
   if (typeof window === 'undefined') return () => undefined;
   lastActivity = Date.now();
   let lastMove = 0;
   const onActivity = (e: Event) => {
+    // A connected website can focus its popup programmatically. That must not
+    // keep locally unlocked signing keys alive without a wallet action.
+    if (!trackFocus && e.type === 'focus') return;
     const now = Date.now();
     if (e.type === 'pointermove') {
       if (now - lastMove < 1000) return;

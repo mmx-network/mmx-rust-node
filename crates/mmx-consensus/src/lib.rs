@@ -8,17 +8,25 @@
 //! proof-record hashes and plot identity checks. `pos` and `transitions` implement
 //! CPU space work and history-dependent header checks. `vdf` verifies timelord
 //! work and links verified outputs to headers. Ledger validation is separate.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod accelerator;
 pub mod authorization;
 mod encode;
 mod hash;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod header;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod pos;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod proof;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod response;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod transitions;
 mod validation;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod vdf;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod vote;
 mod wire;
 

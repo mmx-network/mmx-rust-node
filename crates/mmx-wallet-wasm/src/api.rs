@@ -31,7 +31,7 @@ type Seed = Box<Zeroizing<[u8; 32]>>;
 pub const MAX_ADDRESSES: u32 = 100;
 pub const MEMO_MAX_BYTES: usize = 64;
 
-fn wallet_error(e: mmx_wallet::Error) -> Code {
+pub(crate) fn wallet_error(e: mmx_wallet::Error) -> Code {
     use mmx_wallet::Error as E;
     #[allow(unreachable_patterns)]
     match e {
@@ -40,7 +40,9 @@ fn wallet_error(e: mmx_wallet::Error) -> Code {
         E::InvalidAmount(_) => INVALID_AMOUNT,
         E::InsufficientFunds("transaction fee") => INSUFFICIENT_FEE,
         E::InsufficientFunds(_) => INSUFFICIENT_FUNDS,
-        E::InvalidArgument(_) | E::InvalidKeyFile => INVALID_ARGUMENT,
+        E::InvalidArgument(_) | E::InvalidKeyFile | E::InvalidTransaction(_) | E::Native(_) => {
+            INVALID_ARGUMENT
+        }
         _ => INTERNAL,
     }
 }
@@ -72,7 +74,7 @@ fn parse_memo(memo: Option<String>) -> Res<Option<String>> {
 }
 
 /// Priority levels offered by the wallet: 1×, 2×, 3×, 5× and 10× the minimum.
-fn fee_ratio(level: u32) -> Res<u32> {
+pub(crate) fn fee_ratio(level: u32) -> Res<u32> {
     match level {
         1 | 2 | 3 | 5 | 10 => Ok(level * 1024),
         _ => Err(INVALID_ARGUMENT),
@@ -100,7 +102,7 @@ struct BalanceEntry {
 }
 
 /// `[{"address":"mmx1…","contract":"mmx1…","amount":"123"}]`
-fn parse_balances(json: &str) -> Res<Balances> {
+pub(crate) fn parse_balances(json: &str) -> Res<Balances> {
     let entries: Vec<BalanceEntry> = serde_json::from_str(json).map_err(|_| INVALID_ARGUMENT)?;
     let mut balances = Balances::new();
     for entry in entries {
@@ -269,7 +271,7 @@ pub struct VaultCore {
     passphrase: Zeroizing<String>,
     with_passphrase: bool,
     fingerprint: String,
-    wallet: Wallet,
+    pub(crate) wallet: Wallet,
 }
 
 pub struct Transfer<'a> {

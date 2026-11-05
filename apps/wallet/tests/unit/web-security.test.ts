@@ -99,7 +99,11 @@ describe('deployment files', () => {
     const caddy = deploy('Caddyfile');
     const nginx = deploy('nginx-security-headers.conf');
     for (const [name, value] of securityHeaders(ORIGIN)) {
-      expect(caddy).toContain(`${name} "${value}"`);
+      if (name === 'Cross-Origin-Opener-Policy') {
+        expect(caddy).toContain('Cross-Origin-Opener-Policy "{wallet_coop}"');
+        expect(caddy).toContain('/connect.html unsafe-none');
+        expect(caddy).toContain('default same-origin');
+      } else expect(caddy).toContain(`${name} "${value}"`);
       expect(nginx).toContain(`add_header ${name} "${value}" always;`);
     }
     const site = deploy('nginx.conf');
@@ -107,6 +111,15 @@ describe('deployment files', () => {
     // `http2 on;` needs nginx 1.25.1+, newer than Ubuntu 24.04 and Debian 12 ship.
     expect(site).not.toMatch(/^\s*http2\s+on\s*;/mu);
     expect(site.match(/^\s*listen\s+(\[::\]:)?443\s+ssl\s+http2;/gmu)).toHaveLength(2);
-    expect(site.match(/include snippets\/mmx-wallet-security-headers\.conf;/gu)).toHaveLength(site.match(/location /gu)!.length);
+    expect(site.match(/include snippets\/mmx-wallet(?:-connect)?-security-headers\.conf;/gu)).toHaveLength(site.match(/location /gu)!.length);
+    const connect = deploy('nginx-connect-security-headers.conf');
+    for (const [name,value] of securityHeaders(ORIGIN,'/connect.html')) expect(connect).toContain(`add_header ${name} "${value}" always;`);
+  });
+
+  it('permits the connection popup and public SDK without changing the main document policy', () => {
+    expect(new Map(securityHeaders(ORIGIN)).get('Cross-Origin-Opener-Policy')).toBe('same-origin');
+    expect(new Map(securityHeaders(ORIGIN,'/connect.html')).get('Cross-Origin-Opener-Policy')).toBe('unsafe-none');
+    expect(new Map(securityHeaders(ORIGIN,'/mmx-wallet.js')).get('Access-Control-Allow-Origin')).toBe('*');
+    expect(new Map(securityHeaders(ORIGIN,'/assets/app.js')).has('Access-Control-Allow-Origin')).toBe(false);
   });
 });

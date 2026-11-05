@@ -24,6 +24,7 @@ import { homeRoute, navigate, route, routeAllowed, startRouter } from './router'
 import { finishSend } from './send';
 import { closeSession, openSession, resetChain, startSessionEffects } from './session';
 import { activateWallet, lockedElsewhere, reconcileAddresses } from './wallets';
+import { startWalletHost } from '../connect/host';
 
 let started: Promise<void> | null = null;
 
@@ -67,6 +68,7 @@ async function start(override?: Backend): Promise<void> {
     if (b.onExternalLock) b.onExternalLock(() => void lockedElsewhere().catch(() => undefined));
     startSessionEffects();
     startIdleLock();
+    if (__PLATFORM__ === 'web') startWalletHost();
     startRouteGuard();
   } catch (e) {
     initError.value = errorMessage(e);

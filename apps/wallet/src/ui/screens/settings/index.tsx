@@ -9,11 +9,14 @@ import {
   notify,
   platform,
   setAutoLockMinutes,
+  setAllowWebsiteConnections,
+  setWebsiteBlocked,
   setTheme,
   settings,
   usableWallets,
 } from '../../../state';
-import { Button, OptionRow, Page, PageHeader, Section, SegmentedControl, Select } from '../../components';
+import { Button, Field, TextInput, OptionRow, Page, PageHeader, Section, SegmentedControl, Select, Stack, Switch } from '../../components';
+import { websiteOrigin } from '../../../lib/websites';
 import { NetworkSettings } from './NetworkSettings';
 import { autoLockLabel } from './text';
 import { WalletSettings } from './WalletSettings';
@@ -53,10 +56,7 @@ function SecuritySettings() {
   return (
     <Section title="Security" card>
       {autoLockApplies ? (
-        <OptionRow
-          title="Lock automatically"
-          description={web ? undefined : 'For wallets with a passphrase'}
-        >
+        <OptionRow title="Lock automatically" description={web ? undefined : 'For wallets with a passphrase'}>
           <Select
             size="sm"
             aria-label="Lock automatically after"
@@ -77,6 +77,75 @@ function SecuritySettings() {
   );
 }
 
+function WebsiteSettings() {
+  const [saving, setSaving] = useState(false);
+  const [input, setInput] = useState('');
+  if (platform.value !== 'web') return null;
+  const sites = settings.value.blockedWebsites ?? [];
+  const save = async (action: () => Promise<void>) => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await action();
+    } catch (e) {
+      notify(errorMessage(e), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+  const block = async () => {
+    let site: string | null = null;
+    try {
+      site = websiteOrigin(new URL(input.trim()).origin);
+    } catch {
+      /* show validation below */
+    }
+    if (!site) {
+      notify('Enter a website URL starting with https://.', 'error');
+      return;
+    }
+    await setWebsiteBlocked(site, true);
+    setInput('');
+  };
+  return (
+    <Section title="Website connections" card>
+      <OptionRow
+        title="Allow website connections"
+        description="Share public addresses and review transaction requests from websites. Every transaction requires approval."
+      >
+        <Switch
+          aria-label="Allow website connections"
+          checked={settings.value.allowWebsiteConnections === true}
+          disabled={saving}
+          onChange={(v) => void save(() => setAllowWebsiteConnections(v))}
+        />
+      </OptionRow>
+      <OptionRow title="Block a website" description="Blocked websites cannot connect or request transactions." stacked>
+        <Stack gap={3}>
+          <Field label="Website URL">
+            <TextInput value={input} placeholder="https://example.com" onValue={setInput} disabled={saving} />
+          </Field>
+          <Button size="sm" disabled={saving || !input.trim()} onClick={() => void save(block)}>
+            Block website
+          </Button>
+        </Stack>
+      </OptionRow>
+      {sites.map((site) => (
+        <OptionRow key={site} title={<span class="settings__website">{site}</span>} description="Blocked">
+          <Button
+            size="sm"
+            disabled={saving}
+            aria-label={`Unblock ${site}`}
+            onClick={() => void save(() => setWebsiteBlocked(site, false))}
+          >
+            Unblock
+          </Button>
+        </OptionRow>
+      ))}
+    </Section>
+  );
+}
+
 export default function SettingsScreen() {
   const wallet = activeWallet.value;
   const theme = settings.value.theme;
@@ -86,6 +155,7 @@ export default function SettingsScreen() {
       <PageHeader title="Settings" />
       {wallet ? <WalletSettings key={wallet.id} wallet={wallet} /> : null}
       <SecuritySettings />
+      <WebsiteSettings />
       <NetworkSettings />
       <Section title="Appearance" card>
         <OptionRow title="Theme" class="settings-theme">

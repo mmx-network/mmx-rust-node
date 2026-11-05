@@ -5,6 +5,7 @@
 //! seeds and keys are only held inside WASM memory and cleared when released;
 //! private keys are never returned.
 mod api;
+mod custom;
 
 use js_sys::JsString;
 use wasm_bindgen::prelude::*;
@@ -86,6 +87,17 @@ pub fn static_fee(
 #[wasm_bindgen]
 pub fn verify_transaction(tx_json: &str, params_json: &str) -> Result<(), JsError> {
     Ok(api::verify_transaction(tx_json, params_json)?)
+}
+
+/// Canonical unsigned transaction for review, retaining typed VM arguments.
+#[wasm_bindgen]
+pub fn inspect_custom_transaction(tx_json: &str) -> Result<String, JsError> {
+    Ok(custom::inspect(tx_json)?)
+}
+
+#[wasm_bindgen]
+pub fn verify_custom_transaction(tx_json: &str, params_json: &str) -> Result<(), JsError> {
+    Ok(custom::verify_json(tx_json, params_json)?)
 }
 
 /// Sendable amount from public addresses alone; no seed or keys are opened.
@@ -215,6 +227,28 @@ impl Vault {
             expire_delta,
             nonce: None,
         })?)
+    }
+
+    /// Complete and sign an unsigned custom transaction. Approval/broadcast
+    /// remain in the wallet UI; no key material crosses the WASM boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_custom_transaction(
+        &self,
+        tx_json: &str,
+        balances_json: &str,
+        params_json: &str,
+        height: u32,
+        fee_level: u32,
+        gas_limit: u32,
+    ) -> Result<String, JsError> {
+        Ok(self.0.complete_custom(
+            tx_json,
+            balances_json,
+            params_json,
+            height,
+            fee_level,
+            gas_limit,
+        )?)
     }
 
     /// `sign_transfer` with a fixed nonce (parity tests only).

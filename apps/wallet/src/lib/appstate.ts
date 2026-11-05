@@ -7,6 +7,7 @@ import { normalizeAddress, NATIVE_CONTRACT } from './address';
 import { DEFAULT_FEE_LEVEL, isFeeLevel } from './fees';
 import { randomId } from './id';
 import { sanitizeText, validateName, type NameError } from './text';
+import { MAX_BLOCKED_WEBSITES, websiteOrigin } from './websites';
 
 export const MAX_ADDRESSES = 100;
 export const DEFAULT_ADDRESS_COUNT = 3;
@@ -25,7 +26,8 @@ const MAX_AUTO_LOCK_MINUTES = 24 * 60;
 const CONTACT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function defaultSettings(): Settings {
-  return { theme: 'system', autoLockMinutes: DEFAULT_AUTO_LOCK_MINUTES, feeLevel: DEFAULT_FEE_LEVEL };
+  return { theme: 'system', autoLockMinutes: DEFAULT_AUTO_LOCK_MINUTES, feeLevel: DEFAULT_FEE_LEVEL,
+    allowWebsiteConnections: false, blockedWebsites: [] };
 }
 
 export function defaultAppState(): AppState {
@@ -49,6 +51,11 @@ export function sanitizeSettings(raw: unknown, platform: Platform): Settings {
     s.autoLockMinutes = minutes;
   }
   if (isFeeLevel(raw.feeLevel)) s.feeLevel = raw.feeLevel;
+  if (platform === 'web') {
+    s.allowWebsiteConnections = raw.allowWebsiteConnections === true;
+    if (Array.isArray(raw.blockedWebsites)) s.blockedWebsites = [...new Set(raw.blockedWebsites
+      .filter((v): v is string => websiteOrigin(v) !== null))].slice(0, MAX_BLOCKED_WEBSITES);
+  }
   if (platform === 'desktop' && typeof raw.rpcUrl === 'string') {
     const url = raw.rpcUrl.trim();
     if (url && url.length <= 512 && !/[\s\u{0}-\u{1f}\u{7f}]/u.test(url)) s.rpcUrl = url;

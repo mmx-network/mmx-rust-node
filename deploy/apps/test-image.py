@@ -80,7 +80,7 @@ def request(port, host, path="/", method="GET", headers=None):
         connection.close()
 
 
-def security(headers, rpc_origin, wallet, website=False):
+def security(headers, rpc_origin, wallet, website=False, connection=False):
     policy = headers["content-security-policy"]
     if website:
         assert rpc_origin not in policy, policy
@@ -94,7 +94,7 @@ def security(headers, rpc_origin, wallet, website=False):
     assert headers["referrer-policy"] == "no-referrer"
     assert "set-cookie" not in headers
     if wallet:
-        assert headers["cross-origin-opener-policy"] == "same-origin"
+        assert headers["cross-origin-opener-policy"] == ("unsafe-none" if connection else "same-origin")
         assert headers["cross-origin-resource-policy"] == "same-origin"
         assert "clipboard-read=(self)" in headers["permissions-policy"]
         assert "max-age=" in headers["strict-transport-security"]
@@ -175,6 +175,20 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
     assert status == 200, (host, status)
     title = b"<title>MMX" if website else b"<title>MMX Wallet</title>" if wallet else b"<title>MMX Explorer"
     assert title in html
+    if wallet:
+        status, connect_headers, connect_html = request(port, host, "/connect.html")
+        assert status == 200 and b"/assets/" in connect_html
+        assert b'noindex' in connect_html
+        assert connect_headers["cache-control"] == "no-cache"
+        assert "access-control-allow-origin" not in connect_headers
+        security(connect_headers, rpc_origin, True, connection=True)
+        status, sdk_headers, sdk = request(port, host, "/mmx-wallet.js")
+        assert status == 200 and b"sendTransaction" in sdk and b"connect.html" in sdk
+        assert "javascript" in sdk_headers["content-type"]
+        assert sdk_headers["access-control-allow-origin"] == "*"
+        assert sdk_headers["cache-control"] == "no-cache"
+        security(sdk_headers, rpc_origin, True)
+        assert "access-control-allow-origin" not in headers
     check_search(port, host, html, rpc_origin, wallet, website)
     links = SearchMetadata(html.decode()).links
     for relation, name, content_type in [

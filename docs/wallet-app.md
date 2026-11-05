@@ -25,13 +25,16 @@ is shown in the product UI.
   encoding, transaction hashing/signing, fee cost) exists exactly once, in Rust
   (`crates/mmx-wallet`). Desktop links it natively; web runs it as WASM.
 
+Website integrations use an opt-in popup API, disabled by default, with per-site
+blocking and explicit transaction approval. See [website connection API](wallet-connect.md).
+
 ## 2. Repository layout
 
 ```
 crates/mmx-wallet/        Core. Feature `native` (default) = consensus record bridge
                           (native.rs, spend.rs, mmx-consensus/mmx-types/vnx deps).
-                          Without it: pure Rust, builds for wasm32-unknown-unknown.
-crates/mmx-wallet-wasm/   wasm-bindgen API over mmx-wallet (default-features = false).
+                          Portable record codec also builds for wasm32; proof work is native only.
+crates/mmx-wallet-wasm/   wasm-bindgen API over mmx-wallet with the portable record bridge.
 crates/mmxwallet/         CLI + library. `mmxwallet::service` is the desktop backend.
 apps/wallet/              Shared UI (Preact + TypeScript + Vite).
   src/backend/            types.ts (Backend contract), desktop.ts, web/*, mock.ts (tests only)

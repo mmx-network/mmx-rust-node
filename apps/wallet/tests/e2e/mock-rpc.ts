@@ -533,21 +533,21 @@ export class MockRpc {
     const fields = ['__type', 'id', 'version', 'expires', 'fee_ratio', 'static_cost', 'max_fee_amount', 'note', 'nonce', 'network', 'sender', 'inputs', 'outputs', 'execute', 'solutions', 'deploy', 'exec_result', 'content_hash'];
     for (const f of fields) if (!(f in tx)) throw bad(`missing field ${f}`);
     for (const f of Object.keys(tx)) if (!fields.includes(f)) throw bad(`unknown field ${f}`);
-    if (tx.__type !== 'mmx.Transaction' || tx.version !== 1 || tx.note !== 'TRANSFER') throw bad('not a transfer');
-    if (typeof tx.id !== 'string' || !/^[0-9a-f]{64}$/.test(tx.id)) throw bad('invalid id');
-    if (typeof tx.content_hash !== 'string' || !/^[0-9a-f]{64}$/.test(tx.content_hash)) throw bad('invalid content hash');
+    if (tx.__type !== 'mmx.Transaction' || tx.version !== 1 || (tx.note !== 'TRANSFER' && u32(tx.note) === null)) throw bad('not a transaction');
+    if (typeof tx.id !== 'string' || !/^[0-9a-f]{64}$/i.test(tx.id)) throw bad('invalid id');
+    if (typeof tx.content_hash !== 'string' || !/^[0-9a-f]{64}$/i.test(tx.content_hash)) throw bad('invalid content hash');
     if (tx.network !== this.network) throw bad('wrong network');
-    if (typeof tx.nonce !== 'number' || tx.nonce <= 0) throw bad('invalid nonce');
+    if ((typeof tx.nonce !== 'number' && !(typeof tx.nonce === 'string' && /^\d{1,20}$/.test(tx.nonce))) || BigInt(tx.nonce as number|string) <= 0n) throw bad('invalid nonce');
     const expires = u32(tx.expires);
     const feeRatio = u32(tx.fee_ratio);
     const staticCost = u32(tx.static_cost);
     const maxFee = u32(tx.max_fee_amount);
     if (expires === null || feeRatio === null || feeRatio < 1024 || staticCost === null || maxFee === null) throw bad('invalid fee fields');
     if (!isAddress(tx.sender)) throw bad('invalid sender');
-    if (!Array.isArray(tx.execute) || tx.execute.length || tx.deploy !== null || tx.exec_result !== null) throw bad('not a simple transfer');
+    if (!Array.isArray(tx.execute) || tx.deploy !== null || tx.exec_result !== null) throw bad('mock does not simulate deployments or receipts');
     if (!Array.isArray(tx.solutions) || tx.solutions.length === 0) throw bad('missing signatures');
     for (const s of tx.solutions) {
-      if (!isRecord(s) || s.__type !== 'mmx.solution.PubKey' || typeof s.pubkey !== 'string' || !/^0[23][0-9a-f]{64}$/.test(s.pubkey) || typeof s.signature !== 'string' || !/^[0-9a-f]{128}$/.test(s.signature)) {
+      if (!isRecord(s) || s.__type !== 'mmx.solution.PubKey' || typeof s.pubkey !== 'string' || !/^0[23][0-9a-f]{64}$/i.test(s.pubkey) || typeof s.signature !== 'string' || !/^[0-9a-f]{128}$/i.test(s.signature)) {
         throw bad('invalid signature');
       }
     }
@@ -561,13 +561,34 @@ export class MockRpc {
       }
       return { address: v.address, contract: v.contract, amount, ...(typeof v.memo === 'string' ? { memo: v.memo } : {}) };
     };
-    if (!Array.isArray(tx.inputs) || tx.inputs.length === 0 || !Array.isArray(tx.outputs) || tx.outputs.length === 0) {
+    if (!Array.isArray(tx.inputs) || !Array.isArray(tx.outputs) || (!tx.execute.length && (tx.inputs.length === 0 || tx.outputs.length === 0))) {
       throw bad('empty transfer');
     }
     const inputs = tx.inputs.map((i) => io(i, true));
     const outputs = tx.outputs.map((o) => io(o, false));
     let cost = MIN_TXFEE + BigInt(tx.solutions.length) * MIN_TXFEE_SIGN;
     for (const x of [...inputs, ...outputs]) cost += MIN_TXFEE_IO + memoCost(x.memo);
+    // No-op contract simulation for integration tests. Consensus hashing and
+    // signature checks run separately through the real WASM core.
+    const dynamicSize = (v: unknown): number => {
+      if (v === null || typeof v === 'boolean') return 1;
+      if (typeof v === 'number' && Number.isInteger(v)) return 8;
+      if (typeof v === 'string') return 4 + Buffer.byteLength(v);
+      if (Array.isArray(v)) return 4 + v.reduce((n,x) => n + dynamicSize(x), 0);
+      if (isRecord(v)) return 4 + Object.entries(v).reduce((n,[k,x]) => n + Buffer.byteLength(k) + dynamicSize(x),0);
+      throw bad('unsupported VM argument');
+    };
+    for (const op of tx.execute) {
+      if (!isRecord(op) || !['mmx.operation.Execute','mmx.operation.Deposit'].includes(String(op.__type)) || !isAddress(op.address)
+        || typeof op.method !== 'string' || !op.method || !Array.isArray(op.args)) throw bad('invalid contract call');
+      if (op.user !== null && (!isAddress(op.user) || u32(op.solution) === null || Number(op.solution) >= tx.solutions.length)) throw bad('invalid caller');
+      cost += 10000n + 100n * BigInt(Buffer.byteLength(op.method) + op.args.reduce((n:number,x:unknown) => n + dynamicSize(x),0));
+      if (op.__type === 'mmx.operation.Deposit') {
+        const n = atomic(op.amount);
+        if (!n || !isAddress(op.currency)) throw bad('invalid deposit');
+        outputs.push({address:op.address,contract:op.currency,amount:n});
+      }
+    }
     if (cost !== BigInt(staticCost)) throw bad(`static cost mismatch: ${staticCost} != ${cost}`);
     const fee = (BigInt(staticCost) * BigInt(feeRatio)) / 1024n;
     if (fee > BigInt(maxFee)) throw bad('transaction fee > max_fee_amount');

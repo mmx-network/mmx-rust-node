@@ -1,8 +1,9 @@
 /** Appearance, auto-lock, default fee and (desktop) network server. */
-import { BackendError, type FeeLevel, type ThemeSetting } from '../backend/types';
+import { BackendError, type FeeLevel, type ThemeSetting, type WebsitePermissionChange } from '../backend/types';
 import { AUTO_LOCK_CHOICES } from '../lib/appstate';
 import { isFeeLevel } from '../lib/fees';
-import { commitAppState, persistAppState, platform, sessionWalletId } from './core';
+import { MAX_BLOCKED_WEBSITES, websiteOrigin } from '../lib/websites';
+import { appState, backend, commitAppState, persistAppState, platform, reloadAppState, sessionWalletId } from './core';
 import { openSession, resetChain } from './session';
 
 export const DEFAULT_RPC_URL = 'https://rpc.mmx.network';
@@ -21,6 +22,43 @@ export async function setAutoLockMinutes(minutes: number): Promise<void> {
 export async function setDefaultFeeLevel(level: FeeLevel): Promise<void> {
   if (!isFeeLevel(level)) throw new BackendError('invalid_argument');
   await persistAppState((s) => ({ ...s, settings: { ...s.settings, feeLevel: level } }));
+}
+
+export async function setAllowWebsiteConnections(enabled: boolean): Promise<void> {
+  if (platform.value !== 'web' || typeof enabled !== 'boolean') throw new BackendError('invalid_argument');
+  await changeWebsitePermission({ enabled });
+}
+
+export async function setWebsiteBlocked(site: string, blocked: boolean): Promise<void> {
+  if (platform.value !== 'web' || !websiteOrigin(site)) throw new BackendError('invalid_argument');
+  await changeWebsitePermission({ origin: site, blocked });
+}
+
+async function changeWebsitePermission(change: WebsitePermissionChange): Promise<void> {
+  const b = backend();
+  if (!b.setWebsitePermission) throw new BackendError('invalid_argument');
+  const next = { ...appState.peek().settings };
+  const revoking = 'enabled' in change ? !change.enabled : change.blocked;
+  if ('enabled' in change) next.allowWebsiteConnections = change.enabled;
+  else {
+    const sites = new Set(next.blockedWebsites ?? []);
+    if (change.blocked) sites.add(change.origin);
+    else sites.delete(change.origin);
+    if (sites.size > MAX_BLOCKED_WEBSITES) throw new BackendError('invalid_argument');
+    next.blockedWebsites = [...sites].sort();
+  }
+  if (revoking) appState.value = { ...appState.peek(), settings: next };
+  try {
+    const saved = await b.setWebsitePermission(change);
+    const current = appState.peek();
+    appState.value = {
+      ...current,
+      settings: { ...current.settings, allowWebsiteConnections: saved.allowWebsiteConnections, blockedWebsites: saved.blockedWebsites },
+    };
+  } catch (e) {
+    await reloadAppState().catch(() => undefined);
+    throw e;
+  }
 }
 
 /** Normalizes user input to an http(s) URL, or null if it is not one. */

@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { webSecurityPlugin } from './deploy/security';
 import { fingerprintPublicAssets } from '../../deploy/apps/fingerprint';
@@ -88,6 +89,10 @@ export default defineConfig(({ mode }) => {
     // Web: Content-Security-Policy <meta>, inline-code check, _headers, preview headers.
     plugins: [buildScope(style, platform), ...(platform === 'web' ? [fingerprintPublicAssets(), webSecurityPlugin()] : [])],
     build: {
+      ...(platform === 'web' ? { rollupOptions: { input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        connect: fileURLToPath(new URL('./connect.html', import.meta.url)),
+      } } } : {}),
       target: 'es2022',
       sourcemap: false,
       assetsInlineLimit: 0,

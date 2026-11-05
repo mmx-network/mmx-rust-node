@@ -436,6 +436,7 @@ pub(crate) fn vdf(record: &Record) -> Result<Vec<u8>> {
     Ok(out.bytes)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn header(record: &Record, hardfork2_height: u32) -> Result<Vec<u8>> {
     if !matches!(record.name.as_str(), "mmx.Block" | "mmx.BlockHeader") {
         return Err(input("expected block header"));

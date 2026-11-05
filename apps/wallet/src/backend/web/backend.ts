@@ -26,20 +26,23 @@ import {
   type UnlockRequest,
   type WalletId,
   type WalletInfo,
+  type WebsitePermissionChange,
 } from '../types';
 import { checkNode, parseAddressBalances, parseChainParams, parseNodeInfo } from '../../chain/rpc';
 import type { ChainParams } from '../../chain/types';
 import { NATIVE_CONTRACT, normalizeAddress } from '../../lib/address';
-import { MAX_ADDRESSES, WALLET_NAME_MAX } from '../../lib/appstate';
+import { MAX_ADDRESSES, WALLET_NAME_MAX, sanitizeSettings } from '../../lib/appstate';
 import { isFeeLevel } from '../../lib/fees';
 import { MEMO_MAX_BYTES, utf8Length } from '../../lib/memo';
 import { hasUnsafeCharacters, validateName } from '../../lib/text';
+import { MAX_BLOCKED_WEBSITES, websiteAccess, websiteOrigin } from '../../lib/websites';
 import { Clipboard, downloadFile, openExplorer, pickTextFile } from './browser';
 import { preventSilentAccess } from './credentials';
 import { RpcHttp, type FetchLike } from './http';
 import { parseRpcUrl } from './rpc-url';
 import { isFingerprint, LOCK_SIGNAL_KEY, MetadataStore, STORAGE_KEY, type StorageLike, type WalletRecord } from './store';
 import type { VaultHandle, WasmApi } from './wasm';
+import { boundedJson, transactionRequest, type PreparedTransaction, type TransactionRequest } from '../../connect/protocol';
 
 /** Blocks a transfer stays valid for (same as the desktop wallet). */
 export const EXPIRE_DELTA = 100;
@@ -89,6 +92,9 @@ interface Prepared {
   txJson: string;
   createdAt: number;
   reservation: Reservation;
+  /** Custom requests are invalidated if the signing session changes. */
+  vault?: VaultHandle;
+  websiteOrigin?: string;
 }
 
 interface Currency {
@@ -210,6 +216,7 @@ export class WebBackend implements Backend {
   private readonly clipboard = new Clipboard();
   private readonly vaults = new Map<WalletId, VaultHandle>();
   private readonly prepared = new Map<string, Prepared>();
+  private readonly broadcasting = new Set<WalletId>();
   /**
    * Broadcast transfers per wallet, by txid, oldest first. Kept while the
    * wallet is locked (they hold no secret) so that funds stay reserved.
@@ -219,16 +226,26 @@ export class WebBackend implements Backend {
   private wasmPromise: Promise<WasmApi> | null = null;
   /** Bumped by lockAll; an unlock started before a lock does not complete. */
   private lockEpoch = 0;
+  private websiteEpoch = 0;
+  private websitePolicy = '';
   /** The WASM module crashed; it is not used again until the page is reloaded. */
   private crashed = false;
 
   constructor(private readonly options: WebBackendOptions) {
     this.store = new MetadataStore(options.storage);
+    this.syncWebsitePermissions();
     this.http = new RpcHttp(options.fetch, parseRpcUrl(options.rpcUrl).base, options.timeoutMs);
     this.now = options.now ?? (() => Date.now());
     // Registered first: the keys are freed before any listener hears of the lock.
     options.events?.addEventListener('storage', (e) => {
       if (isLockSignal(e)) this.lockedElsewhere();
+      if (e.key === STORAGE_KEY || e.key === null) {
+        // Use each event's policy so a rapid disable/enable still invalidates
+        // approvals created before revocation, even if storage is enabled again.
+        let raw: unknown;
+        try { raw = e.newValue ? JSON.parse(e.newValue) : null; } catch { raw = null; }
+        this.syncWebsitePermissions(sanitizeSettings(isRecord(raw) ? raw.settings : null, 'web'));
+      }
     });
   }
 
@@ -326,7 +343,49 @@ export class WebBackend implements Backend {
   }
 
   async saveAppState(s: AppState): Promise<void> {
-    this.store.saveAppState(s);
+    this.syncWebsitePermissions();
+    // Ordinary metadata writes may come from a tab whose storage event has
+    // not arrived yet. They must never undo a permission revocation.
+    const current = this.store.appState().settings;
+    this.store.saveAppState({ ...s, settings: { ...s.settings,
+      allowWebsiteConnections: current.allowWebsiteConnections, blockedWebsites: current.blockedWebsites } });
+  }
+
+  async setWebsitePermission(change: WebsitePermissionChange) {
+    const current = this.store.appState();
+    const settings = { ...current.settings };
+    if ('enabled' in change) {
+      if (typeof change.enabled !== 'boolean') fail('invalid_argument');
+      settings.allowWebsiteConnections = change.enabled;
+    } else {
+      if (!websiteOrigin(change.origin) || typeof change.blocked !== 'boolean') fail('invalid_argument');
+      const sites = new Set(settings.blockedWebsites ?? []);
+      if (change.blocked) sites.add(change.origin); else sites.delete(change.origin);
+      if (sites.size > MAX_BLOCKED_WEBSITES) fail('invalid_argument');
+      settings.blockedWebsites = [...sites].sort();
+    }
+    this.store.saveAppState({ ...current, settings });
+    this.syncWebsitePermissions();
+    return this.store.appState().settings;
+  }
+
+  private syncWebsitePermissions(settings = this.store.appState().settings): void {
+    const policy = JSON.stringify([settings.allowWebsiteConnections === true,[...(settings.blockedWebsites ?? [])].sort()]);
+    if (policy !== this.websitePolicy) {
+      this.websitePolicy = policy;
+      this.websiteEpoch++;
+      this.dropWebsitePrepared();
+    }
+  }
+
+  private dropWebsitePrepared(): void {
+    for (const [txid, p] of this.prepared) if (p.websiteOrigin) this.prepared.delete(txid);
+  }
+
+  private checkWebsite(site: string): void {
+    this.syncWebsitePermissions();
+    const error = websiteAccess(this.store.appState().settings, site);
+    if (error) fail(error);
   }
 
   async listWallets(): Promise<WalletInfo[]> {
@@ -849,16 +908,76 @@ export class WebBackend implements Backend {
     return prepared;
   }
 
+  async prepareTransaction(walletId: WalletId, request: TransactionRequest, site: string): Promise<PreparedTransaction> {
+    this.checkWebsite(site);
+    const permissionEpoch = this.websiteEpoch;
+    if (!transactionRequest(request)) fail('invalid_argument');
+    const vault = this.vault(walletId);
+    const wasm = await this.wasm();
+    this.stillOpen(walletId, vault);
+    const unsigned = this.call(() => wasm.inspect_custom_transaction(JSON.stringify(request.transaction)));
+    const addresses = await this.getAddresses(walletId);
+    const chain = await this.snapshot(walletId, addresses);
+    this.stillOpen(walletId, vault);
+    this.checkWebsite(site);
+    if (permissionEpoch !== this.websiteEpoch) fail('prepared_not_found');
+    if (request.network !== chain.params.network) fail('invalid_argument');
+    const txJson = this.call(() => vault.complete_custom_transaction(unsigned, chain.balancesJson, chain.paramsJson,
+      chain.height, request.feeLevel ?? this.store.appState().settings.feeLevel, request.gasLimit ?? 5_000_000));
+    this.call(() => wasm.verify_custom_transaction(txJson, chain.paramsJson));
+    const tx = JSON.parse(txJson) as Record<string, unknown>;
+    const txid = String(tx.id).toUpperCase();
+    const maxFee = BigInt(String(tx.max_fee_amount));
+    const own = new Set(addresses);
+    const inputs = tx.inputs as Array<{ address: string; contract: string; amount: string }>;
+    const reservation: Reservation = {
+      txid, expires: Number(tx.expires), sender: String(tx.sender), senderFee: maxFee,
+      inputs: inputs.filter((i) => own.has(i.address)).map((i) => ({ ...i, amount: BigInt(i.amount) })),
+    };
+    this.prunePrepared();
+    while (this.prepared.size >= MAX_PREPARED) this.prepared.delete(this.prepared.keys().next().value!);
+    const { solutions: _solutions, content_hash: _hash, ...review } = tx;
+    const used = new Set(inputs.map((i) => i.contract));
+    for (const output of tx.outputs as Array<{contract:string}>) used.add(output.contract);
+    used.add(NATIVE_CONTRACT);
+    const result: PreparedTransaction = {
+      txid, network: chain.params.network, fee: (BigInt(String(tx.static_cost)) * BigInt(String(tx.fee_ratio)) / 1024n).toString(),
+      maxFee: maxFee.toString(), expires: reservation.expires, height: chain.height, decimals: chain.params.decimals,
+      transaction: review, currencies: [...chain.currencies].filter(([contract]) => used.has(contract)).map(([contract, c]) => ({ contract, ...c })),
+    };
+    if (!boundedJson(result, 65_536)) fail('invalid_argument');
+    this.prepared.set(txid, { walletId, txJson, createdAt: this.now(), reservation, vault, websiteOrigin: site });
+    return result;
+  }
+
   private prunePrepared(): void {
     const now = this.now();
     for (const [txid, p] of this.prepared) if (now - p.createdAt > PREPARED_TTL_MS) this.prepared.delete(txid);
   }
 
   async broadcast(walletId: WalletId, txid: string): Promise<void> {
+    if (this.broadcasting.has(walletId)) fail('tx_not_sent');
+    this.broadcasting.add(walletId);
+    try { await this.broadcastPrepared(walletId,txid); }
+    finally { this.broadcasting.delete(walletId); }
+  }
+
+  private async broadcastPrepared(walletId: WalletId, txid: string): Promise<void> {
     const key = typeof txid === 'string' ? txid.toUpperCase() : '';
     this.prunePrepared();
     const p = this.prepared.get(key);
     if (!p || p.walletId !== walletId || !this.store.has(walletId)) fail('prepared_not_found');
+    const epoch = this.lockEpoch;
+    const permissionEpoch = this.websiteEpoch;
+    const stillAuthorized = () => {
+      if (epoch !== this.lockEpoch) fail('locked');
+      if (p.vault) this.stillOpen(walletId, p.vault);
+      if (p.websiteOrigin) {
+        this.checkWebsite(p.websiteOrigin);
+        if (permissionEpoch !== this.websiteEpoch) fail('prepared_not_found');
+      }
+    };
+    stillAuthorized();
     // Removed before sending: a transfer is submitted at most once.
     this.prepared.delete(key);
     // Nothing is sent unless these checks pass (as on desktop), so a failure
@@ -867,12 +986,23 @@ export class WebBackend implements Backend {
       if (e instanceof BackendError && REFUSED.has(e.code)) throw e;
       fail('tx_not_sent');
     };
-    // A cheap read first, so a transfer that can no longer be included is never sent.
-    const height = await this.http
-      .get('/node/info')
-      .then((reply) => parseNodeInfo(reply.value).height)
-      .catch(notSent);
-    if (p.reservation.expires <= height) fail('tx_expired');
+    // Two websites (or the manual Send form) can review against the same
+    // balance. Recheck after earlier submissions reserved their funds.
+    const addresses = await this.getAddresses(walletId).catch(notSent);
+    const chain = await this.snapshot(walletId,addresses).catch(notSent);
+    stillAuthorized();
+    if (JSON.parse(p.txJson).network !== chain.params.network) fail('tx_not_sent');
+    if (p.reservation.expires <= chain.height) fail('tx_expired');
+    const required = new Map<string,bigint>();
+    for (const input of p.reservation.inputs) {
+      const k = fundsKey(input.address,input.contract);
+      required.set(k,(required.get(k) ?? 0n)+input.amount);
+    }
+    const payer = fundsKey(p.reservation.sender,NATIVE_CONTRACT);
+    required.set(payer,(required.get(payer) ?? 0n)+p.reservation.senderFee);
+    const available = new Map((JSON.parse(chain.balancesJson) as Array<{address:string;contract:string;amount:string}>)
+      .map((i) => [fundsKey(i.address,i.contract),BigInt(i.amount)] as const));
+    for (const [key,n] of required) if (n > (available.get(key) ?? 0n)) fail('insufficient_funds');
     // The node's broadcast accepts a transfer whose execution fails (it is
     // included and charged its fee), so its dry run must pass first, at no
     // more than the fee shown on review.
@@ -880,6 +1010,7 @@ export class WebBackend implements Backend {
       .validate(p.txJson)
       .then((reply) => reply.value)
       .catch(notSent);
+    stillAuthorized();
     if (!isRecord(result) || typeof result.did_fail !== 'boolean') fail('tx_not_sent');
     if (result.did_fail) fail(failedExecutionCode(result.error));
     const totalFee = atomicField(result.total_fee);

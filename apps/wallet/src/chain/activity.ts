@@ -224,6 +224,14 @@ export function filterItems(items: readonly ActivityItem[], filter: ActivityFilt
 
 /** A locally tracked send as an activity item. */
 export function pendingItem(p: PendingTx, ownAddresses: ReadonlySet<string>, isVerified: VerifiedLookup = () => false): ActivityItem {
+  if (p.custom) {
+    const amounts = p.custom.outgoing.map((row) => ({...row,amount:-row.amount,native:row.contract===NATIVE_CONTRACT,
+      verified:row.contract===NATIVE_CONTRACT || isVerified(row.contract)}));
+    return {
+      key:p.txid,txid:p.txid,kind:amounts.length ? 'sent' : 'fee',status:p.status==='confirmed'?'pending':p.status,
+      timeMs:p.createdAt,amounts,primary:pickPreferred(amounts),fee:p.fee,ownAddresses:[],local:true,
+    };
+  }
   const toSelf = ownAddresses.has(p.to);
   const native = p.contract === NATIVE_CONTRACT;
   const amount: ActivityAmount = {

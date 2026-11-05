@@ -46,7 +46,13 @@ export interface Settings {
   feeLevel: FeeLevel;
   /** Desktop only. Undefined = default public server. */
   rpcUrl?: string;
+  /** Web only. Missing in older state means disabled. */
+  allowWebsiteConnections?: boolean;
+  /** Exact website origins refused even when connections are enabled. */
+  blockedWebsites?: string[];
 }
+
+export type WebsitePermissionChange = { enabled: boolean } | { origin: string; blocked: boolean };
 
 export interface AppState {
   activeWallet?: WalletId;
@@ -123,9 +129,13 @@ export interface UnlockRequest {
 
 export interface Backend {
   readonly platform: Platform;
+  /** Web dApp requests; the signed transaction remains inside this backend. */
+  prepareTransaction?(walletId: WalletId, request: import('../connect/protocol').TransactionRequest, websiteOrigin: string): Promise<import('../connect/protocol').PreparedTransaction>;
 
   loadAppState(): Promise<AppState>;
   saveAppState(s: AppState): Promise<void>;
+  /** Web only. Patch current permissions without overwriting changes from another tab. */
+  setWebsitePermission?(change: WebsitePermissionChange): Promise<Settings>;
 
   listWallets(): Promise<WalletInfo[]>;
   /** Desktop: choose and copy a seed file locally. No key material crosses IPC. */
@@ -216,6 +226,8 @@ export const ERROR_CODES = [
   'tx_expired',
   'tx_not_sent',
   'prepared_not_found',
+  'website_connections_disabled',
+  'website_blocked',
   'io_error',
   'internal',
 ] as const;

@@ -1,6 +1,10 @@
 # MMX Wallet (web) for Caddy 2. Replace the site address and root.
 # Caddy obtains and renews the TLS certificate automatically.
 wallet.example.org {
+	map {path} {wallet_coop} {
+		/connect.html unsafe-none
+		default same-origin
+	}
 	root * /srv/mmx-wallet
 	encode zstd gzip
 	file_server
@@ -10,7 +14,7 @@ wallet.example.org {
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		Permissions-Policy "accelerometer=(), autoplay=(), camera=(self), clipboard-read=(self), clipboard-write=(self), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-create=(), publickey-credentials-get=(), screen-wake-lock=(), usb=()"
-		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Opener-Policy "{wallet_coop}"
 		Cross-Origin-Resource-Policy "same-origin"
 		X-Frame-Options "DENY"
 		Strict-Transport-Security "max-age=63072000; includeSubDomains"
@@ -20,6 +24,8 @@ wallet.example.org {
 	@assets path /assets/*
 	header @assets Cache-Control "public, max-age=31536000, immutable"
 
-	@page path / /index.html
+	@page path / /index.html /connect.html /mmx-wallet.js
 	header @page Cache-Control "no-cache"
+	@sdk path /mmx-wallet.js
+	header @sdk Access-Control-Allow-Origin "*"
 }

@@ -265,3 +265,19 @@ describe('balances', () => {
     expect(sortAssets([{ native: false, verified: false, symbol: 'A', contract: 'x' }, { native: true, verified: true, symbol: 'Z', contract: 'y' }])[0]!.native).toBe(true);
   });
 });
+
+describe('custom transaction reservations', () => {
+  it('reserves gross multi-currency inputs and the maximum fee while displaying only known net outgoing amounts', async () => {
+    const {customPending}=await import('../../src/connect/pending');
+    const B=testAddress(2);
+    const p=customPending({txid:'A'.repeat(64),fee:'10',maxFee:'100',expires:100,height:1,network:'test',decimals:6,
+      currencies:[{contract:NATIVE_CONTRACT,symbol:'MMX',decimals:6},{contract:TOKEN,symbol:'USDM',decimals:6}],
+      transaction:{inputs:[{address:A,contract:NATIVE_CONTRACT,amount:'3000'},{address:A,contract:TOKEN,amount:'2000'}],
+        outputs:[{address:A,contract:NATIVE_CONTRACT,amount:'1000'},{address:B,contract:NATIVE_CONTRACT,amount:'2000'},
+          {address:A,contract:TOKEN,amount:'500'},{address:B,contract:TOKEN,amount:'1500'}],execute:[]}},'wallet',[A],true);
+    expect(p.uncertain).toBe(true);
+    expect(pendingReserved([p],NATIVE_CONTRACT)).toEqual(new Map([[NATIVE_CONTRACT,3100n],[TOKEN,2000n]]));
+    expect(pendingOutgoing([p],NATIVE_CONTRACT,new Set([A]))).toEqual(new Map([[NATIVE_CONTRACT,2100n],[TOKEN,1500n]]));
+    expect(pendingReserved([{...p,status:'failed'}],NATIVE_CONTRACT).size).toBe(0);
+  });
+});

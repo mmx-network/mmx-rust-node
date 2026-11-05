@@ -15,6 +15,7 @@ ENV PATH="/opt/wasm-bindgen/bin:${PATH}"
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY schema/ schema/
 COPY vendor/vnx-rust/ vendor/vnx-rust/
 COPY apps/wallet/scripts/build-wasm.sh apps/wallet/scripts/build-wasm.sh
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \

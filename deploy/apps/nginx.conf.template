@@ -58,6 +58,18 @@ http {
         listen [::]:${PORT};
         server_name ${WALLET_HOST};
         root /srv/mmx/wallet;
+        # These locations provide their complete policy because nginx drops
+        # inherited add_header directives as soon as a location adds one.
+        location = /connect.html {
+            include /etc/nginx/mmx/wallet-connect-headers.conf;
+            add_header Cache-Control $cache_control always;
+            try_files $uri =404;
+        }
+        location = /mmx-wallet.js {
+            include /etc/nginx/mmx/wallet-sdk-headers.conf;
+            add_header Cache-Control $cache_control always;
+            try_files $uri =404;
+        }
         include /etc/nginx/mmx/wallet-headers.conf;
         add_header Cache-Control $cache_control always;
         include /etc/nginx/mmx/locations.conf;

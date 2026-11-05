@@ -10,6 +10,8 @@ mod mnemonic;
 #[cfg(feature = "native")]
 mod native;
 #[cfg(feature = "native")]
+pub mod public_json;
+#[cfg(feature = "native")]
 mod spend;
 mod transaction;
 

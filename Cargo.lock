@@ -945,6 +945,8 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "js-sys",
+ "mmx-consensus",
+ "mmx-types",
  "mmx-wallet",
  "serde",
  "serde_json",

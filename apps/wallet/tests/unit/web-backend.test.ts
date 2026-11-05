@@ -472,6 +472,8 @@ describe('wallet core failures', () => {
       fingerprint: (w, p) => wasm.fingerprint(w, p),
       validate_address: (a) => wasm.validate_address(a),
       verify_transaction: (t, p) => wasm.verify_transaction(t, p),
+      inspect_custom_transaction: (t) => wasm.inspect_custom_transaction(t),
+      verify_custom_transaction: (t,p) => wasm.verify_custom_transaction(t,p),
       Vault: {
         open: (...args) => {
           const vault = wasm.Vault.open(...args);
@@ -483,6 +485,7 @@ describe('wallet core failures', () => {
             set_count: (n: number) => vault.set_count(n),
             mnemonic: () => vault.mnemonic(),
             sign_transfer: (...a: Parameters<typeof vault.sign_transfer>) => vault.sign_transfer(...a),
+            complete_custom_transaction: (...a: Parameters<typeof vault.complete_custom_transaction>) => vault.complete_custom_transaction(...a),
             max_amount: () => {
               throw new WebAssembly.RuntimeError('unreachable');
             },
@@ -1254,5 +1257,94 @@ describe('platform services', () => {
     listeners.get('focus')?.();
     await vi.advanceTimersByTimeAsync(0);
     expect(writes).toEqual(['secret words', '']);
+  });
+});
+
+describe('custom website transactions', () => {
+  const site = 'https://shop.example';
+  const request = (amount = '1000000') => ({network:'mainnet',gasLimit:1_000_000,
+    transaction:{outputs:[{__type:'mmx.txout_t',address:RECIPIENT,contract:NATIVE,amount}]}});
+  async function enable(b: WebBackend) {
+    await b.setWebsitePermission({enabled:true});
+  }
+  beforeEach(() => { rpc.reset({height:5_600_000}); });
+
+  it('keeps revocations when another tab saves stale metadata or blocks another origin', async () => {
+    const b=backend();await enable(b);
+    const stale=await b.loadAppState();
+    await b.setWebsitePermission({enabled:false});
+    await b.setWebsitePermission({origin:site,blocked:true});
+    const other=backend();
+    await other.saveAppState({...stale,settings:{...stale.settings,theme:'dark'}});
+    await other.setWebsitePermission({origin:'https://other.example',blocked:true});
+    expect((await b.loadAppState()).settings).toMatchObject({allowWebsiteConnections:false,blockedWebsites:[site,'https://other.example'].sort(),theme:'dark'});
+  });
+  it('enforces opt-in and blocks exact origins at the signing boundary', async () => {
+    const b=backend();const {info}=await openWallet(b,[50n*MMX]);
+    expect(await code(b.prepareTransaction(info.id,request(),site))).toBe('website_connections_disabled');
+    await enable(b);
+    await b.setWebsitePermission({origin:site,blocked:true});
+    expect(await code(b.prepareTransaction(info.id,request(),site))).toBe('website_blocked');
+    expect(await code(b.prepareTransaction(info.id,request(),site+'/path'))).toBe('invalid_argument');
+    expect(await code(b.prepareTransaction(info.id,request(),'https://other.example'))).toBe('ok');
+    expect(fetchFn.calls.filter(p=>p.startsWith('POST'))).toEqual([]);
+  });
+  it('keeps the signed payload private until approval, verifies it and broadcasts at most once', async () => {
+    const b=backend();const {info}=await openWallet(b,[50n*MMX]);await enable(b);
+    const p=await b.prepareTransaction(info.id,request(),site);
+    expect(p.transaction.solutions).toBeUndefined();expect(p.transaction.content_hash).toBeUndefined();
+    expect(p.transaction.outputs).toEqual([expect.objectContaining({amount:'1000000',address:RECIPIENT})]);
+    expect(BigInt(p.maxFee)).toBeGreaterThan(BigInt(p.fee));
+    expect(fetchFn.calls.filter(p=>p.startsWith('POST'))).toEqual([]);
+    await b.broadcast(info.id,p.txid);
+    expect(fetchFn.calls.filter(p=>p.startsWith('POST'))).toEqual(['POST /transaction/validate','POST /transaction/broadcast']);
+    expect(await code(b.broadcast(info.id,p.txid))).toBe('prepared_not_found');
+    expect(await code(b.prepareTransaction(info.id,{...request(),network:'other'},site))).toBe('invalid_argument');
+  });
+  it('rechecks balances against earlier approvals, including the maximum fee reservation', async () => {
+    const b=backend();const {info}=await openWallet(b,[10n*MMX]);await enable(b);
+    const first=await b.prepareTransaction(info.id,request('6000000'),site);
+    const second=await b.prepareTransaction(info.id,request('6000000'),'https://other.example');
+    await b.broadcast(info.id,first.txid);
+    expect(await code(b.broadcast(info.id,second.txid))).toBe('insufficient_funds');
+    expect(fetchFn.calls.filter(p=>p==='POST /transaction/broadcast')).toHaveLength(1);
+    expect(await code(b.prepareTransaction(info.id,request('3500000'),site))).toBe('insufficient_funds');
+  });
+  it('invalidates old approvals when permissions are revoked and then re-enabled', async () => {
+    const b=backend();const {info}=await openWallet(b,[50n*MMX]);await enable(b);
+    const p=await b.prepareTransaction(info.id,request(),site);
+    await b.setWebsitePermission({enabled:false});
+    await enable(b);
+    expect(await code(b.broadcast(info.id,p.txid))).toBe('prepared_not_found');
+    expect(fetchFn.calls.filter(p=>p.startsWith('POST'))).toEqual([]);
+  });
+  it.each(['lock','disable','block'] as const)('stops before broadcast if %s happens during the node dry run', async (action) => {
+    let release:()=>void=()=>undefined;
+    let entered:()=>void=()=>undefined;
+    const started=new Promise<void>(resolve=>{entered=resolve;});
+    const gate=new Promise<void>(resolve=>{release=resolve;});
+    const b=backend({fetch:async(input,init)=>{
+      if(new URL(input).pathname==='/transaction/validate') {entered();await gate;}
+      return fetchFn(input,init);
+    }});
+    const {info}=await openWallet(b,[50n*MMX]);await enable(b);
+    const p=await b.prepareTransaction(info.id,request(),site);
+    const broadcasting=b.broadcast(info.id,p.txid);
+    await started;
+    if(action==='lock') await b.lockAll();
+    else {
+      await b.setWebsitePermission(action==='disable'?{enabled:false}:{origin:site,blocked:true});
+    }
+    release();
+    expect(await code(broadcasting)).toBe(action==='lock'?'locked':action==='disable'?'website_connections_disabled':'website_blocked');
+    expect(fetchFn.calls.filter(p=>p==='POST /transaction/broadcast')).toEqual([]);
+  });
+  it('keeps maximum-fee reservations if the broadcast reply is lost', async () => {
+    const b=backend();const {info}=await openWallet(b,[10n*MMX]);await enable(b);
+    const p=await b.prepareTransaction(info.id,request('6000000'),site);
+    rpc.handle('POST','/__mock/fail',JSON.stringify({path:'/transaction/broadcast',mode:'drop',after:true}));
+    expect(await code(b.broadcast(info.id,p.txid))).toBe('rpc_unreachable');
+    expect(await code(b.prepareTransaction(info.id,request('3500000'),site))).toBe('insufficient_funds');
+    expect(await code(b.broadcast(info.id,p.txid))).toBe('prepared_not_found');
   });
 });

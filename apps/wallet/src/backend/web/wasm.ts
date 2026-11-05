@@ -31,10 +31,13 @@ export interface VaultHandle {
     feeLevel: number,
     expireDelta: number,
   ): string;
+  complete_custom_transaction(txJson: string, balancesJson: string, paramsJson: string, height: number, feeLevel: number, gasLimit: number): string;
 }
 
 /** The part of the WASM API the web backend uses. */
 export interface WasmApi {
+  inspect_custom_transaction(txJson: string): string;
+  verify_custom_transaction(txJson: string, paramsJson: string): void;
   watch_max_amount(addressesJson: string, balancesJson: string, paramsJson: string, currency: string, memo: string | null, feeLevel: number): string;
   generate_mnemonic(): string;
   normalize_mnemonic(words: string): string;

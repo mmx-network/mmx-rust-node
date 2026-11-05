@@ -51,8 +51,15 @@ directory):
 | File | Server |
 | --- | --- |
 | `Caddyfile` | Caddy 2 |
-| `nginx.conf` + `nginx-security-headers.conf` | nginx |
+| `nginx.conf` + `nginx-security-headers.conf` + `nginx-connect-security-headers.conf` | nginx |
 | `_headers` (also generated into `dist/web`) | Netlify, Cloudflare Pages |
+
+The [website connection API](../../../docs/wallet-connect.md) is disabled by
+default in wallet Settings. Its popup `/connect.html` needs COOP `unsafe-none`;
+the main wallet keeps `same-origin`. `/mmx-wallet.js` is the public ESM SDK and
+needs CORS `*`. Both paths use `Cache-Control: no-cache`. Preserve the supplied
+path-specific rules in CDN overrides. For nginx, install both security-header
+snippets at the paths specified at the top of `nginx.conf`.
 
 The files here contain the policy for `https://rpc.mmx.network`. With a
 different `VITE_RPC_URL`, copy the `Content-Security-Policy` line from the

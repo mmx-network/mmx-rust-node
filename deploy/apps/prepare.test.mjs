@@ -13,6 +13,15 @@ test('uses the built policy, and leaves caching to nginx', () => {
   assert.equal(output, `add_header Content-Security-Policy "${csp}" always;\nadd_header X-Frame-Options "DENY" always;\n`);
 });
 
+test('keeps the wallet isolated while giving only the connection page compatible COOP and the SDK CORS', () => {
+  const source = `/*\n  Content-Security-Policy: ${csp}\n  X-Frame-Options: DENY\n\n/\n  Cross-Origin-Opener-Policy: same-origin\n  Cache-Control: no-cache\n\n/connect.html\n  Cross-Origin-Opener-Policy: unsafe-none\n\n/mmx-wallet.js\n  Access-Control-Allow-Origin: *\n`;
+  assert.match(nginxHeaders(source,'/'), /Opener-Policy "same-origin"/);
+  assert.match(nginxHeaders(source,'/connect.html'), /Opener-Policy "unsafe-none"/);
+  assert.doesNotMatch(nginxHeaders(source,'/connect.html'), /Allow-Origin/);
+  assert.match(nginxHeaders(source,'/mmx-wallet.js'), /Allow-Origin "\*"/);
+  assert.doesNotMatch(nginxHeaders(source,'/'), /Allow-Origin/);
+});
+
 test('quotes header values without allowing nginx variable interpolation', () => {
   assert.match(nginxHeaders(`/*\n  Content-Security-Policy: ${csp}\n  Example: a"b\\c\n`), /Example "a\\"b\\\\c" always;/);
   for (const value of ['$host', 'bad\rvalue', 'bad\u0000value']) {

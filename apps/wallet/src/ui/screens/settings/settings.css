@@ -1,4 +1,5 @@
 /* Settings screen. Theme tokens only. */
+.settings__website { overflow-wrap: anywhere; }
 
 .settings__mono {
   font-family: var(--font-mono);

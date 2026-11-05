@@ -154,6 +154,14 @@ is public browser configuration. Use a public HTTPS REST/WebAPI server that
 allows both app origins through CORS; the Rust node's JSON-RPC `/rpc` endpoint
 is a different interface. The apps also accept loopback HTTP for local testing.
 
+## Wallet website connections
+
+[Website connections](wallet-connect.md) are disabled by default in the wallet.
+The image serves `/connect.html` with COOP `unsafe-none` so an external website
+can communicate with its popup; the main wallet keeps COOP `same-origin`.
+`/mmx-wallet.js` is a standalone ESM SDK with CORS `*`. Both paths revalidate
+on every load. Preserve these path-specific headers in CDN overrides.
+
 ## CDN caching
 
 All sites emit content-hashed JavaScript, CSS, font, favicon and touch-icon

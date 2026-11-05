@@ -4,28 +4,33 @@ import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
 /** Translate each build's global _headers policy, keeping its RPC origin. */
-export function nginxHeaders(source) {
-  const headers = [];
+export function nginxHeaders(source, path = null) {
+  const headers = new Map();
   let global = false;
+  let matches = false;
   for (const line of source.split('\n')) {
     if (!line.trim()) continue;
     if (!line.startsWith(' ')) {
       global = line === '/*';
+      matches = global || (path !== null && line === path);
       continue;
     }
-    if (!global) continue;
+    if (!matches) continue;
     const match = /^  ([A-Za-z][A-Za-z0-9-]*): (.+)$/.exec(line);
     if (!match || /[\x00-\x1f\x7f$]/.test(match[2])) {
       throw new Error(`Unsafe or malformed global header: ${line}`);
     }
     const [, name, value] = match;
-    if (name.toLowerCase() === 'cache-control') throw new Error('Cache-Control belongs to nginx locations');
-    headers.push([name, value]);
+    if (name.toLowerCase() === 'cache-control') {
+      if (global) throw new Error('Cache-Control belongs to nginx locations');
+      continue;
+    }
+    headers.set(name, value);
   }
-  if (!headers.some(([name, value]) => name.toLowerCase() === 'content-security-policy' && value.includes("frame-ancestors 'none'"))) {
+  if (![...headers].some(([name, value]) => name.toLowerCase() === 'content-security-policy' && value.includes("frame-ancestors 'none'"))) {
     throw new Error('The build must supply Content-Security-Policy with frame-ancestors');
   }
-  return headers.map(([name, value]) => `add_header ${name} "${value.replace(/[\\"]/g, '\\$&')}" always;\n`).join('');
+  return [...headers].map(([name, value]) => `add_header ${name} "${value.replace(/[\\"]/g, '\\$&')}" always;\n`).join('');
 }
 
 const compressible = new Set(['.html', '.js', '.css', '.wasm', '.svg', '.json', '.webmanifest']);
@@ -52,8 +57,14 @@ export async function prepare(root) {
     ['website', 'apps/website/dist'],
   ]) {
     const directory = join(root, output);
-    const headers = nginxHeaders(await readFile(join(directory, '_headers'), 'utf8'));
+    const source = await readFile(join(directory, '_headers'), 'utf8');
+    const headers = nginxHeaders(source, name === 'wallet' ? '/' : null);
     await writeFile(join(generated, `${name}-headers.conf`), headers);
+    if (name === 'wallet') {
+      for (const [kind,path] of [['connect','/connect.html'],['sdk','/mmx-wallet.js']]) {
+        await writeFile(join(generated, `wallet-${kind}-headers.conf`), nginxHeaders(source,path));
+      }
+    }
     await precompress(directory);
   }
 }

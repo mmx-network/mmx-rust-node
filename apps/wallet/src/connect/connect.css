@@ -1,0 +1,41 @@
+.connection__origin {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.connection__address {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+.connection__item {
+  display: grid;
+  gap: 0.5rem;
+  padding-block: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.connection__json {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 22rem;
+  overflow: auto;
+  padding: 1rem;
+  background: var(--surface-2);
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+}
+.connection__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.connection__fee {
+  display: grid;
+  gap: 0.4rem;
+}
+@media (max-width: 719px) {
+  .connection__actions > button {
+    flex: 1;
+  }
+}

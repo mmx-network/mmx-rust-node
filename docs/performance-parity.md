@@ -1627,3 +1627,52 @@ covers upgrades and repeat launches; packaged Linux checks verify both theme
 sizes in the deb and in the AppImage's isolated XDG data directory. Real-session
 GTK lookup now selects the user 48/64-pixel assets and still selects the existing
 system asset at 96/128 pixels.
+
+## Web wallet website connections (2026-11-05)
+
+Reference intent: C++ `Wallet.cpp::{complete,sign_off}` and
+`ECDSA_Wallet::{complete,sign_off}`; Rust native `spend.rs` and consensus record
+hashing/authorization. WASM now reuses the native transaction record bridge for
+unsigned custom transactions, including Execute/Deposit arguments and native
+contract deployments. Only proof/header/OpenCL work is excluded on wasm32;
+native consensus builds retain it. Public JSON conversion follows declared VNI
+aliases rather than inferring types from VM argument keys. JSON integer-only
+and reserved `__type` restrictions are explicit in [the API](wallet-connect.md).
+Docker now copies the schema inputs needed by that bridge.
+
+Website access is a web-only addition, off until explicitly enabled, with a
+persistent exact-origin block list. Popup/postMessage and same-origin
+BroadcastChannel reuse an unlocked tab without transferring credentials or
+signed bytes. Cold/closed/suspended signers require a local popup unlock.
+Permissions are checked again before preparing and broadcasting; storage
+changes revoke approvals across tabs. Ordinary stale metadata writes preserve
+current permissions. Programmatic popup focus, discovery and incoming requests
+do not refresh the signing timeout; explicit Review/Approve actions do.
+
+Work bounds: 64 KiB / depth 32 / 4,096 nodes per request, 100 supplied inputs
+and outputs, 32 operations, 16 prepared transactions and 16 clients per host.
+Balance RPCs retain four-worker concurrency; signing commands are serialized
+per host. Approval refreshes balances and existing reservations before dry run
+and at-most-once submission. This adds a balance snapshot per explicit send,
+with no extra background RPC polling for discovery. A lost broadcast reply
+retains input and maximum-fee reservations. These reservations are local to a
+signing backend, not a global lock across independently unlocked tabs.
+The shipped WASM core measures 1,574,131 bytes (361,571 bytes gzip); a popup
+reusing an existing signer does not fetch another WASM instance.
+
+Evidence: 69 native consensus/wallet/WASM tests passed (one existing ignored
+proof benchmark); native all-target and wasm32 Clippy passed with warnings
+denied. The wallet's 536 unit tests and full 53-test Chromium suite passed;
+affected connection/timeout tests were repeated after permission persistence
+and focus-timer changes. Cross-origin tests use real popup windows, production
+CSP/COOP, and actual WASM signing. They cover default-off, connect consent,
+no POST before approval, exact contract arguments, secrets absent from messages,
+rejection, warm reuse, local unlock fallback, lock, disable and block/unblock.
+Backend tests cover stale metadata, conflicting quotes, maximum-fee reservation,
+uncertain submissions and lock/revocation during dry run. The actual Docker
+image's non-root/read-only nginx tests cover popup COOP, SDK CORS, routing,
+security headers, caching and gzip alongside the other sites. Web and desktop
+frontend builds pass. The mock node checks transaction shape, static costs and
+balances but does not run arbitrary contract VM programs; native tests verify
+signatures and tampering. Physical iOS/Android popup/background behavior and
+representative contract execution on a real public node remain unmeasured.

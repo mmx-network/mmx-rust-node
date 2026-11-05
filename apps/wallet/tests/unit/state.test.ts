@@ -162,6 +162,27 @@ describe('passphrase wallets (desktop)', () => {
     expect(S.autoLockDelayMinutes()).toBeNull();
     expect(await codeOf(S.setAutoLockMinutes(7))).toBe('invalid_argument');
   });
+
+  it('does not let programmatic popup focus extend a local signing session', async () => {
+    const { S, M } = await boot('web');
+    await S.unlockWallet(S.wallets.value[0]!.id, {mnemonic:M.MOCK_WALLETS[0].mnemonic});
+    const idle = await import('../../src/state/idle');
+    const listeners = new Map<string,(e: {type:string}) => void>();
+    vi.stubGlobal('window', {
+      addEventListener: (name:string,fn:(e: {type:string})=>void) => listeners.set(name,fn),
+      removeEventListener: (name:string) => listeners.delete(name),
+    });
+    vi.stubGlobal('document', {addEventListener:()=>undefined,removeEventListener:()=>undefined});
+    const stop = idle.startIdleLock({trackFocus:false});
+    try {
+      S.markActivity(START);
+      vi.setSystemTime(START+4*60_000);
+      listeners.get('focus')!({type:'focus'});
+      expect(S.idleExpired(START+5*60_000)).toBe(true);
+      listeners.get('pointerdown')!({type:'pointerdown'});
+      expect(S.idleExpired(START+5*60_000)).toBe(false);
+    } finally { stop();vi.unstubAllGlobals(); }
+  });
 });
 
 describe('sending', () => {

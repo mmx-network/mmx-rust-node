@@ -12,7 +12,8 @@
  * contain the same values for the default chain server (checked by
  * tests/unit/web-security.test.ts).
  */
-import type { Plugin } from 'vite';
+import { readFileSync } from 'node:fs';
+import { transformWithEsbuild, type Plugin } from 'vite';
 import { DEFAULT_RPC_URL, parseRpcUrl } from '../src/backend/web/rpc-url';
 
 export { DEFAULT_RPC_URL };
@@ -74,17 +75,19 @@ export function contentSecurityPolicy(rpcOrigin: string, forMeta = false): strin
 }
 
 /** Response headers for every file of the site. */
-export function securityHeaders(rpcOrigin: string): Array<[string, string]> {
-  return [
+export function securityHeaders(rpcOrigin: string, path = '/'): Array<[string, string]> {
+  const headers: Array<[string,string]> = [
     ['Content-Security-Policy', contentSecurityPolicy(rpcOrigin)],
     ['X-Content-Type-Options', 'nosniff'],
     ['Referrer-Policy', 'no-referrer'],
     ['Permissions-Policy', PERMISSIONS_POLICY],
-    ['Cross-Origin-Opener-Policy', 'same-origin'],
+    ['Cross-Origin-Opener-Policy', path === '/connect.html' ? 'unsafe-none' : 'same-origin'],
     ['Cross-Origin-Resource-Policy', 'same-origin'],
     ['X-Frame-Options', 'DENY'],
     ['Strict-Transport-Security', 'max-age=63072000; includeSubDomains'],
   ];
+  if (path === '/mmx-wallet.js') headers.push(['Access-Control-Allow-Origin', '*']);
+  return headers;
 }
 
 /** Hashed build assets never change; the page itself is always revalidated so updates arrive at once. */
@@ -94,10 +97,14 @@ export const CACHE_REVALIDATE = 'no-cache';
 /** `_headers` file for Netlify and Cloudflare Pages. */
 export function netlifyHeaders(rpcOrigin: string): string {
   const lines = ['/*'];
-  for (const [name, value] of securityHeaders(rpcOrigin)) lines.push(`  ${name}: ${value}`);
+  // COOP only applies to documents. Separate rules avoid conflicting values
+  // on hosts which concatenate headers from multiple matching rules.
+  for (const [name, value] of securityHeaders(rpcOrigin)) if (name !== 'Cross-Origin-Opener-Policy') lines.push(`  ${name}: ${value}`);
   lines.push('', '/assets/*', `  Cache-Control: ${CACHE_IMMUTABLE}`);
-  lines.push('', '/', `  Cache-Control: ${CACHE_REVALIDATE}`);
-  lines.push('', '/index.html', `  Cache-Control: ${CACHE_REVALIDATE}`);
+  for (const path of ['/', '/index.html', '/connect.html']) {
+    lines.push('', path, `  Cross-Origin-Opener-Policy: ${path === '/connect.html' ? 'unsafe-none' : 'same-origin'}`, `  Cache-Control: ${CACHE_REVALIDATE}`);
+  }
+  lines.push('', '/mmx-wallet.js', '  Cross-Origin-Opener-Policy: same-origin', '  Access-Control-Allow-Origin: *', `  Cache-Control: ${CACHE_REVALIDATE}`);
   return lines.join('\n') + '\n';
 }
 
@@ -159,19 +166,27 @@ export function webSecurityPlugin(): Plugin {
         return injectCspMeta(html, origin);
       },
     },
-    generateBundle(_options, bundle) {
+    async generateBundle(_options, bundle) {
       const page = bundle['index.html'];
       if (!page || page.type !== 'asset') this.error('web build: index.html missing from the output');
       const html = typeof page.source === 'string' ? page.source : new TextDecoder().decode(page.source);
       const problems = findInlineCode(html);
       if (problems.length > 0) this.error(`index.html must not contain inline code: ${problems.join('; ')}`);
       if (!html.includes(cspMetaTag(origin))) this.error('index.html is missing the Content-Security-Policy');
+      for (const [name, output] of Object.entries(bundle)) {
+        if (output.type !== 'asset' || !name.endsWith('.html')) continue;
+        const source = String(output.source);
+        if (findInlineCode(source).length || !source.includes(cspMetaTag(origin))) this.error(`${name} must have CSP and no inline code`);
+      }
       this.emitFile({ type: 'asset', fileName: '_headers', source: netlifyHeaders(origin) });
+      const sdk = readFileSync(new URL('../src/connect/sdk.ts', import.meta.url), 'utf8');
+      const built = await transformWithEsbuild(sdk, 'mmx-wallet-sdk.ts', { target:'es2022', format:'esm', minify:true });
+      this.emitFile({ type:'asset', fileName:'mmx-wallet.js', source:built.code });
     },
     configurePreviewServer(server) {
-      const headers = securityHeaders(origin);
-      server.middlewares.use((_req, res, next) => {
-        for (const [name, value] of headers) res.setHeader(name, value);
+      server.middlewares.use((req, res, next) => {
+        const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+        for (const [name, value] of securityHeaders(origin,path)) res.setHeader(name, value);
         next();
       });
     },

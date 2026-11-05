@@ -157,7 +157,7 @@ export {
   type ImportContactsResult,
   type RestoreResult,
 } from './contacts';
-export { DEFAULT_RPC_URL, normalizeRpcUrl, setAutoLockMinutes, setDefaultFeeLevel, setRpcUrl, setTheme } from './settings';
+export { DEFAULT_RPC_URL, normalizeRpcUrl, setAutoLockMinutes, setDefaultFeeLevel, setRpcUrl, setTheme, setAllowWebsiteConnections, setWebsiteBlocked } from './settings';
 export { copyAddress, copyToClipboard, openAddress, openTransaction, sensitiveCopyMessage } from './actions';
 export { autoLockDelayMinutes, idleExpired, markActivity } from './idle';
 export { init, startRouteGuard, startRouter } from './init';
