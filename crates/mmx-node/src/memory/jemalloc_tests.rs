@@ -9,6 +9,102 @@ use std::{
 
 const MIB: usize = 1024 * 1024;
 
+#[test]
+fn thp_default_blocks_collapse_and_operator_overrides_survive() {
+    let Ok(mode) = std::env::var("MMX_JEMALLOC_THP_TEST") else {
+        for (mode, config) in [
+            ("default", None),
+            ("unrelated", Some("dirty_decay_ms:1000")),
+            ("override_default", Some("thp:default")),
+            ("override_always", Some("thp:always")),
+        ] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "memory::jemalloc_tests::thp_default_blocks_collapse_and_operator_overrides_survive",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("MMX_JEMALLOC_THP_TEST", mode)
+                .env_remove("_RJEM_MALLOC_CONF")
+                .env_remove("MALLOC_CONF");
+            if let Some(config) = config {
+                child.env("_RJEM_MALLOC_CONF", config);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    assert!(tikv_jemalloc_ctl::background_thread::read().unwrap());
+    let policy = super::thp().unwrap();
+    if policy == "not supported" {
+        eprintln!("THP is unavailable on this kernel; collapse check skipped");
+        return;
+    }
+    let expected = match mode.as_str() {
+        "override_default" => "default",
+        "override_always" => "always",
+        _ => "never",
+    };
+    assert_eq!(policy, expected);
+    if mode == "unrelated" {
+        // SAFETY: opt.dirty_decay_ms has the documented ssize_t ABI.
+        let decay: libc::ssize_t =
+            unsafe { tikv_jemalloc_ctl::raw::read(b"opt.dirty_decay_ms\0") }.unwrap();
+        assert_eq!(decay, 1000);
+    }
+    if expected != "never" {
+        return;
+    }
+
+    // Exercise the executable's actual global allocator. MADV_COLLAPSE can
+    // bypass the host's global THP policy, but must respect MADV_NOHUGEPAGE.
+    // Use a fully owned, aligned subrange; never change a global kernel setting.
+    let allocation = vec![0x5au8; 4 * MIB];
+    let address = allocation.as_ptr() as usize;
+    let aligned = address.next_multiple_of(2 * MIB);
+    assert!(aligned + 2 * MIB <= address + allocation.len());
+    let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+    let mut contains_allocation = false;
+    let mut no_hugepage = false;
+    for line in smaps.lines() {
+        if let Some((start, rest)) = line.split_once('-') {
+            if let (Ok(start), Some(end)) = (
+                usize::from_str_radix(start, 16),
+                rest.split_whitespace()
+                    .next()
+                    .and_then(|end| usize::from_str_radix(end, 16).ok()),
+            ) {
+                contains_allocation = start <= aligned && aligned + 2 * MIB <= end;
+            }
+        }
+        if contains_allocation && line.starts_with("VmFlags:") {
+            no_hugepage = line.split_whitespace().any(|flag| flag == "nh");
+            break;
+        }
+    }
+    assert!(
+        no_hugepage,
+        "allocator mapping is not marked MADV_NOHUGEPAGE"
+    );
+    // SAFETY: the aligned subrange lies wholly in the still-live allocation.
+    // The advice changes only backing pages, without changing its contents.
+    let result =
+        unsafe { libc::madvise(aligned as *mut libc::c_void, 2 * MIB, libc::MADV_COLLAPSE) };
+    assert_eq!(result, -1, "kernel collapsed a protected allocator mapping");
+    assert!(allocation.iter().all(|byte| *byte == 0x5a));
+    black_box(allocation);
+    eprintln!("jemalloc THP default: mode={mode} policy={policy} mapping=nh collapse=rejected");
+}
+
 fn rss() -> Result<usize, String> {
     std::fs::read_to_string("/proc/self/status")
         .map_err(|error| error.to_string())?

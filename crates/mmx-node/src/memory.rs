@@ -5,12 +5,33 @@
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// jemalloc reads this before main, including allocations made during startup.
+// A reference to a fixed-size array is one pointer, matching C's const char *;
+// a byte slice would also carry a length. The bytes live for the whole process.
+// Operator configuration is processed later and can override this default.
+#[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
+#[used]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static MALLOC_CONF: &[u8; 10] = b"thp:never\0";
+
 #[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
 #[derive(Clone, Copy, Debug)]
 struct Heap {
     allocated: usize,
     active: usize,
     resident: usize,
+    thp: &'static str,
+}
+
+#[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
+fn thp() -> Result<&'static str, tikv_jemalloc_ctl::Error> {
+    // SAFETY: opt.thp returns an immutable, process-lifetime, NUL-terminated
+    // string. read_str uses that exact const char * mallctl ABI.
+    let value = unsafe { tikv_jemalloc_ctl::raw::read_str(b"opt.thp\0")? };
+    Ok(std::ffi::CStr::from_bytes_with_nul(value)
+        .expect("jemalloc returned a non-terminated THP option")
+        .to_str()
+        .unwrap_or("invalid"))
 }
 
 #[cfg(all(feature = "jemalloc", target_os = "linux", target_env = "gnu"))]
@@ -21,6 +42,7 @@ fn heap() -> Result<Heap, tikv_jemalloc_ctl::Error> {
         allocated: stats::allocated::read()?,
         active: stats::active::read()?,
         resident: stats::resident::read()?,
+        thp: thp()?,
     })
 }
 
@@ -28,8 +50,8 @@ fn heap() -> Result<Heap, tikv_jemalloc_ctl::Error> {
 pub(super) fn report() {
     match heap() {
         Ok(heap) => eprintln!(
-            "jemalloc heap: allocated_bytes={} active_bytes={} resident_bytes={}",
-            heap.allocated, heap.active, heap.resident
+            "jemalloc heap: allocated_bytes={} active_bytes={} resident_bytes={} thp={}",
+            heap.allocated, heap.active, heap.resident, heap.thp
         ),
         Err(error) => eprintln!("Could not read jemalloc heap statistics: {error}"),
     }

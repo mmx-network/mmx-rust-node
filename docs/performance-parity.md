@@ -1,5 +1,37 @@
 # C++ performance parity
 
+## Jemalloc THP default (2026-11-05)
+
+GNU/Linux node executables using jemalloc now default to `thp:never` for all
+deployments. The binary exports jemalloc's prefixed `malloc_conf` pointer to a
+static NUL-terminated option string, so the policy applies to allocations made
+before `main` as well as normal operation. Operator configuration is processed
+later: explicit `_RJEM_MALLOC_CONF=thp:default` or `thp:always` still takes
+precedence, while unrelated options keep the node default. Background purging,
+cache budgets, native-library allocation and system-allocator builds retain
+their existing behavior. Heap diagnostics include the resolved `thp` policy.
+This requires the updated executable; it does not alter the host's global THP
+policy or running instances of older binaries.
+
+References inspected: C++ links jemalloc when available and reports allocator
+statistics in `Node.cpp::print_stats`; it does not impose this THP default.
+The Rust policy addresses the measured retained-extent backing described below
+and deliberately differs from relying on host-wide hugepage settings.
+The exported Rust reference points to a fixed-size byte array, preserving the
+single-pointer C ABI rather than exporting a slice with a length. The setting
+belongs only to the node executable, not to consumers of its libraries.
+
+A fresh-process regression exercises the executable's actual global allocator.
+It verifies the default, an unrelated allocator option and explicit `default`
+and `always` overrides. Default-policy allocations must carry the kernel's
+`MADV_NOHUGEPAGE` mapping flag, and a collapse request against a fully owned,
+aligned allocation must be rejected without changing its bytes. No kernel-wide
+setting or live ledger is used. The earlier three-burst natural-decay regression
+also remains in place.
+Validation: all 198 node tests pass with jemalloc, and all 197 tests pass with
+the system allocator, using two test threads. All-target Clippy passes with
+warnings denied in both configurations; formatting and diff checks pass.
+
 ## Eu2 RSS and transparent hugepages (2026-11-03)
 
 After about 51 hours on `75b8bc9`, local and t320 heap usage had plateaued,

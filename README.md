@@ -401,6 +401,11 @@ overhead; it does not cap total process RSS or temporary request/response memory
 
 GNU/Linux node builds use bundled jemalloc for Rust allocations, with background
 page reclamation and heap statistics logged at startup and every minute.
+The executable defaults to `thp:never` before the allocator initializes, preventing
+transparent hugepages from backing purged, unused allocator memory on hosts
+whose hugepage policy is `always`. Heap logs include the resolved `thp` policy.
+An explicit `_RJEM_MALLOC_CONF` can override it, for example `thp:default` to
+inherit the host policy; unrelated allocator options preserve `thp:never`.
 `allocated_bytes` tracks application allocations; `active_bytes` also includes
 unused space within active pages; `resident_bytes` includes allocator metadata
 and dirty pages. These describe the jemalloc heap, not the complete process RSS.
