@@ -1676,3 +1676,48 @@ frontend builds pass. The mock node checks transaction shape, static costs and
 balances but does not run arbitrary contract VM programs; native tests verify
 signatures and tampering. Physical iOS/Android popup/background behavior and
 representative contract execution on a real public node remain unmeasured.
+
+## Wallet request popup lifecycle and transaction presentation (2026-11-05)
+
+The website SDK now opens one popup per connect or transaction action and closes
+it on completion, rejection, cancellation, timeout or denial. The public
+connection survives a completed popup via a random origin-bound grant, capped
+at 32 grants and one hour. Stored grants contain only public account metadata;
+all signing/unlock material stays in the existing wallet vault. Blocking or
+disabling removes grants. A cold popup unlock is purged on close, while a warm
+main wallet continues signing across separate requests. Closing a popup after
+submission begins reports an uncertain outcome rather than a false rejection.
+
+The first review renders formatted transfers, full recipient addresses, memos
+and structured contract actions/arguments; the canonical quote adds exact fees
+and maximum total. Generic VM arguments retain their values and escaped control
+characters. No raw JSON is shown. Approval buttons and the maximum fee remain
+visible while longer details scroll. Website-blocking input width follows the
+settings row at desktop and phone widths. Scoped styles and shared wallet UI
+components keep desktop controls and the standard send flow unchanged. The
+external popup protocol is version 2; both locally hosted pages must be
+reloaded after upgrading the SDK.
+
+Public pending-funds reservations now survive a cold popup closing or a tab
+reload. They retain the C++ input/static-fee subtraction and inclusion/expiry
+release intent; custom transactions reserve their maximum fee. Storage is
+scoped by RPC endpoint and wallet, with explicit network tags, at most 256
+transactions / 1,024 inputs each / 2 million serialized characters. Every
+mutation reads fresh data. Writes occur only on broadcast, refusal, inclusion,
+expiry or wallet removal; there is no extra polling or ledger I/O. Capacity or
+write failure stops submission before the broadcast POST. No signed bytes or
+secret material are persisted. This still does not provide an atomic spend
+lock across independently unlocked tabs submitting simultaneously.
+
+Evidence: 547 unit tests pass, including persistent pending-fund recovery after
+accepted and uncertain submissions, storage failure before POST, capacity,
+network isolation and grant revocation across clock changes. The 54-test
+Chromium run passed 53 tests; its remaining backend test assumed a generated
+named export that Rollup now shares through a namespace. After correcting that
+test lookup, all eight affected popup/backend browser tests pass, including a
+second cold popup refusing already-reserved funds. Web and desktop frontend
+builds and TypeScript checks pass. Reviewed 480-pixel popup and 390-pixel phone
+layouts, plus URL-field widths at 1,280 / 540 / 390 / 320 pixels. Native signing
+code is unchanged from the earlier verified checkpoint. No real funds were
+sent by these tests. Physical mobile browser behavior and arbitrary contract
+VM execution retain the limitations recorded above.

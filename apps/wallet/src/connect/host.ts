@@ -98,9 +98,9 @@ export function startWalletHost(): { id: string; close: () => void } | null {
         const access = websiteAccess((await b.loadAppState()).settings, client.origin);
         if (access) throw new ConnectionError(access, messageForCode(access));
         stillPresent();
-        const network = parseChainParams(raw).network;
+        const { network, decimals } = parseChainParams(raw);
         client.addresses = addresses;
-        reply({ walletId, address: addresses[0]!, addresses, network });
+        reply({ walletId, address: addresses[0]!, addresses, network, decimals });
       } else if (method === 'prepare') {
         if (!b.prepareTransaction || !transactionRequest(message.params)) throw new ConnectionError('invalid_request');
         if (client.prepared) await b.discardPrepared(client.prepared.txid);

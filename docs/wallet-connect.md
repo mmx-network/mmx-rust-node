@@ -5,7 +5,9 @@ custom transaction submission. Users must first enable **Settings → Website
 connections → Allow website connections**. It is off by default, including when
 upgrading an existing wallet. Connecting shares the selected wallet's public
 addresses only after the user clicks **Connect**. Each transaction requires
-**Review transaction**, then **Approve and send** in the wallet window.
+**Continue** (or **Unlock to review**), then **Send now** in the wallet window.
+Connecting and each transaction open their own short-lived popup. The popup
+closes after approval, rejection, an error or a timeout.
 
 Users can choose **Block this website** in the connection window, or enter a
 website URL in wallet Settings. Blocking persists for that exact origin
@@ -44,6 +46,7 @@ document.querySelector('#connect').onclick = async () => {
 
 document.querySelector('#send').onclick = async () => {
   try {
+    // Call directly in the click handler: this opens a fresh approval popup.
     const { txid } = await wallet.sendTransaction({
       execute: [{
         __type: 'mmx.operation.Execute',
@@ -75,7 +78,11 @@ The calling website must use the default
 `same-origin` severs the popup reference and cannot use this API. If the caller
 has a CSP, it must allow importing the SDK from the wallet origin, or bundle
 `apps/wallet/src/connect/sdk.ts` into its application. The popup is a separate
-window or tab according to the browser's UI. Keep it open for the connection.
+window or tab according to the browser's UI. It closes after each action; the
+public connection stays available for later transaction requests. Both
+`connect()` and `sendTransaction()` must be called directly from a user click
+or tap, before any `await`, so mobile popup blocking does not prevent the new
+window. Only one popup may be active per SDK instance.
 
 ## Transaction format and limits
 
@@ -115,9 +122,11 @@ signing, arbitrary hash signing, signed transaction bytes or private keys.
 `gasLimit` is an unsigned 32-bit execution-cost budget, default 5,000,000.
 Review displays the actual canonical template, transfers, calls/arguments,
 deployments, network, expiry and maximum fee (static cost plus execution budget,
-scaled by the fee ratio). The fee payer must cover this maximum. The wallet
-shows raw contract actions; it does not simulate their balance/ownership
-changes before review. After approval, a node dry run must succeed and stay
+scaled by the fee ratio). The fee payer must cover this maximum. The wallet shows formatted amounts, recipients, memos, contract actions and
+named argument/value lists from the first review screen. The canonical signed
+quote then shows the maximum fee and total; signatures stay private. Structured
+additional details replace raw JSON. Contract balance/ownership changes are
+not simulated before review. After approval, a node dry run must succeed and stay
 within the approved maximum before broadcast. Submission returns `{ txid }`;
 confirmation must be followed separately.
 
@@ -126,15 +135,20 @@ Requests are bounded to 64 KiB, depth 32 and 4,096 JSON nodes, with at most
 pending per popup. Signing commands are serialized per signing tab. Before
 broadcast, the wallet refreshes balances and subtracts pending reservations so
 two reviewed requests using that signer cannot spend the same available funds.
-Reservations are local to each signing backend; independently unlocked tabs
-still rely on the node to reject conflicting submissions. A prepared
+Public reservations are stored per wallet and RPC endpoint, tagged with the
+network, so closing a signing popup or reloading cannot release pending funds.
+They are removed once included, expired or definitively refused. Storage is
+bounded to 256 pending transactions and 2 million characters per wallet; a full
+or unwritable store prevents submission rather than evicting pending entries.
+This is bookkeeping, not an atomic lock across simultaneously unlocked tabs;
+the node still rejects conflicting concurrent submissions. A prepared
 transaction is consumed at most once.
 
 Handle `user_rejected`, `website_connections_disabled`, `website_blocked`,
 `locked`, `popup_blocked`, `disconnected`, `timeout`, `invalid_request`,
 `insufficient_funds`, `insufficient_fee`, `tx_rejected`, `tx_expired` and
 `tx_uncertain`. A lost broadcast reply leaves the maximum fee and inputs
-reserved. **Do not automatically retry a transaction** after a timeout or
+reserved. Closing or timing out after submission starts reports `tx_uncertain`. **Do not automatically retry a transaction** after a timeout or
 uncertain reply; check wallet Activity / chain state first.
 
 ## Browser communication and deployment
@@ -146,11 +160,21 @@ it for approval, and communicates with wallet tabs over a separate same-origin
 `BroadcastChannel`. The website never receives that channel's bridge ID.
 There is no wallet-server relay, session cookie or remote signing session.
 
+A successful connection returns a random, origin-bound grant to the SDK. The
+wallet stores up to 32 public grants for one hour so a subsequent popup can
+identify the approved account. Grants contain only origin, public account,
+wallet name and expiry; they cannot unlock or spend. Their IDs travel in the
+origin-checked handshake, never in the URL. The SDK keeps its grant in memory
+and drops it on disconnect/navigation. Blocking a site or disabling website
+connections removes stored grants, so re-enabling requires fresh connection
+consent. The grant never substitutes for per-transaction approval.
+
 An unlocked wallet tab signs locally without sending its seed, passphrase,
 keys, signatures or signed transaction to the popup. If the tab is closed,
-locked or suspended, **Unlock in this window** lets the user unlock the same
-wallet locally in the popup. A fresh popup with no available signer offers
-**unlock here**. Manual and idle locks still purge signing material; only the
+locked or suspended, **Unlock to review** asks the user to unlock the same
+wallet locally in that transaction's popup. Connecting a locked wallet offers
+**Unlock and connect**. Closing a locally unlocked popup purges its keys, so
+another request needs another unlock unless a main wallet tab is unlocked. Manual and idle locks still purge signing material; only the
 user's spending actions extend the signing tab's inactivity timer. Discovery
 and inbound website requests do not extend it. Closing the popup releases keys
 it unlocked without locking the original wallet tab.

@@ -36,6 +36,8 @@ import { isFeeLevel } from '../../lib/fees';
 import { MEMO_MAX_BYTES, utf8Length } from '../../lib/memo';
 import { hasUnsafeCharacters, validateName } from '../../lib/text';
 import { MAX_BLOCKED_WEBSITES, websiteAccess, websiteOrigin } from '../../lib/websites';
+import { WebsiteSessions } from '../../connect/sessions';
+import { ReservationStore, type Reservation } from './reservations';
 import { Clipboard, downloadFile, openExplorer, pickTextFile } from './browser';
 import { preventSilentAccess } from './credentials';
 import { RpcHttp, type FetchLike } from './http';
@@ -51,8 +53,6 @@ export const PREPARED_TTL_MS = 10 * 60_000;
 const MAX_PREPARED = 16;
 /** Parallel balance requests while preparing a transfer (same as the desktop service). */
 const FETCH_WORKERS = 4;
-/** Broadcast transfers remembered per wallet; far more than a wallet sends within their 100-block lifetime. */
-const MAX_RESERVATIONS = 256;
 /** Broadcast refusals: the node did not accept the transfer. Other errors leave the outcome open. */
 const REFUSED: ReadonlySet<ErrorCode> = new Set(['tx_rejected', 'insufficient_funds', 'insufficient_fee', 'tx_expired']);
 
@@ -71,20 +71,6 @@ export interface WebBackendOptions {
   events?: StorageEventSource;
   now?: () => number;
   timeoutMs?: number;
-}
-
-/**
- * A broadcast transfer of the wallet that is not included yet. Its static fee
- * (paid by `sender`) and its inputs from the wallet's own addresses are taken
- * out of fresh balances until it is included or expires.
- */
-export interface Reservation {
-  txid: string;
-  expires: number;
-  sender: string;
-  /** static cost × fee ratio / 1024, in MMX. */
-  senderFee: bigint;
-  inputs: Array<{ address: string; contract: string; amount: bigint }>;
 }
 
 interface Prepared {
@@ -217,11 +203,8 @@ export class WebBackend implements Backend {
   private readonly vaults = new Map<WalletId, VaultHandle>();
   private readonly prepared = new Map<string, Prepared>();
   private readonly broadcasting = new Set<WalletId>();
-  /**
-   * Broadcast transfers per wallet, by txid, oldest first. Kept while the
-   * wallet is locked (they hold no secret) so that funds stay reserved.
-   */
-  private readonly reserved = new Map<WalletId, Map<string, Reservation>>();
+  /** Public pending funds survive closing a signing popup or reloading a tab. */
+  private readonly reservations: ReservationStore;
   private readonly now: () => number;
   private wasmPromise: Promise<WasmApi> | null = null;
   /** Bumped by lockAll; an unlock started before a lock does not complete. */
@@ -234,7 +217,9 @@ export class WebBackend implements Backend {
   constructor(private readonly options: WebBackendOptions) {
     this.store = new MetadataStore(options.storage);
     this.syncWebsitePermissions();
-    this.http = new RpcHttp(options.fetch, parseRpcUrl(options.rpcUrl).base, options.timeoutMs);
+    const rpcUrl = parseRpcUrl(options.rpcUrl).base;
+    this.http = new RpcHttp(options.fetch, rpcUrl, options.timeoutMs);
+    this.reservations = new ReservationStore(options.storage, rpcUrl);
     this.now = options.now ?? (() => Date.now());
     // Registered first: the keys are freed before any listener hears of the lock.
     options.events?.addEventListener('storage', (e) => {
@@ -364,6 +349,8 @@ export class WebBackend implements Backend {
       if (sites.size > MAX_BLOCKED_WEBSITES) fail('invalid_argument');
       settings.blockedWebsites = [...sites].sort();
     }
+    if ('enabled' in change && !change.enabled) new WebsiteSessions(this.options.storage, this.now).revoke();
+    if ('origin' in change && change.blocked) new WebsiteSessions(this.options.storage, this.now).revoke(change.origin);
     this.store.saveAppState({ ...current, settings });
     this.syncWebsitePermissions();
     return this.store.appState().settings;
@@ -631,9 +618,9 @@ export class WebBackend implements Backend {
     const vault = this.vaults.get(id);
     this.vaults.delete(id);
     this.dropPrepared(id);
-    this.reserved.delete(id);
     if (vault) this.freeVault(vault);
     this.store.removeWallet(id);
+    this.reservations.removeWallet(id);
   }
 
   async revealMnemonic(id: WalletId, passphrase?: string): Promise<string> {
@@ -683,7 +670,6 @@ export class WebBackend implements Backend {
         this.dropPrepared(id);
         this.freeVault(vault);
       }
-      for (const id of [...this.reserved.keys()]) if (!known.has(id)) this.reserved.delete(id);
       listener();
     });
   }
@@ -719,7 +705,7 @@ export class WebBackend implements Backend {
   private async snapshot(walletId: WalletId, addresses: readonly string[]): Promise<ChainSnapshot> {
     // Inclusion is checked before balances are read: a transfer included in
     // between is then subtracted once more (safe) instead of not at all.
-    const waiting = [...(this.reserved.get(walletId)?.values() ?? [])];
+    const waiting = this.reservations.list(walletId);
     const [paramsReply, nodeReply, included] = await Promise.all([
       this.http.get('/chain/info'),
       this.http.get('/node/info'),
@@ -729,8 +715,8 @@ export class WebBackend implements Backend {
     const params = parseChainParams(paramsReply.value);
     const node = parseNodeInfo(nodeReply.value);
     checkNode(node, params);
-    this.releaseReservations(
-      walletId,
+    this.reservations.release(
+      walletId, params.network,
       new Set(waiting.filter((_, i) => included[i]).map((r) => r.txid)),
       node.height,
     );
@@ -738,7 +724,7 @@ export class WebBackend implements Backend {
       address,
       rows: parseAddressBalances((await this.http.get(`/address?id=${address}&limit=1000`)).value, params),
     }));
-    const held = this.heldFunds(walletId);
+    const held = this.heldFunds(walletId, params.network);
     const balances: Array<{ address: string; contract: string; amount: string }> = [];
     const currencies = new Map<string, Currency>();
     currencies.set(NATIVE_CONTRACT, { symbol: 'MMX', decimals: params.decimals });
@@ -762,48 +748,18 @@ export class WebBackend implements Backend {
     return isRecord(info) && safeInteger(info.height) !== null;
   }
 
-  /** Forgets reservations of transfers that were included or can no longer be (`expires < height`). */
-  private releaseReservations(walletId: WalletId, included: ReadonlySet<string>, height: number): void {
-    const list = this.reserved.get(walletId);
-    if (!list) return;
-    for (const [txid, r] of [...list]) if (included.has(txid) || r.expires < height) list.delete(txid);
-    if (list.size === 0) this.reserved.delete(walletId);
-  }
-
   /** Funds held by the wallet's broadcast transfers, per address and currency. */
-  private heldFunds(walletId: WalletId): Map<string, bigint> {
+  private heldFunds(walletId: WalletId, network: string): Map<string, bigint> {
     const held = new Map<string, bigint>();
     const add = (address: string, contract: string, amount: bigint) => {
       const key = fundsKey(address, contract);
       held.set(key, (held.get(key) ?? 0n) + amount);
     };
-    for (const r of this.reserved.get(walletId)?.values() ?? []) {
+    for (const r of this.reservations.list(walletId).filter((r) => r.network === network)) {
       add(r.sender, NATIVE_CONTRACT, r.senderFee);
       for (const input of r.inputs) add(input.address, input.contract, input.amount);
     }
     return held;
-  }
-
-  private reserve(walletId: WalletId, r: Reservation): void {
-    let list = this.reserved.get(walletId);
-    if (!list) {
-      list = new Map();
-      this.reserved.set(walletId, list);
-    }
-    list.delete(r.txid);
-    while (list.size >= MAX_RESERVATIONS) {
-      const oldest = list.keys().next().value;
-      if (oldest === undefined) break;
-      list.delete(oldest);
-    }
-    list.set(r.txid, r);
-  }
-
-  private unreserve(walletId: WalletId, txid: string): void {
-    const list = this.reserved.get(walletId);
-    if (!list) return;
-    list.delete(txid);
-    if (list.size === 0) this.reserved.delete(walletId);
   }
 
   /** Throws `locked` when the wallet was locked (or re-opened) while a request was running. */
@@ -878,6 +834,7 @@ export class WebBackend implements Backend {
     const fee = tx.fee;
     const own = new Set(addresses);
     const reservation: Reservation = {
+      network: chain.params.network,
       txid: tx.txid,
       expires: tx.expires,
       sender: tx.sender,
@@ -931,6 +888,7 @@ export class WebBackend implements Backend {
     const own = new Set(addresses);
     const inputs = tx.inputs as Array<{ address: string; contract: string; amount: string }>;
     const reservation: Reservation = {
+      network: chain.params.network,
       txid, expires: Number(tx.expires), sender: String(tx.sender), senderFee: maxFee,
       inputs: inputs.filter((i) => own.has(i.address)).map((i) => ({ ...i, amount: BigInt(i.amount) })),
     };
@@ -1016,11 +974,12 @@ export class WebBackend implements Backend {
     const totalFee = atomicField(result.total_fee);
     if (totalFee === null || totalFee > p.reservation.senderFee) fail('tx_not_sent');
     // Reserved before sending: when the reply is lost the node may still have accepted it.
-    this.reserve(walletId, p.reservation);
+    try { this.reservations.put(walletId, p.reservation); }
+    catch { fail('tx_not_sent'); }
     try {
       await this.http.broadcast(p.txJson);
     } catch (e) {
-      if (e instanceof BackendError && REFUSED.has(e.code)) this.unreserve(walletId, p.reservation.txid);
+      if (e instanceof BackendError && REFUSED.has(e.code)) this.reservations.remove(walletId, p.reservation.txid);
       throw e;
     }
   }

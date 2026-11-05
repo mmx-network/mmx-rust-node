@@ -2,7 +2,7 @@ import type { FeeLevel, WalletInfo } from '../backend/types';
 export { websiteOrigin as origin } from '../lib/websites';
 
 export const PROTOCOL = 'mmx-wallet';
-export const VERSION = 1;
+export const VERSION = 2;
 export const CHANNEL = 'mmx-wallet-connect/v1';
 export const REQUEST_TIMEOUT = 120_000;
 export const MAX_JSON = 65_536;
@@ -11,6 +11,7 @@ export interface Account {
   address: string;
   addresses: string[];
   network: string;
+  decimals?: number;
 }
 export interface TransactionRequest {
   network: string;
@@ -36,7 +37,7 @@ export interface Offer {
 }
 export interface Envelope {
   protocol: 'mmx-wallet';
-  version: 1;
+  version: 2;
   channel: string;
   type: string;
   id?: string;

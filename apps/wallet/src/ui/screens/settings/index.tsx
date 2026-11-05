@@ -120,8 +120,13 @@ function WebsiteSettings() {
           onChange={(v) => void save(() => setAllowWebsiteConnections(v))}
         />
       </OptionRow>
-      <OptionRow title="Block a website" description="Blocked websites cannot connect or request transactions." stacked>
-        <Stack gap={3}>
+      <OptionRow
+        title="Block a website"
+        description="Blocked websites cannot connect or request transactions."
+        stacked
+        class="settings-website-block"
+      >
+        <Stack gap={3} class="settings-website-block__form">
           <Field label="Website URL">
             <TextInput value={input} placeholder="https://example.com" onValue={setInput} disabled={saving} />
           </Field>

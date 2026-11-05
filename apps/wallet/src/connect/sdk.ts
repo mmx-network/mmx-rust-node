@@ -1,5 +1,4 @@
-/** Standalone browser SDK, also emitted as /mmx-wallet.js. No dependencies,
- * storage, relay, seed handling, injected provider or background connection. */
+/** Standalone ESM SDK. Each user action owns exactly one short-lived popup. */
 import type { Account, TransactionRequest } from './protocol';
 
 export interface ConnectOptions {
@@ -9,6 +8,7 @@ export interface ConnectOptions {
 }
 export interface WalletConnection {
   readonly account: Account;
+  /** Call directly from a click/tap handler so the browser permits a new popup. */
   sendTransaction(
     transaction: Record<string, unknown>,
     options?: Pick<TransactionRequest, 'feeLevel' | 'gasLimit'>,
@@ -24,6 +24,8 @@ export class WalletError extends Error {
     this.name = 'WalletError';
   }
 }
+const VERSION = 2;
+let popupInUse = false;
 function random(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -45,148 +47,195 @@ function json(value: unknown, depth = 0, budget = { left: 4096 }, seen = new Set
   seen.delete(value);
   return valid;
 }
-
-/** Call directly from a click/tap handler so the browser permits the popup.
- * The caller must use COOP unsafe-none (the default) or same-origin-allow-popups. */
-export function connect(options: ConnectOptions = {}): Promise<WalletConnection> {
-  if (!allowed(new URL(window.location.href))) return Promise.reject(new WalletError('insecure_origin'));
+interface PopupRequest {
+  promise: Promise<Record<string, unknown>>;
+  cancel: () => void;
+}
+function request(options: ConnectOptions, action: 'connect' | 'sendTransaction', payload: Record<string, unknown>): PopupRequest {
+  const failure = (error: WalletError): PopupRequest => ({ promise: Promise.reject(error), cancel: () => undefined });
+  if (popupInUse) return failure(new WalletError('busy', 'Finish the current wallet request first.'));
+  if (!allowed(new URL(window.location.href))) return failure(new WalletError('insecure_origin'));
   let url: URL;
   try {
     url = new URL('connect.html', options.walletUrl ?? 'https://wallet.mmx.network/');
   } catch {
-    return Promise.reject(new WalletError('invalid_wallet_url'));
+    return failure(new WalletError('invalid_wallet_url'));
   }
-  if (!allowed(url) || url.username || url.password) return Promise.reject(new WalletError('invalid_wallet_url'));
+  if (!allowed(url) || url.username || url.password) return failure(new WalletError('invalid_wallet_url'));
   const timeout = options.timeoutMs ?? 120_000;
-  if (!Number.isFinite(timeout) || timeout < 1 || timeout > 300_000) return Promise.reject(new WalletError('invalid_argument'));
-  const channel = random();
-  const connectId = random();
+  if (
+    !Number.isFinite(timeout) ||
+    timeout < 1 ||
+    timeout > 300_000 ||
+    (options.network !== undefined && (typeof options.network !== 'string' || !options.network.length || options.network.length > 256))
+  )
+    return failure(new WalletError('invalid_argument'));
+  const channel = random(),
+    id = random();
   url.hash = new URLSearchParams({ channel, origin: window.location.origin }).toString();
-  const popup = window.open(url, `mmx-wallet-${channel}`, 'popup,width=540,height=800');
-  if (!popup) return Promise.reject(new WalletError('popup_blocked', 'Allow the wallet popup and try again.'));
-  let closed = false;
-  let greeted = false;
-  let account: Account | undefined;
-  const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-  const send = (v: Record<string, unknown>) => popup.postMessage({ protocol: 'mmx-wallet', version: 1, channel, ...v }, url.origin);
-  let rejectConnect: (e: Error) => void = () => undefined;
-  let resolveConnect: (c: WalletConnection) => void = () => undefined;
-  const cleanup = (error: Error) => {
-    if (closed) return;
-    closed = true;
+  // Never await anything before window.open: mobile browsers require activation.
+  let popup: Window | null;
+  try { popup = window.open(url, `mmx-wallet-${channel}`, 'popup,width=480,height=720'); }
+  catch { return failure(new WalletError('popup_blocked', 'Allow the wallet popup and try again.')); }
+  if (!popup) return failure(new WalletError('popup_blocked', 'Allow the wallet popup and try again.'));
+  popupInUse = true;
+  let done = false,
+    greeted = false,
+    submitting = false;
+  let resolve!: (v: Record<string, unknown>) => void;
+  let reject!: (e: Error) => void;
+  const promise = new Promise<Record<string, unknown>>((ok, no) => {
+    resolve = ok;
+    reject = no;
+  });
+  const send = (data: Record<string, unknown>) =>
+    popup.postMessage({ protocol: 'mmx-wallet', version: VERSION, channel, ...data }, url.origin);
+  const finish = (result?: Record<string, unknown>, error?: Error) => {
+    if (done) return;
+    done = true;
+    popupInUse = false;
     clearInterval(watch);
-    clearTimeout(connectTimer);
+    clearTimeout(timer);
     window.removeEventListener('message', onMessage);
     window.removeEventListener('pagehide', onLeave);
-    rejectConnect(error);
-    for (const p of pending.values()) {
-      clearTimeout(p.timer);
-      p.reject(error);
-    }
-    pending.clear();
-  };
-  const onLeave = () => {
     try {
-      send({ type: 'disconnect' });
+      popup.close();
     } catch {}
-    cleanup(new WalletError('disconnected'));
+    if (error) reject(error);
+    else resolve(result!);
   };
-  const connection: WalletConnection = {
-    get account() {
-      return account!;
-    },
-    sendTransaction(transaction, opts = {}) {
-      if (closed || !account) return Promise.reject(new WalletError('disconnected'));
-      if (pending.size) return Promise.reject(new WalletError('busy', 'Finish the current wallet request first.'));
-      let params: TransactionRequest;
-      try {
-        if (!record(transaction) || !json(transaction) || !json(opts)) throw new Error();
-        const encoded = JSON.stringify({ transaction, network: account.network, ...opts });
-        if (new TextEncoder().encode(encoded).length > 65_536) throw new Error();
-        params = JSON.parse(encoded) as TransactionRequest;
-      } catch {
-        return Promise.reject(new WalletError('invalid_request'));
-      }
-      const id = random();
-      popup.focus();
-      return new Promise<{ txid: string }>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          send({ type: 'cancel', id });
-          reject(new WalletError('timeout'));
-        }, timeout);
-        pending.set(id, { resolve: (v) => resolve(v as { txid: string }), reject, timer });
-        send({ type: 'request', id, method: 'sendTransaction', params });
-      });
-    },
-    disconnect() {
-      if (!closed) {
-        send({ type: 'disconnect' });
-        cleanup(new WalletError('disconnected'));
-        popup.close();
-      }
-    },
+  const cancel = () => {
+    if (done) return;
+    try {
+      send({ type: 'cancel', id });
+    } catch {}
+    finish(
+      undefined,
+      new WalletError(
+        submitting ? 'tx_uncertain' : 'disconnected',
+        submitting ? 'Check wallet Activity before requesting another transaction.' : 'disconnected',
+      ),
+    );
   };
+  const onLeave = () => cancel();
   function onMessage(event: MessageEvent<unknown>) {
     if (event.source !== popup || event.origin !== url.origin || !record(event.data)) return;
     const m = event.data;
-    if (m.protocol !== 'mmx-wallet' || m.version !== 1 || m.channel !== channel) return;
+    if (m.protocol !== 'mmx-wallet' || m.version !== VERSION || m.channel !== channel) return;
     if (m.type === 'ready' && !greeted) {
       greeted = true;
-      send({ type: 'hello', id: connectId, ...(options.network ? { network: options.network } : {}) });
-    } else if (m.type === 'closed') cleanup(new WalletError('disconnected'));
-    else if (m.type === 'connected' && m.id === connectId && !account) {
-      if (
-        !record(m.account) ||
-        typeof m.account.walletId !== 'string' ||
-        typeof m.account.address !== 'string' ||
-        !Array.isArray(m.account.addresses) ||
-        m.account.addresses.length < 1 ||
-        m.account.addresses.length > 100 ||
-        !m.account.addresses.every((a) => typeof a === 'string') ||
-        m.account.address !== m.account.addresses[0] ||
-        typeof m.account.network !== 'string' ||
-        (options.network !== undefined && m.account.network !== options.network)
-      )
-        return;
-      account = m.account as unknown as Account;
-      clearTimeout(connectTimer);
-      resolveConnect(connection);
-    } else if (m.type === 'result' && typeof m.id === 'string') {
-      const error =
-        record(m.error) && typeof m.error.code === 'string'
-          ? new WalletError(m.error.code, typeof m.error.message === 'string' ? m.error.message : m.error.code)
-          : undefined;
-      if (m.id === connectId && !account && error) {
-        cleanup(error);
-        return;
-      }
-      const p = pending.get(m.id);
-      if (!p) return;
-      clearTimeout(p.timer);
-      pending.delete(m.id);
-      if (error) p.reject(error);
-      else if (record(m.result) && typeof m.result.txid === 'string' && /^[a-fA-F0-9]{64}$/.test(m.result.txid))
-        p.resolve({ txid: m.result.txid });
-      else p.reject(new WalletError('invalid_response'));
-    }
+      send({ type: 'hello', id, action, ...payload });
+    } else if (m.type === 'submitting' && m.id === id) {
+      submitting = true;
+    } else if (m.type === 'result' && m.id === id) {
+      if (record(m.error) && typeof m.error.code === 'string')
+        finish(undefined, new WalletError(m.error.code, typeof m.error.message === 'string' ? m.error.message : m.error.code));
+      else if (record(m.result)) finish(m.result);
+      else finish(undefined, new WalletError('invalid_response'));
+    } else if (m.type === 'closed')
+      finish(
+        undefined,
+        new WalletError(
+          submitting ? 'tx_uncertain' : 'user_rejected',
+          submitting ? 'Check wallet Activity before requesting another transaction.' : 'Request cancelled.',
+        ),
+      );
   }
   const watch = setInterval(() => {
     try {
-      if (popup.closed) cleanup(new WalletError('disconnected', 'The wallet window closed or its opener policy blocked the connection.'));
+      if (popup.closed)
+        finish(
+          undefined,
+          new WalletError(
+            submitting ? 'tx_uncertain' : 'user_rejected',
+            submitting ? 'Check wallet Activity before requesting another transaction.' : 'The wallet window was closed.',
+          ),
+        );
     } catch {
-      cleanup(new WalletError('disconnected'));
+      finish(undefined, new WalletError('disconnected'));
     }
-  }, 1000);
-  const connectTimer = setTimeout(() => {
-    cleanup(new WalletError('timeout'));
-    popup.close();
+  }, 500);
+  const timer = setTimeout(() => {
+    try {
+      send({ type: 'cancel', id });
+    } catch {}
+    finish(
+      undefined,
+      new WalletError(
+        submitting ? 'tx_uncertain' : 'timeout',
+        submitting ? 'Check wallet Activity before requesting another transaction.' : 'timeout',
+      ),
+    );
   }, timeout);
   window.addEventListener('message', onMessage);
   window.addEventListener('pagehide', onLeave);
-  return new Promise<WalletConnection>((resolve, reject) => {
-    resolveConnect = resolve;
-    rejectConnect = reject;
+  return { promise, cancel };
+}
+function account(v: unknown, network?: string): v is Account {
+  return (
+    record(v) &&
+    typeof v.walletId === 'string' &&
+    typeof v.address === 'string' &&
+    Array.isArray(v.addresses) &&
+    v.addresses.length >= 1 &&
+    v.addresses.length <= 100 &&
+    v.addresses.every((a) => typeof a === 'string') &&
+    v.addresses[0] === v.address &&
+    typeof v.network === 'string' &&
+    (network === undefined || v.network === network)
+  );
+}
+/** Call directly from a user gesture. COOP must be unsafe-none (the default)
+ * or same-origin-allow-popups on the calling website. */
+export function connect(options: ConnectOptions = {}): Promise<WalletConnection> {
+  return request(options, 'connect', options.network ? { network: options.network } : {}).promise.then((result) => {
+    if (
+      !account(result.account, options.network) ||
+      typeof result.session !== 'string' ||
+      !/^[a-f0-9]{32}$/.test(result.session) ||
+      typeof result.expires !== 'number'
+    )
+      throw new WalletError('invalid_response');
+    const approved = structuredClone(result.account);
+    const session = result.session,
+      expires = result.expires;
+    let disconnected = false;
+    let active: PopupRequest | undefined;
+    const disconnect = () => {
+      disconnected = true;
+      active?.cancel();
+      active = undefined;
+      window.removeEventListener('pagehide', disconnect);
+    };
+    window.addEventListener('pagehide', disconnect);
+    return {
+      get account() {
+        return structuredClone(approved);
+      },
+      sendTransaction(transaction, opts = {}) {
+        if (disconnected || Date.now() >= expires) return Promise.reject(new WalletError('disconnected', 'Connect your wallet again.'));
+        if (active) return Promise.reject(new WalletError('busy', 'Finish the current wallet request first.'));
+        let params: TransactionRequest;
+        try {
+          if (!record(transaction) || !json(transaction) || !json(opts)) throw new Error();
+          const text = JSON.stringify({ transaction, network: approved.network, ...opts });
+          if (new TextEncoder().encode(text).length > 65_536) throw new Error();
+          params = JSON.parse(text) as TransactionRequest;
+        } catch {
+          return Promise.reject(new WalletError('invalid_request'));
+        }
+        active = request(options, 'sendTransaction', { session, params });
+        return active.promise
+          .then((result) => {
+            if (typeof result.txid !== 'string' || !/^[a-fA-F0-9]{64}$/.test(result.txid)) throw new WalletError('invalid_response');
+            return { txid: result.txid };
+          })
+          .finally(() => {
+            active = undefined;
+          });
+      },
+      disconnect,
+    };
   });
 }
 export const mmxWallet = { connect };

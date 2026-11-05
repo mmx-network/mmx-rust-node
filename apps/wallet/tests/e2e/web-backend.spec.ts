@@ -9,7 +9,13 @@ import { walletAddresses } from './wallet';
 
 function backendChunkUrl(): string {
   const dir = new URL('../../dist/e2e/assets/', import.meta.url);
-  const file = readdirSync(dir).find((f) => f.endsWith('.js') && readFileSync(new URL(f, dir), 'utf8').includes(' as createBackend'));
+  const file = readdirSync(dir).find((f) => {
+    if (!f.endsWith('.js')) return false;
+    const code=readFileSync(new URL(f,dir),'utf8');
+    // Shared imports may expose the backend through Rollup's module namespace
+    // rather than retaining its original named export in the chunk.
+    return code.includes('createBackend:') && code.includes('WebBackend:');
+  });
   if (!file) throw new Error('web backend chunk not found in dist/e2e');
   return new URL(`assets/${file}`, APP_URL).href;
 }
@@ -21,8 +27,11 @@ test('creates, opens, sends once and locks in the browser', async ({ page, rpc }
   const recipient = testAddress('e2e-recipient');
 
   const created = await page.evaluate(async (url) => {
-    const mod = (await import(url)) as { createBackend(): Promise<unknown> };
-    const backend = (await mod.createBackend()) as {
+    const mod = (await import(url)) as Record<string, unknown>;
+    const api = (typeof mod.createBackend === 'function' ? mod : Object.values(mod).find(
+      (v) => !!v && typeof v === 'object' && typeof (v as Record<string, unknown>).createBackend === 'function',
+    )) as {createBackend():Promise<unknown>};
+    const backend = (await api.createBackend()) as {
       newRecoveryPhrase(): Promise<string>;
       createWallet(r: object): Promise<{ id: string; locked: boolean; verified: boolean }>;
     };

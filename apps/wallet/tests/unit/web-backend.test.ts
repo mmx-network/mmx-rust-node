@@ -11,6 +11,8 @@ import { memoryStorage } from '../../src/backend/web/memory-storage';
 import { DAMAGED_KEY, LOCK_SIGNAL_KEY, STORAGE_KEY } from '../../src/backend/web/store';
 import type { VaultHandle, WasmApi } from '../../src/backend/web/wasm';
 import { MockRpc, NATIVE, testAddress } from '../e2e/mock-rpc';
+import { WebsiteSessions } from '../../src/connect/sessions';
+import { ReservationStore } from '../../src/backend/web/reservations';
 
 interface TestWasm extends WasmApi {
   initSync(input: { module: BufferSource }): unknown;
@@ -1269,6 +1271,20 @@ describe('custom website transactions', () => {
   }
   beforeEach(() => { rpc.reset({height:5_600_000}); });
 
+  it('revokes cross-popup grants on block or disable, without restoring them on unblock', async () => {
+    const b=backend();const {info,addresses}=await openWallet(b);await enable(b);
+    const sessions=new WebsiteSessions(storage,()=>clock);
+    const account={walletId:info.id,address:addresses[0]!,addresses,network:'mainnet'};
+    const first=sessions.create(site,account,'Main');
+    const other=sessions.create('https://other.example',account,'Main');
+    await b.setWebsitePermission({origin:site,blocked:true});
+    await b.setWebsitePermission({origin:site,blocked:false});
+    expect(sessions.get(first.id,site)).toBeNull();
+    expect(sessions.get(other.id,'https://other.example')).not.toBeNull();
+    await b.setWebsitePermission({enabled:false});await enable(b);
+    expect(sessions.get(other.id,'https://other.example')).toBeNull();
+  });
+
   it('keeps revocations when another tab saves stale metadata or blocks another origin', async () => {
     const b=backend();await enable(b);
     const stale=await b.loadAppState();
@@ -1309,6 +1325,29 @@ describe('custom website transactions', () => {
     expect(await code(b.broadcast(info.id,second.txid))).toBe('insufficient_funds');
     expect(fetchFn.calls.filter(p=>p==='POST /transaction/broadcast')).toHaveLength(1);
     expect(await code(b.prepareTransaction(info.id,request('3500000'),site))).toBe('insufficient_funds');
+  });
+  it.each([false,true])('retains pending funds across closed signing popups (lost reply: %s)', async (lost) => {
+    const b=backend();const {info,words,addresses}=await openWallet(b,[10n*MMX]);await enable(b);
+    const p=await b.prepareTransaction(info.id,request('6000000'),site);
+    if(lost) rpc.handle('POST','/__mock/fail',JSON.stringify({path:'/transaction/broadcast',mode:'drop',after:true}));
+    expect(await code(b.broadcast(info.id,p.txid))).toBe(lost?'rpc_unreachable':'ok');
+    await b.lockAll();
+    const next=backend();await next.unlockWallet(info.id,{mnemonic:words});
+    expect(await code(next.prepareTransaction(info.id,request('3500000'),site))).toBe('insufficient_funds');
+    const pending=new ReservationStore(storage,'https://rpc.test');
+    expect(pending.list(info.id)).toMatchObject([{txid:p.txid,senderFee:BigInt(p.maxFee)}]);
+    const persisted=JSON.stringify(storage.dump());
+    expect(persisted).not.toContain(words);expect(persisted).not.toContain('solutions');
+    rpc.advance(1);rpc.fund({address:addresses[0]!,amount:'5000000'});
+    expect(await code(next.prepareTransaction(info.id,request('3500000'),site))).toBe('ok');
+    expect(pending.list(info.id)).toEqual([]);
+  });
+  it('does not submit if pending funds cannot be persisted for the next popup', async () => {
+    const b=backend();const {info}=await openWallet(b,[10n*MMX]);await enable(b);
+    const p=await b.prepareTransaction(info.id,request(),site);
+    vi.spyOn(storage,'setItem').mockImplementation(()=>{throw new Error('quota');});
+    expect(await code(b.broadcast(info.id,p.txid))).toBe('tx_not_sent');
+    expect(fetchFn.calls.filter(p=>p==='POST /transaction/broadcast')).toEqual([]);
   });
   it('invalidates old approvals when permissions are revoked and then re-enabled', async () => {
     const b=backend();const {info}=await openWallet(b,[50n*MMX]);await enable(b);

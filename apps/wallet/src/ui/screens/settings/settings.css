@@ -69,3 +69,10 @@
     justify-content: flex-end;
   }
 }
+
+.settings .settings-website-block .option-row__control {
+  width: 100%;
+  justify-content: stretch;
+}
+.settings-website-block__form { width: 100%; align-items: flex-start; }
+.settings-website-block__form > .field { width: 100%; }
