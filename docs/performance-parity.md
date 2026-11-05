@@ -1759,3 +1759,22 @@ actual default content viewport was 480 × 727 after Firefox clamped the window;
 measured vertical overflow was zero. Both frontend builds and TypeScript checks
 pass. No native code or live wallet/ledger data was changed for these checks.
 Physical mobile background suspension remains unmeasured.
+
+## Keep failed transaction preparation visible (2026-11-05)
+
+The approval popup no longer completes the website request when account
+retrieval or transaction preparation fails after unlocking. It shows the
+error above the transaction and retains the request for an explicit retry or
+rejection. Permission revocation, manual lock and request timeout still cancel
+the flow. A successful unlock remains in the main wallet's existing timed
+session, so retrying preparation does not require another passphrase. No dry
+run or broadcast happens before explicit Send now approval.
+
+Evidence: all 550 unit tests and 11 popup browser tests pass, plus TypeScript
+and the web build. A simulated 503 immediately after unlock reproduces the
+previous premature close and now stays open, then succeeds on retry without
+another unlock or any transaction POST. Pending-fund insufficiency also remains
+visible. A real-WASM regression prepares the demo's 0.001 MMX self-transfer
+with zero execution gas. The original live failure's error code has not been
+observed; this verifies the erroneous close/retry behavior without spending
+real funds.

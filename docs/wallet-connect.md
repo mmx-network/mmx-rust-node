@@ -7,7 +7,9 @@ upgrading an existing wallet. Connecting shares the selected wallet's public
 addresses only after the user clicks **Connect**. Each transaction requires
 **Continue** (or **Unlock to review**), then **Send now** in the wallet window.
 Connecting and each transaction open their own short-lived popup. The popup
-closes after approval, rejection, an error or a timeout.
+closes after a completed action, rejection, timeout or access revocation.
+Unlocking and preparation errors remain visible in the popup for retry; they
+do not complete the request or send anything.
 
 Users can choose **Block this website** in the connection window, or enter a
 website URL in wallet Settings. Blocking persists for that exact origin

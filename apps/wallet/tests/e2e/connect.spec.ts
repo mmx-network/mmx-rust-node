@@ -219,6 +219,32 @@ for (const passphrase of [undefined, 'timed popup unlock']) {
   });
 }
 
+test('a preparation failure after unlocking stays visible and can retry without another unlock', async ({page,rpc,context,consoleGuard}) => {
+  consoleGuard.allow(/status of 503/u);
+  await openFundedWallet(page,(address)=>rpc.fund({address,amount:'50000000'}),{passphrase:'keep review open'});
+  await enable(page);
+  await page.getByRole('button',{name:'Lock',exact:true}).first().click();
+  const site=await context.newPage();await connect(site);
+  const popup=await requested(site,transfer);
+  await consoleGuard.attach(popup);
+  await popup.getByRole('button',{name:'Unlock to review',exact:true}).click();
+  const dialog=popup.getByRole('dialog',{name:'Unlock for spending'});
+  await dialog.getByLabel('Passphrase',{exact:true}).fill('keep review open');
+  await rpc.failNext({path:'/node/info',mode:'status',status:503,body:'temporary failure'});
+  await dialog.getByRole('button',{name:'Unlock',exact:true}).click();
+  await expect(popup.getByText('The network server reported a problem. Try again in a moment.',{exact:true})).toBeVisible();
+  expect(popup.isClosed()).toBe(false);
+  await expect(popup.getByRole('dialog')).toHaveCount(0);
+  await expect(popup.getByRole('button',{name:'Send now',exact:true})).toHaveCount(0);
+  expect((await rpc.requests()).filter(r=>r.method==='POST')).toEqual([]);
+  await quote(popup);
+  await expect(popup.getByRole('dialog')).toHaveCount(0);
+  expect((await rpc.requests()).filter(r=>r.method==='POST')).toEqual([]);
+  await popup.getByRole('button',{name:'Reject',exact:true}).click();
+  await expect.poll(()=>popup.isClosed()).toBe(true);
+  expect(await rpc.broadcasts()).toEqual([]);
+});
+
 test('connecting only unlocks when its public addresses are unknown', async ({page,rpc,context}) => {
   const wallet=await openFundedWallet(page,(address)=>rpc.fund({address,amount:'5000000'}),{passphrase:'discover addresses'});
   await enable(page);
@@ -281,7 +307,10 @@ test('a cold mobile request unlocks locally and shows a formatted transfer befor
   dialog = popup.getByRole('dialog', { name: 'Unlock for spending' });
   await dialog.getByLabel('Passphrase', { exact: true }).fill('popup passphrase');
   await dialog.getByRole('button', { name: 'Unlock', exact: true }).click();
-  await expect.poll(() => error(site)).toBe('insufficient_funds');
+  await expect(popup.getByText('Not enough funds for this amount and the network fee.',{exact:true})).toBeVisible();
+  expect(popup.isClosed()).toBe(false);
+  await expect(popup.getByRole('button',{name:'Send now',exact:true})).toHaveCount(0);
+  await popup.getByRole('button',{name:'Reject',exact:true}).click();
   await expect.poll(() => popup.isClosed()).toBe(true);
   expect(await rpc.broadcasts()).toHaveLength(1);
 });

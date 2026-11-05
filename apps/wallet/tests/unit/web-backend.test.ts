@@ -1305,6 +1305,13 @@ describe('custom website transactions', () => {
     expect(await code(b.prepareTransaction(info.id,request(),'https://other.example'))).toBe('ok');
     expect(fetchFn.calls.filter(p=>p.startsWith('POST'))).toEqual([]);
   });
+  it('prepares the demo self-transfer with a zero execution gas budget', async () => {
+    const b=backend();const {info,addresses}=await openWallet(b,[10n*MMX]);await enable(b);
+    const p=await b.prepareTransaction(info.id,{network:'mainnet',gasLimit:0,transaction:{outputs:[{__type:'mmx.txout_t',address:addresses[0]!,contract:NATIVE,amount:'1000'}]}},site);
+    expect(p.transaction.outputs).toMatchObject([{address:addresses[0],amount:'1000'}]);
+    expect(p.maxFee).toBe(p.fee);
+    expect(fetchFn.calls.filter(p=>p.startsWith('POST'))).toEqual([]);
+  });
   it('keeps the signed payload private until approval, verifies it and broadcasts at most once', async () => {
     const b=backend();const {info}=await openWallet(b,[50n*MMX]);await enable(b);
     const p=await b.prepareTransaction(info.id,request(),site);

@@ -312,8 +312,11 @@ export function ConnectApp() {
     } catch (e) {
       if (!finished.current) {
         const failure = fault(e);
-        if (failure.code === 'locked' || failure.code === 'disconnected') setError('Unlock your wallet to continue.');
-        else finish(undefined, failure);
+        if (failure.code === 'website_blocked' || failure.code === 'website_connections_disabled') finish(undefined,failure);
+        else if (failure.code === 'locked' || failure.code === 'disconnected') setError('Unlock your wallet to continue.');
+        // Unlocking/preparing is not a completed transaction. Keep the request
+        // and its error visible so the user can retry or explicitly reject it.
+        else setError(failure.message);
       }
     } finally {
       if (epoch === generation.current) {
@@ -465,6 +468,7 @@ export function ConnectApp() {
         ) : null}
         {ready && flow && !completed && !access ? (
           <>
+            {error ? <Banner tone="warning">{error}</Banner> : null}
             <Card padding="none" class="connection__card">
               {flow.action === 'connect' ? (
                 <div class="connection__connect-content">
@@ -512,7 +516,6 @@ export function ConnectApp() {
                 </div>
               )}
             </Card>
-            {error ? <Banner tone="warning">{error}</Banner> : null}
           </>
         ) : null}
         {completed ? <Text tone="muted">Returning to the website…</Text> : null}
