@@ -32,7 +32,7 @@ development. Import the standalone ESM SDK from the deployed wallet:
 
 ```js
 // wallet-integration.js
-import { connect } from 'https://wallet.mmx.network/mmx-wallet.js';
+import { connect } from 'https://wallet.mmx.network/wallet-sdk.js';
 
 let wallet;
 document.querySelector('#connect').onclick = async () => {
@@ -66,6 +66,19 @@ document.querySelector('#send').onclick = async () => {
 
 // To end the session: wallet.disconnect().
 ```
+
+`/wallet-sdk.js` is a small ES module loader that re-exports the latest build
+from `/assets/sdk/wallet-sdk-<hash>.js`. The hash is derived from the emitted
+SDK's contents, so unchanged SDK code keeps the same URL across wallet builds.
+The loader revalidates on a fresh page load; the hashed SDK is cached for one
+year with `immutable`. Existing imports of `/mmx-wallet.js` remain supported as
+an equivalent loader. Both loaders and the hashed SDK permit cross-origin
+imports. There is no HTTP redirect or server relay.
+
+To pin a particular SDK build, import the hashed URL named in the loader
+instead. Keep that asset available on the origin across deployments for sites
+that pin it. The stable loader automatically follows upgrades without changing
+the website's import URL.
 
 A test deployment can pass `walletUrl: 'http://127.0.0.1:5173/'` (or its HTTPS
 base URL, ending in `/`) to `connect`. Use a production web build plus Vite
@@ -202,9 +215,11 @@ transfers (including a short memo) fit with approval controls visible. Longer
 contract details and smaller screens can scroll.
 
 The wallet's deployment templates retain COOP `same-origin` on the main page
-and use `unsafe-none` only for `/connect.html`. The standalone `/mmx-wallet.js`
-has `Access-Control-Allow-Origin: *`; wallet pages and RPC do not gain wildcard
-CORS from this change. Both new paths use `Cache-Control: no-cache`. CSP,
+and use `unsafe-none` only for `/connect.html`. `/wallet-sdk.js`, its legacy
+alias `/mmx-wallet.js`, and `/assets/sdk/*` have
+`Access-Control-Allow-Origin: *`; wallet pages and RPC do not gain wildcard
+CORS from this change. The loaders and popup use `Cache-Control: no-cache`;
+hashed SDK assets use `public, max-age=31536000, immutable`. CSP,
 anti-framing, no-referrer and other wallet security headers remain enabled on
 the popup. The Docker image, Caddy, nginx and generated `_headers` files all
 include these rules. Any CDN overrides must preserve the path-specific COOP

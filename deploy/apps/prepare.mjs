@@ -12,7 +12,7 @@ export function nginxHeaders(source, path = null) {
     if (!line.trim()) continue;
     if (!line.startsWith(' ')) {
       global = line === '/*';
-      matches = global || (path !== null && line === path);
+      matches = global || (path !== null && (line === path || (line.endsWith('/*') && path.startsWith(line.slice(0, -1)))));
       continue;
     }
     if (!matches) continue;
@@ -61,7 +61,7 @@ export async function prepare(root) {
     const headers = nginxHeaders(source, name === 'wallet' ? '/' : null);
     await writeFile(join(generated, `${name}-headers.conf`), headers);
     if (name === 'wallet') {
-      for (const [kind,path] of [['connect','/connect.html'],['sdk','/mmx-wallet.js']]) {
+      for (const [kind,path] of [['connect','/connect.html'],['sdk','/wallet-sdk.js'],['sdk-asset','/assets/sdk/']]) {
         await writeFile(join(generated, `wallet-${kind}-headers.conf`), nginxHeaders(source,path));
       }
     }

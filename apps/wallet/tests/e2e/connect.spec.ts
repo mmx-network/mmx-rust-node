@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { createHash } from 'node:crypto';
 import type { Page } from '@playwright/test';
 import { APP_PORT, APP_URL } from './env';
 import { capture, goTo, MOBILE, openFundedWallet } from './app';
@@ -13,7 +14,7 @@ test.beforeAll(async () => {
   server = createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cross-Origin-Opener-Policy': 'same-origin-allow-popups' });
     res.end(`<!doctype html><title>MMX test application</title><button id="connect">Connect wallet</button><button id="send">Request transaction</button><script type="module">
-      import {connect} from '${APP_URL}mmx-wallet.js';
+      import {connect} from '${APP_URL}wallet-sdk.js';
       window.messages=[];window.addEventListener('message',e=>window.messages.push(e.data));
       document.querySelector('#connect').onclick=()=>{window.error=null;window.connectionPromise=connect({walletUrl:'${APP_URL}'}).then(c=>{window.connection=c;window.account=c.account;return c}).catch(e=>{window.error=e.code})};
       document.querySelector('#send').onclick=()=>{window.error=null;window.result=null;window.sending=window.connection.sendTransaction(window.tx,{gasLimit:1000000}).then(r=>window.result=r).catch(e=>window.error=e.code)};
@@ -65,6 +66,35 @@ async function quote(popup: Page) {
   await popup.getByRole('button', { name: 'Continue', exact: true }).click();
   await expect(popup.getByRole('heading', { name: 'Confirm transaction' })).toBeVisible();
 }
+
+test('the public loader imports a content-hashed SDK with immutable caching across origins', async ({ page, request }) => {
+  const loader = await request.get(`${APP_URL}wallet-sdk.js`);
+  expect(loader.status()).toBe(200);
+  expect(loader.headers()['cache-control']).toBe('no-cache');
+  expect(loader.headers()['access-control-allow-origin']).toBe('*');
+  const source = await loader.text();
+  const path = /^export \* from '\.\/(assets\/sdk\/wallet-sdk-([a-f0-9]{16})\.js)';\n$/.exec(source);
+  expect(path).not.toBeNull();
+  const url = new URL(path![1]!, APP_URL).href;
+  const sdk = await request.get(url);
+  expect(sdk.status()).toBe(200);
+  expect(sdk.headers()['content-type']).toContain('javascript');
+  expect(sdk.headers()['access-control-allow-origin']).toBe('*');
+  expect(sdk.headers()['cache-control']).toBe('public, max-age=31536000, immutable');
+  expect(createHash('sha256').update(await sdk.body()).digest('hex').slice(0, 16)).toBe(path![2]);
+  const cached = await request.get(url, { headers: { 'If-None-Match': sdk.headers().etag! } });
+  expect(cached.status()).toBe(304);
+  expect(cached.headers()['cache-control']).toBe('public, max-age=31536000, immutable');
+  expect(cached.headers()['access-control-allow-origin']).toBe('*');
+  const missing = await request.get(`${APP_URL}assets/sdk/wallet-sdk-0000000000000000.js`);
+  expect(missing.status()).toBe(404);
+  expect(missing.headers()['cache-control']).toBe('no-store');
+  await page.goto(DAPP);
+  expect(await page.evaluate(async ({ loaderUrl, url }) => {
+    const [loader, pinned, legacy] = await Promise.all([import(loaderUrl), import(url), import(new URL('mmx-wallet.js', loaderUrl).href)]);
+    return typeof pinned.connect === 'function' && loader.connect === pinned.connect && loader.WalletError === pinned.WalletError && legacy.connect === pinned.connect;
+  }, { loaderUrl: `${APP_URL}wallet-sdk.js`, url })).toBe(true);
+});
 
 test('connections are off by default and denied popups close without sharing an account', async ({ page, rpc, context }) => {
   await openFundedWallet(page, (a) => rpc.fund({ address: a, amount: '50000000' }));

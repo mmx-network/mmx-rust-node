@@ -56,8 +56,11 @@ directory):
 
 The [website connection API](../../../docs/wallet-connect.md) is disabled by
 default in wallet Settings. Its popup `/connect.html` needs COOP `unsafe-none`;
-the main wallet keeps `same-origin`. `/mmx-wallet.js` is the public ESM SDK and
-needs CORS `*`. Both paths use `Cache-Control: no-cache`. Preserve the supplied
+the main wallet keeps `same-origin`. `/wallet-sdk.js` is a small public ESM
+loader for `/assets/sdk/wallet-sdk-<hash>.js`; `/mmx-wallet.js` remains a
+compatibility alias. All SDK paths need CORS `*`. The loaders and popup use
+`Cache-Control: no-cache`; hashed SDK code uses
+`public, max-age=31536000, immutable`. Preserve the supplied
 path-specific rules in CDN overrides. For nginx, install both security-header
 snippets at the paths specified at the top of `nginx.conf`.
 
@@ -88,7 +91,8 @@ Requirements for any other server:
 
 Build the new version and replace the served files in one step (for example by
 switching a symlink to the new directory). Old asset files can be removed after
-a day.
+a day, except SDK builds pinned by third-party websites: keep those hashed
+SDK files available for as long as the integrations use them.
 
 ## Check
 

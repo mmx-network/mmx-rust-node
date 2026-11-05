@@ -65,8 +65,18 @@ http {
             add_header Cache-Control $cache_control always;
             try_files $uri =404;
         }
+        location = /wallet-sdk.js {
+            include /etc/nginx/mmx/wallet-sdk-headers.conf;
+            add_header Cache-Control $cache_control always;
+            try_files $uri =404;
+        }
         location = /mmx-wallet.js {
             include /etc/nginx/mmx/wallet-sdk-headers.conf;
+            add_header Cache-Control $cache_control always;
+            try_files $uri =404;
+        }
+        location /assets/sdk/ {
+            include /etc/nginx/mmx/wallet-sdk-asset-headers.conf;
             add_header Cache-Control $cache_control always;
             try_files $uri =404;
         }

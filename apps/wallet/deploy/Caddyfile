@@ -21,11 +21,14 @@ wallet.example.org {
 		-Server
 	}
 
-	@assets path /assets/*
+	@assets {
+		path /assets/*
+		file
+	}
 	header @assets Cache-Control "public, max-age=31536000, immutable"
 
-	@page path / /index.html /connect.html /mmx-wallet.js
+	@page path / /index.html /connect.html /wallet-sdk.js /mmx-wallet.js
 	header @page Cache-Control "no-cache"
-	@sdk path /mmx-wallet.js
+	@sdk path /wallet-sdk.js /mmx-wallet.js /assets/sdk/*
 	header @sdk Access-Control-Allow-Origin "*"
 }

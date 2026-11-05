@@ -119,7 +119,8 @@ describe('deployment files', () => {
   it('permits the connection popup and public SDK without changing the main document policy', () => {
     expect(new Map(securityHeaders(ORIGIN)).get('Cross-Origin-Opener-Policy')).toBe('same-origin');
     expect(new Map(securityHeaders(ORIGIN,'/connect.html')).get('Cross-Origin-Opener-Policy')).toBe('unsafe-none');
-    expect(new Map(securityHeaders(ORIGIN,'/mmx-wallet.js')).get('Access-Control-Allow-Origin')).toBe('*');
+    expect(new Map(securityHeaders(ORIGIN,'/wallet-sdk.js')).get('Access-Control-Allow-Origin')).toBe('*');
+    expect(new Map(securityHeaders(ORIGIN,'/assets/sdk/wallet-sdk-0123456789abcdef.js')).get('Access-Control-Allow-Origin')).toBe('*');
     expect(new Map(securityHeaders(ORIGIN,'/assets/app.js')).has('Access-Control-Allow-Origin')).toBe(false);
   });
 });

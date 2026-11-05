@@ -1778,3 +1778,29 @@ visible. A real-WASM regression prepares the demo's 0.001 MMX self-transfer
 with zero execution gas. The original live failure's error code has not been
 observed; this verifies the erroneous close/retry behavior without spending
 real funds.
+
+## Cache the website wallet SDK by content (2026-11-05)
+
+The public `/wallet-sdk.js` entry point now re-exports a standalone module at
+`/assets/sdk/wallet-sdk-<hash>.js`. The hash is the first 16 hexadecimal digits
+of SHA-256 over the emitted SDK bytes. It changes only with those bytes, so
+unrelated wallet builds do not invalidate a website's cached SDK. The loader
+revalidates; successful hashed responses are immutable for one year. The old
+`/mmx-wallet.js` URL re-exports the same module for compatibility. SDK paths
+permit cross-origin imports without adding CORS to wallet pages or other app
+assets. Existing popup approval and signing behavior is unchanged.
+
+Docker nginx, standalone nginx, Caddy, generated `_headers` and Vite preview
+include the SDK path rules. The generated nginx snippets now apply directory
+header rules as well as exact paths. Missing hashes return uncached 404s in
+nginx and preview; preview cannot fall back to wallet HTML. Integration docs
+use the new entry point and explain retention when a website pins a hash.
+
+Evidence: all 550 unit tests, 12 Chromium SDK/popup tests, deployment generator
+tests, TypeScript and the web build pass. The browser imports the new loader,
+legacy alias and pinned URL from another origin and verifies they expose the
+same module. It checks the hash against the served bytes, immutable caching,
+CORS, conditional 304s and missing hashes. The complete Docker image smoke
+check passes, including precompressed SDK delivery through a proxy, 304 headers,
+404 cache policy, site isolation and its read-only/non-root runtime. The new
+server rules are included in that built image; no live deployment was changed.

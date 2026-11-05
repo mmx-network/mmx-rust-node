@@ -3,6 +3,7 @@
 
 import argparse
 import gzip
+import hashlib
 import http.client
 import json
 import re
@@ -182,12 +183,31 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
         assert connect_headers["cache-control"] == "no-cache"
         assert "access-control-allow-origin" not in connect_headers
         security(connect_headers, rpc_origin, True, connection=True)
-        status, sdk_headers, sdk = request(port, host, "/mmx-wallet.js")
-        assert status == 200 and b"sendTransaction" in sdk and b"connect.html" in sdk
+        status, sdk_headers, sdk = request(port, host, "/wallet-sdk.js")
+        assert status == 200
         assert "javascript" in sdk_headers["content-type"]
         assert sdk_headers["access-control-allow-origin"] == "*"
         assert sdk_headers["cache-control"] == "no-cache"
         security(sdk_headers, rpc_origin, True)
+        sdk_path = re.fullmatch(rb"export \* from '\./(assets/sdk/wallet-sdk-([a-f0-9]{16})\.js)';\n", sdk)
+        assert sdk_path, sdk
+        path = "/" + sdk_path[1].decode()
+        status, asset_headers, sdk = request(port, host, path)
+        assert status == 200 and b"sendTransaction" in sdk and b"connect.html" in sdk
+        assert hashlib.sha256(sdk).hexdigest()[:16] == sdk_path[2].decode()
+        assert "javascript" in asset_headers["content-type"]
+        assert asset_headers["access-control-allow-origin"] == "*"
+        assert asset_headers["cache-control"] == "public, max-age=31536000, immutable"
+        security(asset_headers, rpc_origin, True)
+        status, cached_headers, body = request(port, host, path, headers={"If-None-Match": asset_headers["etag"]})
+        assert status == 304 and not body
+        assert cached_headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert cached_headers["access-control-allow-origin"] == "*"
+        status, compressed_headers, body = request(port, host, path, headers={"Via": "BunnyCDN", "Accept-Encoding": "gzip"})
+        assert status == 200 and compressed_headers["content-encoding"] == "gzip" and gzip.decompress(body) == sdk
+        assert compressed_headers["cache-control"] == "public, max-age=31536000, immutable"
+        status, missing_headers, _ = request(port, host, "/assets/sdk/wallet-sdk-0000000000000000.js")
+        assert status == 404 and missing_headers["cache-control"] == "no-store"
         assert "access-control-allow-origin" not in headers
     check_search(port, host, html, rpc_origin, wallet, website)
     links = SearchMetadata(html.decode()).links
