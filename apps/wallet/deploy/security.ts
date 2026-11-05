@@ -21,7 +21,7 @@ import { DEFAULT_RPC_URL, parseRpcUrl } from '../src/backend/web/rpc-url';
 export { DEFAULT_RPC_URL };
 
 const HASHED_SDK_PATH = /^\/assets\/sdk\/wallet-sdk-[a-f0-9]{16}\.js$/;
-const SDK_LOADERS = ['/wallet-sdk.js', '/mmx-wallet.js'];
+const SDK_LOADER_PATH = '/wallet-sdk.js';
 
 /**
  * Features the wallet does not use are disabled. Copying to and pasting from
@@ -91,7 +91,7 @@ export function securityHeaders(rpcOrigin: string, path = '/'): Array<[string, s
     ['X-Frame-Options', 'DENY'],
     ['Strict-Transport-Security', 'max-age=63072000; includeSubDomains'],
   ];
-  if (SDK_LOADERS.includes(path) || HASHED_SDK_PATH.test(path)) headers.push(['Access-Control-Allow-Origin', '*']);
+  if (path === SDK_LOADER_PATH || HASHED_SDK_PATH.test(path)) headers.push(['Access-Control-Allow-Origin', '*']);
   return headers;
 }
 
@@ -110,7 +110,7 @@ export function netlifyHeaders(rpcOrigin: string): string {
   for (const path of ['/', '/index.html', '/connect.html']) {
     lines.push('', path, `  Cross-Origin-Opener-Policy: ${path === '/connect.html' ? 'unsafe-none' : 'same-origin'}`, `  Cache-Control: ${CACHE_REVALIDATE}`);
   }
-  for (const path of SDK_LOADERS) lines.push('', path, '  Cross-Origin-Opener-Policy: same-origin', '  Access-Control-Allow-Origin: *', `  Cache-Control: ${CACHE_REVALIDATE}`);
+  lines.push('', SDK_LOADER_PATH, '  Cross-Origin-Opener-Policy: same-origin', '  Access-Control-Allow-Origin: *', `  Cache-Control: ${CACHE_REVALIDATE}`);
   return lines.join('\n') + '\n';
 }
 
@@ -192,7 +192,7 @@ export function webSecurityPlugin(): Plugin {
       const hash = createHash('sha256').update(built.code).digest('hex').slice(0, 16);
       const fileName = `assets/sdk/wallet-sdk-${hash}.js`;
       this.emitFile({ type:'asset', fileName, source:built.code });
-      for (const path of SDK_LOADERS) this.emitFile({ type:'asset', fileName:path.slice(1), source:`export * from './${fileName}';\n` });
+      this.emitFile({ type:'asset', fileName:SDK_LOADER_PATH.slice(1), source:`export * from './${fileName}';\n` });
     },
     configurePreviewServer(server) {
       server.middlewares.use((req, res, next) => {
@@ -208,7 +208,7 @@ export function webSecurityPlugin(): Plugin {
             return;
           }
           res.setHeader('Cache-Control', CACHE_IMMUTABLE);
-        } else if (SDK_LOADERS.includes(path)) res.setHeader('Cache-Control', CACHE_REVALIDATE);
+        } else if (path === SDK_LOADER_PATH) res.setHeader('Cache-Control', CACHE_REVALIDATE);
         next();
       });
     },

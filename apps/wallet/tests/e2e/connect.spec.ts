@@ -91,8 +91,8 @@ test('the public loader imports a content-hashed SDK with immutable caching acro
   expect(missing.headers()['cache-control']).toBe('no-store');
   await page.goto(DAPP);
   expect(await page.evaluate(async ({ loaderUrl, url }) => {
-    const [loader, pinned, legacy] = await Promise.all([import(loaderUrl), import(url), import(new URL('mmx-wallet.js', loaderUrl).href)]);
-    return typeof pinned.connect === 'function' && loader.connect === pinned.connect && loader.WalletError === pinned.WalletError && legacy.connect === pinned.connect;
+    const [loader, pinned] = await Promise.all([import(loaderUrl), import(url)]);
+    return typeof pinned.connect === 'function' && loader.connect === pinned.connect && loader.WalletError === pinned.WalletError;
   }, { loaderUrl: `${APP_URL}wallet-sdk.js`, url })).toBe(true);
 });
 

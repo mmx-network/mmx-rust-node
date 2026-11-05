@@ -27,8 +27,8 @@ wallet.example.org {
 	}
 	header @assets Cache-Control "public, max-age=31536000, immutable"
 
-	@page path / /index.html /connect.html /wallet-sdk.js /mmx-wallet.js
+	@page path / /index.html /connect.html /wallet-sdk.js
 	header @page Cache-Control "no-cache"
-	@sdk path /wallet-sdk.js /mmx-wallet.js /assets/sdk/*
+	@sdk path /wallet-sdk.js /assets/sdk/*
 	header @sdk Access-Control-Allow-Origin "*"
 }

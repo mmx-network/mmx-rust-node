@@ -1785,8 +1785,7 @@ The public `/wallet-sdk.js` entry point now re-exports a standalone module at
 `/assets/sdk/wallet-sdk-<hash>.js`. The hash is the first 16 hexadecimal digits
 of SHA-256 over the emitted SDK bytes. It changes only with those bytes, so
 unrelated wallet builds do not invalidate a website's cached SDK. The loader
-revalidates; successful hashed responses are immutable for one year. The old
-`/mmx-wallet.js` URL re-exports the same module for compatibility. SDK paths
+revalidates; successful hashed responses are immutable for one year. SDK paths
 permit cross-origin imports without adding CORS to wallet pages or other app
 assets. Existing popup approval and signing behavior is unchanged.
 
@@ -1797,8 +1796,8 @@ nginx and preview; preview cannot fall back to wallet HTML. Integration docs
 use the new entry point and explain retention when a website pins a hash.
 
 Evidence: all 550 unit tests, 12 Chromium SDK/popup tests, deployment generator
-tests, TypeScript and the web build pass. The browser imports the new loader,
-legacy alias and pinned URL from another origin and verifies they expose the
+tests, TypeScript and the web build pass. The browser imports the loader
+and pinned URL from another origin and verifies they expose the
 same module. It checks the hash against the served bytes, immutable caching,
 CORS, conditional 304s and missing hashes. The complete Docker image smoke
 check passes, including precompressed SDK delivery through a proxy, 304 headers,

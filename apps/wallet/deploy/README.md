@@ -57,9 +57,8 @@ directory):
 The [website connection API](../../../docs/wallet-connect.md) is disabled by
 default in wallet Settings. Its popup `/connect.html` needs COOP `unsafe-none`;
 the main wallet keeps `same-origin`. `/wallet-sdk.js` is a small public ESM
-loader for `/assets/sdk/wallet-sdk-<hash>.js`; `/mmx-wallet.js` remains a
-compatibility alias. All SDK paths need CORS `*`. The loaders and popup use
-`Cache-Control: no-cache`; hashed SDK code uses
+loader for `/assets/sdk/wallet-sdk-<hash>.js`. All SDK paths need CORS `*`.
+The loader and popup use `Cache-Control: no-cache`; hashed SDK code uses
 `public, max-age=31536000, immutable`. Preserve the supplied
 path-specific rules in CDN overrides. For nginx, install both security-header
 snippets at the paths specified at the top of `nginx.conf`.

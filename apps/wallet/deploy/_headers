@@ -30,8 +30,3 @@
   Cross-Origin-Opener-Policy: same-origin
   Access-Control-Allow-Origin: *
   Cache-Control: no-cache
-
-/mmx-wallet.js
-  Cross-Origin-Opener-Policy: same-origin
-  Access-Control-Allow-Origin: *
-  Cache-Control: no-cache

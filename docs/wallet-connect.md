@@ -71,8 +71,7 @@ document.querySelector('#send').onclick = async () => {
 from `/assets/sdk/wallet-sdk-<hash>.js`. The hash is derived from the emitted
 SDK's contents, so unchanged SDK code keeps the same URL across wallet builds.
 The loader revalidates on a fresh page load; the hashed SDK is cached for one
-year with `immutable`. Existing imports of `/mmx-wallet.js` remain supported as
-an equivalent loader. Both loaders and the hashed SDK permit cross-origin
+year with `immutable`. The loader and the hashed SDK permit cross-origin
 imports. There is no HTTP redirect or server relay.
 
 To pin a particular SDK build, import the hashed URL named in the loader
@@ -215,10 +214,9 @@ transfers (including a short memo) fit with approval controls visible. Longer
 contract details and smaller screens can scroll.
 
 The wallet's deployment templates retain COOP `same-origin` on the main page
-and use `unsafe-none` only for `/connect.html`. `/wallet-sdk.js`, its legacy
-alias `/mmx-wallet.js`, and `/assets/sdk/*` have
-`Access-Control-Allow-Origin: *`; wallet pages and RPC do not gain wildcard
-CORS from this change. The loaders and popup use `Cache-Control: no-cache`;
+and use `unsafe-none` only for `/connect.html`. `/wallet-sdk.js` and
+`/assets/sdk/*` have `Access-Control-Allow-Origin: *`; wallet pages and RPC do not gain wildcard
+CORS from this change. The loader and popup use `Cache-Control: no-cache`;
 hashed SDK assets use `public, max-age=31536000, immutable`. CSP,
 anti-framing, no-referrer and other wallet security headers remain enabled on
 the popup. The Docker image, Caddy, nginx and generated `_headers` files all

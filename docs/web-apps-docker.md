@@ -160,9 +160,9 @@ is a different interface. The apps also accept loopback HTTP for local testing.
 The image serves `/connect.html` with COOP `unsafe-none` so an external website
 can communicate with its popup; the main wallet keeps COOP `same-origin`.
 `/wallet-sdk.js` is a small ESM loader for the content-hashed SDK under
-`/assets/sdk/`, with `/mmx-wallet.js` retained as an alias. All SDK paths have
-CORS `*`; the hashed code is immutable and cached for a year. The popup and
-loaders revalidate on every load. Preserve these path-specific headers in CDN
+`/assets/sdk/`. All SDK paths have CORS `*`; the hashed code is immutable and
+cached for a year. The popup and
+loader revalidate on every load. Preserve these path-specific headers in CDN
 overrides.
 
 ## CDN caching
