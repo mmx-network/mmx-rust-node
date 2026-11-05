@@ -1,15 +1,17 @@
-/** Same-origin signing service. This never transfers a vault, seed, passphrase
- * or signed transaction. Only an explicitly selected host receives commands. */
+/** Same-origin signing service. Signing bytes stay in the selected
+ * host. An encrypted, one-use unlock handoff lets an approval popup unlock the
+ * persistent wallet tab without sending plaintext credentials on the channel. */
 import { effect } from '@preact/signals';
-import { parseChainParams } from '../chain/rpc';
+import { publicAccount } from './account';
+import { openUnlock, unlockKeyPair, unlockPublicKey } from './unlock';
 import { errorMessage } from '../lib/errors';
 import { isTransportError } from '../lib/errors';
-import { appState, backend, platform, wallets } from '../state/core';
+import { appState, backend, platform, wallets, lockVersion, upsertWallet, activeWalletId, sessionWalletId } from '../state/core';
 import { websiteAccess } from '../lib/websites';
 import { isErrorCode } from '../backend/types';
 import { messageForCode } from '../lib/errors';
 import { idleExpired, markActivity } from '../state/idle';
-import { lock } from '../state/wallets';
+import { lock, activateWallet } from '../state/wallets';
 import { notify } from '../state/toasts';
 import { refreshNow, trackPending } from '../state/session';
 import { customPending } from './pending';
@@ -25,7 +27,7 @@ import {
   type PreparedTransaction,
 } from './protocol';
 
-export function startWalletHost(): { id: string; close: () => void } | null {
+export function startWalletHost({kind='wallet'}: {kind?: 'wallet'|'approval'} = {}): { id: string; close: () => void } | null {
   if (platform.peek() !== 'web' || typeof BroadcastChannel === 'undefined') return null;
   const channel = new BroadcastChannel(CHANNEL);
   const id = randomToken();
@@ -33,25 +35,27 @@ export function startWalletHost(): { id: string; close: () => void } | null {
   let queue: Promise<void> = Promise.resolve();
   const clients = new Map<
     string,
-    { origin: string; walletId: string; seen: number; addresses?: string[]; prepared?: PreparedTransaction }
+    { origin: string; walletId: string; seen: number; addresses?: string[]; prepared?: PreparedTransaction;
+      challenge?: {pair:CryptoKeyPair;nonce:string;at:number;lock:number} }
   >();
   const post = (v: Record<string, unknown>) => {
     if (alive) channel.postMessage({ ...v, host: id });
   };
   const offer = (bridge?: string) =>
     post({
-      type: 'offer',
+      type: 'offer', kind, lock:lockVersion.peek(),
       ...(bridge ? { bridge } : {}),
       wallets:
         appState.peek().settings.allowWebsiteConnections === true
           ? wallets
               .peek()
-              .filter((w) => !w.locked && !w.error)
-              .map(({ id, name, addressCount }) => ({ id, name, addressCount }))
+              .filter((w) => !w.error && (kind==='wallet' || !w.locked))
+              .map(({ id, name, addressCount, locked, canView }) => ({ id, name, addressCount, locked, canView }))
           : [],
     });
   const stopEffect = effect(() => {
     wallets.value;
+    lockVersion.value;
     const settings = appState.value.settings;
     for (const [bridge, client] of clients) {
       const code = websiteAccess(settings, client.origin);
@@ -78,7 +82,7 @@ export function startWalletHost(): { id: string; close: () => void } | null {
     try {
       const access = websiteAccess((await backend().loadAppState()).settings, message.origin as string);
       if (access) throw new ConnectionError(access, messageForCode(access));
-      if (method === 'account') {
+      if (method === 'account' || method === 'unlockKey') {
         for (const [key, c] of clients) if (Date.now() - c.seen > 30 * 60_000) clients.delete(key);
         if (clients.size >= 16 && !clients.has(bridge)) throw new ConnectionError('busy');
         clients.set(bridge, { origin: message.origin as string, walletId, seen: Date.now() });
@@ -86,22 +90,45 @@ export function startWalletHost(): { id: string; close: () => void } | null {
       const client = clients.get(bridge);
       if (!client || client.walletId !== walletId || client.origin !== message.origin) throw new ConnectionError('disconnected');
       client.seen = Date.now();
+      if (idleExpired()) await lock({ inactivity: true });
       const info = wallets.peek().find((w) => w.id === walletId);
-      if (!info || info.error || info.locked) throw new ConnectionError('locked');
-      if (idleExpired()) {
-        await lock({ inactivity: true });
-        throw new ConnectionError('locked');
-      }
+      if (!info || info.error) throw new ConnectionError('locked');
       const b = backend();
       if (method === 'account') {
-        const [addresses, raw] = await Promise.all([b.getAddresses(walletId), b.rpcGet('/chain/info')]);
+        const account=await publicAccount(b,walletId);
         const access = websiteAccess((await b.loadAppState()).settings, client.origin);
         if (access) throw new ConnectionError(access, messageForCode(access));
         stillPresent();
-        const { network, decimals } = parseChainParams(raw);
-        client.addresses = addresses;
-        reply({ walletId, address: addresses[0]!, addresses, network, decimals });
+        client.addresses = account.addresses;
+        reply(account);
+      } else if(method==='unlockKey') {
+        if(kind!=='wallet') throw new ConnectionError('invalid_request');
+        const version=lockVersion.peek();
+        if(message.lock!==version) throw new ConnectionError('locked');
+        const pair=await unlockKeyPair();
+        stillPresent();
+        if(version!==lockVersion.peek()) throw new ConnectionError('locked');
+        const challenge={pair,nonce:randomToken(),at:Date.now(),lock:version};
+        client.challenge=challenge;
+        reply({nonce:challenge.nonce,key:await unlockPublicKey(pair)});
+      } else if(method==='unlock') {
+        const challenge=client.challenge;
+        client.challenge=undefined; // Consumed even on invalid ciphertext or a wrong passphrase.
+        if(kind!=='wallet' || !challenge || challenge.nonce!==message.nonce ||
+          Date.now()-challenge.at>30_000 || challenge.lock!==lockVersion.peek()) throw new ConnectionError('locked');
+        const request=await openUnlock(challenge.pair,message.box,{host:id,bridge,walletId,origin:client.origin,nonce:challenge.nonce});
+        stillPresent();
+        if(challenge.lock!==lockVersion.peek()) throw new ConnectionError('locked');
+        try {
+          const unlocked=await b.unlockWallet(walletId,request);
+          markActivity();
+          upsertWallet(unlocked);
+          if(activeWalletId.peek()===walletId && sessionWalletId.peek()!==walletId)
+            void activateWallet(walletId,{navigateTo:null}).catch(()=>undefined);
+          reply(null);
+        } finally { delete request.mnemonic; delete request.passphrase; }
       } else if (method === 'prepare') {
+        if(info.locked) throw new ConnectionError('locked');
         if (!b.prepareTransaction || !transactionRequest(message.params)) throw new ConnectionError('invalid_request');
         if (client.prepared) await b.discardPrepared(client.prepared.txid);
         // Only the wallet's Review button sends this command. Inbound website
@@ -117,6 +144,7 @@ export function startWalletHost(): { id: string; close: () => void } | null {
         client.prepared = prepared;
         reply(prepared);
       } else if (method === 'broadcast') {
+        if(info.locked) throw new ConnectionError('locked');
         if (typeof message.txid !== 'string' || client.prepared?.txid !== message.txid) throw new ConnectionError('invalid_request');
         stillPresent();
         const prepared = client.prepared;

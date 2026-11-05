@@ -169,15 +169,35 @@ and drops it on disconnect/navigation. Blocking a site or disabling website
 connections removes stored grants, so re-enabling requires fresh connection
 consent. The grant never substitutes for per-transaction approval.
 
-An unlocked wallet tab signs locally without sending its seed, passphrase,
-keys, signatures or signed transaction to the popup. If the tab is closed,
-locked or suspended, **Unlock to review** asks the user to unlock the same
-wallet locally in that transaction's popup. Connecting a locked wallet offers
-**Unlock and connect**. Closing a locally unlocked popup purges its keys, so
-another request needs another unlock unless a main wallet tab is unlocked. Manual and idle locks still purge signing material; only the
-user's spending actions extend the signing tab's inactivity timer. Discovery
-and inbound website requests do not extend it. Closing the popup releases keys
-it unlocked without locking the original wallet tab.
+Connecting uses the cached public address list while the wallet remains locked.
+Only a wallet with no complete address list asks for **Unlock and connect** to
+derive its missing addresses. Connection consent never extends a signing timeout.
+
+For spending, the popup prefers a main wallet tab. If it is locked, **Unlock to
+review** opens a signing session in that tab, so closing the approval popup does
+not discard the session. Following transactions reuse it until the configured
+idle timeout (five minutes by default), manual lock, reload or tab closure.
+Each explicit review/send action refreshes that timeout; incoming website
+requests and discovery do not. Cached public addresses remain observable after
+locking. Keys, signatures and signed transactions stay in the signing tab.
+
+The popup hands an entered unlock credential to the selected wallet tab using
+a one-use P-256 ECDH / AES-GCM envelope through their same-origin channel. The
+fresh recipient key and 30-second challenge are tied to the tab, bridge, wallet,
+website and lock version. Challenges are consumed on any attempt, and a lock
+invalidates outstanding challenges. Plaintext credentials never appear in the
+channel or website messages; neither ciphertext nor credentials are persisted.
+The handoff is bounded to 32 KiB of encoded unlock data and uses browser
+[Web Crypto](https://www.w3.org/TR/webcrypto/). Existing seed-file storage is
+unchanged; this envelope only carries a transient unlock between local pages.
+
+Keep a main wallet tab open to retain the timed session. If no wallet tab is
+available, a popup can still unlock locally; closing that popup purges its keys
+and the next request needs another unlock. If a selected tab stops responding during unlock, the request fails; no second
+signing session is opened automatically. Physical mobile suspension is
+still browser-dependent. The SDK requests a 480 × 800 content window; simple
+transfers (including a short memo) fit with approval controls visible. Longer
+contract details and smaller screens can scroll.
 
 The wallet's deployment templates retain COOP `same-origin` on the main page
 and use `unsafe-none` only for `/connect.html`. The standalone `/mmx-wallet.js`

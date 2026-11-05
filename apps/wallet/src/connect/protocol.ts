@@ -3,7 +3,7 @@ export { websiteOrigin as origin } from '../lib/websites';
 
 export const PROTOCOL = 'mmx-wallet';
 export const VERSION = 2;
-export const CHANNEL = 'mmx-wallet-connect/v1';
+export const CHANNEL = 'mmx-wallet-connect/v2';
 export const REQUEST_TIMEOUT = 120_000;
 export const MAX_JSON = 65_536;
 export interface Account {
@@ -33,7 +33,9 @@ export interface PreparedTransaction {
 }
 export interface Offer {
   host: string;
-  wallet: Pick<WalletInfo, 'id' | 'name' | 'addressCount'>;
+  kind: 'wallet' | 'approval';
+  lock: number;
+  wallet: Pick<WalletInfo, 'id' | 'name' | 'addressCount' | 'locked' | 'canView'>;
 }
 export interface Envelope {
   protocol: 'mmx-wallet';

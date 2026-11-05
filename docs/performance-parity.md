@@ -1721,3 +1721,41 @@ layouts, plus URL-field widths at 1,280 / 540 / 390 / 320 pixels. Native signing
 code is unchanged from the earlier verified checkpoint. No real funds were
 sent by these tests. Physical mobile browser behavior and arbitrary contract
 VM execution retain the limitations recorded above.
+
+## Timed signing across approval popups (2026-11-05)
+
+Connection consent now reads cached public addresses without unlocking, as the
+C++ `ECDSA_Wallet::get_all_addresses` / `Wallet::get_address` public observation
+path permits. Missing addresses still require derivation. Main wallet tabs
+advertise locked accounts too, and a popup unlock targets that tab instead of
+opening a short-lived local vault when the tab is available. The existing
+idle/manual lock owns the resulting vault. Review and broadcast reset the
+timer; account reads, discovery and website traffic do not. The separate
+approval window still closes after each action.
+
+The targeted unlock uses fresh, non-extractable P-256 keys with AES-GCM, a
+one-use 30-second challenge and context-bound associated data. The lock version
+is checked before and after decryption, while the backend's existing lock epoch
+still protects asynchronous vault opening. Encoded unlock data is bounded to
+32 KiB. There is no new seed encryption format, persisted credential or server
+relay; only ephemeral ciphertext crosses the same-origin channel. Temporary
+encoded plaintext buffers are overwritten; browser/JavaScript memory reclamation
+is not a guarantee of zeroization for transient strings. Closed/unreachable
+main tabs cannot retain this session; a genuinely cold popup still purges on
+close. A 480 × 800 default and compact transfer rows remove scrolling for a
+simple transfer, including a short memo, without hiding the maximum fee.
+
+Evidence: 549 unit tests pass, including credential round-trip, ciphertext
+tampering, recipient/context changes and non-extractable private keys. The
+complete 57-test Chromium suite passes. Popup regressions cover cached/unknown
+addresses, a regular or passphrase wallet initially locked in its main tab,
+unlocking once, later spending without another prompt, timer reset, expiry,
+manual lock, revocation and replaying an old unlock with a fresh timestamp.
+The default simple transfer with a memo fits a 480 × 720 content viewport.
+A separate stock Firefox 158 headless check with production headers and real
+WASM against the mock chain verified connect without unlock, unlock retained
+in the main tab, another transaction without prompting and manual lock. Its
+actual default content viewport was 480 × 727 after Firefox clamped the window;
+measured vertical overflow was zero. Both frontend builds and TypeScript checks
+pass. No native code or live wallet/ledger data was changed for these checks.
+Physical mobile background suspension remains unmeasured.

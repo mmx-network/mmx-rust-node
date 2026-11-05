@@ -1,5 +1,4 @@
 import { NATIVE_CONTRACT, normalizeAddress } from '../lib/address';
-import { formatAmount } from '../lib/amount';
 import { sanitizeText } from '../lib/text';
 import { AddressText, Amount, AssetIcon, Badge, Disclosure, Identicon, KeyValue, KeyValueList, Text } from '../ui/components';
 import { object, type Account, type PreparedTransaction } from './protocol';
@@ -125,11 +124,10 @@ export function TransactionReview({
     ),
   );
   return (
-    <div class="connection__review" role="region" aria-label="Transaction details">
+    <div class={`connection__review${single ? ' connection__review--transfer' : ''}`} role="region" aria-label="Transaction details">
       <div class="connection__amount-hero">
         {single ? (
           <>
-            <AssetIcon contract={String(single.contract ?? NATIVE_CONTRACT)} native={single.contract === NATIVE_CONTRACT} size={44} />
             <span class="connection__eyebrow">You send</span>
             <div class="connection__large-amount">
               <Money value={single.amount} contract={String(single.contract ?? NATIVE_CONTRACT)} prepared={prepared} decimals={decimals} />
@@ -236,33 +234,22 @@ export function TransactionReview({
           </Text>
         </div>
       ) : null}
-      <div class="connection__cost">
+      {fee !== null && nativeNet !== null && nativeNet >= 0n ? <div class="connection__cost">
         <KeyValueList variant="compact">
-          <KeyValue label="Network">{sanitizeText(account.network, 64)}</KeyValue>
-          <KeyValue
-            label="Maximum network fee"
-            hint={
-              prepared && prepared.maxFee !== prepared.fee ? `Static fee: ${formatAmount(atomic(prepared.fee), decimals)} MMX` : undefined
-            }
-          >
-            {fee === null ? (
-              <span class="connection__empty">Calculated next</span>
-            ) : (
-              <Amount value={fee} decimals={decimals} symbol="MMX" />
-            )}
+          <KeyValue label="Maximum total" emphasis>
+            <Amount value={nativeNet + fee} decimals={decimals} symbol="MMX" size="lg" />
           </KeyValue>
-          {fee !== null && nativeNet !== null && nativeNet > 0n ? (
-            <KeyValue label="Maximum total" emphasis>
-              <Amount value={nativeNet + fee} decimals={decimals} symbol="MMX" size="lg" />
-            </KeyValue>
-          ) : null}
         </KeyValueList>
-      </div>
+      </div> : null}
       {prepared ? (
         <Disclosure title="More details">
           <KeyValueList variant="compact">
+            <KeyValue label="Network">{sanitizeText(account.network,64)}</KeyValue>
             <KeyValue label="From">
               <AddressText address={account.address} mode="short" />
+            </KeyValue>
+            <KeyValue label="Static network fee">
+              <Amount value={atomic(prepared.fee)} decimals={decimals} symbol="MMX" />
             </KeyValue>
             <KeyValue label="Valid through block">{prepared.expires.toLocaleString()}</KeyValue>
             {prepared.transaction.sender ? (

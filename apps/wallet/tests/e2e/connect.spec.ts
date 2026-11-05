@@ -152,6 +152,97 @@ test('connecting, sending and rejecting each use one new popup and close it', as
   await expect(page.getByRole('button', { name: 'Lock', exact: true }).first()).toBeVisible();
 });
 
+for (const passphrase of [undefined, 'timed popup unlock']) {
+  test(`a locked wallet connects publicly and retains a popup unlock until timeout (${passphrase ? 'passphrase' : 'regular'})`, async ({page,rpc,context,consoleGuard}) => {
+    await page.clock.install();
+    const wallet=await openFundedWallet(page,(address)=>rpc.fund({address,amount:'50000000'}),{passphrase});
+    await enable(page);
+    await page.getByRole('button',{name:'Lock',exact:true}).first().click();
+    await expect(page.getByRole('button',{name:'Unlock',exact:true}).first()).toBeVisible();
+    await page.evaluate(()=>{
+      const channel=new BroadcastChannel('mmx-wallet-connect/v2');
+      const state=window as unknown as {privateMessages:unknown[];spy:BroadcastChannel};
+      state.privateMessages=[];state.spy=channel;channel.onmessage=({data})=>state.privateMessages.push(data);
+    });
+    const site=await context.newPage();
+    let popup=await start(site);
+    await consoleGuard.attach(popup);
+    await expect(popup.getByRole('button',{name:'Connect',exact:true})).toBeVisible();
+    await expect(popup.getByRole('dialog')).toHaveCount(0);
+    await popup.getByRole('button',{name:'Connect',exact:true}).click();
+    await expect.poll(()=>popup.isClosed()).toBe(true);
+    await expect(page.getByRole('button',{name:'Unlock',exact:true}).first()).toBeVisible();
+    const tx={outputs:[{...transfer.outputs[0],memo:'A simple transfer'}]};
+    popup=await requested(site,tx);
+    await popup.setViewportSize({width:480,height:720});
+    await consoleGuard.attach(popup);
+    const noScroll=async()=>expect(await popup.locator('.focus-layout__main').evaluate(e=>e.scrollHeight-e.clientHeight)).toBeLessThanOrEqual(1);
+    await expect(popup.getByRole('button',{name:'Unlock to review',exact:true})).toBeVisible();
+    await noScroll();
+    await popup.getByRole('button',{name:'Unlock to review',exact:true}).click();
+    const dialog=popup.getByRole('dialog',{name:'Unlock for spending'});
+    await dialog.getByLabel(passphrase?'Passphrase':'Recovery phrase',{exact:true}).fill(passphrase??wallet.words);
+    await dialog.getByRole('button',{name:'Unlock',exact:true}).click();
+    await expect(popup.getByRole('heading',{name:'Confirm transaction'})).toBeVisible();
+    await expect(page.getByRole('button',{name:'Lock',exact:true}).first()).toBeVisible();
+    await noScroll();
+    await capture(popup,'connection-transfer-default-confirm');
+    await popup.getByRole('button',{name:'Send now',exact:true}).click();
+    await expect.poll(()=>popup.isClosed()).toBe(true);
+    await page.clock.fastForward('04:00');
+    popup=await requested(site,transfer);
+    await quote(popup);
+    await expect(popup.getByRole('dialog')).toHaveCount(0);
+    await popup.getByRole('button',{name:'Send now',exact:true}).click();
+    await expect.poll(()=>popup.isClosed()).toBe(true);
+    await page.clock.fastForward('04:00');
+    await expect(page.getByRole('button',{name:'Lock',exact:true}).first()).toBeVisible();
+    await page.clock.fastForward('01:30');
+    await expect(page.getByRole('button',{name:'Unlock',exact:true}).first()).toBeVisible();
+    // The encrypted unlock request is single-use, including after a later lock.
+    const messages=await page.evaluate(()=>{
+      const state=window as unknown as {privateMessages:Record<string,unknown>[];spy:BroadcastChannel};
+      const key=state.privateMessages.find(m=>m.method==='unlockKey');
+      const call=state.privateMessages.find(m=>m.method==='unlock');
+      if(!call || !key) throw new Error('No handoff observed');
+      state.spy.postMessage({...key,sentAt:Date.now()});
+      state.spy.postMessage({...call,sentAt:Date.now()});
+      return JSON.stringify(state.privateMessages);
+    });
+    expect(messages).not.toContain(wallet.words);
+    if(passphrase) expect(messages).not.toContain(passphrase);
+    popup=await requested(site,transfer);
+    await expect(popup.getByRole('button',{name:'Unlock to review',exact:true})).toBeVisible();
+    await expect(page.getByRole('button',{name:'Unlock',exact:true}).first()).toBeVisible();
+    await popup.getByRole('button',{name:'Reject',exact:true}).click();
+    expect(await rpc.broadcasts()).toHaveLength(2);
+  });
+}
+
+test('connecting only unlocks when its public addresses are unknown', async ({page,rpc,context}) => {
+  const wallet=await openFundedWallet(page,(address)=>rpc.fund({address,amount:'5000000'}),{passphrase:'discover addresses'});
+  await enable(page);
+  await page.evaluate((id)=>{
+    const root=JSON.parse(localStorage.getItem('mmx-wallet/v1')!);delete root.wallets[id].addresses;
+    localStorage.setItem('mmx-wallet/v1',JSON.stringify(root));
+  },wallet.id);
+  await page.close();
+  const site=await context.newPage();
+  let popup=await start(site);
+  await popup.getByRole('button',{name:'Unlock and connect',exact:true}).click();
+  const dialog=popup.getByRole('dialog',{name:'Unlock for spending'});
+  await dialog.getByLabel('Passphrase',{exact:true}).fill('discover addresses');
+  await dialog.getByRole('button',{name:'Unlock',exact:true}).click();
+  await expect.poll(()=>popup.isClosed()).toBe(true);
+  await expect.poll(()=>site.evaluate(()=>(window as unknown as {account:{address:string}}).account?.address)).toBe(wallet.addresses[0]);
+  popup=await start(site);
+  await expect(popup.getByRole('button',{name:'Connect',exact:true})).toBeVisible();
+  await expect(popup.getByRole('dialog')).toHaveCount(0);
+  await popup.getByRole('button',{name:'Connect',exact:true}).click();
+  await expect.poll(()=>popup.isClosed()).toBe(true);
+  expect(await rpc.broadcasts()).toEqual([]);
+});
+
 test('a cold mobile request unlocks locally and shows a formatted transfer before confirmation', async ({
   page,
   rpc,
@@ -165,10 +256,7 @@ test('a cold mobile request unlocks locally and shows a formatted transfer befor
   let popup = await start(site);
   await popup.setViewportSize(MOBILE);
   await consoleGuard.attach(popup);
-  await popup.getByRole('button', { name: 'Unlock and connect', exact: true }).click();
-  let dialog = popup.getByRole('dialog', { name: 'Unlock for spending' });
-  await dialog.getByLabel('Passphrase', { exact: true }).fill('popup passphrase');
-  await dialog.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await popup.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect.poll(() => popup.isClosed()).toBe(true);
   popup = await requested(site, transfer);
   await popup.setViewportSize(MOBILE);
@@ -178,7 +266,7 @@ test('a cold mobile request unlocks locally and shows a formatted transfer befor
   await expect(popup.locator('pre')).toHaveCount(0);
   await capture(popup, 'connection-transfer-mobile');
   await popup.getByRole('button', { name: 'Unlock to review', exact: true }).click();
-  dialog = popup.getByRole('dialog', { name: 'Unlock for spending' });
+  let dialog = popup.getByRole('dialog', { name: 'Unlock for spending' });
   await dialog.getByLabel('Passphrase', { exact: true }).fill('popup passphrase');
   await dialog.getByRole('button', { name: 'Unlock', exact: true }).click();
   await expect(popup.getByRole('heading', { name: 'Confirm transaction' })).toBeVisible();

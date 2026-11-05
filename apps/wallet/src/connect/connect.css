@@ -6,11 +6,11 @@
 }
 .connection .focus-layout__header {
   flex: 0 0 auto;
-  min-height: 56px;
+  min-height: 52px;
   padding-inline: var(--s5);
 }
 .connection .focus-layout__main {
-  padding: var(--s3) var(--s5) var(--s4);
+  padding: var(--s2) var(--s5) var(--s3);
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -32,8 +32,8 @@
   min-width: 0;
 }
 .connection__site-icon {
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
@@ -56,17 +56,12 @@
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
-.connection__site-origin {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  overflow-wrap: anywhere;
-}
 .connection__heading {
   display: grid;
   gap: var(--s2);
 }
 .connection__heading h1 {
-  font-size: clamp(1.5rem, 6vw, 1.8rem);
+  font-size: clamp(1.5rem, 6vw, 1.625rem);
   line-height: 1.2;
 }
 .connection__card {
@@ -327,4 +322,28 @@
 }
 .connection__approval-fee .amount {
   font-weight: var(--weight-semibold);
+}
+
+/* A simple transfer fits the default approval window, including its fee and controls. */
+.connection__review--transfer .connection__amount-hero {
+  padding: var(--s1) var(--s4);
+  gap: var(--s1);
+}
+.connection__review--transfer .connection__transfer { padding: var(--s4); gap: var(--s2); }
+.connection__review--transfer .connection__recipient { gap: var(--s2); }
+.connection__review--transfer .connection__recipient > .address { padding: var(--s2) var(--s3); }
+.connection__review--transfer .connection__cost { padding: var(--s2) var(--s4); }
+.connection__review--transfer .connection__cost .kv__row { padding-block: var(--s1); }
+.connection__account { padding: var(--s3) var(--s4); }
+
+.connection__network {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 2px 6px;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }

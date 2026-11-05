@@ -75,7 +75,7 @@ function request(options: ConnectOptions, action: 'connect' | 'sendTransaction',
   url.hash = new URLSearchParams({ channel, origin: window.location.origin }).toString();
   // Never await anything before window.open: mobile browsers require activation.
   let popup: Window | null;
-  try { popup = window.open(url, `mmx-wallet-${channel}`, 'popup,width=480,height=720'); }
+  try { popup = window.open(url, `mmx-wallet-${channel}`, 'popup,width=480,height=800'); }
   catch { return failure(new WalletError('popup_blocked', 'Allow the wallet popup and try again.')); }
   if (!popup) return failure(new WalletError('popup_blocked', 'Allow the wallet popup and try again.'));
   popupInUse = true;

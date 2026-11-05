@@ -5,6 +5,7 @@ import { createBackend } from '../backend/web';
 import { sanitizeAppState } from '../lib/appstate';
 import { errorMessage, messageForCode } from '../lib/errors';
 import { websiteAccess } from '../lib/websites';
+import { sanitizeText } from '../lib/text';
 import { setWebsiteBlocked } from '../state/settings';
 import { activeWalletId, appState, lockVersion, platform, setBackend, setWallets, upsertWallet, wallets } from '../state/core';
 import { markActivity, startIdleLock } from '../state/idle';
@@ -30,6 +31,7 @@ import { AuthorizationDialog } from '../ui/screens/unlock/AuthorizationDialog';
 import { WalletClient } from './client';
 import { startWalletHost } from './host';
 import { WebsiteSessions, type WebsiteSession } from './sessions';
+import { publicAccount } from './account';
 import { TransactionReview } from './TransactionReview';
 import {
   ConnectionError,
@@ -155,7 +157,7 @@ export function ConnectApp() {
       activeWalletId.value = appState.value.activeWallet;
       if (!alive.current) return;
       stops.push(startIdleLock({ trackFocus: false }));
-      hostRef.current = startWalletHost();
+      hostRef.current = startWalletHost({kind:'approval'});
       if (b.onExternalChange)
         stops.push(
           b.onExternalChange(
@@ -251,21 +253,26 @@ export function ConnectApp() {
     setAccount(saved.account);
   }, [ready, flow, access]);
   const local = wallets.value.filter((w) => !w.error);
+  // Keep the timed session in a main wallet tab, even when it starts locked.
+  const peerFor = (id: string) => offers.find(o=>o.kind==='wallet' && o.wallet.id===id && !o.wallet.locked)
+    ?? offers.find(o=>o.kind==='wallet' && o.wallet.id===id);
   const options = local.map((w) => {
-    const peer = offers.find((o) => o.wallet.id === w.id);
+    const peer = peerFor(w.id);
     return { value: peer ? `${peer.host}:${w.id}` : `local:${w.id}`, label: w.name };
   });
   const choice = options.some((o) => o.value === selected) ? selected : (options[0]?.value ?? '');
   const selectedWallet =
     flow?.action === 'sendTransaction' ? local.find((w) => w.id === account?.walletId) : local.find((w) => w.id === choice.split(':')[1]);
-  const isUnlocked = !!selectedWallet && (offers.some((o) => o.wallet.id === selectedWallet.id) || !selectedWallet.locked);
+  const peer = selectedWallet ? peerFor(selectedWallet.id) : undefined;
+  const isUnlocked = !!selectedWallet && (!selectedWallet.locked || peer?.wallet.locked===false);
+  const canConnect = !!selectedWallet && (selectedWallet.canView || peer?.wallet.canView || isUnlocked);
   const name = selectedWallet?.name ?? grant.current?.walletName ?? 'Wallet';
   function check(epoch: number) {
     if (!alive.current || finished.current || epoch !== generation.current) throw new ConnectionError('disconnected');
     const denied = websiteAccess(appState.peek().settings, flowRef.current!.site);
     if (denied) throw new ConnectionError(denied);
   }
-  async function perform(t: Target) {
+  async function perform(t?: Target) {
     const current = flowRef.current!;
     if (busyRef.current) return;
     busyRef.current = true;
@@ -274,7 +281,8 @@ export function ConnectApp() {
     const epoch = generation.current;
     try {
       check(epoch);
-      const a = (await clientRef.current!.call(t.host, t.walletId, current.site, 'account')) as Account;
+      const a = t ? (await clientRef.current!.call(t.host, t.walletId, current.site, 'account')) as Account
+        : await publicAccount(bRef.current!,selectedWallet!.id);
       check(epoch);
       if (current.action === 'connect' && current.network !== undefined && current.network !== a.network)
         throw new ConnectionError('invalid_request', 'The website requested a different network.');
@@ -289,6 +297,7 @@ export function ConnectApp() {
         const saved = new WebsiteSessions(window.localStorage).create(current.site, a, selectedWallet?.name ?? 'Wallet');
         finish({ account: a, session: saved.id, expires: saved.expires });
       } else {
+        if(!t) throw new ConnectionError('disconnected');
         const quote = (await clientRef.current!.call(t.host, t.walletId, current.site, 'prepare', {
           params: current.params,
         })) as PreparedTransaction;
@@ -315,8 +324,9 @@ export function ConnectApp() {
   }
   async function continueRequest() {
     if (!flow || !selectedWallet || busyRef.current) return;
-    const peer = offers.find((o) => o.wallet.id === selectedWallet.id);
-    if (peer) {
+    if(flow.action==='connect' && selectedWallet.canView) { await perform(); return; }
+    const peer = peerFor(selectedWallet.id);
+    if (peer && (!peer.wallet.locked || (flow.action==='connect' && peer.wallet.canView))) {
       await perform({ host: peer.host, walletId: selectedWallet.id });
       return;
     }
@@ -334,17 +344,23 @@ export function ConnectApp() {
     try {
       const denied = websiteAccess(appState.peek().settings, flowRef.current!.site);
       if (denied) throw new ConnectionError(denied);
-      const info = await bRef.current!.unlockWallet(authorizing.id, request);
-      if (finished.current) {
-        await bRef.current!.lockAll();
-        return;
+      const peer = peerFor(authorizing.id);
+      let signer: Target;
+      if(peer) {
+        await clientRef.current!.unlock(peer.host,authorizing.id,flowRef.current!.site,peer.lock,request);
+        if(finished.current) return;
+        signer={host:peer.host,walletId:authorizing.id};
+      } else {
+        const info = await bRef.current!.unlockWallet(authorizing.id, request);
+        if (finished.current) { await bRef.current!.lockAll(); return; }
+        upsertWallet(info);
+        markActivity();
+        signer={host:hostRef.current!.id,walletId:info.id};
       }
-      upsertWallet(info);
-      markActivity();
       setAuthorizing(null);
       busyRef.current = false;
       setBusy(false);
-      await perform({ host: hostRef.current!.id, walletId: info.id });
+      await perform(signer);
     } catch (e) {
       if (!finished.current) setError(fault(e).message);
     } finally {
@@ -389,7 +405,7 @@ export function ConnectApp() {
             {prepared ? (
               <div class="connection__approval-fee">
                 <Text size="sm" tone="muted">
-                  Max. network fee
+                  Maximum network fee
                 </Text>
                 <Amount value={BigInt(prepared.maxFee)} decimals={prepared.decimals} symbol="MMX" />
               </div>
@@ -406,7 +422,7 @@ export function ConnectApp() {
                 onClick={() => void (prepared ? send() : continueRequest())}
               >
                 {flow.action === 'connect'
-                  ? isUnlocked
+                  ? canConnect
                     ? 'Connect'
                     : 'Unlock and connect'
                   : prepared
@@ -424,7 +440,7 @@ export function ConnectApp() {
         ) : undefined
       }
     >
-      <Stack gap={4}>
+      <Stack gap={2}>
         {flow ? (
           <div class="connection__site">
             <div class="connection__site-icon">
@@ -432,8 +448,7 @@ export function ConnectApp() {
             </div>
             <div>
               <span class="connection__eyebrow">{flow.action === 'connect' ? 'Connection request' : 'Transaction request'}</span>
-              <strong>{new URL(flow.site).host}</strong>
-              <span class="connection__site-origin">{flow.site}</span>
+              <strong>{flow.site}</strong>
             </div>
           </div>
         ) : null}
@@ -463,9 +478,9 @@ export function ConnectApp() {
                       <Identicon value={selectedWallet.id} size={40} />
                       <div>
                         <strong>{selectedWallet.name}</strong>
-                        <span>{isUnlocked ? 'Ready to connect' : 'Unlock required'}</span>
+                        <span>{canConnect ? 'Ready to connect' : 'Unlock to discover addresses'}</span>
                       </div>
-                      <Icon name={isUnlocked ? 'check-circle' : 'lock'} size="sm" />
+                      <Icon name={canConnect ? 'check-circle' : 'lock'} size="sm" />
                     </div>
                   ) : (
                     <Text tone="muted">Open MMX Wallet to create or import a wallet first.</Text>
@@ -486,6 +501,7 @@ export function ConnectApp() {
                   <div class="connection__account">
                     <Identicon value={account.walletId} size={28} />
                     <strong>{name}</strong>
+                    <span class="connection__network" title={account.network}>{sanitizeText(account.network,64)}</span>
                     <AddressText address={account.address} mode="short" />
                   </div>
                   <TransactionReview transaction={flow.params.transaction} account={account} prepared={prepared} />

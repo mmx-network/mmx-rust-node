@@ -1,7 +1,9 @@
+import type { UnlockRequest } from '../backend/types';
+import { sealUnlock } from './unlock';
 import { CHANNEL, REQUEST_TIMEOUT, ConnectionError, boundedJson, object, randomToken, token, type Offer } from './protocol';
 
 /** The connection page's private channel to wallet tabs. Its bridge ID is never
- * given to the website; no unlock credentials can be carried on this protocol. */
+ * given to the website; no plaintext unlock credentials are carried on this protocol. */
 export class WalletClient {
   private closed = false;
   readonly id = randomToken();
@@ -17,11 +19,12 @@ export class WalletClient {
   constructor() {
     this.channel.onmessage = ({ data: m }) => {
       if (!object(m) || !token(m.host) || !boundedJson(m, 72_000) || (m.bridge !== undefined && m.bridge !== this.id)) return;
-      if (m.type === 'offer' && Array.isArray(m.wallets)) {
+      if (m.type === 'offer' && Array.isArray(m.wallets) && Number.isSafeInteger(m.lock) && Number(m.lock)>=0) {
         const rows: Offer[] = [];
         for (const w of m.wallets.slice(0, 100))
-          if (object(w) && typeof w.id === 'string' && typeof w.name === 'string' && Number.isInteger(w.addressCount)) {
-            rows.push({ host: m.host, wallet: { id: w.id, name: w.name, addressCount: Number(w.addressCount) } });
+          if (object(w) && typeof w.id === 'string' && typeof w.name === 'string' && typeof w.locked === 'boolean' && Number.isInteger(w.addressCount)) {
+            rows.push({ host: m.host, kind: m.kind === 'wallet' ? 'wallet' : 'approval', lock:Number(m.lock),
+              wallet: { id: w.id, name: w.name, addressCount: Number(w.addressCount), locked:w.locked, canView:w.canView===true } });
           }
         this.offers.set(m.host, { rows, seen: Date.now() });
         this.publish();
@@ -71,6 +74,12 @@ export class WalletClient {
       this.pending.set(requestId, { host, resolve, reject, timer });
       this.channel.postMessage({ type: 'call', bridge: this.id, requestId, host, walletId, origin, method, sentAt: Date.now(), ...extra });
     });
+  }
+  async unlock(host: string, walletId: string, origin: string, lock: number, request: UnlockRequest): Promise<void> {
+    const challenge=await this.call(host,walletId,origin,'unlockKey',{lock});
+    if(!object(challenge) || !token(challenge.nonce) || typeof challenge.key!=='string') throw new ConnectionError('invalid_response');
+    const box=await sealUnlock(request,challenge.key,{host,bridge:this.id,walletId,origin,nonce:challenge.nonce});
+    await this.call(host,walletId,origin,'unlock',{nonce:challenge.nonce,box});
   }
   cancel(host: string): void {
     if (!this.closed) this.channel.postMessage({ type: 'cancel', bridge: this.id, host });
