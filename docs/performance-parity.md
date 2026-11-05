@@ -32,6 +32,19 @@ Validation: all 198 node tests pass with jemalloc, and all 197 tests pass with
 the system allocator, using two test threads. All-target Clippy passes with
 warnings denied in both configurations; formatting and diff checks pass.
 
+The GNU/glibc 2.35 release (`92bca1f`) also passed the optimized allocator
+regression before deployment to eu2. Its live heap logs report `thp=never`
+without an allocator environment override or a machine-specific THP drop-in.
+The host remains on `always`. A mapping check found about 459.5 MiB of anonymous
+memory in `MADV_NOHUGEPAGE` regions, with no hugepage backing in those regions;
+other mappings can still use hugepages. The node regained sync and its public
+REST API, forced to the local backend, reported the new commit after its normal
+readiness delay. Its 4 GiB cache limit, historical checkpoints and identity were
+preserved; the proxy and Caddy retained their process identities. Early RSS was
+about 527 MiB, but the restart emptied the old RPC cache, so a comparable
+warm-cache RSS measurement remains outstanding. Existing instances on older
+binaries retain their prior policy until updated.
+
 ## Eu2 RSS and transparent hugepages (2026-11-03)
 
 After about 51 hours on `75b8bc9`, local and t320 heap usage had plateaued,
