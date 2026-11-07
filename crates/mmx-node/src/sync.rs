@@ -259,9 +259,7 @@ pub fn synchronize(
         .ok_or_else(|| error("missing selected tip"))?;
     progress.selected = selected.height;
     if current_target == target && selected.height == target && selected.hash.0 == remote {
-        local.synced = true;
-        crate::rpc::cache::web_sync(&local);
-        local.update()?;
+        local.finish_sync()?;
     }
     Ok(progress)
 }

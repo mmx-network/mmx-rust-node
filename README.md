@@ -104,6 +104,13 @@ The result includes the current height, `synced`, `sync_peers`, and
 `earliest_height`. Farming starts receiving challenges once the node is synced.
 Press Ctrl-C for a clean shutdown; restart with the same data directory to resume.
 
+Logs announce `Finished sync at height ...` after the final peer checks and
+record each new live peak with its block/VDF heights, committed root, transaction
+count, hash prefix, and update time. Chain reorganizations and loss of sync are
+also logged. A `Node status: ...` summary every minute reports sync state, heights,
+sync peers, mempool, pending blocks/proofs, and queued/dropped messages even when
+no new blocks arrive. Historical replay retains its batched progress logging.
+
 Peer listening follows the loaded native `Router.json`; RPC listeners use
 loopback by default:
 

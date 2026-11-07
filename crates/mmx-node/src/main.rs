@@ -356,11 +356,14 @@ fn main() -> Result<()> {
     }
 
     memory::report();
-    let mut last_heap_report = Instant::now();
+    let mut last_status_report = Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        if last_heap_report.elapsed() >= Duration::from_secs(60) {
+        if last_status_report.elapsed() >= Duration::from_secs(60) {
+            if let Err(e) = node.lock().unwrap().log_status() {
+                eprintln!("Node status unavailable: {e}");
+            }
             memory::report();
-            last_heap_report = Instant::now();
+            last_status_report = Instant::now();
         }
         #[cfg(unix)]
         if let Some(services) = &mut services {

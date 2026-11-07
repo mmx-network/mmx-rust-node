@@ -1,5 +1,28 @@
 # C++ performance parity
 
+## Node operation logs (2026-11-07)
+
+References inspected: C++ `Node_update.cpp::on_sync_done` announces completed
+sync, `Node_update.cpp::update` logs changed peaks and forks, `Node.cpp::commit`
+reports live commits, and `Router.cpp::print_stats` supplies periodic diagnostics.
+Rust now logs completed sync after the existing final checks, transition back to
+historical mode, changed live peaks and reorganizations, and committed-root
+advancement without a peak change. Each live peak includes the committed root,
+transaction count, hash prefix and update duration. A status summary every
+60 seconds reports sync state, heights, peers and work/transaction queues, beside
+the existing heap report. Repeated idle updates do not emit peak or transition
+messages, and historical replay keeps its batched progress reports.
+
+Diagnostics use the existing tip and counters; they do not scan ledger bodies
+or add retained block state. These are operational messages, not a measurement
+or claim of performance parity.
+
+Validation: all 198 node tests, all-target Clippy with warnings denied, formatting
+and diff checks pass. Captured fixture output confirms completion and sync-loss
+messages and exactly one peak line for each of two accepted live blocks, with
+no additional peak lines from idle ticks, rejected work, echoes or historical
+replay. The optimized node executable builds successfully.
+
 ## Jemalloc THP default (2026-11-05)
 
 GNU/Linux node executables using jemalloc now default to `thp:never` for all

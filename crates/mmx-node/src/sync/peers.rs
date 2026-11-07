@@ -842,9 +842,7 @@ fn synchronize_inner(
                         .tip()?
                         .is_some_and(|t| t.hash.0 == selected_hash)
                     {
-                        local.synced = true;
-                        crate::rpc::cache::web_sync(&local);
-                        local.update()?;
+                        local.finish_sync()?;
                     }
                 } else if probe.usable.get(1) == Some(&true) {
                     next = peak;

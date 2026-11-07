@@ -341,9 +341,57 @@ impl Node {
         self.pending.len()
     }
     pub fn begin_resync(&mut self) {
+        if self.synced {
+            eprintln!(
+                "Lost sync with network; restarting sync from root {} ({} sync peers)",
+                self.root, self.sync_peers
+            );
+        }
         self.synced = false;
         crate::rpc::cache::web_sync(self);
         self.peer_state.begin_resync();
+    }
+    pub(crate) fn finish_sync(&mut self) -> Result<()> {
+        let was_synced = self.synced;
+        self.synced = true;
+        crate::rpc::cache::web_sync(self);
+        self.update()?;
+        if !was_synced {
+            let tip = self
+                .chain
+                .selected()
+                .tip()?
+                .ok_or_else(|| error("missing selected tip"))?;
+            println!(
+                "Finished sync at height {} / VDF {}, root {}, sync peers {}",
+                tip.height, tip.vdf_height, self.root, self.sync_peers
+            );
+        }
+        Ok(())
+    }
+    /// Periodic operator diagnostics, independent of block arrivals.
+    pub fn log_status(&self) -> Result<()> {
+        let tip = self
+            .chain
+            .selected()
+            .tip()?
+            .ok_or_else(|| error("missing selected tip"))?;
+        let queue = self.inbox.stats()?;
+        println!(
+            "Node status: synced={}, height={} / VDF {}, root={}, sync peers={}, mempool={}, pending blocks={}, pending proofs={}, queued={} ({} bytes), dropped={}",
+            self.synced,
+            tip.height,
+            tip.vdf_height,
+            self.root,
+            self.sync_peers,
+            self.pending_transactions(),
+            self.pending_blocks(),
+            self.pending_proofs(),
+            queue.messages,
+            queue.bytes,
+            queue.dropped,
+        );
+        Ok(())
     }
     /// Drain peer broadcasts and coalesce work in the native periodic update.
     /// Embedded callers must drive this tick even while a peer is polling.
@@ -407,6 +455,7 @@ impl Node {
     }
     pub(crate) fn update(&mut self) -> Result<Update> {
         let started = Instant::now();
+        let previous_root = self.root;
         self.poll_transactions()?;
         for (message, _) in self.inbox.take()? {
             if let Err(e) = self.admit_message(&message) {
@@ -593,6 +642,32 @@ impl Node {
             }
         }
         self.peer_state.publish(tip.height, self.synced);
+        if self.synced {
+            if tip.hash != previous_tip.hash {
+                if let Some(common) = out.common_ancestor.filter(|h| *h != previous_tip.hash.0) {
+                    println!(
+                        "Reorganized selected chain from height {}, hash {}, common ancestor {}",
+                        previous_tip.height,
+                        vnx::util::to_hex_string(&previous_tip.hash.0[..8], false, false),
+                        vnx::util::to_hex_string(&common[..8], false, false),
+                    );
+                }
+                println!(
+                    "New peak at height {} / VDF {}, root {}, txs {}, hash {}, took {:.3}s",
+                    tip.height,
+                    tip.vdf_height,
+                    self.root,
+                    tip.tx_count,
+                    vnx::util::to_hex_string(&tip.hash.0[..8], false, false),
+                    started.elapsed().as_secs_f64(),
+                );
+            } else if self.root != previous_root {
+                println!(
+                    "Committed height {} (previous {})",
+                    self.root, previous_root
+                );
+            }
+        }
         if out.applied.len() >= 64 && std::env::var_os("MMX_PROFILE_REPLAY").is_some() {
             eprintln!("Node update: blocks={} prepare_ms={:.3} fork_ms={:.3} load_ms={:.3} proofs_ms={:.3} choice_ms={:.3} lineage_ms={:.3} replay_ms={:.3} policy_ms={:.3}",
                 out.applied.len(),
