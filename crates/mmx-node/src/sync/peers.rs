@@ -1112,10 +1112,15 @@ pub fn run(
                     node,
                     stop,
                     |p| {
-                        println!("Sync: {} / {}, candidates {} since root {}, {:.1} candidates/s; download wait {:.3}s (hashes {:.3}s bodies {:.3}s, {} body requests, {} retries, {} busy retries) archive {:.3}s update {:.3}s (proofs {:.3}s replay {:.3}s)",
-                        p.selected, p.target, p.downloaded, p.common,
-                        f64::from(p.downloaded) / p.elapsed.as_secs_f64(), p.download_time.as_secs_f64(), p.hash_time.as_secs_f64(), p.body_time.as_secs_f64(), p.body_requests, p.body_retries, p.backpressure_retries,
-                        p.archive_time.as_secs_f64(), p.update_time.as_secs_f64(), p.verification_time.as_secs_f64(), p.replay_time.as_secs_f64());
+                        println!(
+                            "Sync: {} / {}, {:.1} candidates/s; download wait {:.3}s archive {:.3}s update {:.3}s",
+                            p.selected,
+                            p.target,
+                            f64::from(p.downloaded) / p.elapsed.as_secs_f64(),
+                            p.download_time.as_secs_f64(),
+                            p.archive_time.as_secs_f64(),
+                            p.update_time.as_secs_f64(),
+                        );
                     },
                     &mut maintain,
                 )?;

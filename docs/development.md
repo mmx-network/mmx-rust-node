@@ -274,9 +274,9 @@ then run without the ledger mutex; restart/rewind reuse checks read that snapsho
 The reader is released before durable archival so it does not pin the archive WAL
 during publication. The producer joins before those clients are reused on error
 or cancellation. Missing ancestors and empty tip windows suspend prefetch.
-HTTP status also counts body
-requests and timeout reassignments; logs distinguish network stages from the
-remaining download wait after overlap.
+HTTP status also counts body requests and timeout reassignments; sync logs report
+height, candidate rate, remaining download wait after overlap, archive time and
+update time.
 Completed prefetched bodies are retained before the producer replies, including
 on cancellation. Reopening the node reuses those bodies after fresh peer hash
 queries; their presence alone does not advance the selected chain.
