@@ -255,7 +255,7 @@ impl<S: PeerSource> PeerPool<S> {
                     peer.source = None;
                     if let Err(failure) = result {
                         eprintln!(
-                            "Sync peer {}: block request failed: {failure}",
+                            "Peer {}: block request failed: {failure}",
                             vnx::util::to_hex_string(&id[..8], true, false)
                         );
                     }

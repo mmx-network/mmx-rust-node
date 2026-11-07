@@ -1043,13 +1043,13 @@ pub fn run(
                     pool.make_room_for_ahead_peer(id, height, &mut connected, &policy.fixed_peers);
                     if pool.install_authenticated(id, client) {
                         println!(
-                            "Sync peer {address}: authenticated {}, synced height {height}",
+                            "Peer {address}: authenticated {}, synced height {height}",
                             vnx::util::to_hex_string(&id[..8], true, false)
                         );
                         connected.insert(id, address);
                     }
                 }
-                Err(e) => eprintln!("Sync peer {address}: {e}"),
+                Err(e) => eprintln!("Peer {address}: {e}"),
             }
         }
         let connect_node = node.clone();

@@ -129,7 +129,7 @@ impl<S: PeerSource> PeerPool<S> {
                 peer.needs_status = false;
             }
             Ok(Value::Status(None)) => {
-                eprintln!("Sync peer {}: no longer synced", short_id(&peer.id));
+                eprintln!("Peer {}: no longer synced", short_id(&peer.id));
                 peer.active = false;
                 peer.qualified = false;
             }
@@ -138,7 +138,7 @@ impl<S: PeerSource> PeerPool<S> {
                     return Err(error("invalid metadata return type"));
                 };
                 if hashes.len() != count as usize {
-                    eprintln!("Sync peer {}: incomplete hash window", short_id(&peer.id));
+                    eprintln!("Peer {}: incomplete hash window", short_id(&peer.id));
                     peer.active = false;
                 } else if peer.active && peer.qualified {
                     peer.latency = reply.elapsed;
@@ -150,10 +150,7 @@ impl<S: PeerSource> PeerPool<S> {
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "Sync peer {}: metadata request failed: {e}",
-                    short_id(&peer.id)
-                );
+                eprintln!("Peer {}: metadata request failed: {e}", short_id(&peer.id));
                 peer.active = false;
                 peer.qualified = false;
             }
