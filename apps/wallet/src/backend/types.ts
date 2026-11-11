@@ -130,6 +130,7 @@ export interface UnlockRequest {
 export interface Backend {
   readonly platform: Platform;
   /** Web dApp requests; the signed transaction remains inside this backend. */
+  signMessage?(walletId: WalletId, request: import('../connect/protocol').MessageRequest, websiteOrigin: string): Promise<import('../connect/protocol').MessageProof>;
   prepareTransaction?(walletId: WalletId, request: import('../connect/protocol').TransactionRequest, websiteOrigin: string): Promise<import('../connect/protocol').PreparedTransaction>;
 
   loadAppState(): Promise<AppState>;

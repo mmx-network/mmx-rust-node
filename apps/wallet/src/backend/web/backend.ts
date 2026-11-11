@@ -1,3 +1,4 @@
+import { messageRequest, type MessageRequest, type MessageProof } from '../../connect/protocol';
 /**
  * Web wallet backend (docs/wallet-app.md §6.2, §6.3, §6.6). Recovery words come
  * from the user's password manager and are opened into a WASM `Vault` per
@@ -722,7 +723,7 @@ export class WebBackend implements Backend {
     );
     const rows = await mapLimit(addresses, FETCH_WORKERS, async (address) => ({
       address,
-      rows: parseAddressBalances((await this.http.get(`/address?id=${address}&limit=1000`)).value, params),
+      rows: parseAddressBalances((await this.http.get(`/address?id=${address}&limit=1000`)).value, params, true),
     }));
     const held = this.heldFunds(walletId, params.network);
     const balances: Array<{ address: string; contract: string; amount: string }> = [];
@@ -863,6 +864,18 @@ export class WebBackend implements Backend {
     };
     if (memo !== undefined) prepared.memo = memo;
     return prepared;
+  }
+
+  async signMessage(walletId: WalletId, request: MessageRequest, site: string): Promise<MessageProof> {
+    this.checkWebsite(site);
+    const epoch = this.websiteEpoch;
+    if (!messageRequest(request)) fail('invalid_argument');
+    const vault = this.vault(walletId);
+    const params = parseChainParams((await this.http.get('/chain/info')).value);
+    this.stillOpen(walletId, vault);
+    this.checkWebsite(site);
+    if (epoch !== this.websiteEpoch || request.network !== params.network) fail('invalid_argument');
+    return JSON.parse(this.call(() => vault.sign_website_message(site, params.network, request.message))) as MessageProof;
   }
 
   async prepareTransaction(walletId: WalletId, request: TransactionRequest, site: string): Promise<PreparedTransaction> {

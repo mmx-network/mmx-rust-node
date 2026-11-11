@@ -492,3 +492,41 @@ fn public_wallet_can_estimate_fees_but_cannot_sign() {
         )
         .is_err());
 }
+
+#[test]
+fn website_signatures_bind_every_domain_field() {
+    use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
+    use sha2::{Digest, Sha256};
+    let wallet = Wallet::derive(&seed(), "", 0, 1).unwrap();
+    let proof = wallet
+        .sign_website_message("https://game.test", "mainnet", "nonce: 123")
+        .unwrap();
+    let key =
+        VerifyingKey::from_sec1_bytes(&hex::decode(proof["public_key"].as_str().unwrap()).unwrap())
+            .unwrap();
+    let signature =
+        Signature::from_slice(&hex::decode(proof["signature"].as_str().unwrap()).unwrap()).unwrap();
+    let payload = format!(
+        "MMX/sign_message/MMX/website_message/v1\nhttps://game.test\nmainnet\n{}\nnonce: 123",
+        wallet.addresses[0]
+    );
+    assert!(key
+        .verify_prehash(&Sha256::digest(payload.as_bytes()), &signature)
+        .is_ok());
+    for changed in [
+        payload.replace("game.test", "evil.test"),
+        payload.replace("mainnet", "testnet"),
+        payload.replace("123", "124"),
+        payload.replace("MMX/website_message/v1", "transaction"),
+    ] {
+        assert!(key
+            .verify_prehash(&Sha256::digest(changed.as_bytes()), &signature)
+            .is_err());
+    }
+    assert!(wallet
+        .sign_website_message("https://game.test\nmainnet", "mainnet", "nonce")
+        .is_err());
+    assert!(wallet
+        .sign_website_message("https://game.test", "mainnet", &"x".repeat(4097))
+        .is_err());
+}

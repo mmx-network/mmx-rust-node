@@ -1,5 +1,5 @@
 /** Standalone ESM SDK. Each user action owns exactly one short-lived popup. */
-import type { Account, TransactionRequest } from './protocol';
+import type { Account, TransactionRequest, MessageProof } from './protocol';
 
 export interface ConnectOptions {
   walletUrl?: string;
@@ -13,6 +13,7 @@ export interface WalletConnection {
     transaction: Record<string, unknown>,
     options?: Pick<TransactionRequest, 'feeLevel' | 'gasLimit'>,
   ): Promise<{ txid: string }>;
+  signMessage(message: string): Promise<MessageProof>;
   disconnect(): void;
 }
 export class WalletError extends Error {
@@ -51,7 +52,7 @@ interface PopupRequest {
   promise: Promise<Record<string, unknown>>;
   cancel: () => void;
 }
-function request(options: ConnectOptions, action: 'connect' | 'sendTransaction', payload: Record<string, unknown>): PopupRequest {
+function request(options: ConnectOptions, action: 'connect' | 'sendTransaction' | 'signMessage', payload: Record<string, unknown>): PopupRequest {
   const failure = (error: WalletError): PopupRequest => ({ promise: Promise.reject(error), cancel: () => undefined });
   if (popupInUse) return failure(new WalletError('busy', 'Finish the current wallet request first.'));
   if (!allowed(new URL(window.location.href))) return failure(new WalletError('insecure_origin'));
@@ -211,6 +212,19 @@ export function connect(options: ConnectOptions = {}): Promise<WalletConnection>
     return {
       get account() {
         return structuredClone(approved);
+      },
+      signMessage(message) {
+        if (disconnected || Date.now() >= expires) return Promise.reject(new WalletError('disconnected'));
+        if (active) return Promise.reject(new WalletError('busy'));
+        if (typeof message !== 'string' || !message.length || new TextEncoder().encode(message).length > 4096)
+          return Promise.reject(new WalletError('invalid_request'));
+        active = request(options, 'signMessage', { session, params: {network: approved.network, message} });
+        return active.promise.then(result => {
+          if (result.address !== approved.address || result.network !== approved.network || result.origin !== window.location.origin
+            || result.message !== message || typeof result.public_key !== 'string' || !/^(02|03)[a-fA-F0-9]{64}$/.test(result.public_key)
+            || typeof result.signature !== 'string' || !/^[a-fA-F0-9]{128}$/.test(result.signature)) throw new WalletError('invalid_response');
+          return result as unknown as MessageProof;
+        }).finally(() => { active = undefined; });
       },
       sendTransaction(transaction, opts = {}) {
         if (disconnected || Date.now() >= expires) return Promise.reject(new WalletError('disconnected', 'Connect your wallet again.'));

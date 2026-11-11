@@ -487,6 +487,7 @@ describe('wallet core failures', () => {
             set_count: (n: number) => vault.set_count(n),
             mnemonic: () => vault.mnemonic(),
             sign_transfer: (...a: Parameters<typeof vault.sign_transfer>) => vault.sign_transfer(...a),
+            sign_website_message: (...a: Parameters<typeof vault.sign_website_message>) => vault.sign_website_message(...a),
             complete_custom_transaction: (...a: Parameters<typeof vault.complete_custom_transaction>) => vault.complete_custom_transaction(...a),
             max_amount: () => {
               throw new WebAssembly.RuntimeError('unreachable');

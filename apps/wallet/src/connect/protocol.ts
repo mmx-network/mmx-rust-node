@@ -109,3 +109,11 @@ export function transactionRequest(v: unknown): v is TransactionRequest {
     Object.keys(v).every((k) => ['network', 'transaction', 'feeLevel', 'gasLimit'].includes(k))
   );
 }
+
+export interface MessageRequest { network: string; message: string }
+export interface MessageProof extends MessageRequest { origin: string; address: string; public_key: string; signature: string }
+export function messageRequest(v: unknown): v is MessageRequest {
+  return object(v) && typeof v.network === 'string' && v.network.length > 0 && v.network.length <= 64
+    && typeof v.message === 'string' && v.message.length > 0 && new TextEncoder().encode(v.message).length <= 4096
+    && Object.keys(v).every(k => ['network', 'message'].includes(k));
+}

@@ -105,6 +105,12 @@ describe('field validation', () => {
     ]);
   });
 
+  it('includes indivisible NFT balances only for custom transaction funding', () => {
+    const nft = {balances:[{contract:TOKEN,amount:'1',is_nft:true}]};
+    expect(parseAddressBalances(nft,PARAMS)).toEqual([]);
+    expect(parseAddressBalances(nft,PARAMS,true)).toEqual([{contract:TOKEN,amount:1n,decimals:0,symbol:'NFT',native:false}]);
+  });
+
   it('rejects inconsistent balances', () => {
     const bad = (balances: unknown[]) => () => parseAddressBalances({ balances }, PARAMS);
     expect(bad([{ amount: '5', contract: NATIVE_CONTRACT, decimals: 8, symbol: 'MMX' }])).toThrow();

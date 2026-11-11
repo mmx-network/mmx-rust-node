@@ -1803,3 +1803,22 @@ CORS, conditional 304s and missing hashes. The complete Docker image smoke
 check passes, including precompressed SDK delivery through a proxy, 304 headers,
 404 cache policy, site isolation and its read-only/non-root runtime. The new
 server rules are included in that built image; no live deployment was changed.
+
+
+## Website sign-in proofs and NFT spending (2026-11-11)
+
+The C++ wallet's domain-prefixed `sign_message` behavior remains the signing
+reference. Website proofs use the separate `MMX/website_message/v1` domain and
+bind origin, network, primary address and an exact bounded UTF-8 message. Each
+request needs its own popup approval. Lock state and website permission are
+rechecked after the asynchronous chain-parameter read; no transaction is sent.
+The existing custom transaction snapshot now includes canonical NFT balances
+so NFT outputs and escrow deposits can be funded. Currency display filtering
+is unchanged. This adds no background polling or broad cache.
+
+Validation: Rust wallet compatibility tests (13), wallet unit/WASM tests (551),
+connection browser tests (13), TypeScript checking and production web build.
+The browser test verifies the real WASM proof using Node's independent crypto
+implementation, rejects a changed origin, checks rejection and confirms zero
+broadcasts. The Metalstorm integration also verifies these proofs independently
+and signs deployable Binary, WebData and Executable contracts with this WASM.
