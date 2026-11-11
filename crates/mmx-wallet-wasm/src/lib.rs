@@ -183,8 +183,17 @@ impl Vault {
     }
 
     /// Domain-separated website proof. Never signs raw hashes or transactions.
-    pub fn sign_website_message(&self, origin: &str, network: &str, message: &str) -> Result<String, JsError> {
-        let proof = self.0.wallet.sign_website_message(origin, network, message).map_err(api::wallet_error)?;
+    pub fn sign_website_message(
+        &self,
+        origin: &str,
+        network: &str,
+        message: &str,
+    ) -> Result<String, JsError> {
+        let proof = self
+            .0
+            .wallet
+            .sign_website_message(origin, network, message)
+            .map_err(api::wallet_error)?;
         serde_json::to_string(&proof).map_err(|_| api::INTERNAL.into())
     }
 

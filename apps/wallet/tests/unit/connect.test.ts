@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sanitizeSettings } from '../../src/lib/appstate';
 import { websiteAccess, websiteOrigin } from '../../src/lib/websites';
-import { boundedJson, envelope, transactionRequest } from '../../src/connect/protocol';
+import { boundedJson, envelope, messageRequest, transactionRequest } from '../../src/connect/protocol';
 import { connect } from '../../src/connect/sdk';
 import { WebsiteSessions, WEBSITE_SESSION_TTL } from '../../src/connect/sessions';
 import { memoryStorage } from '../../src/backend/web/memory-storage';
@@ -13,6 +13,12 @@ const ID = 'a'.repeat(32);
 const ACCOUNT = { walletId: '123', address: 'test-address', addresses: ['test-address'], network: 'testnet' };
 
 describe('website permissions and message bounds', () => {
+  it('accepts exact UTF-8 messages and rejects lone UTF-16 surrogates before signing', () => {
+    for (const message of ['hello\nworld', '😀'.repeat(1024), '\ufffd'])
+      expect(messageRequest({ network: 'mainnet', message })).toBe(true);
+    for (const message of ['', '😀'.repeat(1025), '\ud800', '\udfff', 'hello\ud800world'])
+      expect(messageRequest({ network: 'mainnet', message })).toBe(false);
+  });
   it('defaults off for missing, malformed and desktop settings; only explicit true opts in', () => {
     for (const value of [undefined, null, 1, 'true', false]) {
       expect(websiteAccess(sanitizeSettings({ allowWebsiteConnections: value }, 'web'), SITE)).toBe('website_connections_disabled');
@@ -197,6 +203,14 @@ describe('short-lived popup SDK', () => {
     await expect(second).rejects.toMatchObject({ code: 'user_rejected' });
     expect(popup.closed).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+    c.disconnect();
+  });
+  it('rejects lossy message encoding before opening an approval popup', async () => {
+    const c = await connected();
+    for (const message of ['\ud800', '\udfff', 'hello\ud800world']) {
+      await expect(c.signMessage(message)).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    expect(open).toHaveBeenCalledTimes(1);
     c.disconnect();
   });
   it('does not open another window for malformed payloads, overlapping connects or disconnect', async () => {

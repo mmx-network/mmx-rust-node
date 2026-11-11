@@ -1816,9 +1816,16 @@ The existing custom transaction snapshot now includes canonical NFT balances
 so NFT outputs and escrow deposits can be funded. Currency display filtering
 is unchanged. This adds no background polling or broad cache.
 
-Validation: Rust wallet compatibility tests (13), wallet unit/WASM tests (551),
-connection browser tests (13), TypeScript checking and production web build.
+Malformed Unicode is rejected before opening the signer or encoding a message;
+approval renders hidden/reordering controls as visible escapes without altering
+the signed bytes. These checks add no network requests.
+
+Validation: Rust wallet compatibility tests (13), wallet unit/WASM tests (560),
+connection browser tests (14), TypeScript checking and production web build.
 The browser test verifies the real WASM proof using Node's independent crypto
 implementation, rejects a changed origin, checks rejection and confirms zero
-broadcasts. The Metalstorm integration also verifies these proofs independently
-and signs deployable Binary, WebData and Executable contracts with this WASM.
+broadcasts, including messages with escaped display controls. Backend regressions
+cover lock and permission changes during chain reads and NFT transfer/deposit
+funding with duplicate-spend reservations. The Metalstorm integration also
+verifies these proofs independently and signs deployable Binary, WebData and
+Executable contracts with this WASM.

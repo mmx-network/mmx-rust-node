@@ -216,7 +216,10 @@ export function connect(options: ConnectOptions = {}): Promise<WalletConnection>
       signMessage(message) {
         if (disconnected || Date.now() >= expires) return Promise.reject(new WalletError('disconnected'));
         if (active) return Promise.reject(new WalletError('busy'));
-        if (typeof message !== 'string' || !message.length || new TextEncoder().encode(message).length > 4096)
+        // This SDK is emitted as a standalone module; keep the check aligned
+        // with validMessage without adding a runtime import.
+        if (typeof message !== 'string' || !message.length || message.length > 4096
+          || /[\ud800-\udfff]/u.test(message) || new TextEncoder().encode(message).length > 4096)
           return Promise.reject(new WalletError('invalid_request'));
         active = request(options, 'signMessage', { session, params: {network: approved.network, message} });
         return active.promise.then(result => {

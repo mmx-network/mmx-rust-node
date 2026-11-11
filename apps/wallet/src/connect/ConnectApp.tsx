@@ -33,6 +33,7 @@ import { startWalletHost } from './host';
 import { WebsiteSessions, type WebsiteSession } from './sessions';
 import { publicAccount } from './account';
 import { TransactionReview } from './TransactionReview';
+import { messageForReview } from './message';
 import {
   ConnectionError,
   PROTOCOL,
@@ -408,6 +409,7 @@ export function ConnectApp() {
     }
   }
   const title = flow?.action === 'signMessage' ? 'Sign message' : flow?.action === 'sendTransaction' ? (prepared ? 'Confirm transaction' : 'Review transaction') : 'Connect wallet';
+  const reviewMessage = flow?.action === 'signMessage' ? messageForReview(flow.params.message) : '';
   return (
     <FocusLayout
       class="connection"
@@ -522,7 +524,8 @@ export function ConnectApp() {
                   </div>
                   {flow.action === 'signMessage' ? <div class="connection__connect-content">
                     <Text>This website asks you to prove wallet ownership. Signing this message does not send a transaction or spend funds.</Text>
-                    <pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'40vh',overflow:'auto'}}>{flow.params.message}</pre>
+                    <pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'40vh',overflow:'auto'}}>{reviewMessage}</pre>
+                    {reviewMessage !== flow.params.message && <Text tone="muted">Control characters and backslashes are escaped for review. The original message is signed.</Text>}
                     <Text tone="muted">The signature is bound to this website, network and wallet address.</Text>
                   </div> : <TransactionReview transaction={flow.params.transaction} account={account} prepared={prepared} />}
                 </>

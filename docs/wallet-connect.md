@@ -241,6 +241,11 @@ and browser-specific popup UI remain to be checked on devices.
 message and origin, and signs only after consent (unlocking if necessary). It
 returns `{address, origin, network, message, public_key, signature}`. It does not
 broadcast a transaction or spend funds. The message must be 1–4096 UTF-8 bytes.
+Malformed Unicode (unpaired UTF-16 surrogates) is rejected rather than replaced
+during UTF-8 encoding. In the approval view, control characters that could hide
+or reorder text are shown as `\uXXXX` escapes, and literal backslashes are
+doubled. Line feeds remain line breaks. The proof always contains and signs the
+original message, not this display representation.
 Invoke it directly from a click handler, after obtaining a server challenge.
 
 Servers must issue a random, expiring, one-use challenge and verify all returned

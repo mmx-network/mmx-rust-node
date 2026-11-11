@@ -17,7 +17,7 @@ test.beforeAll(async () => {
       import {connect} from '${APP_URL}wallet-sdk.js';
       window.messages=[];window.addEventListener('message',e=>window.messages.push(e.data));
       document.querySelector('#connect').onclick=()=>{window.error=null;window.connectionPromise=connect({walletUrl:'${APP_URL}'}).then(c=>{window.connection=c;window.account=c.account;return c}).catch(e=>{window.error=e.code})};
-      document.querySelector('#sign').onclick=()=>{window.error=null;window.proof=null;window.connection.signMessage('Sign in to Metalstorm-X\\nNonce: 123').then(p=>window.proof=p).catch(e=>window.error=e.code)};
+      document.querySelector('#sign').onclick=()=>{window.error=null;window.proof=null;window.connection.signMessage(window.signingMessage ?? 'Sign in to Metalstorm-X\\nNonce: 123').then(p=>window.proof=p).catch(e=>window.error=e.code)};
       document.querySelector('#send').onclick=()=>{window.error=null;window.result=null;window.sending=window.connection.sendTransaction(window.tx,{gasLimit:1000000}).then(r=>window.result=r).catch(e=>window.error=e.code)};
     </script>`);
   });
@@ -444,5 +444,26 @@ test('website message signing requires consent, binds the origin, and never broa
   const signature = Buffer.from(proof.signature!,'hex');
   expect(verify('sha256',Buffer.from(payload),{key:publicKey,dsaEncoding:'ieee-p1363'},signature)).toBe(true);
   expect(verify('sha256',Buffer.from(payload.replace(DAPP,'https://forged.test')),{key:publicKey,dsaEncoding:'ieee-p1363'},signature)).toBe(false);
+  expect(await rpc.broadcasts()).toEqual([]);
+});
+
+test('message review exposes hidden controls while signing the original text', async ({ page, rpc, context }) => {
+  await openFundedWallet(page, a => rpc.fund({ address: a, amount: '50000000' }));
+  await enable(page);
+  const site = await context.newPage();
+  await connect(site);
+  const message = 'Approve \u202e001\u202c MMX\u0000\r\nLiteral \\u202e and 😀';
+  await site.evaluate(message => { (window as any).signingMessage = message; }, message);
+  const next = site.waitForEvent('popup');
+  await site.getByRole('button', { name: 'Sign message', exact: true }).click();
+  const popup = await next;
+  await expect(popup.locator('pre')).toHaveText('Approve \\u202e001\\u202c MMX\\u0000\\u000d\nLiteral \\\\u202e and 😀');
+  await popup.getByRole('button', { name: 'Sign message', exact: true }).click();
+  await expect.poll(() => popup.isClosed()).toBe(true);
+  const proof = await site.evaluate(() => (window as any).proof) as Record<string, string>;
+  expect(proof.message).toBe(message);
+  const publicKey = createPublicKey({ key: Buffer.from('3036301006072a8648ce3d020106052b8104000a032200' + proof.public_key, 'hex'), format: 'der', type: 'spki' });
+  const payload = `MMX/sign_message/MMX/website_message/v1\n${proof.origin}\n${proof.network}\n${proof.address}\n${message}`;
+  expect(verify('sha256', Buffer.from(payload), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(proof.signature!, 'hex'))).toBe(true);
   expect(await rpc.broadcasts()).toEqual([]);
 });
