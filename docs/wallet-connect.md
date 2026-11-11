@@ -248,6 +248,12 @@ doubled. Line feeds remain line breaks. The proof always contains and signs the
 original message, not this display representation.
 Invoke it directly from a click handler, after obtaining a server challenge.
 
+Website transaction approvals use the same escaping rules for memos and other
+text fields. Memo line feeds are shown as `\u000a` rather than line breaks in
+the compact review. Literal backslashes are doubled, so a literal `\u202e`
+cannot be mistaken for an escaped control character. These display escapes do
+not change the memo included in the signed or broadcast transaction.
+
 Servers must issue a random, expiring, one-use challenge and verify all returned
 fields against that challenge. The compressed secp256k1 public key is 33 bytes;
 the signature is a low-S, 64-byte compact ECDSA signature, both hex encoded.

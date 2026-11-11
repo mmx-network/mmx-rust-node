@@ -5,7 +5,7 @@ import { createBackend } from '../backend/web';
 import { sanitizeAppState } from '../lib/appstate';
 import { errorMessage, messageForCode } from '../lib/errors';
 import { websiteAccess } from '../lib/websites';
-import { sanitizeText } from '../lib/text';
+import { sanitizeText, textForReview } from '../lib/text';
 import { setWebsiteBlocked } from '../state/settings';
 import { activeWalletId, appState, lockVersion, platform, setBackend, setWallets, upsertWallet, wallets } from '../state/core';
 import { markActivity, startIdleLock } from '../state/idle';
@@ -33,7 +33,6 @@ import { startWalletHost } from './host';
 import { WebsiteSessions, type WebsiteSession } from './sessions';
 import { publicAccount } from './account';
 import { TransactionReview } from './TransactionReview';
-import { messageForReview } from './message';
 import {
   ConnectionError,
   PROTOCOL,
@@ -409,7 +408,7 @@ export function ConnectApp() {
     }
   }
   const title = flow?.action === 'signMessage' ? 'Sign message' : flow?.action === 'sendTransaction' ? (prepared ? 'Confirm transaction' : 'Review transaction') : 'Connect wallet';
-  const reviewMessage = flow?.action === 'signMessage' ? messageForReview(flow.params.message) : '';
+  const reviewMessage = flow?.action === 'signMessage' ? textForReview(flow.params.message, true) : '';
   return (
     <FocusLayout
       class="connection"

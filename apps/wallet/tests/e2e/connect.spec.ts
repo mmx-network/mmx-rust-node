@@ -447,6 +447,29 @@ test('website message signing requires consent, binds the origin, and never broa
   expect(await rpc.broadcasts()).toEqual([]);
 });
 
+test('website memo approvals distinguish hidden controls from literal escapes without changing the transaction', async ({ page, rpc, context }) => {
+  await openFundedWallet(page, a => rpc.fund({ address: a, amount: '50000000' }));
+  await enable(page);
+  const site = await context.newPage();
+  await connect(site);
+  const memos = ['Ref\u200b\u061c\u200e\u2060\u00ad\u202e001\u202c\n\\u202e', 'Ref\\u200b\\u061c\\u200e\\u2060\\u00ad\\u202e001\\u202c\\n\\u202e'];
+  const displayed = ['“Ref\\u200b\\u061c\\u200e\\u2060\\u00ad\\u202e001\\u202c\\u000a\\\\u202e”', '“Ref\\\\u200b\\\\u061c\\\\u200e\\\\u2060\\\\u00ad\\\\u202e001\\\\u202c\\\\n\\\\u202e”'];
+  const popup = await requested(site, { outputs: memos.map((memo, i) => ({
+    __type: 'mmx.txout_t', address: i ? CONTRACT : TO, contract: NATIVE, amount: '1000000', memo,
+  })) });
+  await expect(popup.locator('.connection__value')).toHaveText(displayed);
+  expect(await rpc.broadcasts()).toEqual([]);
+  await quote(popup);
+  await expect(popup.locator('.connection__value')).toHaveText(displayed);
+  await capture(popup, 'connection-memo-controls');
+  await popup.getByRole('button', { name: 'Send now', exact: true }).click();
+  await expect.poll(() => popup.isClosed()).toBe(true);
+  await expect.poll(() => result(site)).toMatchObject({ txid: expect.stringMatching(/^[0-9A-F]{64}$/) });
+  const broadcasts = await rpc.broadcasts();
+  expect(broadcasts).toHaveLength(1);
+  expect(JSON.parse(broadcasts[0]!.raw).outputs.map((output: { memo: string }) => output.memo)).toEqual(memos);
+});
+
 test('message review exposes hidden controls while signing the original text', async ({ page, rpc, context }) => {
   await openFundedWallet(page, a => rpc.fund({ address: a, amount: '50000000' }));
   await enable(page);

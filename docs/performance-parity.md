@@ -1818,14 +1818,19 @@ is unchanged. This adds no background polling or broad cache.
 
 Malformed Unicode is rejected before opening the signer or encoding a message;
 approval renders hidden/reordering controls as visible escapes without altering
-the signed bytes. These checks add no network requests.
+the signed bytes. Website transaction approvals use the same display escaping
+for memos and other text fields, including literal backslashes and invisible
+formatting marks. The original memo is preserved in the signed transaction.
+These checks add no network requests.
 
-Validation: Rust wallet compatibility tests (13), wallet unit/WASM tests (560),
-connection browser tests (14), TypeScript checking and production web build.
+Validation: Rust wallet compatibility tests (13), wallet unit/WASM tests (563),
+connection browser tests (15), TypeScript checking and production web build.
 The browser test verifies the real WASM proof using Node's independent crypto
 implementation, rejects a changed origin, checks rejection and confirms zero
-broadcasts, including messages with escaped display controls. Backend regressions
-cover lock and permission changes during chain reads and NFT transfer/deposit
+broadcasts, including messages with escaped display controls. Browser coverage
+also checks escaped memos before and after preparation and unchanged memo bytes
+in the broadcast. Backend regressions cover lock and permission changes during
+chain reads and NFT transfer/deposit
 funding with duplicate-spend reservations. The Metalstorm integration also
 verifies these proofs independently and signs deployable Binary, WebData and
 Executable contracts with this WASM.
