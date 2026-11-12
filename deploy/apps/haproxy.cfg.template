@@ -44,8 +44,8 @@ frontend apps
     tcp-request content reject if WAIT_END
 
     acl from_proxy var(sess.trusted_peer) -m bool
-    http-request deny deny_status 400 if from_proxy !{ req.hdr_cnt(${CLIENT_IP_HEADER}) eq 1 }
-    http-request deny deny_status 400 if from_proxy !{ req.hdr_ip(${CLIENT_IP_HEADER}) -m found }
+    http-request return status 400 hdr Cache-Control no-store if from_proxy !{ req.hdr_cnt(${CLIENT_IP_HEADER}) eq 1 }
+    http-request return status 400 hdr Cache-Control no-store if from_proxy !{ req.hdr_ip(${CLIENT_IP_HEADER}) -m found }
     http-request set-src req.hdr_ip(${CLIENT_IP_HEADER}) if from_proxy
     http-request track-sc0 src,ipmask(32,64) table visitors if from_proxy
     http-request track-sc1 src,ipmask(32,48) table prefixes48 if from_proxy !{ src -m ip 0.0.0.0/0 }
@@ -54,9 +54,9 @@ frontend apps
     http-request return status 429 content-type text/plain string Too-many-requests hdr Retry-After 10 hdr Cache-Control no-store if { sc_http_req_rate(0) gt 100 }
     http-request return status 429 content-type text/plain string Too-many-requests hdr Retry-After 10 hdr Cache-Control no-store if { sc_http_req_rate(1) gt 1000 }
 
-    http-request return status 413 if { req.hdr_val(Content-Length) gt 1024 }
+    http-request return status 413 hdr Cache-Control no-store if { req.hdr_val(Content-Length) gt 1024 }
     http-request wait-for-body time 5s at-least 1025
-    http-request return status 413 if { req.body_len gt 1024 }
+    http-request return status 413 hdr Cache-Control no-store if { req.body_len gt 1024 }
     http-request set-header X-Mmx-Client %[src]
     http-request set-header X-Forwarded-For %[src]
     http-request set-header X-Real-IP %[src]

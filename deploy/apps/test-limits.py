@@ -89,13 +89,13 @@ class Frontend:
                 time.sleep(0.02)
         self.wait_connections(0)
 
-    def wait_connections(self, expected):
+    def wait_connections(self, expected, table="total_clients"):
         last = ""
         for _ in range(300):
             with socket.socket(socket.AF_UNIX) as admin:
                 admin.settimeout(1)
                 admin.connect(str(self.root / "admin.sock"))
-                admin.sendall(b"show table total_clients\n")
+                admin.sendall(f"show table {table}\n".encode())
                 admin.shutdown(socket.SHUT_WR)
                 chunks = []
                 while data := admin.recv(65536):
@@ -180,6 +180,9 @@ class LimitsTest(unittest.TestCase):
         for group in range(2, 11):
             for _ in range(10):
                 front.connect(f"2001:db8:1234:{group:x}::1")
+        # PROXY frames may complete on different threads in a different order
+        # from TCP connects. Establish the full budget before probing overflow.
+        front.wait_connections(100, "prefixes48")
         self.assert_rejected(front.connect("2001:db8:1234:ffff::1"))
         self.assert_open(front.connect("2001:db8:1235::1"))
 
@@ -226,7 +229,9 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(front.get("2001:db8:1234:1::2")[0], 429)
         self.assertEqual(front.get("2001:db8:1234:2::1")[0], 200)
         for value in ["bad", "198.18.0.1, 198.18.0.2"]:
-            self.assertEqual(front.get(headers=f"X-Forwarded-For: {value}\r\n")[0], 400)
+            status, headers, _ = front.get(headers=f"X-Forwarded-For: {value}\r\n")
+            self.assertEqual(status, 400)
+            self.assertEqual(headers["cache-control"], "no-store")
         for index in range(100):
             self.assertEqual(front.get(f"2001:db8:1235:1::{index + 1:x}")[0], 200)
         self.assertEqual(front.get("2001:db8:1235:1::ffff")[0], 429)
@@ -249,6 +254,8 @@ class LimitsTest(unittest.TestCase):
                 response = http.client.HTTPResponse(connection)
                 response.begin()
                 self.assertEqual(response.status, expected)
+                if expected == 413:
+                    self.assertEqual(response.getheader("Cache-Control"), "no-store")
                 response.read()
                 front.assert_eof(connection)
                 connection.close()
