@@ -13,6 +13,8 @@ services:
       EXPLORER_HOST: ${EXPLORER_HOST:-explore.mmx.network}
       WEBSITE_HOST: ${WEBSITE_HOST:-mmx.network}
       WEBSITE_WWW_HOST: ${WEBSITE_WWW_HOST:-www.mmx.network}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-X-Forwarded-For}
     restart: unless-stopped
     read_only: true
     tmpfs:

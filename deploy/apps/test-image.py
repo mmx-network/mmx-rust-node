@@ -72,6 +72,16 @@ def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explo
 
 
 def request(port, host, path="/", method="GET", headers=None):
+    # Content checks deliberately make more requests than a normal page load.
+    # Exercise the limiter separately; honor its backoff during content checks.
+    for attempt in range(4):
+        result = request_once(port, host, path, method, headers)
+        if result[0] != 429 or attempt == 3:
+            return result
+        time.sleep(int(result[1]["retry-after"]) + 0.1)
+
+
+def request_once(port, host, path="/", method="GET", headers=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
     try:
         connection.request(method, path, headers={"Host": f"{host}:{port}", **(headers or {})})
@@ -417,6 +427,7 @@ def main():
         ["WEBSITE_HOST=bad;host"], ["WEBSITE_WWW_HOST=bad;host"],
         ["WALLET_HOST=EXPLORE.MMX.NETWORK"], ["WEBSITE_HOST=WALLET.MMX.NETWORK"],
         ["WEBSITE_WWW_HOST=EXPLORE.MMX.NETWORK"], ["WEBSITE_WWW_HOST=MMX.NETWORK"],
+        ["TRUSTED_PROXY_CIDRS=not-a-network"], ["CLIENT_IP_HEADER=bad;header"],
     ]:
         env = [part for setting in settings for part in ["--env", setting]]
         result = docker("run", "--rm", "--network", "none", *env, args.image, "true", check=False)
