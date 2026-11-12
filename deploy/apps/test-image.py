@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import http.client
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -23,7 +24,7 @@ def docker(*args, check=True):
 
 
 @contextmanager
-def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explorer="explore.mmx.network", website="mmx.network", website_www="www.mmx.network", overrides=False, root_console=False):
+def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explorer="explore.mmx.network", website="mmx.network", website_www="www.mmx.network", overrides=False, root_console=False, vm_limits=False):
     token = str(uuid.uuid4())
     args = [
         "run", "--detach", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
@@ -34,6 +35,8 @@ def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explo
     if overrides:
         args += ["--env", f"PORT={port}", "--env", f"WALLET_HOST={wallet}", "--env", f"EXPLORER_HOST={explorer}",
                  "--env", f"WEBSITE_HOST={website}", "--env", f"WEBSITE_WWW_HOST={website_www}"]
+    if vm_limits:
+        args += ["--ulimit", "nofile=1024:4096", "--cpuset-cpus", str(min(os.sched_getaffinity(0)))]
     if root_console:
         # VM supervisors can open console pipes as root before dropping UID.
         # Keep those inherited descriptors, then exec the image's actual command
@@ -401,10 +404,13 @@ def main():
         assert headers["cache-control"] == "no-cache"
         docker("exec", container, "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18080/healthz")
 
-    with running_image(args.image, image_id) as (_, port, wallet, explorer, website, website_www):
+    with running_image(args.image, image_id, vm_limits=True) as (container, port, wallet, explorer, website, website_www):
         for host, title in [(wallet, b"MMX Wallet"), (explorer, b"MMX Explorer"), (website, b"<title>MMX"), (website_www, b"<title>MMX")]:
             status, _, body = request(port, host)
             assert status == 200 and title in body
+        logs = docker("logs", container).stderr
+        assert "Cannot raise FD limit" not in logs and "exceed open file resource limit" not in logs
+        assert "compete for the same CPU" not in logs
 
     with running_image(args.image, image_id, root_console=True) as (container, port, wallet, explorer, website, website_www):
         status = docker("exec", "--user", "nginx", container, "cat", "/proc/1/status").stdout

@@ -1,7 +1,9 @@
 global
-    # Admission uses its own table so over-budget sockets are rejected, not queued.
-    maxconn 8192
-    nbthread 2
+    # Let HAProxy size its internal pool to the inherited hard FD limit. With
+    # sufficient FDs this leaves headroom to reject sockets over our 4096 cap.
+    # Fixed maxconn would prevent startup on VMs with a smaller hard limit.
+    fd-hard-limit 16384
+    thread-hard-limit 2
     # Leave enough body-buffer headroom for the origin's 1 KiB upload allowance.
     tune.maxrewrite 4096
 

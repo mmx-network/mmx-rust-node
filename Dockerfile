@@ -83,4 +83,11 @@ COPY deploy/apps/test-limits.py deploy/apps/test-image.py /tests/
 USER nginx
 RUN nice -n 19 python3 /tests/test-limits.py -v
 
+FROM limits-test AS proxy-test
+USER root
+RUN apk add --no-cache caddy py3-h2
+COPY deploy/apps/test-proxy.py /tests/
+USER nginx
+RUN nice -n 19 python3 /tests/test-proxy.py -v
+
 FROM runtime-base AS runtime

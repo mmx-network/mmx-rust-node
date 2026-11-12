@@ -1017,7 +1017,8 @@ Dockerfile/entrypoint.
 This is a separate static origin, not a port of the native authenticated node
 HTTP API. nginx uses concurrent nonblocking delivery, sendfile, conditional
 and byte-range reads, and immediate file/host/method rejection. There are two
-workers with 4096 backend connections each; HAProxy caps public clients at 4096
+workers with up to 4096 backend connections each, within the inherited FD
+ceiling; HAProxy caps public clients at 4096
 across the complete instance. Files are not buffered in an application
 cache. Compressible build outputs get gzip sidecars once at build time instead
 of native per-request compression work. Only successful hashed assets get
@@ -1058,6 +1059,23 @@ count active origin requests after headers identify the visitor. TLS, ACME and
 browser-to-CDN idle connections remain at the CDN, a deliberate difference
 from the dedicated public RPC edge. The origin cannot enforce limits on sockets
 which terminate elsewhere.
+
+The VM startup regression (2026-11-13) removes fixed HAProxy maxconn/thread
+requirements: its internal pool respects the hard FD ceiling, threads respect
+CPU affinity, and nginx raises only its soft FD limit with descriptor headroom
+for workers. This keeps the existing non-root image usable under Ghostrack's
+1024/4096 inherited FD limits and one CPU. A higher launcher limit is needed to
+reach the full 4096-client ceiling when directly hosting; Compose supplies
+32768 descriptors, while the current HTTP proxy's 50-per-route request limit
+fits within the VM defaults. No privileged bootstrap is required.
+
+The old image fails the new resource-constrained end-to-end fixture. The fixed
+image serves complete site content, concurrent assets and exact wallet WASM
+bytes through TLS Caddy, HAProxy and nginx under those VM limits. It also tests
+50 distinct concurrent visitors and multiplexed HTTP/2 streams, including a
+100-request budget followed by an uncached 429 over the same TLS connection.
+The test CA is explicitly trusted and hostname validation stays enabled.
+CI runs this before publication; Caddy/Python are absent from the final image.
 
 An isolated image build target checks the actual runtime binaries with 4096
 open TCP connections, IPv6 /64 and /48 groups, spoofed/trusted visitor headers,

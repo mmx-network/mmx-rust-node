@@ -36,10 +36,23 @@ case "$CLIENT_IP_HEADER" in
 esac
 export CLIENT_IP_HEADER
 
+# A non-root process may raise the soft limit as far as its inherited ceiling.
+# Keep nginx's workers within that ceiling too, even when it is below 4096.
+# BusyBox ash supports the soft/hard limit switches used by this Alpine image.
+# shellcheck disable=SC3045
+nofile=$(ulimit -H -n)
+case "$nofile" in unlimited) nofile=32768 ;; esac
+if [ "$nofile" -gt 32768 ]; then nofile=32768; fi
+# shellcheck disable=SC3045
+ulimit -S -n "$nofile"
+NGINX_WORKER_CONNECTIONS=$((nofile - 32))
+if [ "$NGINX_WORKER_CONNECTIONS" -gt 4096 ]; then NGINX_WORKER_CONNECTIONS=4096; fi
+export NGINX_WORKER_CONNECTIONS
+
 mkdir -p /tmp/mmx-apps
 # Limit substitution to our settings; preserve nginx's $uri, $status, etc.
 # shellcheck disable=SC2016
-envsubst '${PORT} ${WALLET_HOST} ${EXPLORER_HOST} ${WEBSITE_HOST} ${WEBSITE_WWW_HOST}' \
+envsubst '${PORT} ${WALLET_HOST} ${EXPLORER_HOST} ${WEBSITE_HOST} ${WEBSITE_WWW_HOST} ${NGINX_WORKER_CONNECTIONS}' \
     < /etc/nginx/mmx/nginx.conf.template > /tmp/mmx-apps/nginx.conf
 printf '%s\n' "${TRUSTED_PROXY_CIDRS:-}" | tr ',[:space:]' '\n' > /tmp/mmx-apps/trusted-proxies.lst
 # Header names and the port are validated before inserting them into config.

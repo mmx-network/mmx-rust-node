@@ -34,6 +34,7 @@ in the [package settings](https://github.com/orgs/mmx-network/packages/container
 ```sh
 docker pull ghcr.io/mmx-network/mmx-apps:latest
 docker run -d --name mmx-apps --restart unless-stopped \
+  --ulimit nofile=32768:32768 \
   --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   --cap-drop ALL --security-opt no-new-privileges:true \
   -p 23147:8080 ghcr.io/mmx-network/mmx-apps:latest
@@ -45,6 +46,19 @@ HTTP port `8080`, and map it to the assigned host port. If the platform expects
 the application to listen on the assigned port directly, set `PORT` to that
 number instead. Set each CDN origin to the instance IP and assigned HTTP port,
 preserving its public hostname as the `Host` header.
+
+The image starts under Ghostrack's inherited 1,024-soft/4,096-hard file
+descriptor limits without root privileges. HAProxy sizes its internal connection
+pool to the available hard limit; nginx raises its soft limit only as far as
+permitted and leaves descriptor headroom for its workers. HAProxy uses at most
+two threads and respects single-CPU affinity. The caps below remain upper bounds;
+actual concurrency can be lower when a launcher cannot supply enough descriptors.
+The current 50-connection HTTP proxy limit fits within the existing VM ceiling.
+
+For direct hosting that needs the full 4,096-client capacity, supply
+`--ulimit nofile=32768:32768` as above or use Compose, which sets both limits.
+Each active proxied request uses an incoming and a backend socket, plus process
+overhead. The image cannot raise an inherited hard ceiling as its non-root user.
 
 With this repository's Compose file, pull and start without building:
 
@@ -100,6 +114,7 @@ Without Compose:
 ```sh
 nice -n 19 ionice -c 3 docker build -t mmx-apps .
 docker run -d --name mmx-apps --restart unless-stopped \
+  --ulimit nofile=32768:32768 \
   --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   --cap-drop ALL --security-opt no-new-privileges:true \
   -p 23147:8080 mmx-apps
@@ -306,7 +321,7 @@ and HTTP-to-HTTPS redirects are configured at the CDN, which terminates TLS.
 
 ```sh
 node --test deploy/apps/prepare.test.mjs
-nice -n 19 ionice -c 3 docker build --target limits-test .
+nice -n 19 ionice -c 3 docker build --target proxy-test .
 python3 deploy/apps/test-image.py mmx-apps
 ```
 
@@ -331,6 +346,18 @@ absent from the final runtime image. Its isolated loopback source fixture uses
 PROXY headers to generate IPv6 identities; no shipped listener accepts PROXY
 protocol from callers. The normal image smoke tests honor 429 backoff during
 their deliberately large batches of content checks.
+
+The `proxy-test` target additionally boots the actual image entrypoint under
+the production VM's 1,024-soft/4,096-hard FD ceiling and one-CPU affinity, then
+fetches all three sites through a real TLS-terminating Caddy proxy with a
+verified test CA. It checks complete content/security/cache behavior, parallel
+page assets, 50 distinct concurrent visitors, HTTP/2 multiplexing and request
+rates on a single TLS socket, and exact wallet WASM bytes across the full proxy
+chain. The Docker
+smoke test also boots the restricted image through its actual OCI entrypoint
+and checks that startup produces no FD-limit or CPU-affinity warnings.
+CI requires both test targets before publishing; Caddy/Python stay out of the
+runtime image. The restricted end-to-end test fails on the old configuration.
 
 ## Add another static site
 

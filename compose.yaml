@@ -16,6 +16,10 @@ services:
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-X-Forwarded-For}
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m

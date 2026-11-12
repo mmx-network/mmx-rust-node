@@ -3,7 +3,7 @@ pid /tmp/mmx-apps/nginx.pid;
 error_log stderr warn;
 
 events {
-    worker_connections 4096;
+    worker_connections ${NGINX_WORKER_CONNECTIONS};
 }
 
 http {
