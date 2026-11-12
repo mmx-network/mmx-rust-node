@@ -487,6 +487,7 @@ describe('wallet core failures', () => {
             set_count: (n: number) => vault.set_count(n),
             mnemonic: () => vault.mnemonic(),
             sign_transfer: (...a: Parameters<typeof vault.sign_transfer>) => vault.sign_transfer(...a),
+            sign_website_message: (...a: Parameters<typeof vault.sign_website_message>) => vault.sign_website_message(...a),
             complete_custom_transaction: (...a: Parameters<typeof vault.complete_custom_transaction>) => vault.complete_custom_transaction(...a),
             max_amount: () => {
               throw new WebAssembly.RuntimeError('unreachable');
@@ -1262,6 +1263,52 @@ describe('platform services', () => {
   });
 });
 
+describe('website message signing', () => {
+  const site = 'https://shop.example';
+  const request = { network: 'mainnet', message: 'Sign in\nNonce: 😀' };
+
+  it('requires website permission, an unlocked wallet and the requested network', async () => {
+    const b = backend();
+    const { info, addresses } = await openWallet(b);
+    expect(await code(b.signMessage(info.id, request, site))).toBe('website_connections_disabled');
+    await b.setWebsitePermission({ enabled: true });
+    expect(await code(b.signMessage(info.id, { ...request, message: '\ud800' }, site))).toBe('invalid_argument');
+    expect(await code(b.signMessage(info.id, { ...request, network: 'testnet' }, site))).toBe('invalid_argument');
+    const proof = await b.signMessage(info.id, request, site);
+    expect(proof).toMatchObject({ ...request, origin: site, address: addresses[0] });
+    await b.setWebsitePermission({ origin: site, blocked: true });
+    expect(await code(b.signMessage(info.id, request, site))).toBe('website_blocked');
+    await b.setWebsitePermission({ origin: site, blocked: false });
+    await b.lockAll();
+    expect(await code(b.signMessage(info.id, request, site))).toBe('locked');
+    expect(fetchFn.calls.filter(p => p.startsWith('POST'))).toEqual([]);
+  });
+
+  it.each(['lock', 'disable', 'block', 're-enable'] as const)('does not sign if %s occurs during the chain read', async action => {
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const b = backend({ fetch: async (input, init) => {
+      if (new URL(input).pathname === '/chain/info') { entered(); await gate; }
+      return fetchFn(input, init);
+    } });
+    const { info } = await openWallet(b);
+    await b.setWebsitePermission({ enabled: true });
+    const signing = b.signMessage(info.id, request, site);
+    await started;
+    if (action === 'lock') await b.lockAll();
+    else if (action === 'block') await b.setWebsitePermission({ origin: site, blocked: true });
+    else {
+      await b.setWebsitePermission({ enabled: false });
+      if (action === 're-enable') await b.setWebsitePermission({ enabled: true });
+    }
+    release();
+    expect(await code(signing)).toBe({ lock: 'locked', disable: 'website_connections_disabled', block: 'website_blocked', 're-enable': 'invalid_argument' }[action]);
+    expect(fetchFn.calls.filter(p => p.startsWith('POST'))).toEqual([]);
+  });
+});
+
 describe('custom website transactions', () => {
   const site = 'https://shop.example';
   const request = (amount = '1000000') => ({network:'mainnet',gasLimit:1_000_000,
@@ -1270,6 +1317,34 @@ describe('custom website transactions', () => {
     await b.setWebsitePermission({enabled:true});
   }
   beforeEach(() => { rpc.reset({height:5_600_000}); });
+
+  it.each(['transfer', 'deposit'] as const)('funds an NFT %s and prevents a second approved spend', async action => {
+    rpc.registerToken(TOKEN, 'NFT', 0);
+    // Canonical NFT balance rows have no fungible symbol/decimal metadata.
+    const b = backend({ fetch: async (input, init) => {
+      const response = await fetchFn(input, init);
+      if (new URL(input).pathname !== '/address') return response;
+      const body = await response.json();
+      body.balances = body.balances.map((row: { contract: string; amount: string }) =>
+        row.contract === TOKEN ? { contract: TOKEN, amount: row.amount, is_nft: true } : row);
+      return Response.json(body);
+    } });
+    const { info, addresses } = await openWallet(b, [50n * MMX]);
+    rpc.fund({ address: addresses[0]!, contract: TOKEN, amount: '1' });
+    await enable(b);
+    const transaction = action === 'transfer'
+      ? { outputs: [{ __type: 'mmx.txout_t', address: RECIPIENT, contract: TOKEN, amount: '1' }] }
+      : { execute: [{ __type: 'mmx.operation.Deposit', address: RECIPIENT, method: 'deposit', args: [], currency: TOKEN, amount: '1' }] };
+    const req = { network: 'mainnet', gasLimit: 1_000_000, transaction };
+    const first = await b.prepareTransaction(info.id, req, site);
+    const second = await b.prepareTransaction(info.id, req, site);
+    expect(first.transaction.inputs).toContainEqual(expect.objectContaining({ address: addresses[0], contract: TOKEN, amount: '1' }));
+    expect(first.currencies).toContainEqual({ contract: TOKEN, decimals: 0, symbol: 'NFT' });
+    expect(fetchFn.calls.filter(p => p.startsWith('POST'))).toEqual([]);
+    await b.broadcast(info.id, first.txid);
+    expect(await code(b.broadcast(info.id, second.txid))).toBe('insufficient_funds');
+    expect(fetchFn.calls.filter(p => p === 'POST /transaction/broadcast')).toHaveLength(1);
+  });
 
   it('revokes cross-popup grants on block or disable, without restoring them on unblock', async () => {
     const b=backend();const {info,addresses}=await openWallet(b);await enable(b);

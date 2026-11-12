@@ -1,7 +1,8 @@
 /**
  * Display safety for text that comes from the network (memos, token symbols
- * and names) or from files: control and bidirectional override characters are
- * removed and the length is capped. Always render the result as text.
+ * and names) or from files. Ordinary displays remove controls and cap length;
+ * approvals expose controls as escapes without changing the signed content.
+ * Always render the result as text.
  */
 
 // C0 controls except tab/newline/CR (handled as line breaks), DEL, C1 controls.
@@ -34,6 +35,16 @@ export function sanitizeSymbol(value: unknown): string {
 /** Memos are at most 64 bytes on chain. */
 export function sanitizeMemo(value: unknown): string {
   return sanitizeText(value, 64);
+}
+
+/** Lossless approval display: expose hidden/reordering controls and distinguish
+ * them from literal backslash escapes. Only message challenges keep LF as a
+ * line break; compact transaction fields escape it too. Never sign this view. */
+export function textForReview(value: string, multiline = false): string {
+  return value.replace(/\\/gu, '\\\\').replace(
+    /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/gu,
+    c => multiline && c === '\n' ? c : `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
 }
 
 /** True when the string contains characters sanitizeText would remove or change. */

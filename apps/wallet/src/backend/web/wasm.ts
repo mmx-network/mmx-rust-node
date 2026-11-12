@@ -12,6 +12,7 @@ export interface VaultHandle {
   addresses(): string[];
   set_count(count: number): void;
   mnemonic(): string;
+  sign_website_message(origin: string, network: string, message: string): string;
   max_amount(
     balancesJson: string,
     paramsJson: string,

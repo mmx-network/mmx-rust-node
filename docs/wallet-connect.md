@@ -94,7 +94,7 @@ has a CSP, it must allow importing the SDK from the wallet origin, or bundle
 `apps/wallet/src/connect/sdk.ts` into its application. The popup is a separate
 window or tab according to the browser's UI. It closes after each action; the
 public connection stays available for later transaction requests. Both
-`connect()` and `sendTransaction()` must be called directly from a user click
+`connect()`, `signMessage()` and `sendTransaction()` must be called directly from a user click
 or tap, before any `await`, so mobile popup blocking does not prevent the new
 window. Only one popup may be active per SDK instance.
 
@@ -233,3 +233,42 @@ models deposits; signature verification runs through the real wallet core.
 The mock does not execute arbitrary contract VM code. Native tests cover exact Variant
 arguments and signature tampering. Physical iOS/Android background suspension
 and browser-specific popup UI remain to be checked on devices.
+
+
+## Sign-in messages
+
+`wallet.signMessage(message)` opens a separate approval popup, displays the exact
+message and origin, and signs only after consent (unlocking if necessary). It
+returns `{address, origin, network, message, public_key, signature}`. It does not
+broadcast a transaction or spend funds. The message must be 1–4096 UTF-8 bytes.
+Malformed Unicode (unpaired UTF-16 surrogates) is rejected rather than replaced
+during UTF-8 encoding. In the approval view, control characters that could hide
+or reorder text are shown as `\uXXXX` escapes, and literal backslashes are
+doubled. Line feeds remain line breaks. The proof always contains and signs the
+original message, not this display representation.
+Invoke it directly from a click handler, after obtaining a server challenge.
+
+Website transaction approvals use the same escaping rules for memos and other
+text fields. Memo line feeds are shown as `\u000a` rather than line breaks in
+the compact review. Literal backslashes are doubled, so a literal `\u202e`
+cannot be mistaken for an escaped control character. These display escapes do
+not change the memo included in the signed or broadcast transaction.
+
+Servers must issue a random, expiring, one-use challenge and verify all returned
+fields against that challenge. The compressed secp256k1 public key is 33 bytes;
+the signature is a low-S, 64-byte compact ECDSA signature, both hex encoded.
+Verify ECDSA over the SHA-256 digest of this exact UTF-8 payload:
+
+```text
+MMX/sign_message/MMX/website_message/v1\n{origin}\n{network}\n{address}\n{message}
+```
+
+Each `\n` above is one LF byte. The wallet address must equal the MMX Bech32m
+encoding of SHA-256(public_key), using MMX's reversed-byte address encoding.
+Neither a public `connect()` reply nor a valid signature for a different origin,
+network or nonce is proof for the current session. Consume the challenge once.
+The wallet signs the primary address approved by the connection.
+
+Custom transaction funding includes indivisible NFT balances, so a website can
+request a canonical NFT transfer or escrow deposit. Ordinary currency balances
+and history keep their existing NFT filtering.

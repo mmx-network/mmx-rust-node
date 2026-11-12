@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hasUnsafeCharacters, sanitizeMemo, sanitizeSymbol, sanitizeText, shortenHash, validateName } from '../../src/lib/text';
+import { hasUnsafeCharacters, sanitizeMemo, sanitizeSymbol, sanitizeText, shortenHash, textForReview, validateName } from '../../src/lib/text';
 
 describe('sanitizeText', () => {
   it('removes bidi overrides, isolates and marks', () => {
@@ -35,6 +35,26 @@ describe('sanitizeText', () => {
     expect(hasUnsafeCharacters('a\u{202e}b')).toBe(true);
     expect(hasUnsafeCharacters('a\u{0}')).toBe(true);
     expect(hasUnsafeCharacters('a\u{200b}')).toBe(true);
+  });
+});
+
+describe('approval text', () => {
+  it('distinguishes hidden controls from literal escape text', () => {
+    expect(textForReview('Ref\u200b\u061c\u200e\u2060\u00ad\u202e001\u202c')).toBe('Ref\\u200b\\u061c\\u200e\\u2060\\u00ad\\u202e001\\u202c');
+    expect(textForReview('Ref\\u200b')).toBe('Ref\\\\u200b');
+    expect(textForReview('\u0000\\u0000')).toBe('\\u0000\\\\u0000');
+  });
+
+  it('escapes memo line breaks while preserving message paragraphs', () => {
+    const value = 'line one\r\nline two\t\\n';
+    expect(textForReview(value)).toBe('line one\\u000d\\u000aline two\\u0009\\\\n');
+    expect(textForReview(value, true)).toBe('line one\\u000d\nline two\\u0009\\\\n');
+  });
+
+  it('keeps ordinary multilingual text and emoji intact', () => {
+    const value = 'Invoice Café 日本 שלום 😀';
+    expect(textForReview(value)).toBe(value);
+    expect(textForReview(value, true)).toBe(value);
   });
 });
 

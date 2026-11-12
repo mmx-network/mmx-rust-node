@@ -5,7 +5,7 @@ import { createBackend } from '../backend/web';
 import { sanitizeAppState } from '../lib/appstate';
 import { errorMessage, messageForCode } from '../lib/errors';
 import { websiteAccess } from '../lib/websites';
-import { sanitizeText } from '../lib/text';
+import { sanitizeText, textForReview } from '../lib/text';
 import { setWebsiteBlocked } from '../state/settings';
 import { activeWalletId, appState, lockVersion, platform, setBackend, setWallets, upsertWallet, wallets } from '../state/core';
 import { markActivity, startIdleLock } from '../state/idle';
@@ -43,6 +43,8 @@ import {
   origin,
   token,
   transactionRequest,
+  messageRequest,
+  type MessageRequest,
   type Account,
   type Offer,
   type PreparedTransaction,
@@ -52,7 +54,8 @@ import {
 type Target = { host: string; walletId: string };
 type Flow =
   | { id: string; site: string; action: 'connect'; network?: string }
-  | { id: string; site: string; action: 'sendTransaction'; session: string; params: TransactionRequest };
+  | { id: string; site: string; action: 'sendTransaction'; session: string; params: TransactionRequest }
+  | { id: string; site: string; action: 'signMessage'; session: string; params: MessageRequest };
 function fault(e: unknown): { code: string; message: string } {
   return e instanceof ConnectionError
     ? { code: e.code, message: isErrorCode(e.code) ? messageForCode(e.code) : e.message }
@@ -197,6 +200,8 @@ export function ConnectApp() {
           (m.network === undefined || (typeof m.network === 'string' && m.network.length > 0 && m.network.length <= 256))
         )
           next = { id: m.id, site: event.origin, action: 'connect', ...(typeof m.network === 'string' ? { network: m.network } : {}) };
+        else if (m.action === 'signMessage' && token(m.session) && messageRequest(m.params))
+          next = { id: m.id, site: event.origin, action: 'signMessage', session: m.session, params: structuredClone(m.params) };
         else if (m.action === 'sendTransaction' && token(m.session) && transactionRequest(m.params))
           next = { id: m.id, site: event.origin, action: 'sendTransaction', session: m.session, params: structuredClone(m.params) };
         else {
@@ -237,7 +242,7 @@ export function ConnectApp() {
     };
   }, []);
   useEffect(() => {
-    if (!ready || !flow || finished.current || access || flow.action !== 'sendTransaction') return;
+    if (!ready || !flow || finished.current || access || flow.action === 'connect') return;
     let saved: WebsiteSession | null;
     try { saved = new WebsiteSessions(window.localStorage).get(flow.session, flow.site); }
     catch { finish(undefined, {code:'io_error', message:messageForCode('io_error')}); return; }
@@ -262,7 +267,7 @@ export function ConnectApp() {
   });
   const choice = options.some((o) => o.value === selected) ? selected : (options[0]?.value ?? '');
   const selectedWallet =
-    flow?.action === 'sendTransaction' ? local.find((w) => w.id === account?.walletId) : local.find((w) => w.id === choice.split(':')[1]);
+    flow && flow.action !== 'connect' ? local.find((w) => w.id === account?.walletId) : local.find((w) => w.id === choice.split(':')[1]);
   const peer = selectedWallet ? peerFor(selectedWallet.id) : undefined;
   const isUnlocked = !!selectedWallet && (!selectedWallet.locked || peer?.wallet.locked===false);
   const canConnect = !!selectedWallet && (selectedWallet.canView || peer?.wallet.canView || isUnlocked);
@@ -287,7 +292,7 @@ export function ConnectApp() {
       if (current.action === 'connect' && current.network !== undefined && current.network !== a.network)
         throw new ConnectionError('invalid_request', 'The website requested a different network.');
       if (
-        current.action === 'sendTransaction' &&
+        current.action !== 'connect' &&
         (a.address !== grant.current?.account.address || a.network !== grant.current.account.network)
       )
         throw new ConnectionError('invalid_request', 'The wallet account changed. Connect again from the website.');
@@ -296,6 +301,11 @@ export function ConnectApp() {
       if (current.action === 'connect') {
         const saved = new WebsiteSessions(window.localStorage).create(current.site, a, selectedWallet?.name ?? 'Wallet');
         finish({ account: a, session: saved.id, expires: saved.expires });
+      } else if (current.action === 'signMessage') {
+        if (!t) throw new ConnectionError('disconnected');
+        const proof = await clientRef.current!.call(t.host, t.walletId, current.site, 'signMessage', {params: current.params});
+        check(epoch);
+        finish(proof as Record<string, unknown>);
       } else {
         if(!t) throw new ConnectionError('disconnected');
         const quote = (await clientRef.current!.call(t.host, t.walletId, current.site, 'prepare', {
@@ -397,7 +407,8 @@ export function ConnectApp() {
       setError(errorMessage(e));
     }
   }
-  const title = flow?.action === 'sendTransaction' ? (prepared ? 'Confirm transaction' : 'Review transaction') : 'Connect wallet';
+  const title = flow?.action === 'signMessage' ? 'Sign message' : flow?.action === 'sendTransaction' ? (prepared ? 'Confirm transaction' : 'Review transaction') : 'Connect wallet';
+  const reviewMessage = flow?.action === 'signMessage' ? textForReview(flow.params.message, true) : '';
   return (
     <FocusLayout
       class="connection"
@@ -421,13 +432,15 @@ export function ConnectApp() {
                 variant="primary"
                 icon={prepared ? 'send' : undefined}
                 loading={busy}
-                disabled={!selectedWallet || !ready || (flow.action === 'sendTransaction' && !account)}
+                disabled={!selectedWallet || !ready || (flow.action !== 'connect' && !account)}
                 onClick={() => void (prepared ? send() : continueRequest())}
               >
                 {flow.action === 'connect'
                   ? canConnect
                     ? 'Connect'
                     : 'Unlock and connect'
+                  : flow.action === 'signMessage'
+                    ? isUnlocked ? 'Sign message' : 'Unlock and sign'
                   : prepared
                     ? 'Send now'
                     : isUnlocked
@@ -450,7 +463,7 @@ export function ConnectApp() {
               <Icon name="globe" size="lg" />
             </div>
             <div>
-              <span class="connection__eyebrow">{flow.action === 'connect' ? 'Connection request' : 'Transaction request'}</span>
+              <span class="connection__eyebrow">{flow.action === 'connect' ? 'Connection request' : flow.action === 'signMessage' ? 'Message request' : 'Transaction request'}</span>
               <strong>{flow.site}</strong>
             </div>
           </div>
@@ -508,7 +521,12 @@ export function ConnectApp() {
                     <span class="connection__network" title={account.network}>{sanitizeText(account.network,64)}</span>
                     <AddressText address={account.address} mode="short" />
                   </div>
-                  <TransactionReview transaction={flow.params.transaction} account={account} prepared={prepared} />
+                  {flow.action === 'signMessage' ? <div class="connection__connect-content">
+                    <Text>This website asks you to prove wallet ownership. Signing this message does not send a transaction or spend funds.</Text>
+                    <pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'40vh',overflow:'auto'}}>{reviewMessage}</pre>
+                    {reviewMessage !== flow.params.message && <Text tone="muted">Control characters and backslashes are escaped for review. The original message is signed.</Text>}
+                    <Text tone="muted">The signature is bound to this website, network and wallet address.</Text>
+                  </div> : <TransactionReview transaction={flow.params.transaction} account={account} prepared={prepared} />}
                 </>
               ) : (
                 <div class="connection__loading">

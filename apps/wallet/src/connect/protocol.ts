@@ -1,4 +1,5 @@
 import type { FeeLevel, WalletInfo } from '../backend/types';
+import { validMessage } from './message';
 export { websiteOrigin as origin } from '../lib/websites';
 
 export const PROTOCOL = 'mmx-wallet';
@@ -108,4 +109,12 @@ export function transactionRequest(v: unknown): v is TransactionRequest {
     (v.gasLimit === undefined || (Number.isInteger(v.gasLimit) && (v.gasLimit as number) >= 0 && (v.gasLimit as number) <= 0xffff_ffff)) &&
     Object.keys(v).every((k) => ['network', 'transaction', 'feeLevel', 'gasLimit'].includes(k))
   );
+}
+
+export interface MessageRequest { network: string; message: string }
+export interface MessageProof extends MessageRequest { origin: string; address: string; public_key: string; signature: string }
+export function messageRequest(v: unknown): v is MessageRequest {
+  return object(v) && typeof v.network === 'string' && v.network.length > 0 && v.network.length <= 64
+    && validMessage(v.message)
+    && Object.keys(v).every(k => ['network', 'message'].includes(k));
 }

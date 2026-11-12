@@ -1,5 +1,5 @@
 import { NATIVE_CONTRACT, normalizeAddress } from '../lib/address';
-import { sanitizeText } from '../lib/text';
+import { sanitizeText, textForReview } from '../lib/text';
 import { AddressText, Amount, AssetIcon, Badge, Disclosure, Identicon, KeyValue, KeyValueList, Text } from '../ui/components';
 import { object, type Account, type PreparedTransaction } from './protocol';
 
@@ -11,8 +11,6 @@ const atomic = (v: unknown) => {
     return 0n;
   }
 };
-const exactText = (v: string) =>
-  v.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /** Render VM values as named fields and lists, without discarding type or precision. */
 export function DetailValue({ value }: { value: unknown }) {
@@ -21,7 +19,7 @@ export function DetailValue({ value }: { value: unknown }) {
   if (typeof value === 'number') return <span class="connection__number">{String(value)}</span>;
   if (typeof value === 'string') {
     if (normalizeAddress(value) === value) return <AddressText address={value} />;
-    return <span class="connection__value">{value ? `“${exactText(value)}”` : <span class="connection__empty">Empty text</span>}</span>;
+    return <span class="connection__value">{value ? `“${textForReview(value)}”` : <span class="connection__empty">Empty text</span>}</span>;
   }
   const entries = Array.isArray(value) ? value.map((v, i) => [`Item ${i + 1}`, v] as const) : object(value) ? Object.entries(value) : [];
   if (!entries.length) return <span class="connection__empty">Empty</span>;
@@ -29,7 +27,7 @@ export function DetailValue({ value }: { value: unknown }) {
     <dl class="connection__fields">
       {entries.map(([key, v]) => (
         <div key={key}>
-          <dt>{exactText(String(key))}</dt>
+          <dt>{textForReview(String(key))}</dt>
           <dd>
             <DetailValue value={v} />
           </dd>
@@ -168,6 +166,9 @@ export function TransactionReview({
             <KeyValueList variant="compact">
               <KeyValue label="Memo">
                 <DetailValue value={v.memo} />
+                {typeof v.memo === 'string' && textForReview(v.memo) !== v.memo && (
+                  <Text size="sm" tone="muted">Control characters and backslashes are escaped for review. The original memo is sent.</Text>
+                )}
               </KeyValue>
             </KeyValueList>
           ) : null}
@@ -191,7 +192,7 @@ export function TransactionReview({
               <AddressText address={String(v.address)} />
             </KeyValue>
             <KeyValue label="Action">
-              <span class="connection__method">{exactText(String(v.method ?? ''))}</span>
+              <span class="connection__method">{textForReview(String(v.method ?? ''))}</span>
             </KeyValue>
             {v.user ? (
               <KeyValue label="Acting as">

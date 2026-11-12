@@ -24,6 +24,7 @@ import {
   randomToken,
   token,
   transactionRequest,
+  messageRequest,
   type PreparedTransaction,
 } from './protocol';
 
@@ -127,6 +128,13 @@ export function startWalletHost({kind='wallet'}: {kind?: 'wallet'|'approval'} = 
             void activateWallet(walletId,{navigateTo:null}).catch(()=>undefined);
           reply(null);
         } finally { delete request.mnemonic; delete request.passphrase; }
+      } else if (method === 'signMessage') {
+        if (info.locked) throw new ConnectionError('locked');
+        if (!b.signMessage || !messageRequest(message.params)) throw new ConnectionError('invalid_request');
+        markActivity();
+        const proof = await b.signMessage(walletId, message.params, client.origin);
+        stillPresent();
+        reply(proof);
       } else if (method === 'prepare') {
         if(info.locked) throw new ConnectionError('locked');
         if (!b.prepareTransaction || !transactionRequest(message.params)) throw new ConnectionError('invalid_request');
