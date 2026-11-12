@@ -1,0 +1,67 @@
+global
+    # Admission uses its own table so over-budget sockets are rejected, not queued.
+    maxconn 8192
+    nbthread 2
+    # Leave enough body-buffer headroom for the origin's 1 KiB upload allowance.
+    tune.maxrewrite 4096
+
+defaults
+    mode http
+    timeout connect 5s
+    timeout client 15s
+    timeout server 15s
+    timeout http-request 5s
+    timeout http-keep-alive 15s
+    option httpclose
+
+backend visitors
+    stick-table type ipv6 size 100k expire 1m store conn_cur,http_req_rate(10s)
+
+backend prefixes48
+    stick-table type ipv6 size 100k expire 1m store conn_cur,http_req_rate(10s)
+
+backend total_clients
+    stick-table type integer size 1 store conn_cur
+
+frontend apps
+    mode tcp
+    bind 0.0.0.0:${PORT}
+    bind [::]:${PORT} v6only
+    acl trusted_peer src -f /tmp/mmx-apps/trusted-proxies.lst
+    tcp-request connection set-var(sess.trusted_peer) bool(true) if trusted_peer
+    tcp-request connection track-sc2 int(0) table total_clients
+    tcp-request connection reject if { sc_conn_cur(2) gt 4096 }
+    # Direct callers are counted before they send any HTTP bytes. A trusted
+    # HTTP proxy supplies visitor identity only after its headers arrive.
+    tcp-request session track-sc0 src,ipmask(32,64) table visitors unless trusted_peer
+    tcp-request session track-sc1 src,ipmask(32,48) table prefixes48 unless trusted_peer or { src -m ip 0.0.0.0/0 }
+    tcp-request session reject if { sc_conn_cur(0) gt 10 }
+    tcp-request session reject if { sc_conn_cur(1) gt 100 }
+    # Start the 5-second header deadline with the first HTTP byte; an entirely
+    # idle TCP connection gets the agreed 15 seconds, then is closed silently.
+    tcp-request inspect-delay 15s
+    tcp-request content switch-mode http proto h1 if { req.len gt 0 }
+    tcp-request content reject if WAIT_END
+
+    acl from_proxy var(sess.trusted_peer) -m bool
+    http-request deny deny_status 400 if from_proxy !{ req.hdr_cnt(${CLIENT_IP_HEADER}) eq 1 }
+    http-request deny deny_status 400 if from_proxy !{ req.hdr_ip(${CLIENT_IP_HEADER}) -m found }
+    http-request set-src req.hdr_ip(${CLIENT_IP_HEADER}) if from_proxy
+    http-request track-sc0 src,ipmask(32,64) table visitors if from_proxy
+    http-request track-sc1 src,ipmask(32,48) table prefixes48 if from_proxy !{ src -m ip 0.0.0.0/0 }
+    http-request return status 429 content-type text/plain string Too-many-connections hdr Retry-After 10 hdr Cache-Control no-store if { sc_conn_cur(0) gt 10 }
+    http-request return status 429 content-type text/plain string Too-many-connections hdr Retry-After 10 hdr Cache-Control no-store if { sc_conn_cur(1) gt 100 }
+    http-request return status 429 content-type text/plain string Too-many-requests hdr Retry-After 10 hdr Cache-Control no-store if { sc_http_req_rate(0) gt 100 }
+    http-request return status 429 content-type text/plain string Too-many-requests hdr Retry-After 10 hdr Cache-Control no-store if { sc_http_req_rate(1) gt 1000 }
+
+    http-request return status 413 if { req.hdr_val(Content-Length) gt 1024 }
+    http-request wait-for-body time 5s at-least 1025
+    http-request return status 413 if { req.body_len gt 1024 }
+    http-request set-header X-Mmx-Client %[src]
+    http-request set-header X-Forwarded-For %[src]
+    http-request set-header X-Real-IP %[src]
+    default_backend static_files
+
+backend static_files
+    http-after-response set-header Connection close
+    server nginx /tmp/mmx-apps/nginx.sock

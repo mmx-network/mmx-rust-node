@@ -1,8 +1,9 @@
 # MMX apps Docker image
 
 `mmx-apps` builds and serves the MMX website, new web wallet and explorer. One
-nginx process serves all three sites on the same HTTP port, selected by the
-request's `Host` header:
+HAProxy frontend enforces shared connection/request limits, then nginx serves
+all three sites through a private Unix socket, selected by the request's
+`Host` header:
 
 | Hostname | App |
 | --- | --- |
@@ -107,7 +108,7 @@ docker run -d --name mmx-apps --restart unless-stopped \
 Docker builds the wallet core with two Rust jobs, no incremental compilation
 or debug symbols, then builds all three frontends sequentially at low priority.
 Cargo/npm download caches persist in BuildKit; build tools, sources and
-dependencies are absent from the small nginx runtime image. `.dockerignore`
+dependencies are absent from the small HAProxy/nginx runtime image. `.dockerignore`
 limits the build context to source inputs and excludes local `.env` files,
 generated WASM, desktop build output and dependency directories.
 
@@ -129,6 +130,8 @@ filesystem.
 | `EXPLORER_HOST` | Container startup | `explore.mmx.network` | Explorer hostname, without scheme, path or port |
 | `WEBSITE_HOST` | Container startup | `mmx.network` | Website hostname, without scheme, path or port |
 | `WEBSITE_WWW_HOST` | Container startup | `www.mmx.network` | Website alias, without scheme, path or port |
+| `TRUSTED_PROXY_CIDRS` | Container startup | Empty (no trusted proxies) | Space/comma-separated proxy IPs/CIDRs allowed to supply visitor IPs |
+| `CLIENT_IP_HEADER` | Container startup | `X-Forwarded-For` | Single-IP header overwritten by the trusted proxy |
 | `VITE_RPC_URL` | Image build | `https://rpc.mmx.network` | Public chain WebAPI used by both apps |
 
 Usually only `HTTP_PORT` needs changing. Platforms using host networking or
@@ -164,6 +167,64 @@ can communicate with its popup; the main wallet keeps COOP `same-origin`.
 cached for a year. The popup and
 loader revalidate on every load. Preserve these path-specific headers in CDN
 overrides.
+
+## Connection and request limits
+
+Each image instance enforces the public RPC defaults, shared across the website,
+wallet, explorer, aliases, unknown hosts and health checks:
+
+| Scope | Concurrent incoming connections | Requests per 10 seconds |
+| --- | ---: | ---: |
+| Entire instance | 4,096 | — |
+| IPv4 address | 10 | 100 |
+| IPv6 /64 | 10 | 100 |
+| IPv6 /48, additionally | 100 | 1,000 |
+
+HAProxy admits direct TCP clients before reading HTTP, including sockets that
+have sent no request. Excess connections close immediately. Request budgets
+use rolling `http_req_rate(10s)` counters; excess requests return `429`,
+`Retry-After: 10` and `Cache-Control: no-store`. Denied requests count toward
+their enclosing prefix's request budget too. Restarting an instance resets its
+counters; instances do not share a cluster quota.
+
+Completely idle sockets close after 15 seconds. Once HTTP starts, headers have
+a 5-second deadline. Request bodies have a separate absolute 5-second deadline,
+including when bytes keep arriving; the existing 1 KiB body limit still applies
+to both fixed-length and chunked uploads. Every HTTP response has
+`Connection: close`, and its socket closes after the response. The origin is
+HTTP/1 only; CDN-to-browser TLS and connection policies remain at the CDN.
+
+By default, counters use the incoming socket's source IP and ignore all
+forwarded-client headers. A CDN, NAT or proxy therefore shares a source budget.
+To use original visitor IPs, set `TRUSTED_PROXY_CIDRS` to the exact proxy ranges
+and `CLIENT_IP_HEADER` to a header that those proxies **overwrite** with one
+validated visitor IP. For example, for an operator-controlled proxy:
+
+```sh
+TRUSTED_PROXY_CIDRS='192.0.2.10/32 2001:db8:ffff::/48' \
+CLIENT_IP_HEADER=X-Forwarded-For docker compose up -d
+```
+
+Replace the example ranges with the actual proxy sources visible to the
+container. Never trust all addresses or a network containing direct callers.
+Missing, malformed or multi-address visitor headers from a trusted proxy return
+400. Untrusted callers cannot choose their budget with forged headers. The
+private origin socket accepts normalized client metadata only from HAProxy;
+nginx logs the resulting address through its existing inherited console stream.
+
+For a trusted HTTP proxy, the global cap still counts real incoming TCP sockets.
+Visitor concurrency can be attributed only after its HTTP headers arrive, so
+it counts active origin requests/connections for that visitor and returns 429
+on overflow. An origin cannot count or close visitor connections held at the
+CDN edge; configure edge policies there when those limits are required too.
+
+HAProxy and nginx run as the existing non-root user. A small supervisor stops
+both when either exits, and tini forwards shutdown signals and reaps workers.
+Nginx's backend listens only on `/tmp/mmx-apps/nginx.sock`; the exposed port and
+health check stay the same. The runtime still supports a read-only root with
+the existing 16 MiB `/tmp` tmpfs. Budget container memory and file descriptors
+for the intended concurrent load; the connection caps are admission limits,
+not a memory reservation.
 
 ## CDN caching
 
@@ -245,6 +306,7 @@ and HTTP-to-HTTPS redirects are configured at the CDN, which terminates TLS.
 
 ```sh
 node --test deploy/apps/prepare.test.mjs
+nice -n 19 ionice -c 3 docker build --target limits-test .
 python3 deploy/apps/test-image.py mmx-apps
 ```
 
@@ -260,6 +322,15 @@ HTTP delivery and request logging after the supervisor drops privileges.
 It makes no requests to a chain server and does not access ledger/plot storage.
 The [web apps image workflow](../.github/workflows/apps.yml) runs the build and
 these tests on relevant source changes.
+
+The `limits-test` build target uses the image's actual HAProxy/nginx binaries
+and configs to check IPv4 and IPv6 /64 and /48 aggregation, the full 4,096-socket
+budget, shared request rates, forwarded-header spoofing, trusted proxy identity,
+socket closure and trickled uploads. Its Python dependency and fixtures are
+absent from the final runtime image. Its isolated loopback source fixture uses
+PROXY headers to generate IPv6 identities; no shipped listener accepts PROXY
+protocol from callers. The normal image smoke tests honor 429 backoff during
+their deliberately large batches of content checks.
 
 ## Add another static site
 

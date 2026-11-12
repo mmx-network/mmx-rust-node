@@ -1017,7 +1017,8 @@ Dockerfile/entrypoint.
 This is a separate static origin, not a port of the native authenticated node
 HTTP API. nginx uses concurrent nonblocking delivery, sendfile, conditional
 and byte-range reads, and immediate file/host/method rejection. There are two
-workers with 1024 connections each; files are not buffered in an application
+workers with 4096 backend connections each; HAProxy caps public clients at 4096
+across the complete instance. Files are not buffered in an application
 cache. Compressible build outputs get gzip sidecars once at build time instead
 of native per-request compression work. Only successful hashed assets get
 one-year immutable caching; HTML revalidates and errors use no-store. Each
@@ -1044,6 +1045,26 @@ not been compared; these tests do not claim performance parity. A replacement
 image contains only one release's assets, so uninterrupted older lazy-loaded
 sessions require retaining previous hashes at the CDN/object origin. CDN
 behavior itself requires verification against the chosen provider's settings.
+
+The image frontend now follows C++'s `scripts/systemd/rpc-front` admission
+policy: 10 connections and 100 requests/10s per IPv4 or IPv6 /64, additionally
+100 connections and 1000 requests/10s per IPv6 /48. Real TCP admission precedes
+HTTP, a 15-second idle timer precedes the first byte, and header/body deadlines
+are 5 seconds. Plain HTTP always closes after a response. HAProxy counters are
+shared across all sites; nginx retains sendfile/range/gzip and generated CSP.
+The optional trusted proxy CIDRs/header are documented in `web-apps-docker.md`.
+The global budget counts real sockets; forwarded visitor concurrency can only
+count active origin requests after headers identify the visitor. TLS, ACME and
+browser-to-CDN idle connections remain at the CDN, a deliberate difference
+from the dedicated public RPC edge. The origin cannot enforce limits on sockets
+which terminate elsewhere.
+
+An isolated image build target checks the actual runtime binaries with 4096
+open TCP connections, IPv6 /64 and /48 groups, spoofed/trusted visitor headers,
+rate rejection and recovery across identities, actual response EOF, fixed and
+chunked uploads, and service-pair shutdown. The tests use only disposable ports
+and synthetic identities, with no ledger/plot reads. They establish admission
+and deadline behavior, not throughput or RSS parity under 4096 active downloads.
 
 ## Review fixes, 2026-10-25
 

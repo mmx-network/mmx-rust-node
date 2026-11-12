@@ -52,7 +52,8 @@ RUN nice -n 19 ionice -c 3 npm run build
 COPY deploy/apps/ /build/deploy/apps/
 RUN nice -n 19 ionice -c 3 node /build/deploy/apps/prepare.mjs /build
 
-FROM nginx:1.30.6-alpine AS runtime
+FROM nginx:1.30.6-alpine AS runtime-base
+RUN apk add --no-cache haproxy tini
 LABEL org.opencontainers.image.title="mmx-apps" \
     org.opencontainers.image.description="MMX website, web wallet and explorer HTTP origin" \
     org.opencontainers.image.source="https://github.com/mmx-network/mmx-rust-node"
@@ -60,13 +61,26 @@ COPY --from=web-build /build/apps/wallet/dist/web/ /srv/mmx/wallet/
 COPY --from=web-build /build/apps/explorer/dist/ /srv/mmx/explorer/
 COPY --from=web-build /build/apps/website/dist/ /srv/mmx/website/
 COPY --from=web-build /build/deploy/apps/generated/ /etc/nginx/mmx/
-COPY deploy/apps/nginx.conf.template deploy/apps/locations.conf /etc/nginx/mmx/
+COPY deploy/apps/nginx.conf.template deploy/apps/locations.conf deploy/apps/haproxy.cfg.template /etc/nginx/mmx/
 COPY --chmod=755 deploy/apps/entrypoint.sh /usr/local/bin/mmx-apps-entrypoint
+COPY --chmod=755 deploy/apps/run.sh /usr/local/bin/mmx-apps-run
 ENV PORT=8080 WALLET_HOST=wallet.mmx.network EXPLORER_HOST=explore.mmx.network \
-    WEBSITE_HOST=mmx.network WEBSITE_WWW_HOST=www.mmx.network
+    WEBSITE_HOST=mmx.network WEBSITE_WWW_HOST=www.mmx.network \
+    TRUSTED_PROXY_CIDRS="" CLIENT_IP_HEADER=X-Forwarded-For
 USER nginx
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -q -O /dev/null "http://127.0.0.1:${PORT}/healthz" || exit 1
-ENTRYPOINT ["/usr/local/bin/mmx-apps-entrypoint"]
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/usr/local/bin/mmx-apps-entrypoint"]
 CMD ["nginx", "-e", "stderr", "-c", "/tmp/mmx-apps/nginx.conf", "-g", "daemon off;"]
+
+# Exercise the shipped binaries and configuration without adding test tools to
+# the published runtime. Also works where Docker can build but cannot run images.
+FROM runtime-base AS limits-test
+USER root
+RUN apk add --no-cache python3
+COPY deploy/apps/test-limits.py deploy/apps/test-image.py /tests/
+USER nginx
+RUN nice -n 19 python3 /tests/test-limits.py -v
+
+FROM runtime-base AS runtime
