@@ -21,7 +21,7 @@ import {
   sendableAssets,
   sendDraft,
   sendFlow,
-  sendNeedsPassphrase,
+  sendNeedsUnlock,
   spendableBalance,
   unlockForSend,
   updateDraft,
@@ -64,7 +64,7 @@ type Touched = Partial<Record<'to' | 'amount', boolean>>;
 function PassphraseDialog() {
   const wallet = activeWallet.value;
   const flow = sendFlow.value;
-  if (!wallet || !sendNeedsPassphrase.value) return null;
+  if (!wallet || !sendNeedsUnlock.value) return null;
   return (
     <AuthorizationDialog
       open
@@ -161,7 +161,7 @@ export function SendForm() {
   const memoError = flow.error?.field === 'memo' ? flow.error.message : check.errors.memo;
 
   const generalError =
-    flow.error && !sendNeedsPassphrase.value && (!flow.error.field || flow.error.field === 'passphrase') ? flow.error.message : undefined;
+    flow.error && !sendNeedsUnlock.value && (!flow.error.field || flow.error.field === 'passphrase') ? flow.error.message : undefined;
 
   const paste = async (): Promise<void> => {
     const text = await readClipboardText();

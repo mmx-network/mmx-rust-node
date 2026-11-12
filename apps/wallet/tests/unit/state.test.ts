@@ -292,7 +292,7 @@ describe('sending', () => {
     await backend.lockWallet(savings.id);
     expect(await S.reviewSend()).toBe(false);
     expect(S.sendFlow.value.needsPassphrase).toBe(true);
-    expect(S.sendNeedsPassphrase.value).toBe(true);
+    expect(S.sendNeedsUnlock.value).toBe(true);
     expect(await S.unlockForSend('wrong')).toBe(false);
     expect(S.sendFlow.value.error?.field).toBe('passphrase');
     expect(await S.unlockForSend(M.MOCK_PASSPHRASE)).toBe(true);

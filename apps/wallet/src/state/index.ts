@@ -128,7 +128,7 @@ export {
   sendableAssets,
   sendDraft,
   sendFlow,
-  sendNeedsPassphrase,
+  sendNeedsUnlock,
   setSendFeeLevel,
   spendableBalance,
   startSend,

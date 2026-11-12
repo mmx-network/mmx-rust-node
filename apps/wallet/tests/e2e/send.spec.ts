@@ -1,5 +1,5 @@
 // Receiving and sending MMX in the web wallet.
-import { capture, goTo, openFundedWallet, pollNow } from './app';
+import { capture, goTo, lockWallet, openFundedWallet, pollNow } from './app';
 import { expect, test } from './fixtures';
 import { NATIVE, testAddress } from './mock-rpc';
 
@@ -217,6 +217,23 @@ test('reports a transfer whose result is unknown and does not send it again', as
   const broadcasts = await rpc.broadcasts();
   expect(broadcasts).toHaveLength(1);
   expect(broadcasts[0]!.submissions).toBe(1);
+});
+
+test('asks to unlock a locked wallet without a passphrase on review', async ({ page, rpc }) => {
+  const wallet = await openFundedWallet(page, (address) => rpc.fund({ address, amount: (5n * MMX).toString() }));
+  await lockWallet(page);
+  await goTo(page, 'Send');
+  await page.getByLabel('To').fill(testAddress('e2e-erin'));
+  await page.getByLabel('Amount').fill('1');
+  await page.getByRole('button', { name: 'Review' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Unlock for spending' });
+  await expect(dialog).toBeVisible();
+  await dialog.locator('input[name=password]').fill(wallet.words);
+  await dialog.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('region', { name: 'Transfer details' })).toBeVisible();
+  expect(await rpc.broadcasts()).toHaveLength(0);
 });
 
 test('shows why a transfer cannot be sent', async ({ page, rpc, consoleGuard }) => {
