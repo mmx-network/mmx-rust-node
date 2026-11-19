@@ -52,7 +52,7 @@ RUN nice -n 19 ionice -c 3 npm run build
 COPY deploy/apps/ /build/deploy/apps/
 RUN nice -n 19 ionice -c 3 node /build/deploy/apps/prepare.mjs /build
 
-FROM nginx:1.30.6-alpine AS runtime-base
+FROM nginx:1.30.7-alpine AS runtime-base
 RUN apk add --no-cache haproxy tini
 LABEL org.opencontainers.image.title="mmx-apps" \
     org.opencontainers.image.description="MMX website, web wallet and explorer HTTP origin" \
