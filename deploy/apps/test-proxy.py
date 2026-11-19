@@ -134,6 +134,21 @@ class ProxyTest(unittest.TestCase):
                         time.sleep(0.05)
                     self.assertTrue(ca.exists(), "TLS proxy did not issue its test CA")
                     context = ssl.create_default_context(cafile=str(ca))
+                    # Caddy issues the sites' certificates after its CA: until
+                    # then a handshake ends in an internal-error alert.
+                    for host in hosts:
+                        for _ in range(100):
+                            try:
+                                with socket.create_connection(("127.0.0.1", tls_port), 5) as raw:
+                                    with context.wrap_socket(raw, server_hostname=host):
+                                        break
+                            except (OSError, ssl.SSLError):
+                                if proxy.poll() is not None:
+                                    self.fail("TLS proxy exited")
+                                time.sleep(0.05)
+                        else:
+                            proxy_log.seek(0)
+                            self.fail(f"TLS proxy did not serve {host}'s certificate:\n" + proxy_log.read())
 
                     def request(_, host, path="/", method="GET", headers=None, source="127.0.0.1"):
                         connection = LoopbackTLS(host, tls_port, timeout=5, context=context,
