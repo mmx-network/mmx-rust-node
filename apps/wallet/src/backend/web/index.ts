@@ -16,7 +16,7 @@ function browserStorage(): StorageLike {
   return memoryStorage();
 }
 
-export async function createBackend(): Promise<Backend> {
+export async function createBackend(options: { preload?: boolean } = {}): Promise<Backend> {
   let backend: WebBackend;
   try {
     backend = new WebBackend({
@@ -31,8 +31,10 @@ export async function createBackend(): Promise<Backend> {
   }
   // The wallet core is needed for every wallet action: fetch it while the user reads the first screen.
   const idle = (window as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
-  if (idle) idle(() => backend.preload(), { timeout: 2000 });
-  else setTimeout(() => backend.preload(), 200);
+  if (options.preload !== false) {
+    if (idle) idle(() => backend.preload(), { timeout: 2000 });
+    else setTimeout(() => backend.preload(), 200);
+  }
   return backend;
 }
 

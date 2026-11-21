@@ -64,9 +64,18 @@ other mappings can still use hugepages. The node regained sync and its public
 REST API, forced to the local backend, reported the new commit after its normal
 readiness delay. Its 4 GiB cache limit, historical checkpoints and identity were
 preserved; the proxy and Caddy retained their process identities. Early RSS was
-about 527 MiB, but the restart emptied the old RPC cache, so a comparable
-warm-cache RSS measurement remains outstanding. Existing instances on older
-binaries retain their prior policy until updated.
+about 527 MiB, but the restart emptied the old RPC cache. Existing instances on
+older binaries retain their prior policy until updated.
+
+Read-only follow-up on 2026-11-21 found the same eu2 process running for
+16.36 days, synced, with its 4 GiB REST cache full and evicting entries. Process
+RSS was 5.22 GiB with no swap. Jemalloc resident-byte medians were 5503.84 MiB
+in the previous 24 hours and 5503.04 MiB in the latest 24 hours, indicating a
+plateau once the cache was full. The resolved policy remained `thp=never`,
+and protected mappings still had no hugepage backing. The former roughly
+1.5 GiB excess of process RSS over allocator residency was absent. This is
+long-running evidence against recurrence of that excess, not a matched
+before/after workload benchmark or a guarantee against other memory growth.
 
 ## Eu2 RSS and transparent hugepages (2026-11-03)
 
@@ -1331,7 +1340,9 @@ Dockerfile/entrypoint.
 This is a separate static origin, not a port of the native authenticated node
 HTTP API. nginx uses concurrent nonblocking delivery, sendfile, conditional
 and byte-range reads, and immediate file/host/method rejection. There are two
-workers with 1024 connections each; files are not buffered in an application
+workers with up to 4096 backend connections each, within the inherited FD
+ceiling; HAProxy caps public clients at 4096
+across the complete instance. Files are not buffered in an application
 cache. Compressible build outputs get gzip sidecars once at build time instead
 of native per-request compression work. Only successful hashed assets get
 one-year immutable caching; HTML revalidates and errors use no-store. Each
@@ -1358,6 +1369,43 @@ not been compared; these tests do not claim performance parity. A replacement
 image contains only one release's assets, so uninterrupted older lazy-loaded
 sessions require retaining previous hashes at the CDN/object origin. CDN
 behavior itself requires verification against the chosen provider's settings.
+
+The image frontend now follows C++'s `scripts/systemd/rpc-front` admission
+policy: 10 connections and 100 requests/10s per IPv4 or IPv6 /64, additionally
+100 connections and 1000 requests/10s per IPv6 /48. Real TCP admission precedes
+HTTP, a 15-second idle timer precedes the first byte, and header/body deadlines
+are 5 seconds. Plain HTTP always closes after a response. HAProxy counters are
+shared across all sites; nginx retains sendfile/range/gzip and generated CSP.
+The optional trusted proxy CIDRs/header are documented in `web-apps-docker.md`.
+The global budget counts real sockets; forwarded visitor concurrency can only
+count active origin requests after headers identify the visitor. TLS, ACME and
+browser-to-CDN idle connections remain at the CDN, a deliberate difference
+from the dedicated public RPC edge. The origin cannot enforce limits on sockets
+which terminate elsewhere.
+
+The VM startup regression (2026-11-13) removes fixed HAProxy maxconn/thread
+requirements: its internal pool respects the hard FD ceiling, threads respect
+CPU affinity, and nginx raises only its soft FD limit with descriptor headroom
+for workers. This keeps the existing non-root image usable under Ghostrack's
+1024/4096 inherited FD limits and one CPU. A higher launcher limit is needed to
+reach the full 4096-client ceiling when directly hosting; Compose supplies
+32768 descriptors, while the current HTTP proxy's 50-per-route request limit
+fits within the VM defaults. No privileged bootstrap is required.
+
+The old image fails the new resource-constrained end-to-end fixture. The fixed
+image serves complete site content, concurrent assets and exact wallet WASM
+bytes through TLS Caddy, HAProxy and nginx under those VM limits. It also tests
+50 distinct concurrent visitors and multiplexed HTTP/2 streams, including a
+100-request budget followed by an uncached 429 over the same TLS connection.
+The test CA is explicitly trusted and hostname validation stays enabled.
+CI runs this before publication; Caddy/Python are absent from the final image.
+
+An isolated image build target checks the actual runtime binaries with 4096
+open TCP connections, IPv6 /64 and /48 groups, spoofed/trusted visitor headers,
+rate rejection and recovery across identities, actual response EOF, fixed and
+chunked uploads, and service-pair shutdown. The tests use only disposable ports
+and synthetic identities, with no ledger/plot reads. They establish admission
+and deadline behavior, not throughput or RSS parity under 4096 active downloads.
 
 ## Review fixes, 2026-10-25
 
@@ -1941,3 +1989,210 @@ covers upgrades and repeat launches; packaged Linux checks verify both theme
 sizes in the deb and in the AppImage's isolated XDG data directory. Real-session
 GTK lookup now selects the user 48/64-pixel assets and still selects the existing
 system asset at 96/128 pixels.
+
+## Web wallet website connections (2026-11-05)
+
+Reference intent: C++ `Wallet.cpp::{complete,sign_off}` and
+`ECDSA_Wallet::{complete,sign_off}`; Rust native `spend.rs` and consensus record
+hashing/authorization. WASM now reuses the native transaction record bridge for
+unsigned custom transactions, including Execute/Deposit arguments and native
+contract deployments. Only proof/header/OpenCL work is excluded on wasm32;
+native consensus builds retain it. Public JSON conversion follows declared VNI
+aliases rather than inferring types from VM argument keys. JSON integer-only
+and reserved `__type` restrictions are explicit in [the API](wallet-connect.md).
+Docker now copies the schema inputs needed by that bridge.
+
+Website access is a web-only addition, off until explicitly enabled, with a
+persistent exact-origin block list. Popup/postMessage and same-origin
+BroadcastChannel reuse an unlocked tab without transferring credentials or
+signed bytes. Cold/closed/suspended signers require a local popup unlock.
+Permissions are checked again before preparing and broadcasting; storage
+changes revoke approvals across tabs. Ordinary stale metadata writes preserve
+current permissions. Programmatic popup focus, discovery and incoming requests
+do not refresh the signing timeout; explicit Review/Approve actions do.
+
+Work bounds: 64 KiB / depth 32 / 4,096 nodes per request, 100 supplied inputs
+and outputs, 32 operations, 16 prepared transactions and 16 clients per host.
+Balance RPCs retain four-worker concurrency; signing commands are serialized
+per host. Approval refreshes balances and existing reservations before dry run
+and at-most-once submission. This adds a balance snapshot per explicit send,
+with no extra background RPC polling for discovery. A lost broadcast reply
+retains input and maximum-fee reservations. These reservations are local to a
+signing backend, not a global lock across independently unlocked tabs.
+The shipped WASM core measures 1,574,131 bytes (361,571 bytes gzip); a popup
+reusing an existing signer does not fetch another WASM instance.
+
+Evidence: 69 native consensus/wallet/WASM tests passed (one existing ignored
+proof benchmark); native all-target and wasm32 Clippy passed with warnings
+denied. The wallet's 536 unit tests and full 53-test Chromium suite passed;
+affected connection/timeout tests were repeated after permission persistence
+and focus-timer changes. Cross-origin tests use real popup windows, production
+CSP/COOP, and actual WASM signing. They cover default-off, connect consent,
+no POST before approval, exact contract arguments, secrets absent from messages,
+rejection, warm reuse, local unlock fallback, lock, disable and block/unblock.
+Backend tests cover stale metadata, conflicting quotes, maximum-fee reservation,
+uncertain submissions and lock/revocation during dry run. The actual Docker
+image's non-root/read-only nginx tests cover popup COOP, SDK CORS, routing,
+security headers, caching and gzip alongside the other sites. Web and desktop
+frontend builds pass. The mock node checks transaction shape, static costs and
+balances but does not run arbitrary contract VM programs; native tests verify
+signatures and tampering. Physical iOS/Android popup/background behavior and
+representative contract execution on a real public node remain unmeasured.
+
+## Wallet request popup lifecycle and transaction presentation (2026-11-05)
+
+The website SDK now opens one popup per connect or transaction action and closes
+it on completion, rejection, cancellation, timeout or denial. The public
+connection survives a completed popup via a random origin-bound grant, capped
+at 32 grants and one hour. Stored grants contain only public account metadata;
+all signing/unlock material stays in the existing wallet vault. Blocking or
+disabling removes grants. A cold popup unlock is purged on close, while a warm
+main wallet continues signing across separate requests. Closing a popup after
+submission begins reports an uncertain outcome rather than a false rejection.
+
+The first review renders formatted transfers, full recipient addresses, memos
+and structured contract actions/arguments; the canonical quote adds exact fees
+and maximum total. Generic VM arguments retain their values and escaped control
+characters. No raw JSON is shown. Approval buttons and the maximum fee remain
+visible while longer details scroll. Website-blocking input width follows the
+settings row at desktop and phone widths. Scoped styles and shared wallet UI
+components keep desktop controls and the standard send flow unchanged. The
+external popup protocol is version 2; both locally hosted pages must be
+reloaded after upgrading the SDK.
+
+Public pending-funds reservations now survive a cold popup closing or a tab
+reload. They retain the C++ input/static-fee subtraction and inclusion/expiry
+release intent; custom transactions reserve their maximum fee. Storage is
+scoped by RPC endpoint and wallet, with explicit network tags, at most 256
+transactions / 1,024 inputs each / 2 million serialized characters. Every
+mutation reads fresh data. Writes occur only on broadcast, refusal, inclusion,
+expiry or wallet removal; there is no extra polling or ledger I/O. Capacity or
+write failure stops submission before the broadcast POST. No signed bytes or
+secret material are persisted. This still does not provide an atomic spend
+lock across independently unlocked tabs submitting simultaneously.
+
+Evidence: 547 unit tests pass, including persistent pending-fund recovery after
+accepted and uncertain submissions, storage failure before POST, capacity,
+network isolation and grant revocation across clock changes. The 54-test
+Chromium run passed 53 tests; its remaining backend test assumed a generated
+named export that Rollup now shares through a namespace. After correcting that
+test lookup, all eight affected popup/backend browser tests pass, including a
+second cold popup refusing already-reserved funds. Web and desktop frontend
+builds and TypeScript checks pass. Reviewed 480-pixel popup and 390-pixel phone
+layouts, plus URL-field widths at 1,280 / 540 / 390 / 320 pixels. Native signing
+code is unchanged from the earlier verified checkpoint. No real funds were
+sent by these tests. Physical mobile browser behavior and arbitrary contract
+VM execution retain the limitations recorded above.
+
+## Timed signing across approval popups (2026-11-05)
+
+Connection consent now reads cached public addresses without unlocking, as the
+C++ `ECDSA_Wallet::get_all_addresses` / `Wallet::get_address` public observation
+path permits. Missing addresses still require derivation. Main wallet tabs
+advertise locked accounts too, and a popup unlock targets that tab instead of
+opening a short-lived local vault when the tab is available. The existing
+idle/manual lock owns the resulting vault. Review and broadcast reset the
+timer; account reads, discovery and website traffic do not. The separate
+approval window still closes after each action.
+
+The targeted unlock uses fresh, non-extractable P-256 keys with AES-GCM, a
+one-use 30-second challenge and context-bound associated data. The lock version
+is checked before and after decryption, while the backend's existing lock epoch
+still protects asynchronous vault opening. Encoded unlock data is bounded to
+32 KiB. There is no new seed encryption format, persisted credential or server
+relay; only ephemeral ciphertext crosses the same-origin channel. Temporary
+encoded plaintext buffers are overwritten; browser/JavaScript memory reclamation
+is not a guarantee of zeroization for transient strings. Closed/unreachable
+main tabs cannot retain this session; a genuinely cold popup still purges on
+close. A 480 × 800 default and compact transfer rows remove scrolling for a
+simple transfer, including a short memo, without hiding the maximum fee.
+
+Evidence: 549 unit tests pass, including credential round-trip, ciphertext
+tampering, recipient/context changes and non-extractable private keys. The
+complete 57-test Chromium suite passes. Popup regressions cover cached/unknown
+addresses, a regular or passphrase wallet initially locked in its main tab,
+unlocking once, later spending without another prompt, timer reset, expiry,
+manual lock, revocation and replaying an old unlock with a fresh timestamp.
+The default simple transfer with a memo fits a 480 × 720 content viewport.
+A separate stock Firefox 158 headless check with production headers and real
+WASM against the mock chain verified connect without unlock, unlock retained
+in the main tab, another transaction without prompting and manual lock. Its
+actual default content viewport was 480 × 727 after Firefox clamped the window;
+measured vertical overflow was zero. Both frontend builds and TypeScript checks
+pass. No native code or live wallet/ledger data was changed for these checks.
+Physical mobile background suspension remains unmeasured.
+
+## Keep failed transaction preparation visible (2026-11-05)
+
+The approval popup no longer completes the website request when account
+retrieval or transaction preparation fails after unlocking. It shows the
+error above the transaction and retains the request for an explicit retry or
+rejection. Permission revocation, manual lock and request timeout still cancel
+the flow. A successful unlock remains in the main wallet's existing timed
+session, so retrying preparation does not require another passphrase. No dry
+run or broadcast happens before explicit Send now approval.
+
+Evidence: all 550 unit tests and 11 popup browser tests pass, plus TypeScript
+and the web build. A simulated 503 immediately after unlock reproduces the
+previous premature close and now stays open, then succeeds on retry without
+another unlock or any transaction POST. Pending-fund insufficiency also remains
+visible. A real-WASM regression prepares the demo's 0.001 MMX self-transfer
+with zero execution gas. The original live failure's error code has not been
+observed; this verifies the erroneous close/retry behavior without spending
+real funds.
+
+## Cache the website wallet SDK by content (2026-11-05)
+
+The public `/wallet-sdk.js` entry point now re-exports a standalone module at
+`/assets/sdk/wallet-sdk-<hash>.js`. The hash is the first 16 hexadecimal digits
+of SHA-256 over the emitted SDK bytes. It changes only with those bytes, so
+unrelated wallet builds do not invalidate a website's cached SDK. The loader
+revalidates; successful hashed responses are immutable for one year. SDK paths
+permit cross-origin imports without adding CORS to wallet pages or other app
+assets. Existing popup approval and signing behavior is unchanged.
+
+Docker nginx, standalone nginx, Caddy, generated `_headers` and Vite preview
+include the SDK path rules. The generated nginx snippets now apply directory
+header rules as well as exact paths. Missing hashes return uncached 404s in
+nginx and preview; preview cannot fall back to wallet HTML. Integration docs
+use the new entry point and explain retention when a website pins a hash.
+
+Evidence: all 550 unit tests, 12 Chromium SDK/popup tests, deployment generator
+tests, TypeScript and the web build pass. The browser imports the loader
+and pinned URL from another origin and verifies they expose the
+same module. It checks the hash against the served bytes, immutable caching,
+CORS, conditional 304s and missing hashes. The complete Docker image smoke
+check passes, including precompressed SDK delivery through a proxy, 304 headers,
+404 cache policy, site isolation and its read-only/non-root runtime. The new
+server rules are included in that built image; no live deployment was changed.
+
+
+## Website sign-in proofs and NFT spending (2026-11-11)
+
+The C++ wallet's domain-prefixed `sign_message` behavior remains the signing
+reference. Website proofs use the separate `MMX/website_message/v1` domain and
+bind origin, network, primary address and an exact bounded UTF-8 message. Each
+request needs its own popup approval. Lock state and website permission are
+rechecked after the asynchronous chain-parameter read; no transaction is sent.
+The existing custom transaction snapshot now includes canonical NFT balances
+so NFT outputs and escrow deposits can be funded. Currency display filtering
+is unchanged. This adds no background polling or broad cache.
+
+Malformed Unicode is rejected before opening the signer or encoding a message;
+approval renders hidden/reordering controls as visible escapes without altering
+the signed bytes. Website transaction approvals use the same display escaping
+for memos and other text fields, including literal backslashes and invisible
+formatting marks. The original memo is preserved in the signed transaction.
+These checks add no network requests.
+
+Validation: Rust wallet compatibility tests (13), wallet unit/WASM tests (563),
+connection browser tests (15), TypeScript checking and production web build.
+The browser test verifies the real WASM proof using Node's independent crypto
+implementation, rejects a changed origin, checks rejection and confirms zero
+broadcasts, including messages with escaped display controls. Browser coverage
+also checks escaped memos before and after preparation and unchanged memo bytes
+in the broadcast. Backend regressions cover lock and permission changes during
+chain reads and NFT transfer/deposit
+funding with duplicate-spend reservations. The Metalstorm integration also
+verifies these proofs independently and signs deployable Binary, WebData and
+Executable contracts with this WASM.

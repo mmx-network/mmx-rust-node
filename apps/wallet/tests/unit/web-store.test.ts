@@ -154,11 +154,11 @@ describe('MetadataStore', () => {
     expect(state.activeWallet).toBeUndefined();
     expect(state.labels).toEqual({ '1': { 0: 'Main', 2: 'y' } });
     expect(state.contacts).toEqual([{ id: 'c-1', name: 'Alice', address: CONTACT }]);
-    expect(state.settings).toEqual({ theme: 'dark', autoLockMinutes: 0, feeLevel: 3 });
+    expect(state.settings).toEqual({ theme: 'dark', autoLockMinutes: 0, feeLevel: 3, allowWebsiteConnections: false, blockedWebsites: [] });
 
     store.saveAppState({ ...state, activeWallet: '1', settings: { ...state.settings, rpcUrl: 'https://evil.example' } });
     const root = stored(storage);
-    expect(root.settings).toEqual({ theme: 'dark', autoLockMinutes: 0, feeLevel: 3 });
+    expect(root.settings).toEqual({ theme: 'dark', autoLockMinutes: 0, feeLevel: 3, allowWebsiteConnections: false, blockedWebsites: [] });
     expect(root.activeWallet).toBe('1');
     expect(Object.keys(root.wallets as object)).toEqual(['1']);
   });

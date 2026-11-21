@@ -26,6 +26,8 @@ const MESSAGES: Record<ErrorCode, string> = {
   tx_expired: 'This transfer expired. Review it again.',
   tx_not_sent: 'Could not check this transfer with the network. Nothing was sent. Try again.',
   prepared_not_found: 'This transfer expired. Review it again.',
+  website_connections_disabled: 'Website connections are off. Enable them in Settings to connect a website.',
+  website_blocked: 'This website is blocked. You can unblock it in Settings.',
   io_error: 'Could not save your changes. Check disk space and permissions.',
   internal: 'Something went wrong. Try again.',
 };

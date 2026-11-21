@@ -12,10 +12,16 @@
  * contain the same values for the default chain server (checked by
  * tests/unit/web-security.test.ts).
  */
-import type { Plugin } from 'vite';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { transformWithEsbuild, type Plugin } from 'vite';
 import { DEFAULT_RPC_URL, parseRpcUrl } from '../src/backend/web/rpc-url';
 
 export { DEFAULT_RPC_URL };
+
+const HASHED_SDK_PATH = /^\/assets\/sdk\/wallet-sdk-[a-f0-9]{16}\.js$/;
+const SDK_LOADER_PATH = '/wallet-sdk.js';
 
 /**
  * Features the wallet does not use are disabled. Copying to and pasting from
@@ -74,17 +80,19 @@ export function contentSecurityPolicy(rpcOrigin: string, forMeta = false): strin
 }
 
 /** Response headers for every file of the site. */
-export function securityHeaders(rpcOrigin: string): Array<[string, string]> {
-  return [
+export function securityHeaders(rpcOrigin: string, path = '/'): Array<[string, string]> {
+  const headers: Array<[string,string]> = [
     ['Content-Security-Policy', contentSecurityPolicy(rpcOrigin)],
     ['X-Content-Type-Options', 'nosniff'],
     ['Referrer-Policy', 'no-referrer'],
     ['Permissions-Policy', PERMISSIONS_POLICY],
-    ['Cross-Origin-Opener-Policy', 'same-origin'],
+    ['Cross-Origin-Opener-Policy', path === '/connect.html' ? 'unsafe-none' : 'same-origin'],
     ['Cross-Origin-Resource-Policy', 'same-origin'],
     ['X-Frame-Options', 'DENY'],
     ['Strict-Transport-Security', 'max-age=63072000; includeSubDomains'],
   ];
+  if (path === SDK_LOADER_PATH || HASHED_SDK_PATH.test(path)) headers.push(['Access-Control-Allow-Origin', '*']);
+  return headers;
 }
 
 /** Hashed build assets never change; the page itself is always revalidated so updates arrive at once. */
@@ -94,10 +102,15 @@ export const CACHE_REVALIDATE = 'no-cache';
 /** `_headers` file for Netlify and Cloudflare Pages. */
 export function netlifyHeaders(rpcOrigin: string): string {
   const lines = ['/*'];
-  for (const [name, value] of securityHeaders(rpcOrigin)) lines.push(`  ${name}: ${value}`);
+  // COOP only applies to documents. Separate rules avoid conflicting values
+  // on hosts which concatenate headers from multiple matching rules.
+  for (const [name, value] of securityHeaders(rpcOrigin)) if (name !== 'Cross-Origin-Opener-Policy') lines.push(`  ${name}: ${value}`);
   lines.push('', '/assets/*', `  Cache-Control: ${CACHE_IMMUTABLE}`);
-  lines.push('', '/', `  Cache-Control: ${CACHE_REVALIDATE}`);
-  lines.push('', '/index.html', `  Cache-Control: ${CACHE_REVALIDATE}`);
+  lines.push('', '/assets/sdk/*', '  Cross-Origin-Opener-Policy: same-origin', '  Access-Control-Allow-Origin: *');
+  for (const path of ['/', '/index.html', '/connect.html']) {
+    lines.push('', path, `  Cross-Origin-Opener-Policy: ${path === '/connect.html' ? 'unsafe-none' : 'same-origin'}`, `  Cache-Control: ${CACHE_REVALIDATE}`);
+  }
+  lines.push('', SDK_LOADER_PATH, '  Cross-Origin-Opener-Policy: same-origin', '  Access-Control-Allow-Origin: *', `  Cache-Control: ${CACHE_REVALIDATE}`);
   return lines.join('\n') + '\n';
 }
 
@@ -145,12 +158,14 @@ export function injectCspMeta(html: string, rpcOrigin: string): string {
 /** Vite plugin for web builds (`vite build --mode web`, see the file header). */
 export function webSecurityPlugin(): Plugin {
   let origin = '';
+  let outputDir = '';
   return {
     name: 'mmx-wallet:web-security',
     enforce: 'post',
     configResolved(config) {
       const raw = (config.env.VITE_RPC_URL as string | undefined) ?? process.env.VITE_RPC_URL;
       origin = parseRpcUrl(raw || DEFAULT_RPC_URL).origin;
+      outputDir = resolve(config.root, config.build.outDir);
     },
     transformIndexHtml: {
       order: 'post',
@@ -159,19 +174,41 @@ export function webSecurityPlugin(): Plugin {
         return injectCspMeta(html, origin);
       },
     },
-    generateBundle(_options, bundle) {
+    async generateBundle(_options, bundle) {
       const page = bundle['index.html'];
       if (!page || page.type !== 'asset') this.error('web build: index.html missing from the output');
       const html = typeof page.source === 'string' ? page.source : new TextDecoder().decode(page.source);
       const problems = findInlineCode(html);
       if (problems.length > 0) this.error(`index.html must not contain inline code: ${problems.join('; ')}`);
       if (!html.includes(cspMetaTag(origin))) this.error('index.html is missing the Content-Security-Policy');
+      for (const [name, output] of Object.entries(bundle)) {
+        if (output.type !== 'asset' || !name.endsWith('.html')) continue;
+        const source = String(output.source);
+        if (findInlineCode(source).length || !source.includes(cspMetaTag(origin))) this.error(`${name} must have CSP and no inline code`);
+      }
       this.emitFile({ type: 'asset', fileName: '_headers', source: netlifyHeaders(origin) });
+      const sdk = readFileSync(new URL('../src/connect/sdk.ts', import.meta.url), 'utf8');
+      const built = await transformWithEsbuild(sdk, 'wallet-sdk.ts', { target:'es2022', format:'esm', minify:true });
+      const hash = createHash('sha256').update(built.code).digest('hex').slice(0, 16);
+      const fileName = `assets/sdk/wallet-sdk-${hash}.js`;
+      this.emitFile({ type:'asset', fileName, source:built.code });
+      this.emitFile({ type:'asset', fileName:SDK_LOADER_PATH.slice(1), source:`export * from './${fileName}';\n` });
     },
     configurePreviewServer(server) {
-      const headers = securityHeaders(origin);
-      server.middlewares.use((_req, res, next) => {
-        for (const [name, value] of headers) res.setHeader(name, value);
+      server.middlewares.use((req, res, next) => {
+        const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+        for (const [name, value] of securityHeaders(origin,path)) res.setHeader(name, value);
+        if (HASHED_SDK_PATH.test(path)) {
+          // Never cache a missing hash as immutable during deployment changes.
+          if (!existsSync(resolve(outputDir, `.${path}`))) {
+            res.statusCode = 404;
+            res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('Content-Type', 'text/plain');
+            res.end('SDK build not found.');
+            return;
+          }
+          res.setHeader('Cache-Control', CACHE_IMMUTABLE);
+        } else if (path === SDK_LOADER_PATH) res.setHeader('Cache-Control', CACHE_REVALIDATE);
         next();
       });
     },

@@ -3,8 +3,10 @@
 
 import argparse
 import gzip
+import hashlib
 import http.client
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -22,7 +24,7 @@ def docker(*args, check=True):
 
 
 @contextmanager
-def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explorer="explore.mmx.network", website="mmx.network", website_www="www.mmx.network", overrides=False, root_console=False):
+def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explorer="explore.mmx.network", website="mmx.network", website_www="www.mmx.network", overrides=False, root_console=False, vm_limits=False):
     token = str(uuid.uuid4())
     args = [
         "run", "--detach", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
@@ -33,6 +35,8 @@ def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explo
     if overrides:
         args += ["--env", f"PORT={port}", "--env", f"WALLET_HOST={wallet}", "--env", f"EXPLORER_HOST={explorer}",
                  "--env", f"WEBSITE_HOST={website}", "--env", f"WEBSITE_WWW_HOST={website_www}"]
+    if vm_limits:
+        args += ["--ulimit", "nofile=1024:4096", "--cpuset-cpus", str(min(os.sched_getaffinity(0)))]
     if root_console:
         # VM supervisors can open console pipes as root before dropping UID.
         # Keep those inherited descriptors, then exec the image's actual command
@@ -71,6 +75,16 @@ def running_image(image, image_id, port=8080, wallet="wallet.mmx.network", explo
 
 
 def request(port, host, path="/", method="GET", headers=None):
+    # Content checks deliberately make more requests than a normal page load.
+    # Exercise the limiter separately; honor its backoff during content checks.
+    for attempt in range(4):
+        result = request_once(port, host, path, method, headers)
+        if result[0] != 429 or attempt == 3:
+            return result
+        time.sleep(int(result[1]["retry-after"]) + 0.1)
+
+
+def request_once(port, host, path="/", method="GET", headers=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
     try:
         connection.request(method, path, headers={"Host": f"{host}:{port}", **(headers or {})})
@@ -80,11 +94,11 @@ def request(port, host, path="/", method="GET", headers=None):
         connection.close()
 
 
-def security(headers, rpc_origin, wallet, website=False):
+def security(headers, rpc_origin, wallet, website=False, connection=False):
     policy = headers["content-security-policy"]
     if website:
         assert rpc_origin not in policy, policy
-        assert "connect-src 'none'" in policy, policy
+        assert "connect-src https://api.github.com/repos/mmx-network/mmx-rust-node/releases;" in policy, policy
     else:
         assert f"connect-src 'self' {rpc_origin}" in policy, policy
     assert "frame-ancestors 'none'" in policy
@@ -94,7 +108,7 @@ def security(headers, rpc_origin, wallet, website=False):
     assert headers["referrer-policy"] == "no-referrer"
     assert "set-cookie" not in headers
     if wallet:
-        assert headers["cross-origin-opener-policy"] == "same-origin"
+        assert headers["cross-origin-opener-policy"] == ("unsafe-none" if connection else "same-origin")
         assert headers["cross-origin-resource-policy"] == "same-origin"
         assert "clipboard-read=(self)" in headers["permissions-policy"]
         assert "max-age=" in headers["strict-transport-security"]
@@ -175,6 +189,39 @@ def check_site(port, host, rpc_origin, wallet=False, website=False):
     assert status == 200, (host, status)
     title = b"<title>MMX" if website else b"<title>MMX Wallet</title>" if wallet else b"<title>MMX Explorer"
     assert title in html
+    if wallet:
+        status, connect_headers, connect_html = request(port, host, "/connect.html")
+        assert status == 200 and b"/assets/" in connect_html
+        assert b'noindex' in connect_html
+        assert connect_headers["cache-control"] == "no-cache"
+        assert "access-control-allow-origin" not in connect_headers
+        security(connect_headers, rpc_origin, True, connection=True)
+        status, sdk_headers, sdk = request(port, host, "/wallet-sdk.js")
+        assert status == 200
+        assert "javascript" in sdk_headers["content-type"]
+        assert sdk_headers["access-control-allow-origin"] == "*"
+        assert sdk_headers["cache-control"] == "no-cache"
+        security(sdk_headers, rpc_origin, True)
+        sdk_path = re.fullmatch(rb"export \* from '\./(assets/sdk/wallet-sdk-([a-f0-9]{16})\.js)';\n", sdk)
+        assert sdk_path, sdk
+        path = "/" + sdk_path[1].decode()
+        status, asset_headers, sdk = request(port, host, path)
+        assert status == 200 and b"sendTransaction" in sdk and b"connect.html" in sdk
+        assert hashlib.sha256(sdk).hexdigest()[:16] == sdk_path[2].decode()
+        assert "javascript" in asset_headers["content-type"]
+        assert asset_headers["access-control-allow-origin"] == "*"
+        assert asset_headers["cache-control"] == "public, max-age=31536000, immutable"
+        security(asset_headers, rpc_origin, True)
+        status, cached_headers, body = request(port, host, path, headers={"If-None-Match": asset_headers["etag"]})
+        assert status == 304 and not body
+        assert cached_headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert cached_headers["access-control-allow-origin"] == "*"
+        status, compressed_headers, body = request(port, host, path, headers={"Via": "BunnyCDN", "Accept-Encoding": "gzip"})
+        assert status == 200 and compressed_headers["content-encoding"] == "gzip" and gzip.decompress(body) == sdk
+        assert compressed_headers["cache-control"] == "public, max-age=31536000, immutable"
+        status, missing_headers, _ = request(port, host, "/assets/sdk/wallet-sdk-0000000000000000.js")
+        assert status == 404 and missing_headers["cache-control"] == "no-store"
+        assert "access-control-allow-origin" not in headers
     check_search(port, host, html, rpc_origin, wallet, website)
     links = SearchMetadata(html.decode()).links
     for relation, name, content_type in [
@@ -357,10 +404,13 @@ def main():
         assert headers["cache-control"] == "no-cache"
         docker("exec", container, "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18080/healthz")
 
-    with running_image(args.image, image_id) as (_, port, wallet, explorer, website, website_www):
+    with running_image(args.image, image_id, vm_limits=True) as (container, port, wallet, explorer, website, website_www):
         for host, title in [(wallet, b"MMX Wallet"), (explorer, b"MMX Explorer"), (website, b"<title>MMX"), (website_www, b"<title>MMX")]:
             status, _, body = request(port, host)
             assert status == 200 and title in body
+        logs = docker("logs", container).stderr
+        assert "Cannot raise FD limit" not in logs and "exceed open file resource limit" not in logs
+        assert "compete for the same CPU" not in logs
 
     with running_image(args.image, image_id, root_console=True) as (container, port, wallet, explorer, website, website_www):
         status = docker("exec", "--user", "nginx", container, "cat", "/proc/1/status").stdout
@@ -383,6 +433,7 @@ def main():
         ["WEBSITE_HOST=bad;host"], ["WEBSITE_WWW_HOST=bad;host"],
         ["WALLET_HOST=EXPLORE.MMX.NETWORK"], ["WEBSITE_HOST=WALLET.MMX.NETWORK"],
         ["WEBSITE_WWW_HOST=EXPLORE.MMX.NETWORK"], ["WEBSITE_WWW_HOST=MMX.NETWORK"],
+        ["TRUSTED_PROXY_CIDRS=not-a-network"], ["CLIENT_IP_HEADER=bad;header"],
     ]:
         env = [part for setting in settings for part in ["--env", setting]]
         result = docker("run", "--rm", "--network", "none", *env, args.image, "true", check=False)

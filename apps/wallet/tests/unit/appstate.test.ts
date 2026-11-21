@@ -41,7 +41,7 @@ describe('sanitizeAppState', () => {
       activeWallet: 'wallet.dat',
       labels: { 'wallet.dat': { 0: 'Main', 5: 'Rent' } },
       contacts: [{ id: 'c-1', name: 'Alice', address: A, note: 'Friend' }],
-      settings: { theme: 'dark', autoLockMinutes: 30, feeLevel: 5, rpcUrl: 'https://node.example' },
+      settings: { theme: 'dark', autoLockMinutes: 30, feeLevel: 5, rpcUrl: 'https://node.example', allowWebsiteConnections: false, blockedWebsites: [] },
     });
   });
 
@@ -54,6 +54,8 @@ describe('sanitizeAppState', () => {
       theme: 'system',
       autoLockMinutes: 5,
       feeLevel: 1,
+      allowWebsiteConnections: false,
+      blockedWebsites: [],
     });
     expect(sanitizeSettings({ autoLockMinutes: 1.5 }, 'desktop').autoLockMinutes).toBe(5);
     expect(sanitizeSettings({ autoLockMinutes: 100000 }, 'desktop').autoLockMinutes).toBe(5);

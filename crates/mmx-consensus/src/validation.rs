@@ -205,6 +205,7 @@ pub(crate) fn is_valid(r: &Record, p: &ValidationParams) -> Result<bool> {
                 }
         }
         "mmx.exec_error_t" => r.text("message")?.len() <= 160,
+        #[cfg(not(target_arch = "wasm32"))]
         "mmx.ProofOfSpace" | "mmx.ProofOfSpaceOG" | "mmx.ProofOfSpaceNFT" => {
             crate::proof::is_valid(r)?
         }

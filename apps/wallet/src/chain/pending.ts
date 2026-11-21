@@ -17,6 +17,11 @@ export interface PendingTx {
   decimals: number;
   amount: bigint;
   fee: bigint;
+  /** Custom calls may fund several currencies and recipients. */
+  custom?: {
+    reserved: Array<{contract:string;amount:bigint}>;
+    outgoing: Array<{contract:string;symbol:string;decimals:number;amount:bigint}>;
+  };
   memo?: string;
   /** Last height at which the transaction can be included. */
   expires: number;
@@ -90,7 +95,8 @@ export function pendingOutgoing(
   const out = new Map<string, bigint>();
   for (const p of list) {
     if (!holdsFunds(p)) continue;
-    if (!ownAddresses.has(p.to)) addTo(out, p.contract, p.amount);
+    if (p.custom) for (const row of p.custom.outgoing) addTo(out,row.contract,row.amount);
+    else if (!ownAddresses.has(p.to)) addTo(out, p.contract, p.amount);
     addTo(out, nativeContract, p.fee);
   }
   return out;
@@ -105,7 +111,8 @@ export function pendingReserved(list: readonly PendingTx[], nativeContract: stri
   const out = new Map<string, bigint>();
   for (const p of list) {
     if (!holdsFunds(p)) continue;
-    addTo(out, p.contract, p.amount);
+    if (p.custom) for (const row of p.custom.reserved) addTo(out,row.contract,row.amount);
+    else addTo(out, p.contract, p.amount);
     addTo(out, nativeContract, p.fee);
   }
   return out;

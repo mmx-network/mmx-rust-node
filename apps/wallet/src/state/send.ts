@@ -535,5 +535,9 @@ export function formatPrepared(atomic: bigint, decimals: number, symbol: string)
   return `${formatAmount(atomic, decimals)} ${symbol}`;
 }
 
-/** The wallet requires its passphrase for sending (desktop locked wallet). */
-export const sendNeedsPassphrase = computed(() => sendFlow.value.needsPassphrase && activeWallet.value?.withPassphrase === true);
+/**
+ * The wallet must be unlocked before sending: with its passphrase, or on the
+ * web with its recovery phrase (from the password manager) for a wallet
+ * without one.
+ */
+export const sendNeedsUnlock = computed(() => sendFlow.value.needsPassphrase && activeWallet.value !== undefined);

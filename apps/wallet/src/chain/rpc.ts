@@ -145,22 +145,22 @@ export function parseNodeInfo(v: unknown): NodeInfo {
   };
 }
 
-/** `/address?id=` balances; NFTs are skipped, duplicates rejected. */
-export function parseAddressBalances(v: unknown, params: ChainParams): BalanceRow[] {
+/** `/address?id=` balances; custom signing can opt into NFT inputs. */
+export function parseAddressBalances(v: unknown, params: ChainParams, includeNfts = false): BalanceRow[] {
   const o = asObject(v, 'balances');
   const rows: BalanceRow[] = [];
   const seen = new Set<string>();
   for (const item of asArray(o.balances, 'balances')) {
     const row = asObject(item, 'balance');
     const contract = address(row, 'contract');
-    if (row.is_nft === true) continue;
+    if (row.is_nft === true && !includeNfts) continue;
     if (seen.has(contract)) throw invalid('duplicate balance');
     seen.add(contract);
     rows.push({
       contract,
       amount: atomic(row.amount),
-      decimals: decimals(row, contract, params),
-      symbol: symbolFor(row, contract),
+      decimals: row.is_nft === true ? 0 : decimals(row, contract, params),
+      symbol: row.is_nft === true ? 'NFT' : symbolFor(row, contract),
       native: contract === NATIVE_CONTRACT,
     });
   }

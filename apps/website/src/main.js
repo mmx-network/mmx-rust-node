@@ -1,4 +1,7 @@
 import './style.css';
+import { walletDownloadLinks } from './wallet-download.js';
+
+walletDownloadLinks(document.querySelectorAll('[data-wallet-download]'));
 
 const root = document.documentElement;
 const toggle = document.querySelector('[data-theme-toggle]');

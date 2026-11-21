@@ -51,8 +51,17 @@ directory):
 | File | Server |
 | --- | --- |
 | `Caddyfile` | Caddy 2 |
-| `nginx.conf` + `nginx-security-headers.conf` | nginx |
+| `nginx.conf` + `nginx-security-headers.conf` + `nginx-connect-security-headers.conf` | nginx |
 | `_headers` (also generated into `dist/web`) | Netlify, Cloudflare Pages |
+
+The [website connection API](../../../docs/wallet-connect.md) is disabled by
+default in wallet Settings. Its popup `/connect.html` needs COOP `unsafe-none`;
+the main wallet keeps `same-origin`. `/wallet-sdk.js` is a small public ESM
+loader for `/assets/sdk/wallet-sdk-<hash>.js`. All SDK paths need CORS `*`.
+The loader and popup use `Cache-Control: no-cache`; hashed SDK code uses
+`public, max-age=31536000, immutable`. Preserve the supplied
+path-specific rules in CDN overrides. For nginx, install both security-header
+snippets at the paths specified at the top of `nginx.conf`.
 
 The files here contain the policy for `https://rpc.mmx.network`. With a
 different `VITE_RPC_URL`, copy the `Content-Security-Policy` line from the
@@ -81,7 +90,8 @@ Requirements for any other server:
 
 Build the new version and replace the served files in one step (for example by
 switching a symlink to the new directory). Old asset files can be removed after
-a day.
+a day, except SDK builds pinned by third-party websites: keep those hashed
+SDK files available for as long as the integrations use them.
 
 ## Check
 

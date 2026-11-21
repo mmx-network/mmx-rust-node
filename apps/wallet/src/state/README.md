@@ -164,7 +164,7 @@ moved amount. Labels: `REWARD_LABELS`; `moved` →
 | `backToEdit()` | `Promise<void>` | Leave review without sending. |
 | `finishSend()` | `void` | "Done": clears the form. |
 | `discardSend()` | `Promise<void>` | Reset everything. |
-| `sendNeedsPassphrase` | `Computed<boolean>` | Show AuthorizationDialog: passphrase, or recovery phrase for a regular web wallet. |
+| `sendNeedsUnlock` | `Computed<boolean>` | Show AuthorizationDialog: passphrase, or recovery phrase for a regular web wallet. |
 | `unlockForSend(UnlockRequest)` | `Promise<boolean>` | Continues to review on success; `error.field === 'passphrase'` on failure. |
 | `amountErrorMessage`, `checkDraft`, `matchesRequest`, `formatPrepared`, `PREPARED_TTL_MS` | helpers | |
 

@@ -152,3 +152,36 @@ impl Wallet {
         })
     }
 }
+
+/// Website authentication is separated from transaction hashes and binds the
+/// exact requesting origin, network, primary address and UTF-8 message.
+impl Wallet {
+    pub fn sign_website_message(
+        &self,
+        origin: &str,
+        network: &str,
+        message: &str,
+    ) -> Result<serde_json::Value> {
+        if origin.is_empty()
+            || origin.len() > 2048
+            || network.is_empty()
+            || network.len() > 64
+            || origin.chars().any(char::is_control)
+            || network.chars().any(char::is_control)
+            || message.is_empty()
+            || message.len() > 4096
+        {
+            return Err(Error::InvalidArgument("invalid website message".into()));
+        }
+        let address = *self
+            .addresses
+            .first()
+            .ok_or_else(|| Error::InvalidArgument("empty wallet".into()))?;
+        let payload = format!("MMX/website_message/v1\n{origin}\n{network}\n{address}\n{message}");
+        let proof = self.sign_message(address, &sha256(format!("MMX/sign_message/{payload}")))?;
+        Ok(
+            serde_json::json!({"address":address.to_string(), "origin":origin, "network":network,
+            "message":message, "public_key":hex::encode(proof.pubkey), "signature":hex::encode(proof.signature)}),
+        )
+    }
+}

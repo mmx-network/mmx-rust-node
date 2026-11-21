@@ -46,8 +46,13 @@ The copy distinguishes consensus-driven supply from a guarantee of price
 stability and avoids presenting potential transaction capacity as measured
 throughput. The node download link continues to point to the published C++
 node releases; the desktop wallet button and footer link point to the Rust
-repository's [GitHub Releases](https://github.com/mmx-network/mmx-rust-node/releases),
-where the Wallet workflow automatically publishes tested installers. Rust
+repository's latest published desktop wallet release, selected by its `wallet-v`
+tag and publication date. Node releases, drafts and prereleases are excluded.
+The GitHub release lookup starts only when a visitor hovers, focuses or clicks
+a download link, and both links share one lookup. It follows release pagination
+with a five-second timeout. Without JavaScript or if the API is unavailable,
+the links open the [wallet-only release list](https://github.com/mmx-network/mmx-rust-node/releases?q=wallet-v&expanded=true).
+The Wallet workflow automatically publishes tested installers. Rust
 source and the new web apps are linked separately. The
 existing SafeTrade and NonKYC market links are retained from `mmx-website`.
 
@@ -68,7 +73,8 @@ The static HTML includes a canonical URL, search/social descriptions, and
 to the homepage sitemap; section anchors are not separate sitemap entries.
 `public/_headers` is the
 production policy source; its CSP is also embedded in the built HTML. There
-are no API connections, inline scripts, or inline styles. Only fingerprinted
+are no chain API connections, inline scripts, or inline styles. The CSP permits
+only the repository's public GitHub releases API for the download lookup. Only fingerprinted
 `/assets/` files receive immutable caching in the image.
 
 The root Dockerfile builds this site into the shared `mmx-apps` image. nginx

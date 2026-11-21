@@ -5,6 +5,8 @@
 !Cargo.lock
 !crates/
 !crates/**
+!schema/
+!schema/**
 !vendor/
 !vendor/vnx-rust/
 !vendor/vnx-rust/**
