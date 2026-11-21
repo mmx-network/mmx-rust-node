@@ -774,8 +774,8 @@ impl RelayPeer {
     ) -> Result<()> {
         // Consensus first; receipts are immediate and independent of the
         // randomized body schedule. No state/cache lock spans socket I/O.
-        for class in 0..2 {
-            let (next, ids) = relay.receipts_since(self.acknowledgements[class], class)?;
+        for (class, acknowledgement) in self.acknowledgements.iter_mut().enumerate() {
+            let (next, ids) = relay.receipts_since(*acknowledgement, class)?;
             for id in ids {
                 send(&record(
                     "mmx.ReceiveNote",
@@ -785,7 +785,7 @@ impl RelayPeer {
                     ],
                 ))?;
             }
-            self.acknowledgements[class] = next;
+            *acknowledgement = next;
         }
         for class in 0..2 {
             let ready = {
