@@ -5,7 +5,7 @@ The page compares native SVG icons on light and dark backgrounds, including
 16, 24, 36, and 58 px samples. Each SVG is self-contained, with no fonts,
 embedded raster images, or external resources.
 
-The current matte coin is based on **08 — Wide border** (`simple-coin.svg`).
+The current light-bloom coin is based on **08 — Wide border** (`simple-coin.svg`).
 The website, wallet and explorer interfaces, favicons, and desktop icons derive
 from the canonical source at `../../wallet/branding/mmx-logo.svg`.
 

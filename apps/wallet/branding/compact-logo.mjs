@@ -1,8 +1,8 @@
-// Keep the face, rim, and glyph shading in small icons and omit the grain.
+// The vector rim and glyph keep a soft edge when the bloom is too small to read.
 export function compactLogo(svg) {
   return svg
-    .replace(/<filter\b[^>]*\bid="surface-grain"[\s\S]*?<\/filter>/, '')
-    .replace(/<circle\b[^>]*\bfilter="url\(#surface-grain\)"[^>]*\/>/, '')
+    .replace(/<filter\b[^>]*\bid="glyph-bloom"[\s\S]*?<\/filter>/, '')
+    .replace(/<use\b[^>]*\bfilter="url\(#glyph-bloom\)"[^>]*\/>/, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/\n\s*\n/g, '\n');
 }
