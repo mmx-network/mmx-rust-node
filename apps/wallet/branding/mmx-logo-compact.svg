@@ -1,27 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
   <title>MMX</title>
-  <desc>MMX with an inset rim and a close violet shadow beneath the glyph.</desc>
+  <desc>Compact MMX with a violet face and a high-contrast glyph.</desc>
   <defs>
     <path id="mmx-glyph" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
     <linearGradient id="base" gradientUnits="userSpaceOnUse" x1="32" y1="16" x2="224" y2="240">
       <stop stop-color="#6336a9"/>
       <stop offset="1" stop-color="#281643"/>
     </linearGradient>
-    <radialGradient id="rim" gradientUnits="userSpaceOnUse" cx="128" cy="128" r="128">
-      <stop offset="0.875" stop-color="#cfa9ff" stop-opacity="0"/>
-      <stop offset="0.9" stop-color="#cfa9ff" stop-opacity="0.18"/>
-      <stop offset="0.92" stop-color="#cfa9ff" stop-opacity="0"/>
-      <stop offset="0.938" stop-color="#c084fc" stop-opacity="0"/>
-      <stop offset="0.964" stop-color="#c084fc" stop-opacity="0.56"/>
-      <stop offset="1" stop-color="#c084fc" stop-opacity="0.32"/>
-    </radialGradient>
   </defs>
   <g transform="translate(4 4) scale(0.96875)">
     <circle cx="128" cy="128" r="128" fill="url(#base)"/>
-    <circle cx="128" cy="128" r="128" fill="url(#rim)"/>
+    <circle cx="128" cy="128" r="123.5" fill="none" stroke="#bf91f2" stroke-opacity="0.62" stroke-width="9"/>
+    <circle cx="128" cy="128" r="113" fill="none" stroke="#d0aff6" stroke-opacity="0.24" stroke-width="3.5"/>
     <g transform="rotate(-9 128 128) translate(128 128) scale(1.1) translate(-128 -128)">
-      <use href="#mmx-glyph" fill="#1c0b37" opacity="0.35" transform="translate(0 3)"/>
-      <use href="#mmx-glyph" fill="#f6eaff"/>
+      <use href="#mmx-glyph" fill="#fff8ff" stroke="#fff8ff" stroke-width="2" stroke-linejoin="round"/>
     </g>
   </g>
 </svg>

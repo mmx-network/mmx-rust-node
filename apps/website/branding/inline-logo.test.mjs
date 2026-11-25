@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { inlineLogos } from './inline-logo.mjs';
+import { compactLogo, faviconLogo } from '../../wallet/branding/compact-logo.mjs';
 
 test('inlines independent vector logos with local, collision-free references', () => {
   const sizes = [36, 188, 58, 36];
@@ -30,4 +32,17 @@ test('leaves other images alone and rejects dimensionless logo placeholders', ()
   const html = '<img src="/other.svg" alt="Other image">';
   assert.equal(inlineLogos(html), html);
   assert.throws(() => inlineLogos('<img data-mmx-logo src="/mmx-logo.svg">'), /dimensions/);
+});
+
+test('ships the generated compact artwork and dedicated 16px favicon', () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  const canonical = read('../../wallet/branding/mmx-logo.svg');
+  const compact = compactLogo(canonical);
+  const favicon = faviconLogo(canonical);
+  assert.equal(read('../../wallet/branding/mmx-logo-compact.svg'), compact);
+  assert.match(favicon, /width="16" height="16"/);
+  assert.notEqual(favicon, compact);
+  for (const app of ['wallet', 'explorer', 'website']) {
+    assert.equal(read(`../../${app}/public/favicon.svg`), favicon);
+  }
 });

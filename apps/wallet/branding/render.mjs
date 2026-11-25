@@ -1,13 +1,13 @@
 // Regenerate every application icon from the selected, self-contained SVG.
 // From apps/wallet: node branding/render.mjs
 // Optional: --logo <png> also exports the unpadded logo at 256 px.
-import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { compactLogo } from './compact-logo.mjs';
+import { compactLogo, faviconLogo } from './compact-logo.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const app = resolve(here, '..');
@@ -22,8 +22,9 @@ const document = (size, title, body) =>
 export async function brandJobs() {
   const svg = await readFile(join(here, 'mmx-logo.svg'), 'utf8');
   const compact = compactLogo(svg);
-  // At common dock sizes, use a 44-pixel face in a 48-pixel canvas, with no
-  // glow. Larger app-menu artwork keeps its existing padding and effects.
+  const favicon = faviconLogo(svg);
+  // At common dock sizes, use a 44-pixel face in a 48-pixel canvas.
+  // Larger app-menu artwork keeps its existing padding and effects.
   const dock = compact.replace('viewBox="0 0 256 256"', 'viewBox="-7 -7 270 270"');
   const body = svg.replace(/<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
     .replace(/<title>.*?<\/title>/, '').replace(/<desc>.*?<\/desc>/, '').trim();
@@ -42,7 +43,7 @@ export async function brandJobs() {
   for (const destination of [
     join(app, 'public/favicon.svg'), join(explorer, 'public/favicon.svg'),
     join(website, 'public/favicon.svg'),
-  ]) await writeFile(destination, compact);
+  ]) await writeFile(destination, favicon);
   await writeFile(join(website, 'public/mmx-logo.svg'), svg);
 
   const share = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
@@ -74,7 +75,7 @@ export async function brandJobs() {
   for (const [name, size] of [
     ['32x32.png', 32], ['48x48.png', 48], ['64x64.png', 64], ['128x128.png', 128],
     ['128x128@2x.png', 256], ['icon.png', 512],
-  ]) jobs.push({ svg: size === 48 || size === 64 ? dock : appIcon, size, out: join(app, 'src-tauri/icons', name) });
+  ]) jobs.push({ svg: size <= 64 ? dock : appIcon, size, out: join(app, 'src-tauri/icons', name) });
   jobs.push({ svg: share, width: 1200, height: 630, out: join(website, 'public/share.png') });
   const logoIndex = process.argv.indexOf('--logo');
   if (logoIndex > 0 && process.argv[logoIndex + 1]) {
@@ -83,16 +84,75 @@ export async function brandJobs() {
   return jobs;
 }
 
-/** Use Tauri's encoder, retaining only the desktop formats tracked by the app. */
+function icoFrames(icon) {
+  return Array.from({ length: icon.readUInt16LE(4) }, (_, index) => {
+    const entry = 6 + index * 16;
+    const size = icon[entry] || 256;
+    const length = icon.readUInt32LE(entry + 8);
+    const offset = icon.readUInt32LE(entry + 12);
+    return { size, data: icon.subarray(offset, offset + length) };
+  });
+}
+
+function mergeIco(full, compact) {
+  const frames = icoFrames(full);
+  const smaller = new Map(icoFrames(compact).map(({ size, data }) => [size, data]));
+  const header = Buffer.from(full.subarray(0, 6 + frames.length * 16));
+  let offset = header.length;
+  const images = frames.map(({ size, data }, index) => {
+    const image = (size <= 64 && smaller.get(size)) || data;
+    const entry = 6 + index * 16;
+    header.writeUInt32LE(image.length, entry + 8);
+    header.writeUInt32LE(offset, entry + 12);
+    offset += image.length;
+    return image;
+  });
+  return Buffer.concat([header, ...images]);
+}
+
+function icnsChunks(icon) {
+  const result = new Map();
+  for (let offset = 8; offset < icon.length;) {
+    const type = icon.toString('ascii', offset, offset + 4);
+    const length = icon.readUInt32BE(offset + 4);
+    if (length < 8 || offset + length > icon.length) throw new Error('Invalid ICNS chunk length');
+    result.set(type, icon.subarray(offset, offset + length));
+    offset += length;
+  }
+  return result;
+}
+
+function mergeIcns(full, compact) {
+  const chunks = icnsChunks(full);
+  const smaller = icnsChunks(compact);
+  // 16 and 32 point artwork, including Retina images and legacy alpha masks.
+  for (const type of ['is32', 's8mk', 'il32', 'l8mk', 'ic11', 'ic12']) {
+    if (chunks.has(type) && smaller.has(type)) chunks.set(type, smaller.get(type));
+  }
+  const icon = Buffer.concat([full.subarray(0, 8), ...chunks.values()]);
+  icon.writeUInt32BE(icon.length, 4);
+  return icon;
+}
+
+/** Use Tauri to encode the full and compact artwork, then select frames by size. */
 export async function desktopContainers() {
   const output = await mkdtemp(join(tmpdir(), 'mmx-brand-icons-'));
+  const icons = join(app, 'src-tauri/icons');
+  const full = join(output, 'full');
+  const compact = join(output, 'compact');
   try {
-    await execute(process.execPath, [
-      join(app, 'node_modules/@tauri-apps/cli/tauri.js'), 'icon',
-      join(here, 'app-icon.png'), '--output', output,
-    ], { cwd: app, maxBuffer: 1024 * 1024 });
-    for (const name of ['icon.ico', 'icon.icns']) {
-      await copyFile(join(output, name), join(app, 'src-tauri/icons', name));
+    for (const [input, destination] of [
+      [join(here, 'app-icon.png'), full],
+      [join(icons, 'window-icon.png'), compact],
+    ]) {
+      await execute(process.execPath, [
+        join(app, 'node_modules/@tauri-apps/cli/tauri.js'), 'icon', input, '--output', destination,
+      ], { cwd: app, maxBuffer: 1024 * 1024 });
+    }
+    for (const [name, merge] of [['icon.ico', mergeIco], ['icon.icns', mergeIcns]]) {
+      const fullIcon = await readFile(join(full, name));
+      const compactIcon = await readFile(join(compact, name));
+      await writeFile(join(icons, name), merge(fullIcon, compactIcon));
     }
   } finally {
     await rm(output, { recursive: true, force: true });

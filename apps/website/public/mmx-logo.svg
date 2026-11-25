@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
   <title>MMX</title>
-  <desc>MMX with an inset rim and a close violet shadow beneath the glyph.</desc>
+  <desc>MMX with an inset rim, a close violet shadow, and a light bloom around the glyph.</desc>
   <defs>
     <path id="mmx-glyph" d="M94.29 72H117.66L174.78 184H138.34L87.16 83.64A8 8 0 0 1 94.29 72ZM147.08 72H183.48L158.65 120.69L140.45 85ZM108.92 184H72.52L97.35 135.31L115.55 171ZM112.77 34H128.54L126.6 58.2H110.83ZM142.19 34H157.95L156.01 58.2H140.25ZM99.99 197.8H115.75L113.81 222H98.05ZM129.4 197.8H145.17L143.23 222H127.46Z"/>
     <linearGradient id="base" gradientUnits="userSpaceOnUse" x1="32" y1="16" x2="224" y2="240">
@@ -18,6 +18,9 @@
     <filter id="glyph-shadow" filterUnits="userSpaceOnUse" x="0" y="0" width="256" height="256" color-interpolation-filters="sRGB">
       <feGaussianBlur stdDeviation="1.8"/>
     </filter>
+    <filter id="glyph-bloom" filterUnits="userSpaceOnUse" x="0" y="0" width="256" height="256" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="1.65"/>
+    </filter>
   </defs>
   <!-- A transparent gutter keeps the circular rim away from the image's clip edge. -->
   <g transform="translate(4 4) scale(0.96875)">
@@ -25,6 +28,7 @@
     <circle cx="128" cy="128" r="128" fill="url(#rim)"/>
     <g transform="rotate(-9 128 128) translate(128 128) scale(1.1) translate(-128 -128)">
       <use href="#mmx-glyph" fill="#1c0b37" opacity="0.6" transform="translate(0 3)" filter="url(#glyph-shadow)"/>
+      <use href="#mmx-glyph" fill="#d5baff" opacity="0.55" filter="url(#glyph-bloom)"/>
       <use href="#mmx-glyph" fill="#f6eaff"/>
     </g>
   </g>
