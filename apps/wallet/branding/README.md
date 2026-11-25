@@ -1,20 +1,17 @@
 # MMX application branding
 
-`mmx-logo.svg` is the canonical color icon: the selected **08 — Wide border**
-design, with a violet gradient, larger white X, restrained halo, plain wide
-border, and -9-degree rotation. It is a self-contained SVG without embedded
-raster images, fonts, or external resources.
+`mmx-logo.svg` is the canonical color icon. It uses the **08 — Wide border**
+geometry with a matte violet face, a soft rim, and fine grain. It is a
+self-contained SVG without embedded raster images, fonts, or external resources.
 
-The halo is a separate filtered copy beneath the solid, unfiltered glyph so
-the X stays sharp at navigation sizes. Avoid filtering the whole logo for
-outer shadows; the rail uses a circular CSS box shadow instead.
-The artwork has a four-unit transparent gutter so antialiasing at the coin's
-rim stays inside the SVG viewport instead of being clipped at its edges.
+The grain is a separate overlay, and the artwork has a four-unit transparent
+gutter so antialiasing at the rim stays inside the SVG viewport. The website
+hero and wallet rail use circular CSS box shadows around the mark.
 
 `mmx-logo-compact.svg` is generated from the canonical SVG by `compact-logo.mjs`.
-It retains the same glyph, gradients, border, padding and rotation, and omits
-the halo, highlight mask and halo clip. `BrandMark` uses this version at 64 px
-and below in the wallet and explorer; larger marks retain the full treatment.
+It retains the glyph, shading, padding, and rotation. `BrandMark` uses this
+version at 64 px and below in the wallet and explorer, and larger marks
+include the grain overlay.
 The glyph-only variant remains available for monochrome interface decorations.
 The website inserts the canonical SVG into its HTML for the header, footer,
 wallet illustration and hero art, with unique IDs for each instance. Its small

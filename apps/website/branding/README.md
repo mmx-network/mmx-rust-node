@@ -5,10 +5,9 @@ The page compares native SVG icons on light and dark backgrounds, including
 16, 24, 36, and 58 px samples. Each SVG is self-contained, with no fonts,
 embedded raster images, or external resources.
 
-The selected design is **08 — Wide border** (`simple-coin.svg`). Its canonical
-application source is `../../wallet/branding/mmx-logo.svg`; the website,
-wallet/explorer interface, favicons, and platform icons derive from that SVG.
-The website hero uses that same asset without adding another rotation or border.
+The current matte coin is based on **08 — Wide border** (`simple-coin.svg`).
+The website, wallet and explorer interfaces, favicons, and desktop icons derive
+from the canonical source at `../../wallet/branding/mmx-logo.svg`.
 
 The original hero treatment is retained in `hero-match.svg` for comparison.
 
