@@ -1,17 +1,17 @@
 # MMX application branding
 
 `mmx-logo.svg` is the canonical color icon. It uses the **08 — Wide border**
-geometry with a softly shaded violet face, feathered rim, and light glyph bloom. It is a
+geometry with a violet face, inset rim, and softly shaded glyph. It is a
 self-contained SVG without embedded raster images, fonts, or external resources.
 
-The bloom sits beneath the glyph, and the artwork has a four-unit transparent
+The shadow sits beneath the glyph, and the artwork has a four-unit transparent
 gutter so antialiasing at the rim stays inside the SVG viewport. The website
 hero and wallet rail use circular CSS box shadows around the mark.
 
 `mmx-logo-compact.svg` is generated from the canonical SVG by `compact-logo.mjs`.
-It retains the glyph, shading, padding, and rotation. `BrandMark` uses this
-version at 64 px and below in the wallet and explorer, and larger marks
-include the bloom.
+It retains the glyph, inset rim, padding, and rotation with a lighter vector
+shadow. `BrandMark` uses this version at 64 px and below in the wallet and
+explorer. Larger marks use the blurred shadow.
 The glyph-only variant remains available for monochrome interface decorations.
 The website inserts the canonical SVG into its HTML for the header, footer,
 wallet illustration and hero art, with unique IDs for each instance. Its small

@@ -10,13 +10,15 @@
       <stop offset="1" stop-color="#281643"/>
     </linearGradient>
     <radialGradient id="rim" gradientUnits="userSpaceOnUse" cx="128" cy="128" r="128">
-      <stop offset="0.934" stop-color="#c084fc" stop-opacity="0"/>
-      <stop offset="0.96" stop-color="#c084fc" stop-opacity="0.55"/>
-      <stop offset="0.985" stop-color="#c084fc" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#c084fc" stop-opacity="0.3"/>
+      <stop offset="0.875" stop-color="#cfa9ff" stop-opacity="0"/>
+      <stop offset="0.9" stop-color="#cfa9ff" stop-opacity="0.18"/>
+      <stop offset="0.92" stop-color="#cfa9ff" stop-opacity="0"/>
+      <stop offset="0.938" stop-color="#c084fc" stop-opacity="0"/>
+      <stop offset="0.964" stop-color="#c084fc" stop-opacity="0.56"/>
+      <stop offset="1" stop-color="#c084fc" stop-opacity="0.32"/>
     </radialGradient>
-    <filter id="glyph-bloom" filterUnits="userSpaceOnUse" x="0" y="0" width="256" height="256" color-interpolation-filters="sRGB">
-      <feGaussianBlur stdDeviation="1.65"/>
+    <filter id="glyph-shadow" filterUnits="userSpaceOnUse" x="0" y="0" width="256" height="256" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="1.8"/>
     </filter>
   </defs>
   <!-- A transparent gutter keeps the circular rim away from the image's clip edge. -->
@@ -24,8 +26,8 @@
     <circle cx="128" cy="128" r="128" fill="url(#base)"/>
     <circle cx="128" cy="128" r="128" fill="url(#rim)"/>
     <g transform="rotate(-9 128 128) translate(128 128) scale(1.1) translate(-128 -128)">
-      <use href="#mmx-glyph" fill="#d5baff" opacity="0.55" filter="url(#glyph-bloom)"/>
-      <use href="#mmx-glyph" fill="#fff" stroke="#fff" stroke-width="1.25" stroke-opacity="0.2" stroke-linejoin="round"/>
+      <use href="#mmx-glyph" fill="#1c0b37" opacity="0.6" transform="translate(0 3)" filter="url(#glyph-shadow)"/>
+      <use href="#mmx-glyph" fill="#f6eaff"/>
     </g>
   </g></g>
   <g fill="#efecf8" font-family="Space Grotesk, Inter, DejaVu Sans, sans-serif">
