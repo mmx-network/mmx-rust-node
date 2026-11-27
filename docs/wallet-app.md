@@ -69,15 +69,15 @@ Build rules (AGENTS.md): `CARGO_INCREMENTAL=0`, debug symbols off, `--jobs 2`,
    must succeed. Existing tests keep passing with default features.
 2. `Wallet::max_transfer_amount(&self, balances, params, currency, memo: Option<&str>, fee_ratio) -> Result<u128>`
    (`fee.rs`) returns the largest amount that `transfer` accepts while its fee payer
-   keeps the fee. It reuses `transfer`'s own input selection (`select`: owned balances
-   of the currency, largest first, the last input possibly partial; fee payer = owned
-   address with the largest native balance left after its inputs) and fee check
-   (`covers_fee`: fee payer's native balance ≥ its own native input +
-   `static_fee(inputs, owners, memo) × fee_ratio / 1024`, static cost ≤ u32::MAX).
+   keeps the fee. It uses `transfer`'s input selection, spending owned balances of
+   the currency largest first. The fee payer is an input address that can cover the
+   fee, with the largest remaining native balance as a fallback. `covers_fee` checks
+   that the static cost fits in `u32` and that the payer's native balance covers its
+   own native input plus `static_fee(inputs, owners, memo) × fee_ratio / 1024`.
    Only owned, nonzero balances of the currency and of MMX are considered.
    - Native currency: sort the owned MMX balances descending; for each prefix of the
-     j largest (sum `P_j`, next balance `n`, `fee_j` = fee with j inputs and j
-     owners) the candidates are `P_j − keep` for keep ∈ {0, 1, fee_j, n, n + 1}
+     j largest (sum `P_j`, `fee_j` = fee with j inputs and j
+     owners) the candidates are `P_j − keep` for keep ∈ {0, fee_j}
      (all of them, or all minus the smallest remainder that leaves the last input
      able to pay). Candidates are tried from the largest down; the first one that
      selection + `covers_fee` accept is the result, else 0. Property tests over
@@ -88,7 +88,8 @@ Build rules (AGENTS.md): `CARGO_INCREMENTAL=0`, debug symbols off, `--jobs 2`,
    - Errors: memo > 64 bytes or fee_ratio < 1024 → `InvalidArgument`.
    The balances passed in are fresh chain balances less the wallet's own pending
    transfers (§6.4 Reservations).
-3. `Wallet::transfer` stays consensus-identical (keep `transactions_match_cpp`).
+3. `Wallet::transfer` signs with the fee payer first and points any input it owns to
+   that signature.
 4. Helper `pub fn static_fee(params, inputs, owners, memo) -> u128` used by the above
    and by the UI fee preview, matching `Transaction::calc_cost` exactly.
 

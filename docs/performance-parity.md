@@ -1229,6 +1229,9 @@ server rather than measured against C++.
   a synthetic fixture; production latency and server-load comparisons remain open.
 - Max and Review fetch `/chain/info`, `/node/info` and fresh balances every time
   (web and desktop) so a transfer is never signed against stale balances.
+- For simple transfers, desktop and web prefer an input owner that can pay the
+  static fee and reuse its signature. The fallback uses the `ECDSA_Wallet::complete`
+  default of selecting the largest remaining native balance.
 - Review signs and checks transfers locally (hashes, cost, signatures, fee payer
   coverage, static fee = static_cost × fee_ratio / 1024). No request carries a
   signed transfer before "Send now"; then a read-only `/node/info` expiry check

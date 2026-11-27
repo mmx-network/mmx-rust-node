@@ -183,7 +183,7 @@ fn build_fixture() -> Value {
             100,
             987654321,
         ),
-        (42, recipient(), native, 2_000_000, Some("x"), 5, 50, 31337),
+        (42, recipient(), native, 4_000_000, Some("x"), 5, 50, 31337),
     ];
     let transfers: Vec<Value> = transfers
         .iter()

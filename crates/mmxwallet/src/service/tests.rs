@@ -1562,8 +1562,8 @@ fn pending_transfers_reserve_their_funds() {
     assert_eq!(max(), 4_000_000 - fee1 - fee1);
     assert_eq!(mock.gets_of("/transaction"), 1);
 
-    // Two addresses (A = 10, B = 8): the second transfer of 6 is funded by
-    // B, since A's remaining funds are reserved.
+    // Two addresses (A = 10, B = 8): A funds the first transfer and B funds
+    // the second after the wallet reserves the first transfer's funds.
     mock.set_mmx(&a[0], 10_000_000);
     mock.set_mmx(&a[1], 8_000_000);
     let p2 = svc
@@ -1572,18 +1572,20 @@ fn pending_transfers_reserve_their_funds() {
     svc.broadcast(&info.id, &p2.txid).unwrap();
     let tx2 = last_sent();
     assert_eq!(inputs(&tx2), [(a[0].clone(), "6000000".to_owned())]);
-    // A keeps 4, so B (8) pays the fee (two signatures).
-    assert_eq!(tx2["sender"], json!(a[1]));
-    let fee2 = fee(1, 2, None, 1);
+    // A keeps 4 and can reuse its input signature to pay the fee.
+    assert_eq!(tx2["sender"], json!(a[0]));
+    assert_eq!(tx2["inputs"][0]["solution"], 0);
     let p3 = svc
-        .prepare_send(&send_request(&info.id, to, "6000000"))
+        .prepare_send(&send_request(&info.id, to, "7960000"))
         .unwrap();
     svc.broadcast(&info.id, &p3.txid).unwrap();
     let tx3 = last_sent();
-    assert_eq!(inputs(&tx3), [(a[1].clone(), "6000000".to_owned())]);
-    // A has 4 left, B 8 - fee - 6: A pays this fee.
+    assert_eq!(inputs(&tx3), [(a[1].clone(), "7960000".to_owned())]);
+    // B keeps 0.04 MMX, so A pays the fee with a separate signature.
     assert_eq!(tx3["sender"], json!(a[0]));
-    let left = (4_000_000 - fee2) + (2_000_000 - fee2) - fee(2, 2, None, 1);
+    assert_eq!(tx3["inputs"][0]["solution"], 1);
+    // A alone covers the maximum because B's remainder cannot pay the two-input fee.
+    let left = 4_000_000 - 2 * fee1 - fee(1, 2, None, 1);
     assert_eq!(max(), left);
 
     // A server that cannot answer keeps the funds reserved; unknown

@@ -60,8 +60,7 @@ impl Wallet {
     /// Native MMX pays its own fee, so every arrangement of inputs and fee payer
     /// that `transfer` can produce is considered; the result is 0 when nothing
     /// can be sent. Tokens: the whole owned token balance, or
-    /// `InsufficientFunds("transaction fee")` when the fee payer (the owned
-    /// address with the most MMX) cannot cover the fee.
+    /// `InsufficientFunds("transaction fee")` when no address can cover the fee.
     pub fn max_transfer_amount(
         &self,
         balances: &Balances,
@@ -83,7 +82,7 @@ impl Wallet {
             .map(|(k, v)| (*k, *v))
             .collect();
         let sendable = |amount: u128| -> Result<bool> {
-            match self.select(&relevant, currency, amount) {
+            match self.select(&relevant, params, currency, amount, memo, fee_ratio) {
                 Ok(selection) => Ok(Self::covers_fee(
                     &selection, &relevant, params, currency, memo, fee_ratio,
                 )),
@@ -112,8 +111,7 @@ impl Wallet {
         }
         // With the j largest balances as inputs (the last one possibly partial),
         // the best amount is either all of them (fee paid by the next balance)
-        // or all minus the smallest remainder that keeps the last input as a fee
-        // payer: its fee, the next balance (+1 for map-order ties) or 1.
+        // or all minus the fee that the last input can pay with its own signature.
         amounts.sort_unstable_by(|a, b| b.cmp(a));
         let mut candidates = BTreeSet::new();
         let mut prefix = 0u128;
@@ -122,9 +120,8 @@ impl Wallet {
                 break;
             };
             prefix = sum;
-            let next = amounts.get(j + 1).copied().unwrap_or(0);
             let fee = cost_to_fee(static_fee(params, j + 1, j + 1, memo), fee_ratio);
-            for keep in [0, 1, fee, next, next.saturating_add(1)] {
+            for keep in [0, fee] {
                 if let Some(amount) = prefix.checked_sub(keep).filter(|a| *a > 0) {
                     candidates.insert(amount);
                 }
@@ -198,7 +195,7 @@ mod tests {
         ratio: u32,
         amount: u128,
     ) -> bool {
-        let Ok(sel) = w.select(balances, currency, amount) else {
+        let Ok(sel) = w.select(balances, params, currency, amount, memo, ratio) else {
             return false;
         };
         let fee = fee_of(params, sel.inputs.len(), sel.owners.len(), memo, ratio);
@@ -414,6 +411,33 @@ mod tests {
     }
 
     #[test]
+    fn reuses_an_input_signature_at_the_fee_boundary() {
+        let w = wallet(2);
+        let params = ChainParams::default();
+        let [input, other] = [w.addresses[0], w.addresses[1]];
+        let amount = 1_000_000;
+        let memo = Some("transfer memo");
+        let ratio = 3072;
+        let fee = fee_of(&params, 1, 1, memo, ratio);
+        for currency in [NATIVE, Address([7; 32])] {
+            for (remaining, payer, signatures) in [(fee, input, 1), (fee - 1, other, 2)] {
+                let mut balances =
+                    Balances::from([((input, currency), amount), ((other, NATIVE), 100_000)]);
+                *balances.entry((input, NATIVE)).or_default() += remaining;
+
+                let tx = transfer(&w, &balances, &params, currency, amount, memo, ratio).unwrap();
+                assert_eq!(tx.sender, Some(payer));
+                assert_eq!(tx.inputs.len(), 1);
+                assert_eq!(tx.inputs[0].address, input);
+                assert_eq!(tx.inputs[0].solution, (signatures - 1) as u16);
+                assert_eq!(tx.solutions.len(), signatures);
+                assert_eq!(tx.fee_amount(), fee_of(&params, 1, signatures, memo, ratio));
+                assert!(tx.fee_payer_covered(&balances));
+            }
+        }
+    }
+
+    #[test]
     fn last_input_is_kept_as_fee_payer_when_the_next_balance_cannot_pay() {
         // The next balance exceeds the single-input fee but not the fee it
         // would owe as an extra signer, so the last input must keep more.
@@ -427,9 +451,7 @@ mod tests {
             let max = w
                 .max_transfer_amount(&balances, &params, NATIVE, None, 1024)
                 .unwrap();
-            // Equal remainders resolve to the first address in map order.
-            let tie_to_big = w.addresses[big] < w.addresses[small];
-            assert_eq!(max, if tie_to_big { 998_000 } else { 997_999 });
+            assert_eq!(max, 998_700);
             let tx = transfer(&w, &balances, &params, NATIVE, max, None, 1024).unwrap();
             assert_eq!(tx.sender, Some(w.addresses[big]));
             assert!(tx.fee_payer_covered(&balances));
@@ -511,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn token_maximum_is_the_full_balance_paid_by_the_largest_mmx_holder() {
+    fn token_maximum_is_the_full_balance_when_a_fee_payer_can_cover_it() {
         let w = wallet(4);
         let params = ChainParams::default();
         let token = Address([7; 32]);
@@ -540,15 +562,6 @@ mod tests {
                 continue;
             }
             let tx = transfer(&w, &balances, &params, token, total, memo, ratio).unwrap();
-            let payer = balances
-                .iter()
-                .filter(|((a, c), _)| *c == NATIVE && w.addresses.contains(a))
-                .map(|(_, n)| *n)
-                .max()
-                .unwrap_or(0);
-            if payer > 0 {
-                assert_eq!(balances[&(tx.sender.unwrap(), NATIVE)], payer);
-            }
             if tx.fee_payer_covered(&balances) {
                 assert_eq!(result.unwrap(), total, "case {case}");
                 assert_eq!(
